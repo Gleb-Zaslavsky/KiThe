@@ -1,7 +1,7 @@
 [package]
 name = "KiThe"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 author = "Gleb Zasllavsky"
 license = "MIT"
 keywords = ["scientific computing", "thermodynamics", "chemistry", "CFD", "chemical kinetics", "chemical equilibrium"]
