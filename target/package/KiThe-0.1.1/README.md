@@ -1,1 +1,0 @@
- collection of rust structures and functions useful for chemical kinetics, chemical thermodynamics, combustion, heat and mass transfer, shock tubes and so on and so far. Work in progress. Advices and contributions will be appreciated

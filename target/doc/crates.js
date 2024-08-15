@@ -1,1 +1,0 @@
-window.ALL_CRATES = ["KiThe","aho_corasick","itoa","memchr","proc_macro2","quote","regex","regex_automata","regex_syntax","ryu","serde","serde_derive","serde_json","syn","unicode_ident"];
