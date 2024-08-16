@@ -38,6 +38,8 @@
 /// # Examples
 /// reaction data with  artifacts of parsing equations from databases
 /// ```
+/// use KiThe::reaction_analyzer::ReactionAnalyzer;
+/// let mut ReactionAnalyzer_instance = ReactionAnalyzer::new();
 /// let reactions_: Vec<&str> = vec!["A=2BM)", "B->A + 3C_DUP", "2B+A=D"];
 /// let reaction = reactions_.iter().map(|s| s.to_string()).collect();
 /// ReactionAnalyzer_instance.reactions = reaction;
@@ -149,7 +151,7 @@ fn clean_off_DUP( item: &mut String) -> &String {
 }
 
 // This struct is used to represent a reaction.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ReactionAnalyzer {
   
     pub reactions: Vec<String>, // вектор реакций/ a vector of reactions

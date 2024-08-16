@@ -37,10 +37,12 @@ use std::collections::{HashMap, HashSet};
            println!("library_encrypted_name {:?}", &library_encrypted_name);
            let library_name
         =  match library_encrypted_name.as_str() {
-            "c"|"cantera" =>  "CANTERA".to_string(),
+            "c"|"cantera"|"ca" =>  "Cantera".to_string(),
             "n"|"nuig" =>  "NUIG".to_string(),
             "unknown" =>  "Unknown".to_string(),
             "a"|"aramco"=>  "ARAMCO".to_string(),
+            "B"|"beckstead" =>  "Beckstead".to_string(),
+            "B_c"|"beckstead_c" =>  "Beckstead_c".to_string(),
             _=> library_encrypted_name.clone()
             
         };
@@ -49,11 +51,17 @@ use std::collections::{HashMap, HashSet};
         
         (library_name.to_owned(), reaction_number)
     }   
-    pub fn decipher_vector_of_shortcuts(vec_of_shortcuts: Vec<&str>) -> HashMap<String, String> {
-        let mut map = HashMap::new();
+    pub fn decipher_vector_of_shortcuts(vec_of_shortcuts: Vec<&str>) -> HashMap<String, Vec<String>> {
+        let mut map:HashMap<String, Vec<String>> = HashMap::new();
         for shortcut in vec_of_shortcuts {
             let (library_name, reaction_number) = decipher_shortcut_name(shortcut);
-            map.insert(library_name, reaction_number);
+            if map.contains_key(&library_name) {
+                map.get_mut(&library_name).unwrap().push(reaction_number.to_string());
+             } else {
+              map.insert(library_name.to_string(), vec![reaction_number.to_string()]);
+             }
+
+
         }
         map
     }
@@ -73,15 +81,15 @@ mod tests {
     fn test_decipher_shortcut_name() {
         assert_eq!(
             decipher_shortcut_name("C_10"),
-            ("CANTERA".to_string(), "10".to_string())
+            ("Cantera".to_string(), "10".to_string())
         );
         assert_eq!(
             decipher_shortcut_name("C10"),
-            ("CANTERA".to_string(), "10".to_string())
+            ("Cantera".to_string(), "10".to_string())
         );
         assert_eq!(
             decipher_shortcut_name("Cantera_10"),
-            ("CANTERA".to_string(), "10".to_string())
+            ("Cantera".to_string(), "10".to_string())
         );
        
         assert_eq!(
@@ -105,27 +113,23 @@ mod tests {
     #[test]
     fn test_decipher_vector_of_shortcuts() {
         let vec_of_shortcuts = vec!["C_10", "A10", "n_10"];
-        let expected_map = vec![
-            ("CANTERA".to_string(), "10".to_string()),
-            ("ARAMCO".to_string(), "10".to_string()),
-            ("NUIG".to_string(), "10".to_string()),
-        ]
-        .into_iter()
-        .collect::<HashMap<String, String>>();
+        let expected_map = 
+
+        HashMap::from([("Cantera".to_string(), vec!["10".to_string()]), ("ARAMCO".to_string(), vec!["10".to_string()]), ("NUIG".to_string(), vec!["10".to_string()])]);
 
         assert_eq!(decipher_vector_of_shortcuts(vec_of_shortcuts), expected_map);
     }
     #[test]
     fn test_cipher_vector_of_shortcuts() {
         let map = vec![
-            ("CANTERA".to_string(), "10".to_string()),
+            ("Cantera".to_string(), "10".to_string()),
             ("ARAMCO".to_string(), "10".to_string()),
             ("NUIG".to_string(), "10".to_string()),
         ]
         .into_iter()
         .collect::<HashMap<String, String>>();
 
-        let expected_vec = vec!["CANTERA_10".to_string(), "ARAMCO_10".to_string(), "NUIG_10".to_string()];
+        let expected_vec = vec!["Cantera_10".to_string(), "ARAMCO_10".to_string(), "NUIG_10".to_string()];
         let res: HashSet<String> = cipher_vector_of_shortcuts(map).into_iter().collect();
         let exp: HashSet<String> = expected_vec.into_iter().collect();
         assert_eq!(res, exp);

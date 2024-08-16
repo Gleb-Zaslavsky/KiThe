@@ -37,6 +37,8 @@
 /// # Examples
 /// reaction data with  artifacts of parsing equations from databases
 /// ```
+/// use KiThe::reaction_analyzer::ReactionAnalyzer;
+/// let mut ReactionAnalyzer_instance = ReactionAnalyzer::new();
 /// let reactions_: Vec<&str> = vec!["A=2BM)", "B->A + 3C_DUP", "2B+A=D"];
 /// let reaction = reactions_.iter().map(|s| s.to_string()).collect();
 /// ReactionAnalyzer_instance.reactions = reaction;
@@ -67,6 +69,19 @@ pub mod mechfinder_api;
 /// manually with help of kinetics_lib_api module. Now you ca
 pub mod User_reactions;
 // Basis functionality to search in reaction library
+ /// 
+ ///  # Examples
+/// ```
+/// use KiThe::kinetics_lib_api::KineticData;
+/// let lib = "NUIG";
+/// let mut kin_instance = KineticData::new();
+/// kin_instance.open_json_files(lib);
+/// kin_instance.print_all_reactions();
+///  let substances: Vec<String> = vec!["CO".to_string(), "H".to_string()];
+///   //search reactions by substances 
+/// kin_instance.search_reaction_by_reagents_and_products(substances);
+///  kin_instance.search_reactdata_for_vector_of_IDs(vec!["1".to_string(), "2".to_string()]);
+/// ```
 pub mod kinetics_lib_api;
 /// ru
 ///  в проекте используются шорткаты для названий реакций в стиле
