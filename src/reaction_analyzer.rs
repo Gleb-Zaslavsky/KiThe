@@ -73,7 +73,7 @@ fn clean_off_artifacts( item: &mut String) -> &mut String {
         return item
     } else {item}
 }
-//   half_reaction` - A string representing a half-reaction.
+///   half_reaction` - A string representing a half-reaction.
 pub fn analyse_substances(half_reaction: &str) -> (Vec<String>, Vec<f64>, Vec<f64>) {
     let mut s_list = Vec::new();
     let mut g_list = Vec::new();
@@ -150,7 +150,7 @@ fn clean_off_DUP( item: &mut String) -> &String {
     
 }
 
-// This struct is used to represent a reaction.
+/// This struct is used to represent a reaction.
 #[derive(Debug, Clone)]
 pub struct ReactionAnalyzer {
   

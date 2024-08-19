@@ -12,7 +12,7 @@ use serde_json::{Value, Map, Number};
 /// manually with help of kinetics_lib_api module. Now you can 
 
 
-//structure to store user task and reaction data
+///structure to store user task and reaction data
 #[derive(Debug, Clone)]
 pub struct UserReactions {
     pub shortcut_reactions: Vec<String>, // vector of reaction shortcut names
@@ -36,7 +36,7 @@ impl UserReactions {
             stecheodata:ReactionAnalyzer::new(),
         }
     }
-    // decifer vector of shortcuts to full reaction names and store them in map {'library':"id of reaction"}
+    /// decifer vector of shortcuts to full reaction names and store them in map {'library':"id of reaction"}
     pub fn create_map_of_reactions(&mut self) -> () {
         let vec:Vec<&str> = self.shortcut_reactions.iter().map(|s| s.as_str()).collect();
         self.map_of_reactions = decipher_vector_of_shortcuts(vec);

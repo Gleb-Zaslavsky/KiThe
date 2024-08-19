@@ -94,3 +94,24 @@ pub mod kinetics_lib_api;
 /// for example C_10 means reaction '10' in the CANTERA library. 
 /// The same means C10 and Сantera_10
 pub mod parsetask;
+
+pub mod User_substances;
+
+
+
+/// Module to calculate the atomic composition and molar mass of a chemical formula
+/// 
+///  # Examples
+/// ```
+/// use KiThe::molmass::calculate_molar_mass;
+/// let formula = "C6H8O6";
+/// let (molar_mass, element_composition) = calculate_molar_mass(formula.to_string()); 
+/// println!("Element counts: {:?}", element_composition);
+/// println!("Molar mass: {:?} g/mol", molar_mass);
+/// use KiThe::molmass::parse_formula;
+///  let formula = "Na(NO3)2".to_string();
+///  let atomic_composition = parse_formula(formula);
+///   println!("{:?}", atomic_composition);
+/// ```
+/// 
+pub mod molmass;

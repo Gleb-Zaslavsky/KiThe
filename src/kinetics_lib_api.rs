@@ -5,7 +5,7 @@ use std::io::Read;
 use serde::{Deserialize, Serialize};
 
 use serde_json::Value;
-// Basis functionality to search in reaction library
+// /Basis functionality to search in reaction library
 
 enum Substance {
   reactants,
@@ -80,7 +80,7 @@ impl  KineticData {
      */
    
 } //end print_all_reactions
-  // returns reaction ID and reaction data (parsed from json) for given reaction equation
+  /// returns reaction ID and reaction data (parsed from json) for given reaction equation
   pub fn search_reaction_by_equation(&mut self, equation: &str) ->(String, Value){
 
     let reaction_id = self.EquationReactionMap.get(equation).unwrap();
@@ -89,7 +89,7 @@ impl  KineticData {
 
   }
 
-  // returns reaction ID and reaction data (parsed from json) for given reagents/products
+  // /returns reaction ID and reaction data (parsed from json) for given reagents/products
   fn search_reaction_by_substances(&mut self, substances: Vec<String>, SubstanceType: &str) -> Vec<String>{
     let substances: HashSet<String>=   substances.iter().cloned().collect();;
     let mut found_reactions: Vec<String> = Vec::new();

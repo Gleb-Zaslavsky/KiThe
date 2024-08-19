@@ -1,6 +1,6 @@
 [package]
 name = "KiThe"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 author = "Gleb Zasllavsky"
 license = "MIT"

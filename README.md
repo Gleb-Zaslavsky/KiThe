@@ -64,7 +64,18 @@ kin_instance.search_reaction_by_reagents_and_products(reagents)
 
         let (mechanism, reactants, vec_of_reactions) = mech_search.mechfinder_api();
 ```
-
+ - Calculation of atomic composition and molar mass
+ ```rust
+use KiThe::molmass::calculate_molar_mass;
+ let formula = "C6H8O6";
+let (molar_mass, element_composition) = calculate_molar_mass(formula.to_string()); 
+ println!("Element counts: {:?}", element_composition);
+ println!("Molar mass: {:?} g/mol", molar_mass);
+use KiThe::molmass::parse_formula;
+let formula = "Na(NO3)2".to_string();
+let atomic_composition = parse_formula(formula);
+println!("{:?}", atomic_composition);
+ ```
 ## Testing
 Our project is covered by tests and you can run them by standard command
 ```sh
