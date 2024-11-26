@@ -88,10 +88,12 @@ If you have any questions, comments or want to contribute, please feel free to c
 
 
 ## To do
-- [x] Add libraries of chemical reactions with appropriate methods for processing, searching, and retrieving data.
-- [ ] Add libraries of chemical substances...
-- [ ] Add numerical methods (may be cpp open source...)
+here's a roadmap for further development of the crate 
+1) Add libraries of thermochemical properties (S, H, Cp), as well as transport properties (viscosity, thermal conductivity) and modules for their processing (we have all this as Python code and should be rewritten in Rust). The modules should support different formats of heat capacity polynomials, namely NASA and NIST formats. It is desirable to add a parser of the online database NIST, which in case of absence of the required substance in the local database would look for data on it in NIST (all this we have in the form of code in Python and should be rewritten in Rust). 
+2) Add different types of Arrhenius functions (‘fall-off’, ‘three-body’, etc) presented in kinetic libraries. And kinetic functions should be both in the form of regular Rust functions and in the form of symbolic RustedSciThe functions for further calculation of symbolic jacobians.
+3) Add a constructor of kinetic expressions: we take the Arrhenius function from point (3) of this roadmap, and the reaction_analyzer module will give us the degrees of kinetic polynomials and stoichiometric coefficients
+4) At this stage, we have everything we need to solve the simplest computational heat and mass transfer problem of a ‘0-dimensional’ reactor: an ideal mixing reactor maintained at constant temperature. It is necessary to provide the output of the calculation result in the form of tables, detailed log of the calculation progress and plots. 
 
-
+Translated with DeepL.com (free version)
 
 
