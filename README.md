@@ -94,6 +94,5 @@ here's a roadmap for further development of the crate
 3) Add a constructor of kinetic expressions: we take the Arrhenius function from point (3) of this roadmap, and the reaction_analyzer module will give us the degrees of kinetic polynomials and stoichiometric coefficients
 4) At this stage, we have everything we need to solve the simplest computational heat and mass transfer problem of a ‘0-dimensional’ reactor: an ideal mixing reactor maintained at constant temperature. It is necessary to provide the output of the calculation result in the form of tables, detailed log of the calculation progress and plots. 
 
-Translated with DeepL.com (free version)
 
 
