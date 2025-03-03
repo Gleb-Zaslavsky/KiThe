@@ -1,0 +1,19 @@
+[package]
+name = "KiThe"
+version = "0.1.4"
+edition = "2024"
+author = "Gleb Zasllavsky"
+license = "MIT"
+keywords = [ "thermodynamics", "chemistry", "CFD", "chemical_kinetics"]
+description = "A collection of structures and functions useful for chemical kinetics, chemical thermodynamics, combustion, heat and mass transfer, shock tubes and so on and so far. Work in progress. Advices and contributions will be appreciated"
+repository = "https://github.com/Gleb-Zaslavsky/KiThe"
+[dependencies]
+regex = "1.11.1"
+serde = { version = "1.0.218", features = ["derive"] }
+serde_json = "1.0.140"
+loc = "0.5.0"
+RustedSciThe = "0.2.23"
+nalgebra = "0.33.2"
+
+
+
