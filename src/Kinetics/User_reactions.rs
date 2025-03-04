@@ -8,6 +8,7 @@ use std::io::Write;
 use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
+use prettytable::{Table, Row, Cell};
 /// THE STRUCT KinData COLLECTS ALL THE INFORMATION ABOUT SPECIFIC REACTIONS, WHICH ARE NEEDED FOR FURTHER CALCULATIONS.
 ///  so this is API for allmost all features of Kinetics module
 /// Not all features can be used simultaneously. But the list of features is as follows:
@@ -111,10 +112,16 @@ impl KinData {
     ///construct reaction mechanism
     pub fn construct_mechanism(&mut self,    task_substances: Vec<String>, task_library: String,) {
 
-        let found_mech = Mechanism_search::new(   task_substances,task_library);
+        let found_mech = Mechanism_search::new(   task_substances,task_library.clone());
       //  self.vec_of_equations = found_mech.vec_of_reactions;
         self.vec_of_reaction_data = Some(found_mech.reactdata);
-
+        let reactions = found_mech.mechanism;
+        let mut full_addres = Vec::new();
+        for reaction in reactions.iter() {
+            let addres = format!("{}_{}", task_library, reaction);
+            full_addres.push(addres);
+        }
+        self.shortcut_reactions = Some(full_addres);
 
     }
     /////////////////////////////////GETTING REACTION DATA///////////////////////////////////////////
@@ -152,24 +159,12 @@ impl KinData {
     ///////////////////////////INPUT/OUTPUT/////////////////////////////////////////////////////////
     /// printlns the chosen reactions 
     pub fn print_raw_reactions(&self) -> Result<(), std::io::Error> {
-        if let Some(vec_of_pairs) = & self.vec_of_pairs {
-            let mut vec_of_reaction_values_for_print = Vec::new();
-            // instance of KineticData with opened library json files
-            let mut kin_instance = KineticData::new();
-            for (lib, reaction_id) in vec_of_pairs.iter() {
-                // collecting reaction data for each library name
-                kin_instance.open_json_files(lib);
-                let reaction_data_Value =
-                kin_instance.search_reactdata_by_reaction_id(&reaction_id);
-                vec_of_reaction_values_for_print.push(reaction_data_Value);
-            }
+        if let Some(vec_of_reaction_Values) = & self.vec_of_reaction_Values {
              // Convert the vector of Values to a JSON array
-            let json_array = json!(vec_of_reaction_values_for_print);
-
+            let json_array = json!(vec_of_reaction_Values);
             // Write the JSON array to a file
             let mut file = File::create("raw_reactions.json")?;
             file.write_all(serde_json::to_string_pretty(&json_array)?.as_bytes())?;
-
             println!("Raw reactions have been written to raw_reactions.json");
             Ok(())
     
@@ -179,6 +174,36 @@ impl KinData {
         }
     }// print raw_reactions
 
+    pub fn pretty_print_kindata(&self) -> Result<(),  std::io::Error> {
+        if let Some(vec_of_reaction_Values) = &self.vec_of_reaction_Values {
+            // Create a new table
+            let mut table = Table::new();
+    
+            // Assuming each Value is an object with the same keys
+            if let Some(Value::Object(first_obj)) = vec_of_reaction_Values.get(0) {
+                // Add the header row
+                let header: Vec<Cell> = first_obj.keys().map(|k| Cell::new(k)).collect();
+                table.add_row(Row::new(header));
+            }
+    
+            // Add rows for each Value
+            for value in vec_of_reaction_Values {
+                if let Value::Object(obj) = value {
+                    let row: Vec<Cell> = obj.values().map(|v| Cell::new(&v.to_string())).collect();
+                    table.add_row(Row::new(row));
+                }
+            }
+    
+            // Print the table to stdout
+            table.printstd();
+    
+            println!("Raw reactions have been written to raw_reactions.json");
+            Ok(())
+        } else {
+            println!("KinData::reactdata_from_shortcuts: map_of_reactions is None");
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
