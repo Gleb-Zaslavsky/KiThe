@@ -12,7 +12,7 @@ use Examples::kinetics_examples::kin_examples;
 
 pub fn main() {
     //
-    let kintask: usize = 3;
+    let kintask: usize = 4;
     kin_examples(kintask);
 
     

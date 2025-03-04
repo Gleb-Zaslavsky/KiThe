@@ -195,7 +195,7 @@ const ELEMENTS: &[Element] = &[
 fn filter_phases_marks(formula: &str) -> String {
     let mut formula = formula.to_string();
 
-    let phases = ["(C)", "(c)", "(L)", "(l)", "(G)", "(g)", "(S)", "(s)"];
+    let phases = ["(C)", "(c)", "(L)", "(l)", "(G)", "(g)", "(S)", "(s)", "S)", "s)"];
     for phase in phases {
         formula = formula.replace(phase, "");
     }
@@ -487,6 +487,7 @@ pub fn calculate_molar_mass_of_vector_of_subs(
     vec_of_formulae: Vec<&str>,
     groups: Option<HashMap<String, HashMap<String, usize>>>,
 ) -> Vec<f64> {
+    println!("\n___________CALCULATE MOLAR MASS OF VECTOR OF SUBS___________");
     let mut molar_masses = Vec::new();
     for formula in vec_of_formulae {
         let counts = parse_formula(formula.to_string(), groups.clone());
@@ -501,13 +502,15 @@ pub fn calculate_molar_mass_of_vector_of_subs(
         }
         molar_masses.push(molar_mass);
     }
+    println!("___________CALCULATE MOLAR MASS OF VECTOR OF SUBS ENDED___________");
     molar_masses
 }
 
 pub fn create_elem_composition_matrix(
     vec_of_formulae: Vec<&str>,
     groups: Option<HashMap<String, HashMap<String, usize>>>,
-) -> DMatrix<f64> {
+) ->( DMatrix<f64>, Vec<String>) {
+    println!("\n___________CREATE ELEMENTS COMPOSITION MATRIX___________");
     let mut hashset_of_elems: HashSet<String> = HashSet::new();
     let mut vec_of_compositions = Vec::new();
     for formula in vec_of_formulae.iter() {
@@ -517,7 +520,7 @@ pub fn create_elem_composition_matrix(
         let elements = counts.keys().map(|el| el.clone()).collect::<Vec<_>>();
         hashset_of_elems.extend(elements);
     }
-    let unique_vec_of_elems = hashset_of_elems.iter().collect::<Vec<_>>();
+    let unique_vec_of_elems = hashset_of_elems.into_iter().collect::<Vec<_>>();
     let num_rows = unique_vec_of_elems.len();
     let num_cols = vec_of_compositions.len();
     let mut matrix = DMatrix::zeros(num_rows, num_cols);
@@ -529,8 +532,8 @@ pub fn create_elem_composition_matrix(
             }
         }
     }
-
-    matrix.transpose()
+    println!("\n___________CREATE ELEMENTS COMPOSITION MATRIX ENDED___________");
+    (matrix.transpose(), unique_vec_of_elems)
 }
 
 /*
@@ -638,7 +641,7 @@ mod tests {
     #[test]
     fn test_element_matrix() {
         let vec_of_formulae = vec!["H2O", "NaCl", "C3H8", "CH4"]; // 5 elements
-        let matrix = create_elem_composition_matrix(vec_of_formulae, None);
+        let matrix = create_elem_composition_matrix(vec_of_formulae, None).0;
         println!("{}", matrix);
         assert_eq!(matrix.nrows(), 4);
         assert_eq!(matrix.ncols(), 5);

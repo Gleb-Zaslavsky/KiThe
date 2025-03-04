@@ -1,6 +1,6 @@
 //mod mechfinder_api;
 use crate::Kinetics::kinetics_lib_api::KineticData;
-use crate::Kinetics::mechfinder_api::{ parse_kinetic_data_vec, ReactionData, Mechanism_search};
+use crate::Kinetics::mechfinder_api::{ parse_kinetic_data_vec, ReactionData, Mechanism_search, ReactionKinetics};
 use crate::Kinetics::parsetask::{decipher_vector_of_shortcuts, decipher_vector_of_shortcuts_to_pairs};
 use crate::Kinetics::stoichiometry_analyzer::StoichAnalyzer;
 use std::fs::File;
@@ -8,7 +8,9 @@ use std::io::Write;
 use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
-use prettytable::{Table, Row, Cell};
+use prettytable::{Table, Row, Cell, row};
+use nalgebra::DMatrix;
+use log::{error, info, warn};
 /// THE STRUCT KinData COLLECTS ALL THE INFORMATION ABOUT SPECIFIC REACTIONS, WHICH ARE NEEDED FOR FURTHER CALCULATIONS.
 ///  so this is API for allmost all features of Kinetics module
 /// Not all features can be used simultaneously. But the list of features is as follows:
@@ -66,21 +68,37 @@ impl KinData {
         let parts: Vec<&str> = shortcut_range.split("..").collect(); //splits the string by the ".." to get the starting and ending parts.
 
         if parts.len() != 2 {
-            return vec![]; // Return empty if format is incorrect
+            panic!("Invalid shortcut range: {}", shortcut_range);
+    
         }
 
         let prefix = parts[0]
             .chars()
             .take_while(|c| c.is_alphabetic())
             .collect::<String>(); //extracts the prefix (letters) and the numeric portion from the start.
+   
         let start: usize = parts[0][prefix.len()..].parse().unwrap_or(0); // then parses the numeric values and generates the range of strings.
-        let end: usize = parts[1].parse().unwrap_or(0);
-
-        (start..=end).map(|i| format!("{}{}", prefix, i)).collect() //formatted strings are collected into a Vec<String>.
+        let end: usize = if let Some(last_char) = parts[1].chars().last() { //  checks if there's a last character in parts[1]
+            if last_char.is_numeric() { // the last character is numerit
+                parts[1].chars().rev() // Reverses the string
+                    .take_while(|c| c.is_numeric())// Takes characters while they are numeric
+                    .collect::<String>() //Collects these into a string
+                    .chars().rev().collect::<String>()// Reverses this string again to get the number in the correct order.
+                    .parse().unwrap_or(0) //Parses this string into a usize.
+            } else {
+                panic!("last symbol must be numeric: {}", shortcut_range);
+            }
+        } else {
+            panic!("last symbol must be numeric: {}", shortcut_range);
+        };
+        let res:Vec<String> = (start..=end).map(|i| format!("{}_{}", prefix, i)).collect(); //formatted strings are collected into a Vec<String>.
+        info!("task includes reactions as follows: {:#?}", &res);
+        self.shortcut_reactions = Some(res.clone());
+        return res;
     }
 
     /// decifer vector of shortcuts to full reaction names and store them in map {'library':"id of reaction"} and Vec<("library, reaction_id")>
-    pub fn set_reactions_from_shortcuts(&mut self) -> () {
+    pub fn get_reactions_from_shortcuts(&mut self) -> () {
         if let Some(shortcut_reactions) = &self.shortcut_reactions {
             let vec: Vec<&str> = shortcut_reactions.iter().map(|s| s.as_str()).collect();
             self.map_of_reactions = Some(decipher_vector_of_shortcuts(vec.clone()));
@@ -106,7 +124,7 @@ impl KinData {
                 self.vec_of_reaction_Values = Some(vec_of_reaction_values);
 
         } else {
-            println!("KinData::create_map_of_reactions: shortcut_reactions is None");
+            warn!("KinData::create_map_of_reactions: shortcut_reactions is None");
         }
     }
     ///construct reaction mechanism
@@ -122,21 +140,28 @@ impl KinData {
             full_addres.push(addres);
         }
         self.shortcut_reactions = Some(full_addres);
+        self.substances = found_mech.reactants;
 
     }
-    /////////////////////////////////GETTING REACTION DATA///////////////////////////////////////////
+    /// add manially reaction data as serde Value
+    pub fn append_reaction(&mut self, reactions:Vec<Value>) {
+        let mut old_reactions = self.vec_of_reaction_Values.as_mut().unwrap().clone();
+        old_reactions.extend(reactions);
+        self.vec_of_reaction_Values = Some(old_reactions);
+    }
+    /////////////////////////////////COMPUTING AND PARSING REACTION DATA///////////////////////////////////////////
     /// parse reaction libraries and extracts data into structs
     pub fn reactdata_parsing(&mut self) -> () {
         if let Some(vec_of_reaction_values ) = & self.vec_of_reaction_Values  {
 
             let (vec_ReactionData, vec_of_equations) =
                     parse_kinetic_data_vec( vec_of_reaction_values.clone());
-          //  println!("map_of_reaction_data: {:?}", &vec_of_reaction_data);
-         //   println!("vec_of_equations: {:?}", &vec_of_equations);
+          //  info!("map_of_reaction_data: {:?}", &vec_of_reaction_data);
+         //   info!("vec_of_equations: {:?}", &vec_of_equations);
             self.vec_of_reaction_data = Some(vec_ReactionData);
             self.vec_of_equations = vec_of_equations;
         } else {
-            println!("KinData::reactdata_from_shortcuts: map_of_reactions is None");
+            warn!("KinData::reactdata_from_shortcuts: map_of_reactions is None");
         }
     }
     /// generates  Stoicheometric  data structures: matrix of stoicheometric coefficients, matrix of coefficients of direct reactions and matrix of coefficients of reverse reactions, matrix of degrees of concentration for the
@@ -149,15 +174,22 @@ impl KinData {
         StoichAnalyzer_instance.reactions = self.vec_of_equations.clone();
         StoichAnalyzer_instance.groups = self.groups.clone();
         // parse to find substance names
+        if self.substances.is_empty()| (self.substances.len() == 0) { // no need to parse for substances if they are already known
         StoichAnalyzer_instance.search_substances();
         self.substances = StoichAnalyzer_instance.substances.clone();
+        }
         //find stoichiometric matrix and other matrices
         StoichAnalyzer_instance.analyse_reactions();
         StoichAnalyzer_instance.create_matrix_of_elements();
         self.stecheodata = StoichAnalyzer_instance;
     }
+     /// parsing reaction data into structures and stoichometric calculations under one hood
+    pub fn kinetic_main(&mut self) {
+        self.reactdata_parsing();
+        self.analyze_reactions();
+    }
     ///////////////////////////INPUT/OUTPUT/////////////////////////////////////////////////////////
-    /// printlns the chosen reactions 
+    /// print the chosen reactions 
     pub fn print_raw_reactions(&self) -> Result<(), std::io::Error> {
         if let Some(vec_of_reaction_Values) = & self.vec_of_reaction_Values {
              // Convert the vector of Values to a JSON array
@@ -165,45 +197,116 @@ impl KinData {
             // Write the JSON array to a file
             let mut file = File::create("raw_reactions.json")?;
             file.write_all(serde_json::to_string_pretty(&json_array)?.as_bytes())?;
-            println!("Raw reactions have been written to raw_reactions.json");
+            info!("Raw reactions have been written to raw_reactions.json");
             Ok(())
     
         } else {
-            println!("KinData::reactdata_from_shortcuts: map_of_reactions is None");
-            Ok(())
-        }
-    }// print raw_reactions
-
-    pub fn pretty_print_kindata(&self) -> Result<(),  std::io::Error> {
-        if let Some(vec_of_reaction_Values) = &self.vec_of_reaction_Values {
-            // Create a new table
-            let mut table = Table::new();
-    
-            // Assuming each Value is an object with the same keys
-            if let Some(Value::Object(first_obj)) = vec_of_reaction_Values.get(0) {
-                // Add the header row
-                let header: Vec<Cell> = first_obj.keys().map(|k| Cell::new(k)).collect();
-                table.add_row(Row::new(header));
-            }
-    
-            // Add rows for each Value
-            for value in vec_of_reaction_Values {
-                if let Value::Object(obj) = value {
-                    let row: Vec<Cell> = obj.values().map(|v| Cell::new(&v.to_string())).collect();
-                    table.add_row(Row::new(row));
-                }
-            }
-    
-            // Print the table to stdout
-            table.printstd();
-    
-            println!("Raw reactions have been written to raw_reactions.json");
-            Ok(())
-        } else {
-            println!("KinData::reactdata_from_shortcuts: map_of_reactions is None");
+            warn!("KinData::reactdata_from_shortcuts: map_of_reactions is None");
             Ok(())
         }
     }
+   
+    pub fn pretty_print_substances_verbose(&self) -> Result<(), std::io::Error> {
+        let subs = &self.substances;
+        let reacts = &self.vec_of_equations;
+        let sd: &StoichAnalyzer = &self.stecheodata.clone();
+        let elem_matrix = sd.matrix_of_elements.clone().unwrap().clone();
+        let unique_vec_of_elems = sd.unique_vec_of_elems.clone().unwrap();
+        let sm = sd.stecheo_matrx.clone();
+    
+         // Code  table of such structure 1) first row: first element - String: "Reactions/Substances" all other elements of the first row taken
+    //  from vector subs 2) nest rows look like as follows first element taken from vec reacts, and other elements of row taken from stecheomatrix
+    //  vec of vectors
+        let mut table_stecheo = Table::new();
+        // Create the header row
+        let mut header_row = vec![Cell::new("Reactions/Substances")];
+        for sub in subs {
+            header_row.push(Cell::new(sub));
+        }
+        table_stecheo.add_row(Row::new(header_row));
+    
+        // Create the subsequent rows
+        for (i, react) in reacts.iter().enumerate() {
+            let mut row = vec![Cell::new(react)];
+            for j in 0..subs.len() {
+                row.push(Cell::new(&format!("{:.4}", sm[i][j])));
+            }
+            table_stecheo.add_row(Row::new(row));
+        }
+    
+        // Print the table
+        table_stecheo.printstd();
+    
+
+        let mut elem_table = Table::new();
+        let mut header_row = vec![Cell::new("Substances/Elements")];
+        for elems in unique_vec_of_elems.clone() {
+            header_row.push(Cell::new(&elems));
+        }
+        elem_table.add_row(Row::new(header_row));
+        for (i, sub) in subs.iter().enumerate() {
+            let mut row = vec![Cell::new(sub)];
+            for j in 0..unique_vec_of_elems.len() {
+                row.push(Cell::new(&format!("{:.4}", elem_matrix.get((i, j)).unwrap()    )));
+            }
+            elem_table.add_row(Row::new(row));
+        }
+        elem_table.printstd();
+        Ok(())
+    }
+
+    // print table of kinetical information 
+    pub fn pretty_print_reaction_data(&self) -> Result<(), std::io::Error> {
+        if let Some(vec_of_reaction_data) = &self.vec_of_reaction_data {
+            let mut table = Table::new();
+
+            // Add the header row
+            table.add_row(row![
+                "Reaction number",
+                "Reaction Type",
+                "Equation",
+                "Reactants",
+                "Kinetics Data"
+            ]);
+
+            // Add rows for each ReactionData
+            for (i, reaction_data) in vec_of_reaction_data.iter().enumerate() {
+                let reaction_type = format!("{:?}", reaction_data.reaction_type);
+                let equation = &reaction_data.eq;
+                let reactants = match &reaction_data.react {
+                    Some(react) => format!("{:?}", react),
+                    None => "None".to_string(),
+                };
+                let kinetics_data = match &reaction_data.data {
+                    ReactionKinetics::Elementary(data) => format!("{:?}", data),
+                    ReactionKinetics::Falloff(data) => format!("{:?}", data),
+                    ReactionKinetics::Pressure(data) => format!("{:?}", data),
+                    ReactionKinetics::ThreeBody(data) => format!("{:?}", data),
+                };
+
+                table.add_row(Row::new(vec![
+                    Cell::new(i.to_string().as_str()),
+                    Cell::new(&reaction_type),
+                    Cell::new(equation),
+                    Cell::new(&reactants),
+                    Cell::new(&kinetics_data),
+                ]));
+            }
+
+            // Print the table
+            table.printstd();
+        } else {
+            warn!("No reaction data available.");
+        }
+
+        Ok(())
+    }
+
+    pub fn pretty_print_kindata(&self) {
+        let _ = self.pretty_print_reaction_data();
+        let _ = self.pretty_print_substances_verbose();
+    }
+
 }
 
 #[cfg(test)]
@@ -237,7 +340,7 @@ mod tests {
                 .collect(),
         );
 
-        user_reactions.set_reactions_from_shortcuts();
+        user_reactions.get_reactions_from_shortcuts();
         println!(
             "map_of_reactions: {:?} \n \n ",
             &user_reactions.map_of_reactions
@@ -274,7 +377,7 @@ mod tests {
     fn test_generate_strings_with_single_character_prefix() {
         let mut user_reactions = KinData::new();
         let result = user_reactions.set_reactions_from_shortcut_range("A1..5".to_string());
-        let expected = vec!["A1", "A2", "A3", "A4", "A5"];
+        let expected = vec!["A_1", "A_2", "A_3", "A_4", "A_5"];
         assert_eq!(result, expected);
     }
 
@@ -282,7 +385,7 @@ mod tests {
     fn test_generate_strings_with_multi_character_prefix() {
         let mut user_reactions = KinData::new();
         let result = user_reactions.set_reactions_from_shortcut_range("Cat5..8".to_string());
-        let expected = vec!["Cat5", "Cat6", "Cat7", "Cat8"];
+        let expected = vec!["Cat_5", "Cat_6", "Cat_7", "Cat_8"];
         assert_eq!(result, expected);
     }
 
@@ -290,7 +393,7 @@ mod tests {
     fn test_generate_strings_with_large_numbers() {
         let mut user_reactions = KinData::new();
         let result = user_reactions.set_reactions_from_shortcut_range("Meow20..25".to_string());
-        let expected = vec!["Meow20", "Meow21", "Meow22", "Meow23", "Meow24", "Meow25"];
+        let expected = vec!["Meow_20", "Meow_21", "Meow_22", "Meow_23", "Meow_24", "Meow_25"];
         assert_eq!(result, expected);
     }
 }

@@ -17,7 +17,8 @@ PROJECT NEWS: Kinetics module rewritten in more idiomatic style, more features a
 ## Kinetics
 - parse reaction equations into a list of substances 
 - parse reaction equations into a stoichiometric matrix, matrix of coefficients of direct reactions and matrix of coefficients of reverse reactions, matrix of degrees of concentration for the kinetic function,
-- calculate of atomic composition, molar masses and matrix of atomic composition
+- calculate of atomic composition, molar masses and matrix of atomic composition.
+
 Let us observe the main structure realizing that features
 ```rust
 pub struct StoichAnalyzer {
@@ -147,6 +148,22 @@ pub struct KinData {
     pub groups: Option<HashMap<String, HashMap<String, usize>>>, // Chemical formulae may contain spectial names for chemical groupls i.e. groups of atoms, e.g. Me (methyl) group, which is converted into {"C":1, "H":3}
     pub stecheodata: StoichAnalyzer, // matrix of stoichiometric coefficients and other matrices
 }
+```
+examples of usage 
+```rust
+use crate::Kinetics::User_reactions::KinData;
+    // let our journey begin with a new instance of KinData
+let mut kd = KinData::new();
+ // set the shortcut reactions for our KineticData instance
+// it means we want reactions from Cantera sub-librarie from number 1 to number 10
+kd.set_reactions_from_shortcut_range("C1..C10".to_string());
+            // searching for reactions in data base
+kd.get_reactions_from_shortcuts();
+kd.kinetic_main(); // parsing reaction data into structures and stoichometric calculations under one hood
+kd.pretty_print_kindata(); // pretty print the reaction data
+
+
+
 ```
 ## Testing
 Our project is covered by tests and you can run them by standard command

@@ -1,7 +1,7 @@
 #![allow(warnings)]
 pub mod kinetics;
 mod mechfinder;
-
+use log::{error, info, warn};
 //v 0.1.1
 /// ru
 /// Модуль снабжен библиотекой кинетических параметров химических реакций, полученной в результате парсинга общедоступныхбаз данных
@@ -23,7 +23,7 @@ use std::f64;
 /// enum for types of chemical kinetics rate contant functions 
 #[derive(Debug, PartialEq, Serialize, Clone)]
 #[serde(rename_all = "lowercase")]
-enum ReactionType {
+pub enum ReactionType {
     Elem,
     Falloff,
     Pressure,
@@ -54,16 +54,16 @@ impl<'de> Deserialize<'de> for ReactionType {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ReactionData {
     #[serde(rename = "type")]
-    reaction_type: ReactionType,
-    eq: String,
-    pub react: Option<HashMap<String, f64>>,
+  pub  reaction_type: ReactionType,
+  pub eq: String,
+  pub react: Option<HashMap<String, f64>>,
     #[serde(flatten)]
-    data: ReactionKinetics,
+  pub data: ReactionKinetics,
 }
 /// enum for structs of different types of kinetics
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
-enum ReactionKinetics {
+pub enum ReactionKinetics {
     Elementary(ElementaryStruct),
     Falloff(FalloffStruct),
     Pressure(PressureStruct),
@@ -77,9 +77,9 @@ pub fn parse_kinetic_data(
 ) -> (Map<String, Value>, Vec<String>) {
     let mut reaction_data_hash = Map::new();
     let mut equations = Vec::new();
-
+    info!("______________PARCING REACTION DATA INTO STRUCTS________");
     for (reaction_record, reaction_id) in vec_of_reaction_value.iter().zip(vec_of_reactions) {
-        println!("reaction_record {:#?} \n \n ", reaction_record);
+        info!("reaction_record {:#?} \n \n ", reaction_record);
         let react_code = format!("{}_{}", big_mech, reaction_id);
         if let Ok(mut reactiondata) =
             serde_json::from_value::<ReactionData>(reaction_record.clone())
@@ -98,10 +98,11 @@ pub fn parse_kinetic_data(
             let value = serde_json::to_value(&reactiondata).unwrap();
             reaction_data_hash.insert(react_code, value);
         } else {
-            println!("Error parsing reaction: {}", reaction_record);
+            error!("Error parsing reaction: {}", reaction_record);
+            panic!("Error parsing reaction: {}", reaction_record);
         }
     }
-
+    info!("______________PARCING REACTION DATA INTO STRUCTS ENDED________");
     (reaction_data_hash, equations)
 }
 /// parse Vec of serde Values with reaction data 
@@ -109,11 +110,12 @@ pub fn parse_kinetic_data_vec(
 
     vec_of_reaction_value: Vec<Value>,
 ) -> (Vec<ReactionData>, Vec<String>) {
+    info!("\n \n______________PARCING REACTION DATA INTO STRUCTS________");
     let mut reaction_dat = Vec::new();
     let mut equations = Vec::new();
 
     for reaction_record in vec_of_reaction_value.iter() {
-        println!("reaction_record {:#?} \n \n ", reaction_record);
+        info!("reaction_record {:#?} \n \n ", reaction_record);
         if let Ok(mut reactiondata) =
             serde_json::from_value::<ReactionData>(reaction_record.clone())
         {
@@ -129,10 +131,10 @@ pub fn parse_kinetic_data_vec(
 
             reaction_dat.push(reactiondata);
         } else {
-            println!("Error parsing reaction: {}", reaction_record);
+            info!("Error parsing reaction: {}", reaction_record);
         }
     }
-
+    info!("______________PARCING REACTION DATA INTO STRUCTS ENDED________");
     (reaction_dat, equations)
 }
 /// struct for chemical mechanism construction
@@ -182,10 +184,10 @@ impl Mechanism_search {
 
         let vec: Vec<&str> = self.task_substances.iter().map(|s| s.as_str()).collect();
         let big_mech = self.task_library.clone();
-        println!("задание {:?}, библиотека {:?}", &big_mech, &vec);
+        info!("задание {:?}, библиотека {:?}", &big_mech, &vec);
         let (mechanism, reactants, vec_of_reactions, vec_of_reaction_value) =
             mechfinder::mechfinder(&big_mech, vec);
-        // println!("mechanism {:?}", &mechanism);
+        // info!("mechanism {:?}", &mechanism);
         let (mut reactdata, vec_of_equations) =
             parse_kinetic_data_vec(vec_of_reaction_value.clone()); // парсим данные о реакциях
         self.mechanism = mechanism;
@@ -313,7 +315,7 @@ mod tests {
         let C1_react = Some(vec!["C1".to_string()]);
         kinetics.shortcut_reactions = C1_react.clone();
 
-        kinetics.set_reactions_from_shortcuts();
+        kinetics.get_reactions_from_shortcuts();
 
         kinetics.reactdata_parsing();
         assert!(kinetics.vec_of_reaction_data.iter().len() > 0);

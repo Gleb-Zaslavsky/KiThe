@@ -64,19 +64,23 @@ use std::collections::HashMap;
 */
 fn clean_off_artifacts(item: &mut String) -> &mut String {
     #[allow(unused_variables)]
-    let items_to_clean = [" (", "(", "M)", "M)", ">"];
+    let items_to_clean = [" (", "(", "M)", "M)", ">", "S)", "s)"];
     if item.contains("M)")
         || item.contains("M)")
         || item.contains(" (")
         || item.contains("(")
         || item.contains(">")
+        || item.contains("S)")
+        || item.contains("s)")
     {
         *item = item
             .replace("M)", "")
             .replace("M)", "")
             .replace(" (", "")
             .replace("(", "")
-            .replace(">", "");
+            .replace(">", "")
+             .replace("S)", "")
+            .replace("s)", "");
 
         return item;
     } else {
@@ -129,6 +133,7 @@ pub fn analyse_substances(half_reaction: &str) -> (Vec<String>, Vec<f64>, Vec<f6
         }
 
         s = s.trim();
+        if (s=="M") | (s=="(M)") {  continue; } // "M" means "third body" it is not a real substance
         let s_to_filter: &mut String = &mut s.to_string();
         let s_filtered = clean_off_artifacts(s_to_filter);
         let s: String = s_filtered.to_string();
@@ -164,6 +169,7 @@ pub struct StoichAnalyzer {
     pub G_matrix_prod: Vec<Vec<f64>>,// matrix of powers of concentrations for constructng kinetic equation for reverse reaction 
     pub matrix_of_elements: Option<DMatrix<f64>>,// matrix of elemental composition
     pub vec_of_molmasses: Option<Vec<f64>>,// vector of molecular masses
+    pub  unique_vec_of_elems:Option<Vec<String>>
 }
 
 impl StoichAnalyzer {
@@ -179,16 +185,19 @@ impl StoichAnalyzer {
             G_matrix_prod: Vec::new(),
             matrix_of_elements: None,
             vec_of_molmasses: None,
+            unique_vec_of_elems: None,
         }
     }
 
     pub fn analyse_reactions(&mut self) {
+        println!("\n______________ANALYSING REACTIONS________________________________________________________ \n");
         let reactions_trimmed = self
             .reactions
             .iter()
             .map(|s| s.replace("**", "^").trim().to_string())
             .collect();
         self.reactions = reactions_trimmed;
+        // allocate memory for matrices
         self.stecheo_matrx
             .resize(self.reactions.len(), vec![0.0; self.substances.len()]);
         self.stecheo_reags
@@ -202,13 +211,14 @@ impl StoichAnalyzer {
         for mut reaction in &self.reactions {
             // номер реакции
             if let Some(i) = self.reactions.iter().position(|s| s == reaction) {
-                println!("reaction number: {}", i);
+               
                 let reaction_: &mut String = &mut reaction.to_string();
+                println!("\n \n \n parsing reaction number: {}, {}", i, reaction_);
                 reaction = clean_off_DUP(reaction_);
                 println!("Reaction after dup: {}", &reaction);
                 // разделяем уравнение реакции на половины относящиеся к реагентам и продуктам по соответствующему знаку = или -> или =>
-                let re = Regex::new(r"=|->|=>").unwrap();
-                let sides: Vec<String> = re
+                let re = Regex::new(r"=|->|=>|- >|= >|<=>|< = >|<= >|< =>").unwrap();
+                let sides: Vec<String> = re // divide reaction ino products and reagents
                     .split(reaction) // reaction.split(|s| s == '=' )
                     .map(|s| s.trim())
                     .map(|s| s.to_string())
@@ -219,20 +229,21 @@ impl StoichAnalyzer {
                 let mut g_list = Vec::new();
                 let mut s_list_r = Vec::new();
                 let mut g_list_r: Vec<f64> = Vec::new();
-
+                // left side of reaction equation
                 println!("direct reaction  {:?}", &sides[0]);
                 let (left_subs, mut left_s_list, mut left_g_list) = analyse_substances(&sides[0]);
+                println!("\n back to the reaction analyzer: \n s_list: {:?},\n g_list: {:?}", left_s_list, left_g_list);
                 let mut left_subs = left_subs.iter().map(|s| s.as_str()).collect();
                 subs.append(&mut left_subs);
                 s_list.append(&mut left_s_list);
                 g_list.append(&mut left_g_list);
-                println!("direct reaction substances: {:?}", subs);
+                println!("direct reaction substances: {:?} of lengh {}", subs, &subs.len());
                 println!("iterating over substances in direct reaction");
-                println!("lengh of substance list found in reaction {}", &subs.len());
+         
                 for j in 0..subs.len() {
                     let subs_j = subs[j];
                     if let Some(k) = self.substances.iter().position(|s| s == subs_j) {
-                        println!("Index of substance '{}' in list of substanced of this react is: {}, in general list is {},
+                        println!("Index of substance '{}' in list of substances of this react is: {}, in general list is {},
                      lengh of gen. list is {}", subs_j, j, k,  &self.substances.len());
                         self.stecheo_matrx[i][k] -= s_list[j];
                         self.stecheo_reags[i][k] = s_list[j];
@@ -268,10 +279,13 @@ impl StoichAnalyzer {
                 // Add code to populate self.stecheo_matrx, self.G_matrix_reag, self.G_matrix_prod,
                 // self.stecheo_reags, and self.stecheo_prods with the appropriate values.
             }
+           
         } // end of for reaction in &self.reactions {
+     println!("\n______________ANALYSING REACTIONS: END________________________________________________________ \n");
     }
 
     pub fn search_substances(&mut self) {
+        println!("\n______________SEARCH SUBSTANCES________________________________________________________ \n");
         let reactions_trimmed = self
             .reactions
             .iter()
@@ -311,7 +325,7 @@ impl StoichAnalyzer {
                 found_substances.extend(subs_mut.iter().map(|s| s.to_string()).collect::<Vec<_>>());
             } // end of if let
         } // end of for reaction in &self.reactions {
-
+        println!("\n______________SEARCH SUBSTANCES ENDED________________________________________________________ \n");
         self.substances = found_substances;
     }
     pub fn create_matrix_of_elements(&mut self) {
@@ -319,10 +333,12 @@ impl StoichAnalyzer {
             self.substances.iter().map(|s| s.as_str()).collect(),
             self.groups.clone(),
         ));
-        self.matrix_of_elements = Some(create_elem_composition_matrix(
+        let (matrix, vec_of_elems) = (create_elem_composition_matrix(
             self.substances.iter().map(|s| s.as_str()).collect(),
             self.groups.clone(),
         ));
+        self.matrix_of_elements = Some(matrix);
+        self.unique_vec_of_elems = Some(vec_of_elems);
     }
 } // end of impl ReactionAnalyzer
 

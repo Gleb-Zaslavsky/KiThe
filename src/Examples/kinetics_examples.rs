@@ -49,7 +49,7 @@ pub fn kin_examples(kintask:usize) {
             }
 
             let vec_of_formulae = vec!["H2O", "NaCl", "C3H8", "CH4"]; // 5 elements
-            let matrix = create_elem_composition_matrix(vec_of_formulae, None);
+            let (matrix, vec_of_formulae) = create_elem_composition_matrix(vec_of_formulae, None);
             println!("{}", matrix);
         }
         2 => {// kinetics library api
@@ -65,7 +65,7 @@ pub fn kin_examples(kintask:usize) {
             let reaction1 = kin_instance.search_reactdata_by_reaction_id("1");
             println!("reaction1: {:?}", reaction1);
             // search reactions by substances 
-            kin_instance.search_reaction_by_reagents_and_products((vec!["CO".to_string()])  );
+            kin_instance.search_reaction_by_reagents_and_products(vec!["CO".to_string()]  );
             println!("reactions where CO is product: {:?}", kin_instance.FoundReactionsByProducts);
             println!("reactions where CO is reagent: {:?}", kin_instance.FoundReactionsByReagents);
 
@@ -84,7 +84,21 @@ pub fn kin_examples(kintask:usize) {
             println!("reaction data: {:?}", vec_of_reactions);
             println!("vector of ReactionData structs with parsed data: {:#?}", mech_search.reactdata);
         }
+        4 => { // struct KinData aggregate most of functionality of the Kinetics module 
+            use crate::Kinetics::User_reactions::KinData;
+            // let our journey begin with a new instance of KinData
+            let mut kd = KinData::new();
+            // set the shortcut reactions for our KineticData instance
+            // it means we want reactions from Cantera sub-librarie from number 1 to number 10
+            kd.set_reactions_from_shortcut_range("C1..C10".to_string());
+            // searching for reactions in data base
+            kd.get_reactions_from_shortcuts();
+            kd.kinetic_main(); // parsing reaction data into structures and stoichometric calculations under one hood
+            kd.pretty_print_kindata();
+           // kd.pretty_print_kindata_verbose();
 
+            
+        }
         _ => {
             println!("Wrong task number");
         }
