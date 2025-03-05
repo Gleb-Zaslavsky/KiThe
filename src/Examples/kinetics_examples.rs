@@ -97,8 +97,50 @@ pub fn kin_examples(kintask:usize) {
             kd.pretty_print_kindata();
            // kd.pretty_print_kindata_verbose();
 
-            
         }
+        5=> {
+            use crate::Kinetics::User_reactions::KinData;
+            // let our journey begin with a new instance of KinData
+            let mut kd = KinData::new();
+            let task_substances = vec!["O".to_string(), "NH3".to_string(), "NO".to_string()];
+            let task_library = "NUIG".to_string();
+            kd.construct_mechanism(task_substances, task_library);
+            kd.kinetic_main(); // parsing reaction data into structures and stoichometric calculations under one hood
+            kd.pretty_print_kindata();
+            println!("vector of reactions \n\n {:#?}", kd.vec_of_equations);
+            println!("vector of substances \n\n {:#?}", kd.substances);
+
+        }
+        6=> { // parsing kinetcis data from json
+            use crate::Kinetics::mechfinder_api::kinetics::{PressureStruct, ThreeBodyStruct};
+            let ThreeBodyStruct_test_data: &str = r#"{"Arrenius": [4.577e+19, -1.4, 436705.19999999995],
+            "eff": {"H2": 2.5, "H2O": 12.0, "CO": 1.9, "CO2": 3.8, "HE": 0.83, "CH4": 2.0, "C2H6": 3.0} }"#;
+           
+            let tdata =
+            serde_json::from_value::<ThreeBodyStruct>(
+                serde_json::from_str(ThreeBodyStruct_test_data).unwrap(),
+            );
+
+            if let Ok(tdata)= tdata {
+                println!("tdata: {:#?}", tdata);}
+                else { panic!("Expected ThreeBodyStruct variant");}
+              
+              const PRES_TESTING_JSON: &str = r#"{
+                        "Arrenius":{"0.01": [2.89e+40, -9.76, 140552.983],
+                                    "0.1": [1.8e+44, -10.5, 154800.281]
+                                    }}"#;
+              let pres_val  = serde_json::from_str(PRES_TESTING_JSON).expect("Error parsing JSON: {err:?}");                      
+              let pres_data = serde_json::from_value::<PressureStruct>(pres_val);
+            
+                if let Ok(pres)= pres_data {
+                    println!("pres_data: {:#?}", pres);
+                    // Success
+                } else { panic!("Expected Pressure variant");}
+
+            }
+
+
+    
         _ => {
             println!("Wrong task number");
         }

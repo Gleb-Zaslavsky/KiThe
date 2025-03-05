@@ -2,13 +2,15 @@
 #![allow(warnings)]
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use serde::{Deserialize, Serialize};
+use serde::de::{self, Deserializer, MapAccess, Visitor};
 use std::collections::{HashMap, HashSet};
 use std::f64;
-
+use std::fmt;
+use std::str::FromStr;
 const R: f64 = 8.314;
 const Rsym: Expr = Expr::Const(8.314);
 // Different types of reactions proceeding here
-
+/////////////////////////ELEMENTARTY KINETICS///////////////////////////////////////////////////////////////
 // Struct for reaction type "elementary" with simplest form of
 // kinetic constant - easy Arrhenius form  A*Temp.powf(*n)exp(-E/(Temp*R) )
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -39,20 +41,20 @@ impl ElementaryStruct {
         return k;
     }
 }
-
+/////////////////////////FALLOFF KINETICS///////////////////////////////////////////////////////////////
 // Struct for reaction type "falloff" - form of kinetic constant is more compicated
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct FalloffStruct {
     pub low_rate: Vec<f64>,
     pub high_rate: Vec<f64>,
-    pub eff: HashMap<String, f64>,
+    pub eff: Option<HashMap<String, f64>>,
     pub troe: Option<Vec<f64>>,
 }
 impl FalloffStruct {
     pub fn new(
         low_rate: Vec<f64>,
         high_rate: Vec<f64>,
-        eff: HashMap<String, f64>,
+        eff: Option<HashMap<String, f64>>,
         troe: Option<Vec<f64>>,
     ) -> Self {
         Self {
@@ -77,14 +79,17 @@ impl FalloffStruct {
         let P_r = K0 / K_inf;
         // Calculate effective concentrations, e.g., by multiplying concentrations with coefficients from self.eff
         // Hashmap {substance: concentration}
+        let mut Eff: f64 = 1.0;
+        if let Some(eff) = self.eff.clone(){
         let mut Eff: f64 = 0.0;
         for (subs_name, C_i) in Concentrations.iter() {
-            if self.eff.get(subs_name).is_some() {
-                self.eff.get(subs_name).map(|&eff_i| Eff += eff_i * C_i);
+            if eff.get(subs_name).is_some() {
+                eff.get(subs_name).map(|&eff_i| Eff += eff_i * C_i);
             } else {
                 Eff += C_i;
             };
             return Eff;
+        }
         }
         let k: f64 = {
             if let Some(troe) = &self.troe {
@@ -127,32 +132,7 @@ impl FalloffStruct {
         return K_const_;
     }
 }
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct PressureStruct {
-    pub Arrenius: HashMap<i32, Vec<f64>>,
-}
-
-impl PressureStruct {
-    pub fn new(r#type: String, Arrenius: HashMap<i32, Vec<f64>>, eq: String) -> Self {
-        Self { Arrenius }
-    }
-    pub fn K_const(&self, Temp: &f64, P: f64) -> f64 {
-        let pressures: Vec<f64> = self.Arrenius.keys().map(|p| *p as f64).collect::<Vec<_>>();
-
-        let location =
-            pressures.binary_search_by(|v| v.partial_cmp(&Temp).expect("Couldn't compare values"));
-        let k: f64 = {
-            match location {
-                //
-                Ok(i) => println!("Found at {}", i),
-                Err(i) => println!("Not found, could be inserted at {}", i),
-            }
-            return 0.0;
-        };
-    }
-}
-
+/////////////////////////////THREE-BODY KINETICS////////////////////////////////
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ThreeBodyStruct {
     pub Arrenius: Vec<f64>,
@@ -183,6 +163,135 @@ impl ThreeBodyStruct {
     }
 }
 
+/////////////////////////PRESSURE DEPENDENT KINETICS///////////////////////////////////////////////////////////////
+#[derive(Debug, Deserialize,  Serialize, Clone)]
+pub struct PressureStruct {
+    pub Arrenius: HashMap<String, Vec<f64>>,
+}
+impl PressureStruct {
+    pub fn new( Arrenius: HashMap<String, Vec<f64>>, ) -> Self {
+        Self { Arrenius }
+    }
+
+    pub fn K_const(&self, Temp: &f64, P: f64) -> f64 {
+        let pressures_str: Vec<String> = self.Arrenius.keys().cloned().collect();
+        let pressures = match convert_strings_to_f64(pressures_str.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Error converting pressures to f64: {}", e);
+                return 0.0; // or handle the error in a way that makes sense for your application
+            }
+        };
+        let location:Result<usize, usize> = pressures.binary_search_by(|v| v.partial_cmp(&P).expect("Couldn't compare values"));
+        
+        match location {
+            Ok(i) => {
+                // Exact pressure found
+                let arr_params = &self.Arrenius[pressures_str[i].as_str()];
+                calculate_k(arr_params, Temp)
+            },
+            Err(i) if i > 0 && i < pressures.len() => {
+                // Interpolate between two pressures
+                let p_low = pressures[i-1];
+                let p_high = pressures[i];
+                let arr_low = &self.Arrenius[pressures_str[i].as_str()];
+                let arr_high = &self.Arrenius[pressures_str[i].as_str()];
+                let k_low = calculate_k(arr_low, Temp);
+                let k_high = calculate_k(arr_high, Temp);
+                interpolate(P, p_low, p_high, k_low, k_high)
+            },
+            _ => {
+                // Pressure out of range, use closest available pressure
+                let i = location.unwrap();
+                let closest_p = if i == 0 { pressures[0] } else { pressures[pressures.len() - 1] };
+                let arr_params = &self.Arrenius[closest_p.to_string().as_str()];
+                calculate_k(arr_params, Temp)
+            }
+        }
+    }
+}
+fn calculate_k(arr_params: &[f64], temp: &f64) -> f64 {
+    let a = arr_params[0];
+    let b = arr_params[1];
+    let e = arr_params[2];
+    a * temp.powf(b) * (-e / (R * temp)).exp()
+}
+
+fn interpolate(x: f64, x1: f64, x2: f64, y1: f64, y2: f64) -> f64 {
+    y1 + (x - x1) * (y2 - y1) / (x2 - x1)
+}
+
+fn convert_strings_to_f64(strings: Vec<String>) -> Result<Vec<f64>, std::num::ParseFloatError> {
+    strings.into_iter().map(|s| s.parse::<f64>()).collect()
+}
+//________________________________________________________________
+use std::hash::{Hash, Hasher};
+use std::cmp::Ordering;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct F64Wrapper(pub f64);
+
+impl PartialOrd for F64Wrapper {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+
+impl Ord for F64Wrapper {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+    }
+}
+
+impl Eq for F64Wrapper {}
+
+impl Hash for F64Wrapper {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let bits = self.0.to_bits();
+        bits.hash(state);
+    }
+}
+
+
+fn deserialize_f64_wrapper_map<'de, D>(deserializer: D) -> Result<HashMap<F64Wrapper, Vec<f64>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct F64WrapperMapVisitor;
+
+    impl<'de> Visitor<'de> for F64WrapperMapVisitor {
+        type Value = HashMap<F64Wrapper, Vec<f64>>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a map with f64 keys and vec<f64> values")
+        }
+
+        fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut map = HashMap::with_capacity(access.size_hint().unwrap_or(0));
+
+            while let Some((key, value)) = access.next_entry::<f64, Vec<f64>>()? {
+                map.insert(F64Wrapper(key), value);
+            }
+            println!("map: {:#?} \n", map);
+            Ok(map)
+        }
+    }
+
+    deserializer.deserialize_map(F64WrapperMapVisitor)
+}
+
+fn deserialize_f64_wrapper_map2<'de, D>(deserializer: D) -> Result<HashMap<F64Wrapper, Vec<f64>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let map = HashMap::<String, Vec<f64>>::deserialize(deserializer)?;
+    Ok(map.into_iter().map(|(k, v)| (F64Wrapper(k.parse::<f64>().unwrap()), v)).collect())
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,7 +310,7 @@ mod tests {
         let falloff_reaction = FalloffStruct::new(
             vec![1.0, 2.0, 300.0],
             vec![10.0, 1.5, 400.0],
-            HashMap::from([("H2".to_string(), 2.0), ("M".to_string(), 1.0)]),
+            Some(HashMap::from([("H2".to_string(), 2.0), ("M".to_string(), 1.0)])  ),
             Some(vec![0.5, 300.0, 1000.0]),
         );
 

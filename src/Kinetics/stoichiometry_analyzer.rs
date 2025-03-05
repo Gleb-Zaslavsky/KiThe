@@ -147,7 +147,7 @@ pub fn analyse_substances(half_reaction: &str) -> (Vec<String>, Vec<f64>, Vec<f6
 
 // #  некоторые записи уравнения реакции содержат последние символы '_dup' или '_DUP' (то есть дублирующие)
 // избавляемся от них
-fn clean_off_DUP(item: &mut String) -> &String {
+pub fn clean_off_DUP(item: &mut String) -> &String {
     if item.ends_with("_dup") || item.ends_with("_DUP") {
         *item = item.replace("_dup", "").replace("_DUP", "");
         return item;
@@ -302,7 +302,7 @@ impl StoichAnalyzer {
                 println!("Reaction after dup: {}", &reaction);
                 // разделяем уравнение реакции на половины относящиеся к реагентам и продуктам по соответствующему знаку = или -> или =>
                 // let re = Regex::new(r"=|->|=>").unwrap();
-                let re = Regex::new(r"=|->|=>|<=>").unwrap();
+                let re = Regex::new(r"=|->|=>|<=>|<= >|< =>").unwrap();
                 let sides: Vec<String> = re
                     .split(reaction) // reaction.split(|s| s == '=' )
                     .map(|s| s.trim())

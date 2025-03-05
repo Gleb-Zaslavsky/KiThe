@@ -9,8 +9,8 @@ use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
 use prettytable::{Table, Row, Cell, row};
-use nalgebra::DMatrix;
-use log::{error, info, warn};
+
+use log::{ info, warn};
 /// THE STRUCT KinData COLLECTS ALL THE INFORMATION ABOUT SPECIFIC REACTIONS, WHICH ARE NEEDED FOR FURTHER CALCULATIONS.
 ///  so this is API for allmost all features of Kinetics module
 /// Not all features can be used simultaneously. But the list of features is as follows:
@@ -130,7 +130,13 @@ impl KinData {
     ///construct reaction mechanism
     pub fn construct_mechanism(&mut self,    task_substances: Vec<String>, task_library: String,) {
 
-        let found_mech = Mechanism_search::new(   task_substances,task_library.clone());
+        let mut found_mech = Mechanism_search::new(   task_substances,task_library.clone());
+        found_mech.mechfinder_api();
+        self.vec_of_equations = found_mech.vec_of_reactions;
+  
+      //  println!("mechanism found: reaction data: \n {:?}", found_mech.reactdata);
+      //  println!("mechanism found: mechanism: \n {:#?}", found_mech.mechanism);
+      //  println!("mechanism found: reactants: \n {:#?}", found_mech.reactants);
       //  self.vec_of_equations = found_mech.vec_of_reactions;
         self.vec_of_reaction_data = Some(found_mech.reactdata);
         let reactions = found_mech.mechanism;
@@ -141,14 +147,41 @@ impl KinData {
         }
         self.shortcut_reactions = Some(full_addres);
         self.substances = found_mech.reactants;
+    
 
     }
+    /////////////////////////////////REACTIONS MANIPULATIONS//////////////////////////////////////
     /// add manially reaction data as serde Value
     pub fn append_reaction(&mut self, reactions:Vec<Value>) {
         let mut old_reactions = self.vec_of_reaction_Values.as_mut().unwrap().clone();
         old_reactions.extend(reactions);
         self.vec_of_reaction_Values = Some(old_reactions);
     }
+    pub fn remove_by_index(&mut self, index: usize) {
+    
+            let mut vec_of_equations = self.vec_of_equations.clone();
+            vec_of_equations.remove(index);
+            self.vec_of_equations = vec_of_equations;
+            if let Some(vec_of_reaction_Values) = self.vec_of_reaction_Values.clone().as_mut() {
+                vec_of_reaction_Values.remove(index);
+            self.vec_of_reaction_Values = Some(vec_of_reaction_Values.clone());
+            }
+            if let Some(vec_of_reaction_data) = self.vec_of_reaction_data.clone().as_mut() {
+                vec_of_reaction_data.remove(index);
+            self.vec_of_reaction_data = Some(vec_of_reaction_data.clone());
+            }  
+            if let Some(vec_of_pairs) = self.vec_of_pairs.clone().as_mut() {
+                vec_of_pairs.remove(index);
+            self.vec_of_pairs = Some(vec_of_pairs.clone());
+            }  
+    }
+    pub fn remove_reaction_by_name(&mut self, reaction_name: &str) {
+       let i=  &self.vec_of_equations.clone().iter().position(|eq_i| *eq_i == reaction_name);
+       if let Some(index) = i {
+           self.remove_by_index(*index);
+       }
+    }
+  
     /////////////////////////////////COMPUTING AND PARSING REACTION DATA///////////////////////////////////////////
     /// parse reaction libraries and extracts data into structs
     pub fn reactdata_parsing(&mut self) -> () {
@@ -177,7 +210,7 @@ impl KinData {
         if self.substances.is_empty()| (self.substances.len() == 0) { // no need to parse for substances if they are already known
         StoichAnalyzer_instance.search_substances();
         self.substances = StoichAnalyzer_instance.substances.clone();
-        }
+        } else {StoichAnalyzer_instance.substances = self.substances.clone()};
         //find stoichiometric matrix and other matrices
         StoichAnalyzer_instance.analyse_reactions();
         StoichAnalyzer_instance.create_matrix_of_elements();
@@ -213,7 +246,13 @@ impl KinData {
         let elem_matrix = sd.matrix_of_elements.clone().unwrap().clone();
         let unique_vec_of_elems = sd.unique_vec_of_elems.clone().unwrap();
         let sm = sd.stecheo_matrx.clone();
-    
+        let n_react_from_matrix = sm.len();
+        assert_eq!(n_react_from_matrix, reacts.len());
+        let n_subs_from_matrix = sm[0].len();
+        assert_eq!(n_subs_from_matrix, subs.len());
+        let (nrows, ncols) = elem_matrix.shape();
+        assert_eq!(nrows, subs.len());
+        assert_eq!(ncols, unique_vec_of_elems.len());
          // Code  table of such structure 1) first row: first element - String: "Reactions/Substances" all other elements of the first row taken
     //  from vector subs 2) nest rows look like as follows first element taken from vec reacts, and other elements of row taken from stecheomatrix
     //  vec of vectors

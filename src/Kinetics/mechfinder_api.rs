@@ -1,6 +1,7 @@
 #![allow(warnings)]
 pub mod kinetics;
 mod mechfinder;
+
 use log::{error, info, warn};
 //v 0.1.1
 /// ru
@@ -17,6 +18,8 @@ use log::{error, info, warn};
 use kinetics::{ElementaryStruct, FalloffStruct, PressureStruct, ThreeBodyStruct};
 
 use serde::{Deserialize, Serialize};
+use serde::de::{self, Deserializer, MapAccess, Visitor};
+use std::fmt;
 use serde_json::{Map, Number, Value};
 use std::collections::{HashMap, HashSet};
 use std::f64;
@@ -26,8 +29,9 @@ use std::f64;
 pub enum ReactionType {
     Elem,
     Falloff,
+    #[serde(rename = "pres")]
     Pressure,
-    #[serde(rename = "threebody")]
+   #[serde(rename = "three-body")]
     ThreeBody,
     Empirical,
 }
@@ -40,8 +44,8 @@ impl<'de> Deserialize<'de> for ReactionType {
         match s.as_str() {
             "elem" => Ok(ReactionType::Elem),
             "falloff" => Ok(ReactionType::Falloff),
-            "pressure" => Ok(ReactionType::Pressure),
-            "threebody" | "three-body" => Ok(ReactionType::ThreeBody),
+            "pressure"|"pres" => Ok(ReactionType::Pressure),
+            "three-body" | "threebody" => Ok(ReactionType::ThreeBody),
             "empirical" => Ok(ReactionType::Empirical),
             _ => Err(serde::de::Error::custom(format!(
                 "Unknown reaction type: {}",
@@ -61,14 +65,121 @@ pub struct ReactionData {
   pub data: ReactionKinetics,
 }
 /// enum for structs of different types of kinetics
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize,  Deserialize,  Clone)]
 #[serde(untagged)]
 pub enum ReactionKinetics {
-    Elementary(ElementaryStruct),
+  
     Falloff(FalloffStruct),
     Pressure(PressureStruct),
     ThreeBody(ThreeBodyStruct),
+    Elementary(ElementaryStruct),
 }
+// Implement custom Deserialize for ReactionKinetics
+/* 
+impl<'de> Deserialize<'de> for ReactionKinetics {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ReactionKineticsVisitor;
+
+        impl<'de> Visitor<'de> for ReactionKineticsVisitor {
+            type Value = ReactionKinetics;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map containing reaction kinetics data")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut reaction_type: Option<ReactionType> = None;
+
+                // First, find the "type" field to determine the reaction type
+                while let Some((key, value)) = map.next_entry::<String, Value>()? {
+                    if key == "type" {
+                        reaction_type = Some(ReactionType::deserialize(value)?);
+                        break;
+                    }
+                }
+
+                // Now that we know the reaction type, deserialize the appropriate struct
+                match reaction_type {
+                    Some(ReactionType::Falloff) => Ok(ReactionKinetics::Falloff(FalloffStruct::deserialize(de::value::MapAccessDeserializer::new(map))?)),
+                    Some(ReactionType::Pressure) => Ok(ReactionKinetics::Pressure(PressureStruct::deserialize(de::value::MapAccessDeserializer::new(map))?)),
+                    Some(ReactionType::ThreeBody) => Ok(ReactionKinetics::ThreeBody(ThreeBodyStruct::deserialize(de::value::MapAccessDeserializer::new(map))?)),
+                    Some(ReactionType::Elem) => Ok(ReactionKinetics::Elementary(ElementaryStruct::deserialize(de::value::MapAccessDeserializer::new(map))?)),
+                    _ => Err(de::Error::custom("Unknown or missing reaction type")),
+                }
+            }
+        }
+
+        deserializer.deserialize_map(ReactionKineticsVisitor)
+    }
+}
+*/
+
+
+/*
+impl<'de> Deserialize<'de> for ReactionKinetics {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ReactionKineticsVisitor;
+
+        impl<'de> Visitor<'de> for ReactionKineticsVisitor {
+            type Value = ReactionKinetics;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map with reaction type and data")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut reaction_type = None;
+                let mut data = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "type" => {
+                            reaction_type = Some(map.next_value::<ReactionType>()?);
+                        }
+                        _ => {
+                            // Collect all other fields into a Value
+                            data = Some(map.next_value::<serde_json::Value>()?);
+                        }
+                    }
+                }
+
+                let reaction_type = reaction_type.ok_or_else(|| de::Error::missing_field("type"))?;
+                let data = data.ok_or_else(|| de::Error::missing_field("data"))?;
+
+                match reaction_type {
+                    ReactionType::Elem => Ok(ReactionKinetics::Elementary(
+                        serde_json::from_value(data).map_err(de::Error::custom)?,
+                    )),
+                    ReactionType::Falloff => Ok(ReactionKinetics::Falloff(
+                        serde_json::from_value(data).map_err(de::Error::custom)?,
+                    )),
+                    ReactionType::Pressure => Ok(ReactionKinetics::Pressure(
+                        serde_json::from_value(data).map_err(de::Error::custom)?,
+                    )),
+                    ReactionType::ThreeBody => Ok(ReactionKinetics::ThreeBody(
+                        serde_json::from_value(data).map_err(de::Error::custom)?,
+                    )),
+                    ReactionType::Empirical => Err(de::Error::custom("Empirical reactions not supported")),
+                }
+            }
+        }
+
+        deserializer.deserialize_map(ReactionKineticsVisitor)
+    }
+}
+*/
 
 pub fn parse_kinetic_data(
     big_mech: &str,
@@ -110,28 +221,22 @@ pub fn parse_kinetic_data_vec(
 
     vec_of_reaction_value: Vec<Value>,
 ) -> (Vec<ReactionData>, Vec<String>) {
-    info!("\n \n______________PARCING REACTION DATA INTO STRUCTS________");
+    println!("\n \n______________PARCING REACTION DATA INTO STRUCTS________");
     let mut reaction_dat = Vec::new();
     let mut equations = Vec::new();
 
     for reaction_record in vec_of_reaction_value.iter() {
-        info!("reaction_record {:#?} \n \n ", reaction_record);
+        println!("reaction_record {:#?} \n \n ", reaction_record);
         if let Ok(mut reactiondata) =
             serde_json::from_value::<ReactionData>(reaction_record.clone())
         {
             equations.push(reactiondata.eq.clone());
-       
-            // Initialize any additional fields based on reaction type
-            match &mut reactiondata.data {
-                ReactionKinetics::Elementary(elem_data) => {}
-                ReactionKinetics::ThreeBody(threebody_data) => {}
-                ReactionKinetics::Falloff(falloff_data) => {}
-                _ => {}
-            }
-
+            println!("parsed into {:#?} \n", reactiondata);
             reaction_dat.push(reactiondata);
         } else {
+
             info!("Error parsing reaction: {}", reaction_record);
+            panic!("Error parsing reaction: {}", reaction_record);
         }
     }
     info!("______________PARCING REACTION DATA INTO STRUCTS ENDED________");
@@ -212,13 +317,13 @@ const FALOFF_TESTING_JSON: &str = r#" {"type": "falloff",
                 "high_rate": [100000000000000.0, -0.32, -1097.2009],
                  "eff": {"H2": 2.0, "H2O": 6.0, "CH4": 2.0, "CO": 1.5, "CO2": 2.0, "C2H6": 3.0, "AR": 0.7},
                  "troe": [0.104, 1606.0, 60000.0, 6118.0]} "#;
-const PRES_TESTING_JSON: &str = " '1736': {'type': 'pres', 'eq': 'SC4H9<=>C3H6+CH3',
-               'Arrenius': {'0.001': [2.89e+40, -9.76, 140552.983],
-                              '0.01': [1.8e+44, -10.5, 154800.281],
-                             '0.1': [2.51e+46, -10.73, 168311.37099999998],
-                             '1.0': [4.74e+44, -9.85, 175020.903], 
-                             '10.0': [3.79e+37, -7.44, 169846.532],
-                             '100.0': [4.79e+26, -4.01, 154344.334]}}";
+const PRES_TESTING_JSON: &str =  r#"{"type": "pres", "eq": "SC4H9<=>C3H6+CH3",
+               'Arrenius': {"0.001": [2.89e+40, -9.76, 140552.983],
+                             "0.01": [1.8e+44, -10.5, 154800.281],
+                             "0.1": [2.51e+46, -10.73, 168311.37099999998],
+                             "1.0": [4.74e+44, -9.85, 175020.903], 
+                             "10.0": [3.79e+37, -7.44, 169846.532],
+                             "100.0": [4.79e+26, -4.01, 154344.334] }}"#;
 const THREE_BODY_TESTING_JSON: &str = r#"{"type": "threebody",
               "eq": "H2+M<=>H+H+M",
               "Arrenius": [4.577e+19, -1.4, 436705.19999999995],
@@ -280,7 +385,7 @@ mod tests {
     #[test]
 
     fn test_THREEBODY_parse_kinetic_data() {
-        let ThreeBodyStruct_test_str: &str = r#"{"Arrenius": [4.577e+19, -1.4, 436705.19999999995],
+        let ThreeBodyStruct_test_data: &str = r#"{"Arrenius": [4.577e+19, -1.4, 436705.19999999995],
        "eff": {"H2": 2.5, "H2O": 12.0, "CO": 1.9, "CO2": 3.8, "HE": 0.83, "CH4": 2.0, "C2H6": 3.0} }"#;
         let big_mech: &str = "NUIG";
         let vec_of_reactions = vec!["2".to_string()];
@@ -295,7 +400,7 @@ mod tests {
 
         let threebody_react_testing_instance: ThreeBodyStruct =
             serde_json::from_value::<ThreeBodyStruct>(
-                serde_json::from_str(ThreeBodyStruct_test_str).unwrap(),
+                serde_json::from_str(ThreeBodyStruct_test_data).unwrap(),
             )
             .unwrap();
         println!(
@@ -339,5 +444,64 @@ mod tests {
         Concentrations.insert("O".to_string(), 0.5);
         assert!(falloff_react_testing_instance.K_const(298.15, Concentrations) > 0.0);
         // assert!(elem_react_testing_instance.K_const(298.15) > 0.0);
+    }
+
+    #[test]
+    fn test_three_body_deserialization() {
+        use serde_json::json;
+        let three_body_json = json!({
+            "type": "three-body",
+            "eq": "H2+M<=>H+H+M",
+            "Arrenius": [4.577e+19, -1.4, 436705.19999999995],
+            "eff": {
+                "H2": 2.5,
+                "H2O": 12.0,
+                "CO": 1.9,
+                "CO2": 3.8,
+                "HE": 0.83,
+                "CH4": 2.0,
+                "C2H6": 3.0
+            }
+        });
+
+        let reaction_data: ReactionData = serde_json::from_value(three_body_json).unwrap();
+        println!("reaction_data: {:#?}", reaction_data);
+        assert_eq!(reaction_data.reaction_type, ReactionType::ThreeBody, "wrong reaction type!");
+        if let ReactionKinetics::ThreeBody(_) = reaction_data.data {
+            // Success
+        } else {
+            panic!("Expected ThreeBody variant");
+        }
+    }
+    #[test]
+    fn test_pres_deserialization() {
+  
+        let reaction_data: ReactionData = serde_json::from_str(PRES_TESTING_JSON).expect("Error parsing JSON: {err:?}");
+        println!("reaction_data: {:#?}", reaction_data);
+        assert_eq!(reaction_data.reaction_type, ReactionType::Pressure, "wrong reaction type!");
+        if let ReactionKinetics::Pressure(_) = reaction_data.data {
+            // Success
+        } else {
+            panic!("Expected Pressure variant");
+        }
+    }
+    #[test]
+    fn test_pres_data_deserialization() {
+              const PRES_TESTING_JSON: &str = r#"{
+                        "Arrenius":{"0.01": [2.89e+40, -9.76, 140552.983],
+                                    "0.1": [1.8e+44, -10.5, 154800.281]
+                                    }}"#;
+
+        let pres_val  = serde_json::from_str(PRES_TESTING_JSON).expect("Error parsing JSON: {err:?}"); 
+       println!("val: {:#?}", pres_val);
+         let pres_data =
+        serde_json::from_value::<PressureStruct>(
+            pres_val
+        );
+        if let Ok(pres)= pres_data {
+            println!("pres_data: {:#?}", pres);
+            // Success
+        } else { panic!("Expected Pressure variant");}
+        
     }
 }

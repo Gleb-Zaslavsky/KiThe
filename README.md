@@ -73,7 +73,7 @@ let (molar_mass, element_composition) = calculate_molar_mass(formula.to_string()
 
   let vec_of_formulae = vec!["H2O", "NaCl", "C6H8O6", "Ca(NO3)2"];
   let expected_molar_masses = vec![18.01528, 58.44316, 176.12, 164.093];
-  let calculated_molar_masses = calculate_molar_mass_of_vector_of_subs(vec_of_formulae, None);
+  let (matrix, vec_of_formulae) = create_elem_composition_matrix(vec_of_formulae, None);
     
 for (i, &expected_molar_mass) in expected_molar_masses.iter().enumerate() {
                 println!("molar mass: {:?} g/mol", calculated_molar_masses[i]);
@@ -131,7 +131,7 @@ let mut mech_search = Mechanism_search::new(
 let (mechanism, reactants, vec_of_reactions) = mech_search.mechfinder_api();
 println!("mechanism (reaction ID's) : {:?}", mechanism);
 println!("reactants: {:?}", reactants);
-println!("reaction data: {:?}", vec_of_reactions);
+println!("reaction eq's: {:?}", vec_of_reactions);
 println!("vector of ReactionData structs with parsed data: {:#?}", mech_search.reactdata);
 ```
 The most general approach is to use stuct KinData whin aggregates the most features of Kinetics module: library parsing,
@@ -163,6 +163,19 @@ kd.kinetic_main(); // parsing reaction data into structures and stoichometric ca
 kd.pretty_print_kindata(); // pretty print the reaction data
 
 
+```
+
+```rust
+use KiThe::Kinetics::User_reactions::KinData;
+
+let mut kd = KinData::new();
+let task_substances = vec!["O".to_string(), "NH3".to_string(), "NO".to_string()];
+let task_library = "NUIG".to_string();
+kd.construct_mechanism(task_substances, task_library);
+kd.kinetic_main(); // parsing reaction data into structures and stoichometric calculations under one hood
+kd.pretty_print_kindata();
+println!("vector of reactions \n\n {:#?}", kd.vec_of_equations);
+println!("vector of substances \n\n {:#?}", kd.substances);
 
 ```
 ## Testing
