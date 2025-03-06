@@ -6,7 +6,7 @@ use crate::Kinetics::stoichiometry_analyzer::StoichAnalyzer;
 use std::fs::File;
 use std::io::Write;
 use serde_json::json;
-use serde_json::Value;
+use serde_json::{Value,to_writer_pretty,  from_reader};
 use std::collections::HashMap;
 use prettytable::{Table, Row, Cell, row};
 
@@ -151,12 +151,22 @@ impl KinData {
 
     }
     /////////////////////////////////REACTIONS MANIPULATIONS//////////////////////////////////////
-    /// add manially reaction data as serde Value
+    /// add manually reaction data as serde Value
     pub fn append_reaction(&mut self, reactions:Vec<Value>) {
         let mut old_reactions = self.vec_of_reaction_Values.as_mut().unwrap().clone();
         old_reactions.extend(reactions);
         self.vec_of_reaction_Values = Some(old_reactions);
     }
+      /// add manually reaction data with there shortcut names
+    pub fn append_reaction_with_shortcut(&mut self, reactions:Vec<Value>, shortcuts:Vec<String>) {
+        assert_eq!(reactions.len(), shortcuts.len());
+        self.append_reaction(reactions);
+        let mut old_shortcuts = self.shortcut_reactions.clone().unwrap();
+        old_shortcuts.extend(shortcuts);
+        self.shortcut_reactions = Some(old_shortcuts);
+
+    }
+    ///remove manually reaction data by its index
     pub fn remove_by_index(&mut self, index: usize) {
     
             let mut vec_of_equations = self.vec_of_equations.clone();
@@ -175,7 +185,7 @@ impl KinData {
             self.vec_of_pairs = Some(vec_of_pairs.clone());
             }  
     }
-    pub fn remove_reaction_by_name(&mut self, reaction_name: &str) {
+    pub fn remove_reaction_by_eq(&mut self, reaction_name: &str) {
        let i=  &self.vec_of_equations.clone().iter().position(|eq_i| *eq_i == reaction_name);
        if let Some(index) = i {
            self.remove_by_index(*index);
@@ -223,12 +233,13 @@ impl KinData {
     }
     ///////////////////////////INPUT/OUTPUT/////////////////////////////////////////////////////////
     /// print the chosen reactions 
-    pub fn print_raw_reactions(&self) -> Result<(), std::io::Error> {
+    pub fn save_raw_reactions(&self, file_name: &str) -> Result<(), std::io::Error> {
         if let Some(vec_of_reaction_Values) = & self.vec_of_reaction_Values {
              // Convert the vector of Values to a JSON array
             let json_array = json!(vec_of_reaction_Values);
             // Write the JSON array to a file
-            let mut file = File::create("raw_reactions.json")?;
+            let name = format!("{} {}", file_name, "{}.json");
+            let mut file = File::create(name)?;
             file.write_all(serde_json::to_string_pretty(&json_array)?.as_bytes())?;
             info!("Raw reactions have been written to raw_reactions.json");
             Ok(())
@@ -238,7 +249,47 @@ impl KinData {
             Ok(())
         }
     }
-   
+    pub fn save_reactions_with_shortcuts(&self, file_name: &str) -> Result<(), std::io::Error> {
+        if let Some(reaction_values) = & self.vec_of_reaction_Values {
+              if let Some(shortcuts) = &self.shortcut_reactions {
+                if shortcuts.len() != reaction_values.len() {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Vectors must have the same length"));
+                }
+            
+                let map: HashMap<String, Value> = shortcuts
+                .iter()
+                .cloned()
+                .zip(reaction_values.iter().cloned())
+                .collect();
+
+                let file = File::create(file_name)?;
+                to_writer_pretty(file, &map)?;
+
+            
+              } else {  warn!("KinData: no vector of shortcuts");}
+           Ok(())   
+       } else {
+           warn!("KinData: no vector of Values");
+           Ok(())
+       }
+    }
+
+    pub fn load_reactions_from_json(&mut self, file_name: &str) -> Result<(), std::io::Error> {
+        let file = File::open(file_name)?;
+        let res:Result<HashMap<String, Value>, serde_json::Error> = from_reader(file);
+        if let Ok(map) = res {
+        let (shortcuts, reaction_values): (Vec<String>, Vec<Value>) = map.into_iter().unzip();
+
+        self.shortcut_reactions = Some(shortcuts);
+        self.vec_of_reaction_Values = Some(reaction_values);
+
+        Ok(())
+        } else {
+            Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Vectors must have the same length"))
+        }
+    }
+
+
     pub fn pretty_print_substances_verbose(&self) -> Result<(), std::io::Error> {
         let subs = &self.substances;
         let reacts = &self.vec_of_equations;

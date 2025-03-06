@@ -51,6 +51,7 @@ pub fn kin_examples(kintask:usize) {
             let vec_of_formulae = vec!["H2O", "NaCl", "C3H8", "CH4"]; // 5 elements
             let (matrix, vec_of_formulae) = create_elem_composition_matrix(vec_of_formulae, None);
             println!("{}", matrix);
+            println!("{:?}", vec_of_formulae);
         }
         2 => {// kinetics library api
             use crate::Kinetics::kinetics_lib_api::KineticData;

@@ -333,10 +333,10 @@ impl StoichAnalyzer {
             self.substances.iter().map(|s| s.as_str()).collect(),
             self.groups.clone(),
         ));
-        let (matrix, vec_of_elems) = (create_elem_composition_matrix(
+        let (matrix, vec_of_elems) = create_elem_composition_matrix(
             self.substances.iter().map(|s| s.as_str()).collect(),
             self.groups.clone(),
-        ));
+        );
         self.matrix_of_elements = Some(matrix);
         self.unique_vec_of_elems = Some(vec_of_elems);
     }

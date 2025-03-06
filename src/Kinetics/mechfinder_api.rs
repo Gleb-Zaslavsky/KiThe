@@ -3,18 +3,17 @@ pub mod kinetics;
 mod mechfinder;
 
 use log::{error, info, warn};
-//v 0.1.1
+/// The module is equipped with a library of kinetic parameters of chemical reactions obtained as a result of parsing publicly available databases
+/// The module takes as input the name of the library and the vector of substances and then produces the following data:
+/// 1) all reactions of starting substances with each other, and all their possible products with each other.
+/// 2) HashMap with kinetic data of all found reactions
 /// ru
 /// Модуль снабжен библиотекой кинетических параметров химических реакций, полученной в результате парсинга общедоступныхбаз данных
 /// Модуль берет на вход название библиотеки и вектор веществ а затем выдает следующие данные:
 /// 1) все реакции исходных веществ между собой, и всех их возможных продуктов между собой.
 /// 2) HashMap с кинетическими данными всех найденных реакций
 /// ----------------------------------------------------------------
-/// eng
-/// The module is equipped with a library of kinetic parameters of chemical reactions obtained as a result of parsing publicly available databases
-/// The module takes as input the name of the library and the vector of substances and then produces the following data:
-/// 1) all reactions of starting substances with each other, and all their possible products with each other.
-/// 2) HashMap with kinetic data of all found reactions
+
 use kinetics::{ElementaryStruct, FalloffStruct, PressureStruct, ThreeBodyStruct};
 
 use serde::{Deserialize, Serialize};
@@ -74,113 +73,21 @@ pub enum ReactionKinetics {
     ThreeBody(ThreeBodyStruct),
     Elementary(ElementaryStruct),
 }
-// Implement custom Deserialize for ReactionKinetics
-/* 
-impl<'de> Deserialize<'de> for ReactionKinetics {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct ReactionKineticsVisitor;
-
-        impl<'de> Visitor<'de> for ReactionKineticsVisitor {
-            type Value = ReactionKinetics;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a map containing reaction kinetics data")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut reaction_type: Option<ReactionType> = None;
-
-                // First, find the "type" field to determine the reaction type
-                while let Some((key, value)) = map.next_entry::<String, Value>()? {
-                    if key == "type" {
-                        reaction_type = Some(ReactionType::deserialize(value)?);
-                        break;
-                    }
-                }
-
-                // Now that we know the reaction type, deserialize the appropriate struct
-                match reaction_type {
-                    Some(ReactionType::Falloff) => Ok(ReactionKinetics::Falloff(FalloffStruct::deserialize(de::value::MapAccessDeserializer::new(map))?)),
-                    Some(ReactionType::Pressure) => Ok(ReactionKinetics::Pressure(PressureStruct::deserialize(de::value::MapAccessDeserializer::new(map))?)),
-                    Some(ReactionType::ThreeBody) => Ok(ReactionKinetics::ThreeBody(ThreeBodyStruct::deserialize(de::value::MapAccessDeserializer::new(map))?)),
-                    Some(ReactionType::Elem) => Ok(ReactionKinetics::Elementary(ElementaryStruct::deserialize(de::value::MapAccessDeserializer::new(map))?)),
-                    _ => Err(de::Error::custom("Unknown or missing reaction type")),
-                }
-            }
+impl ReactionData {
+    //write a function that checks if the reaction_type field matches the variant of the data field in a ReactionData instance.
+    // If they don't match, the function will panic. Here's the implementation:
+    pub fn validate_reaction_type(&self) {
+        match (&self.reaction_type, &self.data) {
+            (ReactionType::Elem, ReactionKinetics::Elementary(_)) => {},
+            (ReactionType::Falloff, ReactionKinetics::Falloff(_)) => {},
+            (ReactionType::Pressure, ReactionKinetics::Pressure(_)) => {},
+            (ReactionType::ThreeBody, ReactionKinetics::ThreeBody(_)) => {},
+            _ => panic!("Mismatch between reaction_type ({:?}) and data variant ({:?})", 
+                        self.reaction_type, 
+                        std::mem::discriminant(&self.data)),
         }
-
-        deserializer.deserialize_map(ReactionKineticsVisitor)
     }
 }
-*/
-
-
-/*
-impl<'de> Deserialize<'de> for ReactionKinetics {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct ReactionKineticsVisitor;
-
-        impl<'de> Visitor<'de> for ReactionKineticsVisitor {
-            type Value = ReactionKinetics;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a map with reaction type and data")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut reaction_type = None;
-                let mut data = None;
-
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "type" => {
-                            reaction_type = Some(map.next_value::<ReactionType>()?);
-                        }
-                        _ => {
-                            // Collect all other fields into a Value
-                            data = Some(map.next_value::<serde_json::Value>()?);
-                        }
-                    }
-                }
-
-                let reaction_type = reaction_type.ok_or_else(|| de::Error::missing_field("type"))?;
-                let data = data.ok_or_else(|| de::Error::missing_field("data"))?;
-
-                match reaction_type {
-                    ReactionType::Elem => Ok(ReactionKinetics::Elementary(
-                        serde_json::from_value(data).map_err(de::Error::custom)?,
-                    )),
-                    ReactionType::Falloff => Ok(ReactionKinetics::Falloff(
-                        serde_json::from_value(data).map_err(de::Error::custom)?,
-                    )),
-                    ReactionType::Pressure => Ok(ReactionKinetics::Pressure(
-                        serde_json::from_value(data).map_err(de::Error::custom)?,
-                    )),
-                    ReactionType::ThreeBody => Ok(ReactionKinetics::ThreeBody(
-                        serde_json::from_value(data).map_err(de::Error::custom)?,
-                    )),
-                    ReactionType::Empirical => Err(de::Error::custom("Empirical reactions not supported")),
-                }
-            }
-        }
-
-        deserializer.deserialize_map(ReactionKineticsVisitor)
-    }
-}
-*/
-
 pub fn parse_kinetic_data(
     big_mech: &str,
     vec_of_reactions: &[String],
@@ -197,15 +104,7 @@ pub fn parse_kinetic_data(
         {
             equations.push(reactiondata.eq.clone());
             // let reacttype =  &reactiondata.reaction_type;
-
-            // Initialize any additional fields based on reaction type
-            match &mut reactiondata.data {
-                ReactionKinetics::Elementary(elem_data) => {}
-                ReactionKinetics::ThreeBody(threebody_data) => {}
-                ReactionKinetics::Falloff(falloff_data) => {}
-                _ => {}
-            }
-
+            reactiondata.validate_reaction_type(); //hecks if the reaction_type field matches the variant of the data field in a ReactionData instance. If they don't match, the function will panic
             let value = serde_json::to_value(&reactiondata).unwrap();
             reaction_data_hash.insert(react_code, value);
         } else {
@@ -232,6 +131,7 @@ pub fn parse_kinetic_data_vec(
         {
             equations.push(reactiondata.eq.clone());
             println!("parsed into {:#?} \n", reactiondata);
+            reactiondata.validate_reaction_type(); //hecks if the reaction_type field matches the variant of the data field in a ReactionData instance. If they don't match, the function will panic
             reaction_dat.push(reactiondata);
         } else {
 

@@ -6,11 +6,7 @@ use std::io::Read;
 use serde_json::Value;
 // /Basis functionality to search in reaction library
 
-enum Substance {
-    Reactants,
 
-    Products,
-}
 
 pub struct KineticData {
     pub HashMapOfReactantsAndProducts: HashMap<String, HashMap<String, HashSet<String>>>, // {'reaction ID':{'reagent'/"product": HashSet[substance]}}
