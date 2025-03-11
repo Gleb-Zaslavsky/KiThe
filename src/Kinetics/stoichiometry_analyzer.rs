@@ -79,7 +79,7 @@ fn clean_off_artifacts(item: &mut String) -> &mut String {
             .replace(" (", "")
             .replace("(", "")
             .replace(">", "")
-             .replace("S)", "")
+            .replace("S)", "")
             .replace("s)", "");
 
         return item;
@@ -133,7 +133,9 @@ pub fn analyse_substances(half_reaction: &str) -> (Vec<String>, Vec<f64>, Vec<f6
         }
 
         s = s.trim();
-        if (s=="M") | (s=="(M)") {  continue; } // "M" means "third body" it is not a real substance
+        if (s == "M") | (s == "(M)") {
+            continue;
+        } // "M" means "third body" it is not a real substance
         let s_to_filter: &mut String = &mut s.to_string();
         let s_filtered = clean_off_artifacts(s_to_filter);
         let s: String = s_filtered.to_string();
@@ -165,11 +167,11 @@ pub struct StoichAnalyzer {
     pub stecheo_matrx: Vec<Vec<f64>>, // вектор векторов стехиометрических коэффициентов в каждой реакции/ a vector of vectors of stoichiometric coefficients in each reaction
     pub stecheo_reags: Vec<Vec<f64>>, // вектор векторов стехиометрических коэффициентов реагентов в каждой реакции/ a vector of vectors of stoichiometric coefficients of reactants in each reaction
     pub stecheo_prods: Vec<Vec<f64>>, // вектор векторов стехиометрических коэффициентов продуктов в каждой реакции/ a vector of vectors of stoichiometric coefficients of products in each reaction
-    pub G_matrix_reag: Vec<Vec<f64>>,// matrix of powers of concentrations for constructng kinetic equation for forward reaction 
-    pub G_matrix_prod: Vec<Vec<f64>>,// matrix of powers of concentrations for constructng kinetic equation for reverse reaction 
-    pub matrix_of_elements: Option<DMatrix<f64>>,// matrix of elemental composition
-    pub vec_of_molmasses: Option<Vec<f64>>,// vector of molecular masses
-    pub  unique_vec_of_elems:Option<Vec<String>>
+    pub G_matrix_reag: Vec<Vec<f64>>, // matrix of powers of concentrations for constructng kinetic equation for forward reaction
+    pub G_matrix_prod: Vec<Vec<f64>>, // matrix of powers of concentrations for constructng kinetic equation for reverse reaction
+    pub matrix_of_elements: Option<DMatrix<f64>>, // matrix of elemental composition
+    pub vec_of_molmasses: Option<Vec<f64>>, // vector of molecular masses
+    pub unique_vec_of_elems: Option<Vec<String>>,
 }
 
 impl StoichAnalyzer {
@@ -190,7 +192,9 @@ impl StoichAnalyzer {
     }
 
     pub fn analyse_reactions(&mut self) {
-        println!("\n______________ANALYSING REACTIONS________________________________________________________ \n");
+        println!(
+            "\n______________ANALYSING REACTIONS________________________________________________________ \n"
+        );
         let reactions_trimmed = self
             .reactions
             .iter()
@@ -211,7 +215,6 @@ impl StoichAnalyzer {
         for mut reaction in &self.reactions {
             // номер реакции
             if let Some(i) = self.reactions.iter().position(|s| s == reaction) {
-               
                 let reaction_: &mut String = &mut reaction.to_string();
                 println!("\n \n \n parsing reaction number: {}, {}", i, reaction_);
                 reaction = clean_off_DUP(reaction_);
@@ -232,14 +235,21 @@ impl StoichAnalyzer {
                 // left side of reaction equation
                 println!("direct reaction  {:?}", &sides[0]);
                 let (left_subs, mut left_s_list, mut left_g_list) = analyse_substances(&sides[0]);
-                println!("\n back to the reaction analyzer: \n s_list: {:?},\n g_list: {:?}", left_s_list, left_g_list);
+                println!(
+                    "\n back to the reaction analyzer: \n s_list: {:?},\n g_list: {:?}",
+                    left_s_list, left_g_list
+                );
                 let mut left_subs = left_subs.iter().map(|s| s.as_str()).collect();
                 subs.append(&mut left_subs);
                 s_list.append(&mut left_s_list);
                 g_list.append(&mut left_g_list);
-                println!("direct reaction substances: {:?} of lengh {}", subs, &subs.len());
+                println!(
+                    "direct reaction substances: {:?} of lengh {}",
+                    subs,
+                    &subs.len()
+                );
                 println!("iterating over substances in direct reaction");
-         
+
                 for j in 0..subs.len() {
                     let subs_j = subs[j];
                     if let Some(k) = self.substances.iter().position(|s| s == subs_j) {
@@ -279,13 +289,16 @@ impl StoichAnalyzer {
                 // Add code to populate self.stecheo_matrx, self.G_matrix_reag, self.G_matrix_prod,
                 // self.stecheo_reags, and self.stecheo_prods with the appropriate values.
             }
-           
         } // end of for reaction in &self.reactions {
-     println!("\n______________ANALYSING REACTIONS: END________________________________________________________ \n");
+        println!(
+            "\n______________ANALYSING REACTIONS: END________________________________________________________ \n"
+        );
     }
 
     pub fn search_substances(&mut self) {
-        println!("\n______________SEARCH SUBSTANCES________________________________________________________ \n");
+        println!(
+            "\n______________SEARCH SUBSTANCES________________________________________________________ \n"
+        );
         let reactions_trimmed = self
             .reactions
             .iter()
@@ -325,7 +338,9 @@ impl StoichAnalyzer {
                 found_substances.extend(subs_mut.iter().map(|s| s.to_string()).collect::<Vec<_>>());
             } // end of if let
         } // end of for reaction in &self.reactions {
-        println!("\n______________SEARCH SUBSTANCES ENDED________________________________________________________ \n");
+        println!(
+            "\n______________SEARCH SUBSTANCES ENDED________________________________________________________ \n"
+        );
         self.substances = found_substances;
     }
     pub fn create_matrix_of_elements(&mut self) {

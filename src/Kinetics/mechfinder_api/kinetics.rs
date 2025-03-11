@@ -1,14 +1,15 @@
 //v 0.1.1
 #![allow(warnings)]
 use RustedSciThe::symbolic::symbolic_engine::Expr;
-use serde::{Deserialize, Serialize};
 use serde::de::{self, Deserializer, MapAccess, Visitor};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::f64;
 use std::fmt;
 use std::str::FromStr;
 const R: f64 = 8.314;
 const Rsym: Expr = Expr::Const(8.314);
+
 // Different types of reactions proceeding here
 /////////////////////////ELEMENTARTY KINETICS///////////////////////////////////////////////////////////////
 // Struct for reaction type "elementary" with simplest form of
@@ -29,7 +30,8 @@ impl ElementaryStruct {
         let K_const_: f64 = A * Temp.powf(*n) * f64::exp(-E / (Temp * R));
         return K_const_;
     }
-    pub fn K_expr(&self, T: Expr) -> Expr {
+    pub fn K_expr(&self) -> Expr {
+        let T = Expr::Var("T".to_owned());
         let A: f64 = self.Arrenius[0];
         let n: f64 = self.Arrenius[1];
         let E: f64 = self.Arrenius[2];
@@ -80,16 +82,16 @@ impl FalloffStruct {
         // Calculate effective concentrations, e.g., by multiplying concentrations with coefficients from self.eff
         // Hashmap {substance: concentration}
         let mut Eff: f64 = 1.0;
-        if let Some(eff) = self.eff.clone(){
-        let mut Eff: f64 = 0.0;
-        for (subs_name, C_i) in Concentrations.iter() {
-            if eff.get(subs_name).is_some() {
-                eff.get(subs_name).map(|&eff_i| Eff += eff_i * C_i);
-            } else {
-                Eff += C_i;
-            };
-            return Eff;
-        }
+        if let Some(eff) = self.eff.clone() {
+            let mut Eff: f64 = 0.0;
+            for (subs_name, C_i) in Concentrations.iter() {
+                if eff.get(subs_name).is_some() {
+                    eff.get(subs_name).map(|&eff_i| Eff += eff_i * C_i);
+                } else {
+                    Eff += C_i;
+                };
+                return Eff;
+            }
         }
         let k: f64 = {
             if let Some(troe) = &self.troe {
@@ -131,39 +133,42 @@ impl FalloffStruct {
         let K_const_: f64 = Eff * k;
         return K_const_;
     }
-    pub fn K_expr(&self, Temp: Expr, Concentrations: HashMap<String, Expr>) -> Expr {
+    pub fn K_expr(&self, Concentrations: HashMap<String, Expr>) -> Expr {
+        let T = Expr::Var("T".to_owned());
         let k_l = Expr::Const(self.low_rate[0]);
-        let b_l = Expr::Const( self.low_rate[1]);
-        let E_l = Expr::Const( self.low_rate[2]);
+        let b_l = Expr::Const(self.low_rate[1]);
+        let E_l = Expr::Const(self.low_rate[2]);
         //
         let k_h = Expr::Const(self.high_rate[0]);
         let b_h = Expr::Const(self.high_rate[1]);
         let E_h = Expr::Const(self.high_rate[2]);
-    
-        let K0 = k_l * (-E_l / (Rsym * Temp.clone())).exp() * Temp.clone().pow(b_l);
-        let K_inf = k_h * (-E_h / (Rsym * Temp.clone())).exp() * (Temp.clone()).pow(b_h);
+
+        let K0 = k_l * (-E_l / (Rsym * T.clone())).exp() * T.clone().pow(b_l);
+        let K_inf = k_h * (-E_h / (Rsym * T.clone())).exp() * (T.clone()).pow(b_h);
         let P_r = K0 / K_inf.clone();
         // Calculate effective concentrations, e.g., by multiplying concentrations with coefficients from self.eff
         // Hashmap {substance: concentration}
-        let mut Eff  = Expr::Const(1.0);
-        if let Some(eff) = self.eff.clone(){
-        let mut Eff: Expr = Expr::Const(0.0);
+        let mut Eff = Expr::Const(1.0);
+        if let Some(eff) = self.eff.clone() {
+            let mut Eff: Expr = Expr::Const(0.0);
             for (subs_name, C_i) in Concentrations.iter() {
                 if eff.get(subs_name).is_some() {
-                    eff.get(subs_name).map(|&eff_i| Eff += (Expr::Const(eff_i).clone() * C_i.clone()));
+                    eff.get(subs_name)
+                        .map(|&eff_i| Eff += (Expr::Const(eff_i).clone() * C_i.clone()));
                 } else {
                     Eff += C_i.clone();
                 };
                 return Eff;
-                }
+            }
         }
-        let k= {
+        let k = {
             if let Some(troe) = &self.troe {
                 let F_c = if troe.len() == 3 {
-                    let A  = Expr::Const(troe[0]);
+                    let A = Expr::Const(troe[0]);
                     let T_3 = Expr::Const(troe[1]);
-                    let T_1 =Expr::Const( troe[2]);
-                    let F_c = (Expr::Const(1.0) - A.clone()) * (-Temp.clone() / T_3).exp() + A * (-Temp.clone() / T_1).exp();
+                    let T_1 = Expr::Const(troe[2]);
+                    let F_c = (Expr::Const(1.0) - A.clone()) * (-T.clone() / T_3).exp()
+                        + A * (-T.clone() / T_1).exp();
                     F_c.symplify()
                 }
                 //troe.len()==3
@@ -172,8 +177,8 @@ impl FalloffStruct {
                     let T_3 = Expr::Const(troe[1]);
                     let T_1 = Expr::Const(troe[2]);
                     let T_2 = Expr::Const(troe[3]);
-                    let F_c = (Expr::Const(1.0) - A) * (-Temp.clone() / T_3).exp()
-                        + Temp.clone() * ((-Temp.clone() / T_1).exp() + (-Temp.clone() / T_2).exp());
+                    let F_c = (Expr::Const(1.0) - A) * (-T.clone() / T_3).exp()
+                        + T.clone() * ((-T.clone() / T_1).exp() + (-T.clone() / T_2).exp());
                     F_c.symplify()
                 }
                 //troe.len()==4
@@ -181,11 +186,13 @@ impl FalloffStruct {
                     println!("Error in Troe parameters");
                     return Expr::Const(0.0);
                 }; //troe.len()!=3,4
-                
-                let C =  Expr::Const(-0.4) -  Expr::Const(0.67) * (F_c.clone()).log10(); 
+
+                let C = Expr::Const(-0.4) - Expr::Const(0.67) * (F_c.clone()).log10();
                 let N = Expr::Const(0.75) - Expr::Const(1.27) * (F_c.clone()).log10();
-                let f_1 = ((P_r.clone()).log10() + C.clone()) / (N -  Expr::Const(0.14) * ((P_r.clone()).log10() + C));
-                let F = Expr::Const(10.0).pow( (F_c.clone()).log10() / (Expr::Const(1.0) + f_1.pow(Expr::Const(2.0)  )));
+                let f_1 = ((P_r.clone()).log10() + C.clone())
+                    / (N - Expr::Const(0.14) * ((P_r.clone()).log10() + C));
+                let F = Expr::Const(10.0)
+                    .pow((F_c.clone()).log10() / (Expr::Const(1.0) + f_1.pow(Expr::Const(2.0))));
                 let k = K_inf * (P_r.clone() / (Expr::Const(1.0) + P_r.clone())) * F;
                 return k.symplify();
             } else {
@@ -228,44 +235,46 @@ impl ThreeBodyStruct {
         let K_const_: f64 = Eff * A * Temp.powf(*n) * f64::exp(-E / (Temp * R));
         return K_const_;
     }
-    pub fn  K_expr(&self, Temp: Expr, Concentrations: HashMap<String, Expr>) -> Expr {
+    pub fn K_expr(&self, Concentrations: HashMap<String, Expr>) -> Expr {
+        let T = Expr::Var("T".to_owned());
         let A: f64 = self.Arrenius[0];
         let n: f64 = self.Arrenius[1];
         let E: f64 = self.Arrenius[2];
         let A = Expr::Const(A);
         let n = Expr::Const(n);
         let E = Expr::Const(E);
-        let k0 = A * (Temp.clone()).pow(n);
-        let k = k0 * (E / (Rsym * Temp)).exp();
-          // Calculate effective concentrations, e.g., by multiplying concentrations with coefficients from self.eff
+        let k0 = A * (T.clone()).pow(n);
+        let k = k0 * (E / (Rsym * T)).exp();
+        // Calculate effective concentrations, e.g., by multiplying concentrations with coefficients from self.eff
         // Hashmap {substance: concentration}
         let eff = self.eff.clone();
         let mut Eff: Expr = Expr::Const(0.0);
-            for (subs_name, C_i) in Concentrations.iter() {
-                if eff.get(subs_name).is_some() {
-                    eff.get(subs_name).map(|&eff_i| Eff += (Expr::Const(eff_i).clone() * C_i.clone()));
-                } else {
-                    Eff += C_i.clone();
-                };
-                return Eff;
-                }
-        
-        let K_sym = (Eff*k).symplify();
+        for (subs_name, C_i) in Concentrations.iter() {
+            if eff.get(subs_name).is_some() {
+                eff.get(subs_name)
+                    .map(|&eff_i| Eff += (Expr::Const(eff_i).clone() * C_i.clone()));
+            } else {
+                Eff += C_i.clone();
+            };
+            return Eff;
+        }
+
+        let K_sym = (Eff * k).symplify();
         return K_sym;
     }
 }
 
 /////////////////////////PRESSURE DEPENDENT KINETICS///////////////////////////////////////////////////////////////
-#[derive(Debug, Deserialize,  Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PressureStruct {
     pub Arrenius: HashMap<String, Vec<f64>>,
 }
 impl PressureStruct {
-    pub fn new( Arrenius: HashMap<String, Vec<f64>>, ) -> Self {
+    pub fn new(Arrenius: HashMap<String, Vec<f64>>) -> Self {
         Self { Arrenius }
     }
 
-    pub fn K_const(&self, Temp: &f64, P: f64) -> f64 {
+    pub fn K_const(&self, Temp: f64, P: f64) -> f64 {
         let pressures_str: Vec<String> = self.Arrenius.keys().cloned().collect();
         let pressures = match convert_strings_to_f64(pressures_str.clone()) {
             Ok(p) => p,
@@ -274,36 +283,41 @@ impl PressureStruct {
                 return 0.0; // or handle the error in a way that makes sense for your application
             }
         };
-        let location:Result<usize, usize> = pressures.binary_search_by(|v| v.partial_cmp(&P).expect("Couldn't compare values"));
-        
+        let location: Result<usize, usize> =
+            pressures.binary_search_by(|v| v.partial_cmp(&P).expect("Couldn't compare values"));
+
         match location {
             Ok(i) => {
                 // Exact pressure found
                 let arr_params = &self.Arrenius[pressures_str[i].as_str()];
-                calculate_k(arr_params, Temp)
-            },
+                calculate_k(arr_params, &Temp)
+            }
             Err(i) if i > 0 && i < pressures.len() => {
                 // Interpolate between two pressures
-                let p_low = pressures[i-1];
+                let p_low = pressures[i - 1];
                 let p_high = pressures[i];
                 let arr_low = &self.Arrenius[pressures_str[i].as_str()];
                 let arr_high = &self.Arrenius[pressures_str[i].as_str()];
-                let k_low = calculate_k(arr_low, Temp);
-                let k_high = calculate_k(arr_high, Temp);
+                let k_low = calculate_k(arr_low, &Temp);
+                let k_high = calculate_k(arr_high, &Temp);
                 interpolate(P, p_low, p_high, k_low, k_high)
-            },
+            }
             _ => {
                 // Pressure out of range, use closest available pressure
                 let i = location.unwrap();
-                let closest_p = if i == 0 { pressures[0] } else { pressures[pressures.len() - 1] };
+                let closest_p = if i == 0 {
+                    pressures[0]
+                } else {
+                    pressures[pressures.len() - 1]
+                };
                 let arr_params = &self.Arrenius[closest_p.to_string().as_str()];
-                calculate_k(arr_params, Temp)
+                calculate_k(arr_params, &Temp)
             }
         }
     }
 
-
-    pub fn K_expr(&self, Temp: Expr, P: f64) -> Expr {
+    pub fn K_expr(&self, P: f64) -> Expr {
+        let T = Expr::Var("T".to_owned());
         let pressures_str: Vec<String> = self.Arrenius.keys().cloned().collect();
         let pressures = match convert_strings_to_f64(pressures_str.clone()) {
             Ok(p) => p,
@@ -326,35 +340,43 @@ impl PressureStruct {
             a * temp.clone().pow(b) * (-e / (Rsym * temp)).exp()
         };
 
-        let result:Result<usize, usize> = pressures.binary_search_by(|v| v.partial_cmp(&P).expect("Couldn't compare values"));
+        let result: Result<usize, usize> =
+            pressures.binary_search_by(|v| v.partial_cmp(&P).expect("Couldn't compare values"));
 
         match result {
             Ok(i) => {
                 // Exact pressure found
                 let arr_params = &self.Arrenius[&pressures_str[i]];
-                calculate_k_expr(arr_params, Temp)
-            },
+                calculate_k_expr(arr_params, T)
+            }
             Err(i) if i > 0 && i < pressures.len() => {
                 // Interpolate between two pressures
-                let p_low = pressures[i-1];
+                let p_low = pressures[i - 1];
                 let p_high = pressures[i];
-                let arr_low = &self.Arrenius[&pressures_str[i-1]];
+                let arr_low = &self.Arrenius[&pressures_str[i - 1]];
                 let arr_high = &self.Arrenius[&pressures_str[i]];
-                let k_low = calculate_k_expr(arr_low, Temp.clone());
-                let k_high = calculate_k_expr(arr_high, Temp);
+                let k_low = calculate_k_expr(arr_low, T.clone());
+                let k_high = calculate_k_expr(arr_high, T);
                 interpolate_expr(p_low, p_high, k_low, k_high)
-            },
+            }
             _ => {
                 // Pressure out of range, use closest available pressure
-                let i = if result.is_ok() { result.unwrap() } else { result.unwrap_err() };
-                let closest_p = if i == 0 { pressures[0] } else { pressures[pressures.len() - 1] };
+                let i = if result.is_ok() {
+                    result.unwrap()
+                } else {
+                    result.unwrap_err()
+                };
+                let closest_p = if i == 0 {
+                    pressures[0]
+                } else {
+                    pressures[pressures.len() - 1]
+                };
                 let arr_params = &self.Arrenius[&closest_p.to_string()];
-                calculate_k_expr(arr_params, Temp)
+                calculate_k_expr(arr_params, T)
             }
-        }.symplify()
+        }
+        .symplify()
     }
-
-
 }
 fn calculate_k(arr_params: &[f64], temp: &f64) -> f64 {
     let a = arr_params[0];
@@ -371,8 +393,8 @@ fn convert_strings_to_f64(strings: Vec<String>) -> Result<Vec<f64>, std::num::Pa
     strings.into_iter().map(|s| s.parse::<f64>()).collect()
 }
 //________________________________________________________________
-use std::hash::{Hash, Hasher};
 use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct F64Wrapper(pub f64);
@@ -398,8 +420,9 @@ impl Hash for F64Wrapper {
     }
 }
 
-
-fn deserialize_f64_wrapper_map<'de, D>(deserializer: D) -> Result<HashMap<F64Wrapper, Vec<f64>>, D::Error>
+fn deserialize_f64_wrapper_map<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<F64Wrapper, Vec<f64>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -429,14 +452,18 @@ where
     deserializer.deserialize_map(F64WrapperMapVisitor)
 }
 
-fn deserialize_f64_wrapper_map2<'de, D>(deserializer: D) -> Result<HashMap<F64Wrapper, Vec<f64>>, D::Error>
+fn deserialize_f64_wrapper_map2<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<F64Wrapper, Vec<f64>>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let map = HashMap::<String, Vec<f64>>::deserialize(deserializer)?;
-    Ok(map.into_iter().map(|(k, v)| (F64Wrapper(k.parse::<f64>().unwrap()), v)).collect())
+    Ok(map
+        .into_iter()
+        .map(|(k, v)| (F64Wrapper(k.parse::<f64>().unwrap()), v))
+        .collect())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -456,7 +483,10 @@ mod tests {
         let falloff_reaction = FalloffStruct::new(
             vec![1.0, 2.0, 300.0],
             vec![10.0, 1.5, 400.0],
-            Some(HashMap::from([("H2".to_string(), 2.0), ("M".to_string(), 1.0)])  ),
+            Some(HashMap::from([
+                ("H2".to_string(), 2.0),
+                ("M".to_string(), 1.0),
+            ])),
             Some(vec![0.5, 300.0, 1000.0]),
         );
 

@@ -195,7 +195,9 @@ const ELEMENTS: &[Element] = &[
 fn filter_phases_marks(formula: &str) -> String {
     let mut formula = formula.to_string();
 
-    let phases = ["(C)", "(c)", "(L)", "(l)", "(G)", "(g)", "(S)", "(s)", "S)", "s)"];
+    let phases = [
+        "(C)", "(c)", "(L)", "(l)", "(G)", "(g)", "(S)", "(s)", "S)", "s)",
+    ];
     for phase in phases {
         formula = formula.replace(phase, "");
     }
@@ -509,7 +511,7 @@ pub fn calculate_molar_mass_of_vector_of_subs(
 pub fn create_elem_composition_matrix(
     vec_of_formulae: Vec<&str>,
     groups: Option<HashMap<String, HashMap<String, usize>>>,
-) ->( DMatrix<f64>, Vec<String>) {
+) -> (DMatrix<f64>, Vec<String>) {
     println!("\n___________CREATE ELEMENTS COMPOSITION MATRIX___________");
     let mut hashset_of_elems: HashSet<String> = HashSet::new();
     let mut vec_of_compositions = Vec::new();

@@ -1,18 +1,13 @@
 use crate::Kinetics::User_reactions::KinData;
 use RustedSciThe::numerical::BVP_api::BVP;
+
+use crate::Kinetics::mechfinder_api::kinetics::ElementaryStruct;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use std::collections::HashMap;
-const R: Expr = Expr::Const(8.314);
-fn as_const(value: f64) -> Expr {
-    Expr::Const(value)
-}
-fn Arr(T: Expr, A: f64, n: f64, E: f64) -> Expr {
-    let A = Expr::Const(A);
-    let n = Expr::Const(n);
-    let E = Expr::Const(E);
-    let k0 = A * (T.clone()).pow(n);
-    let k = k0 * (E / (R * T)).exp();
-    k
+
+fn Arr(A: f64, n: f64, E: f64) -> Expr {
+    let k = ElementaryStruct::new(vec![A, n, E]);
+    return k.K_expr();
 }
 
 pub struct SimpleReactorTask {

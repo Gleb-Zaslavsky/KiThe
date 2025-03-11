@@ -1,8 +1,8 @@
 //v 0.1.1
+use crate::Kinetics::stoichiometry_analyzer::clean_off_DUP;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
-use crate::Kinetics::stoichiometry_analyzer::clean_off_DUP;
 //use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Instant;
@@ -129,8 +129,11 @@ pub fn mechfinder(
     let keys_to_replace = HashSet::from(["M", "M)", "(M", "(M)", "V", "(V", "V)"]);
     reactants.retain(|subs| !keys_to_replace.contains(subs.as_str()));
     let mut reactants = reactants.into_iter().collect::<Vec<_>>();
-    let mut reactants: Vec<String> = reactants.iter_mut().map(|x| clean_off_DUP( x).clone()).collect();
-    let mut reactants: HashSet<String> =  reactants.into_iter().collect();
+    let mut reactants: Vec<String> = reactants
+        .iter_mut()
+        .map(|x| clean_off_DUP(x).clone())
+        .collect();
+    let mut reactants: HashSet<String> = reactants.into_iter().collect();
     let mut reactants: Vec<String> = reactants.into_iter().collect();
     reactants.sort();
     let mechanism: Vec<_> = mechanism.into_iter().collect();
@@ -146,7 +149,12 @@ pub fn mechfinder(
         let data_for_react = &reactlibrary[react_num];
         vec_of_reaction_value.push(data_for_react.to_owned());
         //  let table = json_to_table(data_for_react).to_string();
-        let json_string = serde_json::to_string(data_for_react.get("eq").expect("no field eq im react record") ).unwrap();
+        let json_string = serde_json::to_string(
+            data_for_react
+                .get("eq")
+                .expect("no field eq im react record"),
+        )
+        .unwrap();
         vec_of_reactions.push(json_string);
         //  println!("{}", json_string);
         //  println!("таблица, {}", table)

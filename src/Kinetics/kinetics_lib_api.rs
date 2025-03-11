@@ -6,8 +6,6 @@ use std::io::Read;
 use serde_json::Value;
 // /Basis functionality to search in reaction library
 
-
-
 pub struct KineticData {
     pub HashMapOfReactantsAndProducts: HashMap<String, HashMap<String, HashSet<String>>>, // {'reaction ID':{'reagent'/"product": HashSet[substance]}}
     pub LibKineticData: HashMap<String, Value>, // {'reaction ID':{data of reaction}}
@@ -33,6 +31,7 @@ impl KineticData {
             FoundReactionDatasByIDs: Vec::new(),
         }
     }
+    /// Load the reaction library from a JSON file by the name of the reaction library
     pub fn open_json_files(&mut self, big_mech: &str) -> () {
         let mut file = File::open("Reactbase.json").unwrap();
         let mut file_contents = String::new();
@@ -55,7 +54,7 @@ impl KineticData {
         self.HashMapOfReactantsAndProducts = library_of_reagents_and_products.to_owned();
     }
 
-    // returns vector of all reaction equations and HashMap {reaction equation : reaction ID}
+    /// returns vector of all reaction equations and HashMap {reaction equation : reaction ID}
     pub fn print_all_reactions(&mut self) -> () {
         let all_reactions: Vec<String> =
             self.LibKineticData.keys().map(|k| k.to_string()).collect();
@@ -111,7 +110,7 @@ impl KineticData {
         }
         return found_reactions;
     }
-
+    /// search reactions where these substances are reagents/products
     pub fn search_reaction_by_reagents_and_products(&mut self, reagents: Vec<String>) -> () {
         let found_reactions_by_reagents =
             self.search_reaction_by_substances(reagents.clone(), "reagents");
@@ -119,12 +118,12 @@ impl KineticData {
         let found_reactions_by_products = self.search_reaction_by_substances(reagents, "products");
         self.FoundReactionsByProducts = found_reactions_by_products.clone();
     }
-
+    /// get concrete reaction data
     pub fn search_reactdata_by_reaction_id(&mut self, reaction_id: &str) -> Value {
         let reaction = self.LibKineticData.get(reaction_id).unwrap();
         return reaction.clone();
     }
-
+    /// get concrete reaction data for vector of IDs
     pub fn search_reactdata_for_vector_of_IDs(&mut self, reaction_ids: Vec<String>) -> Vec<Value> {
         let mut vec_of_reactions: Vec<Value> = Vec::new();
         for r_id in reaction_ids {
@@ -133,6 +132,20 @@ impl KineticData {
         }
         self.FoundReactionDatasByIDs = vec_of_reactions.clone();
         return vec_of_reactions;
+    }
+    //TODO! test
+
+    pub fn get_reactions_by_field(&self, field: &str, field_value: &str) -> Vec<Value> {
+        self.LibKineticData
+            .values()
+            .filter(|reaction| {
+                reaction
+                    .get(field)
+                    .and_then(|v| v.as_str())
+                    .map_or(false, |v| v == field_value)
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -185,6 +198,16 @@ mod tests {
         assert_eq!(kin_instance.FoundReactionsByReagents.is_empty(), false);
         kin_instance.search_reactdata_for_vector_of_IDs(vec!["1".to_string(), "2".to_string()]);
         assert_eq!(kin_instance.FoundReactionDatasByIDs.is_empty(), false);
+    }
+
+    #[test]
+    fn test_search_data_by_field() {
+        let mut kin_instance = KineticData::new();
+        kin_instance.open_json_files("NUIG");
+
+        let reactions_by_field = kin_instance.get_reactions_by_field("type", "falloff");
+        println!(" reactions_by_field {:?}", reactions_by_field);
+        assert_eq!(reactions_by_field.len(), 109);
     }
     /*
     #[test]

@@ -4,10 +4,11 @@
 
 This is a package of structures, functions and databases useful for such areas as chemical thermodynamics, chemical kinetics, as well as modeling of chemical reactors, combustion, processes in shock tubes and rocket engines, propulsion. 
 
-PROJECT NEWS: Kinetics module rewritten in more idiomatic style, more features added 
+PROJECT NEWS: added thermodynmics lib with handlers
 
 ## Content
 - [Kinetics](#usage)
+- [Thermodynmics](#usage)
 - [Testing](#testing)
 - [Contributing](#contributing)
 - [To do](#to-do)
@@ -164,7 +165,7 @@ kd.pretty_print_kindata(); // pretty print the reaction data
 
 
 ```
-
+mechsnism constracting
 ```rust
 use KiThe::Kinetics::User_reactions::KinData;
 
@@ -178,6 +179,123 @@ println!("vector of reactions \n\n {:#?}", kd.vec_of_equations);
 println!("vector of substances \n\n {:#?}", kd.substances);
 
 ```
+## Thermodynamics
+search data: Cp, dH, dS, thermal conductivity, viscosity, diffusion coefficient, etc
+```rust
+use KiThe::Thermodynamics::thermo_lib_api::ThermoData;
+let mut thermo_data = ThermoData::new();
+println!("Libraries on board {:?} \n \n", thermo_data.AllLibraries);
+let this_lib_subs = thermo_data.subs_of_this_lib("Cantera_nasa_base_gas");
+ println!("subs of this lib {:?} \n \n", this_lib_subs);
+ // you may want to search only in chosen libs
+let allowed_libs: Vec<String> = vec!["Aramco_transport".to_string(), "CEA".to_string()];
+                          // let us find out what info we have about CO
+thermo_data.search_libs_for_subs(vec!["CO".to_string()], None);
+println!(
+    "hashmap_of_thermo_data {:?}",
+    thermo_data.hashmap_of_thermo_data
+        );
+thermo_data.pretty_print_thermo_data();
+
+```
+NASA-CEA lib contains info for calculating thermal dependence of thermal conductivity and viscosity. 
+CEAdata module contains corresponding structures and methods for calculating this values.
+```rust
+use KiThe::Thermodynamics::DBhandlers::CEAdata::CEAdata;
+let thermo_data = ThermoData::new();
+let sublib = thermo_data.LibThermoData.get("CEA").unwrap();
+let CO_data = sublib.get("CO").unwrap();
+let mut CEA = CEAdata::new();
+CEA.from_serde(CO_data.clone()).unwrap();
+CEA.set_lambda_unit(Some("mW/m/K".to_string())).unwrap();
+CEA.set_V_unit(Some("mkPa*s".to_string())).unwrap();
+CEA.parse_coefficients().unwrap();
+CEA.extract_coefficients(500.0).unwrap();
+let lambda = CEA.calculate_Lambda(500.0).unwrap();
+let visc = CEA.calculate_Visc(500.0).unwrap();
+println!("Lambda, mW/m/K: {:?}, Visc: {:?}", lambda, visc);
+```
+Aramco_transport lib contains info for calculating thermal dependence of thermal conductivity, viscosity and diffusion coefficient. 
+TRANSPORTdata module contains corresponding structures and methods for calculating this values.
+```rust
+use  KiThe::Thermodynamics::DBhandlers::TRANSPORTdata::TransportData;
+use KiThe::Thermodynamics::DBhandlers::NASAdata::NASAdata;
+let thermo_data = ThermoData::new();
+let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
+let CO_data = sublib.get("CO").unwrap();
+println!("CO_data: {}", CO_data);
+// creating instance of the transport TransportData structure 
+let mut tr = TransportData ::new();
+// filling transport data from serde json
+tr.from_serde(CO_data.clone());
+// setting units
+tr.set_M_unit(Some("g/mol".to_owned())  );
+tr.set_P_unit(Some("atm".to_owned()));
+tr.set_V_unit( Some("mkPa*s".to_owned()));
+tr. set_lambda_unit(Some("mW/m/K".to_owned()));
+let T = 473.15; // K 
+tr.P = 1.0;
+tr.M = 28.0; // g/mol
+// calculate viscosity
+tr.calculate_Visc(T);
+assert_relative_eq!( tr.V, 25.2, epsilon = 5.0);
+println!("Viscosity: {:?} mkPa*s", tr.V);
+// we need heat capacity - so we shall take it from another library     
+let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
+let CO_data = sublib.get("CO").unwrap();
+let mut NASA = NASAdata::new();
+NASA.from_serde(CO_data.clone());
+NASA.extract_coefficients(T);
+NASA.calculate_Cp_dH_dS(T);
+let Cp = NASA.Cp;
+println!("Cp: {}", Cp, );
+// for density calculation we use now ideal gas equations
+ let ro = (tr.P*101325.0)*(tr.M/1000.0)/(R*T);
+ // thermal conductivity
+let L = tr.calculate_Lambda(Cp, ro, T);
+println!("Lambda: {}",L);
+```
+NASA _gas lib contains info for calculating thermal dependence of heat capacity, enthalpy and entropy.
+```rust
+use KiThe::Thermodynamics::DBhandlers::NASAdata::NASAdata;
+      let thermo_data = ThermoData::new();
+        let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
+        let CO_data = sublib.get("CO").unwrap();
+        let mut NASA = NASAdata::new();
+
+
+        NASA.calculate_Cp_dH_dS(400.0);
+        let Cp = NASA.Cp;
+        let dh = NASA.dh;
+        let ds = NASA.ds;
+
+        println!("Cp: {}, dh: {}, ds: {}", Cp, dh, ds);
+        
+        let t = 400.0;
+        NASA.create_closures_Cp_dH_dS();
+
+        let Cp_fun = &NASA.C_fun;
+        let dh_fun = &NASA.dh_fun;
+        let ds_fun = &NASA.ds_fun;
+        assert_relative_eq!((Cp_fun)(t), NASA.Cp, epsilon = 1e-6);
+        assert_relative_eq!((dh_fun)(t), NASA.dh, epsilon = 1e-6);
+        assert_relative_eq!((ds_fun)(t), NASA.ds, epsilon = 1e-6);
+        // symbolic expressions
+        NASA.create_sym_Cp_dH_dS();
+        let Cp_sym = &NASA.Cp_sym;
+        let Cp_T = Cp_sym.lambdify1D();
+        let Cp_value = Cp_T(400.0);
+        assert_relative_eq!(Cp_value, NASA.Cp, epsilon = 1e-6);
+        let dh_sym = &NASA.dh_sym;
+        let dh_T = dh_sym.lambdify1D();
+        let dh_value = dh_T(400.0);
+        assert_relative_eq!(dh_value, NASA.dh, epsilon = 1e-6);
+        let ds_sym = &NASA.ds_sym;
+        let ds_T = ds_sym.lambdify1D();
+        let ds_value = ds_T(400.0);
+        assert_relative_eq!(ds_value, NASA.ds, epsilon = 1e-6);
+```
+
 ## Testing
 Our project is covered by tests and you can run them by standard command
 ```sh

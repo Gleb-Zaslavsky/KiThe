@@ -95,8 +95,6 @@ pub mod kinetics_lib_api;
 /// The same means C10 and Сantera_10
 pub mod parsetask;
 
-pub mod User_substances;
-
 /// Module to calculate the atomic composition and molar mass of a chemical formula
 ///
 ///  # Examples

@@ -2,7 +2,7 @@
 pub mod kinetics;
 mod mechfinder;
 
-use log::{error, info, warn};
+use RustedSciThe::symbolic::symbolic_engine::Expr;
 /// The module is equipped with a library of kinetic parameters of chemical reactions obtained as a result of parsing publicly available databases
 /// The module takes as input the name of the library and the vector of substances and then produces the following data:
 /// 1) all reactions of starting substances with each other, and all their possible products with each other.
@@ -13,16 +13,16 @@ use log::{error, info, warn};
 /// 1) все реакции исходных веществ между собой, и всех их возможных продуктов между собой.
 /// 2) HashMap с кинетическими данными всех найденных реакций
 /// ----------------------------------------------------------------
-
+// git config --global pack.windowmemory 80000000
 use kinetics::{ElementaryStruct, FalloffStruct, PressureStruct, ThreeBodyStruct};
-
-use serde::{Deserialize, Serialize};
+use log::{error, info, warn};
 use serde::de::{self, Deserializer, MapAccess, Visitor};
-use std::fmt;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use std::collections::{HashMap, HashSet};
 use std::f64;
-/// enum for types of chemical kinetics rate contant functions 
+use std::fmt;
+/// enum for types of chemical kinetics rate contant functions
 #[derive(Debug, PartialEq, Serialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum ReactionType {
@@ -30,7 +30,7 @@ pub enum ReactionType {
     Falloff,
     #[serde(rename = "pres")]
     Pressure,
-   #[serde(rename = "three-body")]
+    #[serde(rename = "three-body")]
     ThreeBody,
     Empirical,
 }
@@ -43,7 +43,7 @@ impl<'de> Deserialize<'de> for ReactionType {
         match s.as_str() {
             "elem" => Ok(ReactionType::Elem),
             "falloff" => Ok(ReactionType::Falloff),
-            "pressure"|"pres" => Ok(ReactionType::Pressure),
+            "pressure" | "pres" => Ok(ReactionType::Pressure),
             "three-body" | "threebody" => Ok(ReactionType::ThreeBody),
             "empirical" => Ok(ReactionType::Empirical),
             _ => Err(serde::de::Error::custom(format!(
@@ -53,38 +53,85 @@ impl<'de> Deserialize<'de> for ReactionType {
         }
     }
 }
-/// struct for reaction data 
+/// struct for reaction data
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ReactionData {
     #[serde(rename = "type")]
-  pub  reaction_type: ReactionType,
-  pub eq: String,
-  pub react: Option<HashMap<String, f64>>,
+    pub reaction_type: ReactionType,
+    pub eq: String,
+    pub react: Option<HashMap<String, f64>>,
     #[serde(flatten)]
-  pub data: ReactionKinetics,
+    pub data: ReactionKinetics,
 }
 /// enum for structs of different types of kinetics
-#[derive(Debug, Serialize,  Deserialize,  Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum ReactionKinetics {
-  
     Falloff(FalloffStruct),
     Pressure(PressureStruct),
     ThreeBody(ThreeBodyStruct),
     Elementary(ElementaryStruct),
 }
 impl ReactionData {
-    //write a function that checks if the reaction_type field matches the variant of the data field in a ReactionData instance.
-    // If they don't match, the function will panic. Here's the implementation:
+    ///function that checks if the reaction_type field matches the variant of the data field in a ReactionData instance.
+    /// If they don't match, the function will panic
     pub fn validate_reaction_type(&self) {
         match (&self.reaction_type, &self.data) {
-            (ReactionType::Elem, ReactionKinetics::Elementary(_)) => {},
-            (ReactionType::Falloff, ReactionKinetics::Falloff(_)) => {},
-            (ReactionType::Pressure, ReactionKinetics::Pressure(_)) => {},
-            (ReactionType::ThreeBody, ReactionKinetics::ThreeBody(_)) => {},
-            _ => panic!("Mismatch between reaction_type ({:?}) and data variant ({:?})", 
-                        self.reaction_type, 
-                        std::mem::discriminant(&self.data)),
+            (ReactionType::Elem, ReactionKinetics::Elementary(_)) => {}
+            (ReactionType::Falloff, ReactionKinetics::Falloff(_)) => {}
+            (ReactionType::Pressure, ReactionKinetics::Pressure(_)) => {}
+            (ReactionType::ThreeBody, ReactionKinetics::ThreeBody(_)) => {}
+            _ => panic!(
+                "Mismatch between reaction_type ({:?}) and data variant ({:?})",
+                self.reaction_type,
+                std::mem::discriminant(&self.data)
+            ),
+        }
+    }
+    /// function to calculate reaction rate constant (under thr hood there is a function that calculates the rate constant for each type of reaction)
+    /// ATTENTION! don't forget to use absolute temperature in Kelvin!
+    pub fn K_const(
+        &self,
+        temp: f64,
+        pres: Option<f64>,
+        concentrations: Option<HashMap<String, f64>>,
+    ) -> f64 {
+        match self.data.clone() {
+            ReactionKinetics::Elementary(data) => data.K_const(temp),
+            ReactionKinetics::Falloff(data) => data.K_const(temp, concentrations.clone().unwrap()),
+            ReactionKinetics::Pressure(data) => data.K_const(temp, pres.clone().unwrap()),
+            ReactionKinetics::ThreeBody(data) => {
+                data.K_const(temp, concentrations.clone().unwrap())
+            }
+        }
+    }
+    ///function to calculate reaction rate constant for the range of temperatures: from T0 to Tend, number of points is n
+    /// ATTENTION! don't forget to use absolute temperature in Kelvin!
+    pub fn K_const_for_T_range(
+        &self,
+        T0: f64,
+        Tend: f64,
+        n: usize,
+        pres: Option<f64>,
+        concentrations: Option<HashMap<String, f64>>,
+    ) -> Vec<f64> {
+        let mut K_const_values = Vec::new();
+        let T: Vec<f64> = (0..n)
+            .map(|i| T0 + i as f64 * (Tend - T0) / n as f64)
+            .collect();
+        for Ti in T {
+            let k = self.K_const(Ti, pres, concentrations.clone());
+            K_const_values.push(k);
+        }
+        K_const_values
+    }
+    /// generate the symbolic representation of the reaction rate constant
+    pub fn K_sym(&self, pres: Option<f64>, concentrations: Option<HashMap<String, Expr>>) -> Expr {
+        match self.data.clone() {
+            ReactionKinetics::Elementary(data) => data.K_expr(),
+            ReactionKinetics::Falloff(data) => data.K_expr(concentrations.clone().unwrap()),
+            ReactionKinetics::Pressure(data) => data.K_expr(pres.clone().unwrap()),
+            ReactionKinetics::ThreeBody(data) => data.K_expr(concentrations.clone().unwrap()),
         }
     }
 }
@@ -115,9 +162,8 @@ pub fn parse_kinetic_data(
     info!("______________PARCING REACTION DATA INTO STRUCTS ENDED________");
     (reaction_data_hash, equations)
 }
-/// parse Vec of serde Values with reaction data 
+/// parse Vec of serde Values with reaction data
 pub fn parse_kinetic_data_vec(
-
     vec_of_reaction_value: Vec<Value>,
 ) -> (Vec<ReactionData>, Vec<String>) {
     println!("\n \n______________PARCING REACTION DATA INTO STRUCTS________");
@@ -134,7 +180,6 @@ pub fn parse_kinetic_data_vec(
             reactiondata.validate_reaction_type(); //hecks if the reaction_type field matches the variant of the data field in a ReactionData instance. If they don't match, the function will panic
             reaction_dat.push(reactiondata);
         } else {
-
             info!("Error parsing reaction: {}", reaction_record);
             panic!("Error parsing reaction: {}", reaction_record);
         }
@@ -150,22 +195,18 @@ pub struct Mechanism_search {
     pub mechanism: Vec<String>,
     pub reactants: Vec<String>,
     pub vec_of_reactions: Vec<String>,
-    pub reactdata:Vec<ReactionData>,
+    pub reactdata: Vec<ReactionData>,
 }
-//
+// set the task to construct mechanism
 impl Mechanism_search {
-    pub fn new(
-        task_substances: Vec<String>,
-        task_library: String,
-
-    ) -> Self {
+    pub fn new(task_substances: Vec<String>, task_library: String) -> Self {
         Self {
-           task_substances: task_substances,
+            task_substances: task_substances,
             task_library: task_library,
-             mechanism: Vec::new(),
-             reactants: Vec::new(),
-             vec_of_reactions: Vec::new(),
-             reactdata: Vec::new(),
+            mechanism: Vec::new(),
+            reactants: Vec::new(),
+            vec_of_reactions: Vec::new(),
+            reactdata: Vec::new(),
         }
     }
 
@@ -179,6 +220,7 @@ impl Mechanism_search {
             reactdata: Vec::new(),
         }
     }
+    /// find chemical mechanism using mechfinder API
     pub fn mechfinder_api(&mut self) -> (Vec<String>, Vec<String>, Vec<String>) {
         /*
         let tuple = [ "O", "NH3", "NO", "O2", "N2", "N2O", "CO", "C"];
@@ -217,7 +259,7 @@ const FALOFF_TESTING_JSON: &str = r#" {"type": "falloff",
                 "high_rate": [100000000000000.0, -0.32, -1097.2009],
                  "eff": {"H2": 2.0, "H2O": 6.0, "CH4": 2.0, "CO": 1.5, "CO2": 2.0, "C2H6": 3.0, "AR": 0.7},
                  "troe": [0.104, 1606.0, 60000.0, 6118.0]} "#;
-const PRES_TESTING_JSON: &str =  r#"{"type": "pres", "eq": "SC4H9<=>C3H6+CH3",
+const PRES_TESTING_JSON: &str = r#"{"type": "pres", "eq": "SC4H9<=>C3H6+CH3",
                'Arrenius': {"0.001": [2.89e+40, -9.76, 140552.983],
                              "0.01": [1.8e+44, -10.5, 154800.281],
                              "0.1": [2.51e+46, -10.73, 168311.37099999998],
@@ -237,7 +279,6 @@ mod tests {
         let mut mech_search = Mechanism_search::new(
             vec!["O".to_string(), "NH3".to_string(), "NO".to_string()],
             "NUIG".to_string(),
-          
         );
 
         let (mechanism, reactants, vec_of_reactions) = mech_search.mechfinder_api();
@@ -366,7 +407,11 @@ mod tests {
 
         let reaction_data: ReactionData = serde_json::from_value(three_body_json).unwrap();
         println!("reaction_data: {:#?}", reaction_data);
-        assert_eq!(reaction_data.reaction_type, ReactionType::ThreeBody, "wrong reaction type!");
+        assert_eq!(
+            reaction_data.reaction_type,
+            ReactionType::ThreeBody,
+            "wrong reaction type!"
+        );
         if let ReactionKinetics::ThreeBody(_) = reaction_data.data {
             // Success
         } else {
@@ -375,10 +420,14 @@ mod tests {
     }
     #[test]
     fn test_pres_deserialization() {
-  
-        let reaction_data: ReactionData = serde_json::from_str(PRES_TESTING_JSON).expect("Error parsing JSON: {err:?}");
+        let reaction_data: ReactionData =
+            serde_json::from_str(PRES_TESTING_JSON).expect("Error parsing JSON: {err:?}");
         println!("reaction_data: {:#?}", reaction_data);
-        assert_eq!(reaction_data.reaction_type, ReactionType::Pressure, "wrong reaction type!");
+        assert_eq!(
+            reaction_data.reaction_type,
+            ReactionType::Pressure,
+            "wrong reaction type!"
+        );
         if let ReactionKinetics::Pressure(_) = reaction_data.data {
             // Success
         } else {
@@ -387,21 +436,20 @@ mod tests {
     }
     #[test]
     fn test_pres_data_deserialization() {
-              const PRES_TESTING_JSON: &str = r#"{
+        const PRES_TESTING_JSON: &str = r#"{
                         "Arrenius":{"0.01": [2.89e+40, -9.76, 140552.983],
                                     "0.1": [1.8e+44, -10.5, 154800.281]
                                     }}"#;
 
-        let pres_val  = serde_json::from_str(PRES_TESTING_JSON).expect("Error parsing JSON: {err:?}"); 
-       println!("val: {:#?}", pres_val);
-         let pres_data =
-        serde_json::from_value::<PressureStruct>(
-            pres_val
-        );
-        if let Ok(pres)= pres_data {
+        let pres_val =
+            serde_json::from_str(PRES_TESTING_JSON).expect("Error parsing JSON: {err:?}");
+        println!("val: {:#?}", pres_val);
+        let pres_data = serde_json::from_value::<PressureStruct>(pres_val);
+        if let Ok(pres) = pres_data {
             println!("pres_data: {:#?}", pres);
             // Success
-        } else { panic!("Expected Pressure variant");}
-        
+        } else {
+            panic!("Expected Pressure variant");
+        }
     }
 }
