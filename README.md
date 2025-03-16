@@ -9,6 +9,7 @@ PROJECT NEWS: added thermodynmics lib with handlers
 ## Content
 - [Kinetics](#usage)
 - [Thermodynmics](#usage)
+- [NIST scrapper](#usage)
 - [Testing](#testing)
 - [Contributing](#contributing)
 - [To do](#to-do)
@@ -258,44 +259,73 @@ println!("Lambda: {}",L);
 NASA _gas lib contains info for calculating thermal dependence of heat capacity, enthalpy and entropy.
 ```rust
 use KiThe::Thermodynamics::DBhandlers::NASAdata::NASAdata;
-      let thermo_data = ThermoData::new();
-        let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
-        let CO_data = sublib.get("CO").unwrap();
-        let mut NASA = NASAdata::new();
+let thermo_data = ThermoData::new();
+let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
+let CO_data = sublib.get("CO").unwrap();
+let mut NASA = NASAdata::new();
 
+NASA.calculate_Cp_dH_dS(400.0);
+let Cp = NASA.Cp;
+let dh = NASA.dh;
+let ds = NASA.ds;
 
-        NASA.calculate_Cp_dH_dS(400.0);
-        let Cp = NASA.Cp;
-        let dh = NASA.dh;
-        let ds = NASA.ds;
-
-        println!("Cp: {}, dh: {}, ds: {}", Cp, dh, ds);
+println!("Cp: {}, dh: {}, ds: {}", Cp, dh, ds);
         
-        let t = 400.0;
-        NASA.create_closures_Cp_dH_dS();
+let t = 400.0;
+NASA.create_closures_Cp_dH_dS();
 
-        let Cp_fun = &NASA.C_fun;
-        let dh_fun = &NASA.dh_fun;
-        let ds_fun = &NASA.ds_fun;
-        assert_relative_eq!((Cp_fun)(t), NASA.Cp, epsilon = 1e-6);
-        assert_relative_eq!((dh_fun)(t), NASA.dh, epsilon = 1e-6);
-        assert_relative_eq!((ds_fun)(t), NASA.ds, epsilon = 1e-6);
-        // symbolic expressions
-        NASA.create_sym_Cp_dH_dS();
-        let Cp_sym = &NASA.Cp_sym;
-        let Cp_T = Cp_sym.lambdify1D();
-        let Cp_value = Cp_T(400.0);
-        assert_relative_eq!(Cp_value, NASA.Cp, epsilon = 1e-6);
-        let dh_sym = &NASA.dh_sym;
-        let dh_T = dh_sym.lambdify1D();
-        let dh_value = dh_T(400.0);
-        assert_relative_eq!(dh_value, NASA.dh, epsilon = 1e-6);
+let Cp_fun = &NASA.C_fun;
+let dh_fun = &NASA.dh_fun;
+let ds_fun = &NASA.ds_fun;
+assert_relative_eq!((Cp_fun)(t), NASA.Cp, epsilon = 1e-6);
+assert_relative_eq!((dh_fun)(t), NASA.dh, epsilon = 1e-6);
+assert_relative_eq!((ds_fun)(t), NASA.ds, epsilon = 1e-6);
+// symbolic expressions
+NASA.create_sym_Cp_dH_dS();
+let Cp_sym = &NASA.Cp_sym;
+let Cp_T = Cp_sym.lambdify1D();
+let Cp_value = Cp_T(400.0);
+assert_relative_eq!(Cp_value, NASA.Cp, epsilon = 1e-6);
+let dh_sym = &NASA.dh_sym;
+let dh_T = dh_sym.lambdify1D();
+let dh_value = dh_T(400.0);
+assert_relative_eq!(dh_value, NASA.dh, epsilon = 1e-6);
         let ds_sym = &NASA.ds_sym;
         let ds_T = ds_sym.lambdify1D();
         let ds_value = ds_T(400.0);
         assert_relative_eq!(ds_value, NASA.ds, epsilon = 1e-6);
 ```
+## NIST scrapper
+    NIST Chemistry WebBook contains huge amount of thermochemical data. This module can scrap 
+    data automatically and use it 
+```rust
+use KiThe::Thermodynamics::DBhandlers::NIST_parser::{ Phase, SearchType, NistParser};
+let parser = NistParser::new();
 
+// Example usage
+let substance = "CH4";
+match parser.get_data(substance, SearchType::All, Phase::Gas) {
+    Ok(data) =>{ println!("Data for {}: {:?}", substance, data);
+    data.pretty_print();
+    #[allow(non_snake_case)]
+    let (Cp, dh, ds) = data.caclc_cp_dh_ds(298.15).expect("Error calculating cp, dh, ds");
+    println!("Cp J/mol*K: {}, dh kJ/mol: {}, ds J/mol*K: {}", Cp, dh, ds);},
+    Err(e) => eprintln!("Error: {}", e),
+                }
+
+let parser = NistParser::new();
+let substance = "NaCl";
+match parser.get_data(substance, SearchType::All, Phase::Solid) {
+    Ok(data) =>{ println!("Data for {}: {:?}", substance, data);
+            
+    data.pretty_print();
+    #[allow(non_snake_case)]
+    let (Cp, dh, ds) = data.caclc_cp_dh_ds(298.15).expect("Error calculating cp, dh, ds");
+    println!("Cp J/mol*K: {}, dh kJ/mol: {}, ds J/mol*K: {}", Cp, dh, ds);},
+                Err(e) => eprintln!("Error: {}", e),
+                
+            }
+```
 ## Testing
 Our project is covered by tests and you can run them by standard command
 ```sh

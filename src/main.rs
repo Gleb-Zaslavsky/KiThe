@@ -9,9 +9,11 @@ pub mod Thermodynamics;
 
 use Examples::kinetics_examples::kin_examples;
 use Examples::thermo_examples::thermo_examples;
+use Examples::NIST_examples::NIST_examples;
 
 pub fn main() {
     //
-    let task: usize = 2;
-    thermo_examples(task);
+    let task: usize = 0;
+    //thermo_examples(task);
+    NIST_examples(task);
 }

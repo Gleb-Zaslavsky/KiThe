@@ -186,6 +186,7 @@ pub struct NASAdata {
 }
 
 impl NASAdata {
+    ///initialize fields
     pub fn new() -> Self {
         let input = NASAinput {
             Cp: Vec::new(),
@@ -209,6 +210,7 @@ impl NASAdata {
             ds_sym: Expr::Const(0.0),
         }
     }
+    /// set energy unitsЖ J or calories
     pub fn set_unit(&mut self, unit: &str) -> Result<(), NASAError> {
         match unit {
             "J" => {
@@ -224,11 +226,13 @@ impl NASAdata {
             _ => Err(NASAError::UnsupportedUnit(unit.to_string())),
         }
     }
+    /// takes serde Value and parse it into structure
     pub fn from_serde(&mut self, serde: Value) -> Result<(), NASAError> {
         self.input = serde_json::from_value(serde)
             .map_err(|e| NASAError::DeserializationError(e.to_string()))?;
         Ok(())
     }
+
     fn extract_coefficients_(
         c_data: &[f64],
         t: f64,
@@ -300,13 +304,14 @@ impl NASAdata {
             _ => Err(NASAError::InvalidTemperatureRange),
         }
     }
-
+    /// get the 7 constants of NASA7 format for conctrete temperature
     pub fn extract_coefficients(&mut self, t: f64) -> Result<(), NASAError> {
         let c_data = self.input.Cp.as_slice();
         let (a, b, c, d, e, f, g) = Self::extract_coefficients_(c_data, t)?;
         self.coeffs = (a, b, c, d, e, f, g);
         Ok(())
     }
+    /// create functions for heat capacity, enthalpy, and entropy using the NASA7 format
     pub fn create_closures_Cp_dH_dS(&mut self) {
         // calculate Cp, dh, ds using the coefficients and the temperature t
         let (a, b, c, d, e, f, g) = self.coeffs;
@@ -335,7 +340,7 @@ impl NASAdata {
         };
         self.ds_fun = Box::new(ds);
     }
-
+    /// create symbolic expressions for heat capacity, enthalpy, and entropy
     pub fn create_sym_Cp_dH_dS(&mut self) {
         let (a, b, c, d, e, f, g) = self.coeffs;
         let unit = Expr::Const(self.unit_multiplier);
@@ -346,6 +351,36 @@ impl NASAdata {
         let ds_sym = unit * ds_sym(a, b, c, d, e, g);
         self.ds_sym = ds_sym.symplify();
     }
+    // Taylor series expension for Cp, dH, dS
+    pub fn Taylor_series_Cp_dH_dS(&mut self, T0: f64) -> (Expr, Expr, Expr) {
+        let T = Expr::Var("T".to_owned());
+        let T0exp = Expr::Const(T0);
+        let Cp = self.Cp_sym.clone();
+        let Cp_at_T0 = Cp.lambdify1D()(T0);
+        let Cp_at_T0_sym = Expr::Const(Cp_at_T0);
+        let dC_dt = Cp.diff("T");
+        let dC_dt_at_T0 = dC_dt.lambdify1D()(T0);
+        let dC_dt_at_T0_sym = Expr::Const(dC_dt_at_T0);
+        let Cp_taylor = Cp_at_T0_sym + dC_dt_at_T0_sym * (T0exp.clone() - T.clone());
+
+        let dh = self.dh_sym.clone();
+        let dh_at_T0 = dh.lambdify1D()(T0);
+        let dh_at_T0_sym = Expr::Const(dh_at_T0);
+        let dh_dt = dh.diff("T");
+        let dh_dt_at_T0 = dh_dt.lambdify1D()(T0);
+        let dh_dt_at_T0_sym = Expr::Const(dh_dt_at_T0);
+        let dh_taylor = dh_at_T0_sym + dh_dt_at_T0_sym * (T0exp.clone() - T.clone());
+
+        let ds = self.ds_sym.clone();
+        let ds_at_T0 = ds.lambdify1D()(T0);
+        let ds_at_T0_sym = Expr::Const(ds_at_T0);
+        let ds_dt = ds.diff("T");
+        let ds_dt_at_T0 = ds_dt.lambdify1D()(T0);
+        let ds_dt_at_T0_sym = Expr::Const(ds_dt_at_T0);
+        let ds_taylor = ds_at_T0_sym + ds_dt_at_T0_sym * (T0exp.clone() - T.clone());
+        (Cp_taylor, dh_taylor, ds_taylor)
+    }
+    /// calculate heat capacity, enthalpy, and entropy as a function of given temperature using the NASA7 format
     pub fn calculate_Cp_dH_dS(&mut self, t: f64) {
         let (a, b, c, d, e, f, g) = self.coeffs;
         let unit = self.unit_multiplier;

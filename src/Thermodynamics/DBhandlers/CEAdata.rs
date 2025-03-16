@@ -1,8 +1,8 @@
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fmt;
 use std::error::Error;
+use std::fmt;
 
 use serde_json::Value;
 
@@ -211,14 +211,19 @@ impl CEAdata {
 
     pub fn extract_coefficients(&mut self, t: f64) -> Result<()> {
         // Extract viscosity coefficients
-        let V = self.coeffs.get("V")
+        let V = self
+            .coeffs
+            .get("V")
             .ok_or_else(|| CEAError::MissingData("Viscosity data not found"))?;
-        let T = V.get("T")
+        let T = V
+            .get("T")
             .ok_or_else(|| CEAError::MissingData("Temperature range for viscosity not found"))?;
-        let coeffs = V.get("coeff")
+        let coeffs = V
+            .get("coeff")
             .ok_or_else(|| CEAError::MissingData("Viscosity coefficients not found"))?;
 
-        let i = T.windows(2)
+        let i = T
+            .windows(2)
             .position(|pair| pair[0] <= t && pair[1] >= t)
             .ok_or_else(|| CEAError::InvalidTemperature(t))?
             / 2;
@@ -232,14 +237,19 @@ impl CEAdata {
         self.coeff_Visc = coeffs[4 * i..4 * i + 4].to_vec();
 
         // Extract thermal conductivity coefficients
-        let L = self.coeffs.get("C")
+        let L = self
+            .coeffs
+            .get("C")
             .ok_or_else(|| CEAError::MissingData("Thermal conductivity data not found"))?;
-        let T = L.get("T")
+        let T = L
+            .get("T")
             .ok_or_else(|| CEAError::MissingData("Temperature range for conductivity not found"))?;
-        let coeffs = L.get("coeff")
+        let coeffs = L
+            .get("coeff")
             .ok_or_else(|| CEAError::MissingData("Conductivity coefficients not found"))?;
 
-        let i = T.windows(2)
+        let i = T
+            .windows(2)
             .position(|pair| pair[0] <= t && pair[1] >= t)
             .ok_or_else(|| CEAError::InvalidTemperature(t))?
             / 2;
@@ -465,7 +475,7 @@ mod tests {
     #[test]
     fn test_extract_coefficients() {
         let mut CEA = setup_cea_data();
-        
+
         // Test valid temperature
         assert!(CEA.extract_coefficients(500.0).is_ok());
         assert_eq!(
@@ -490,7 +500,7 @@ mod tests {
         CEA.extract_coefficients(500.0).unwrap();
         CEA.set_lambda_unit(Some("mW/m/K".to_string())).unwrap();
         CEA.set_V_unit(Some("mkPa*s".to_string())).unwrap();
-        
+
         let lambda = CEA.calculate_Lambda(500.0).unwrap();
         let visc = CEA.calculate_Visc(500.0).unwrap();
 
@@ -514,7 +524,7 @@ mod tests {
         CEA.extract_coefficients(500.0).unwrap();
         CEA.set_lambda_unit(Some("mW/m/K".to_string())).unwrap();
         CEA.set_V_unit(Some("mkPa*s".to_string())).unwrap();
-        
+
         let lambda_closure = CEA.create_closure_Lambda().unwrap();
         let visc_closure = CEA.create_closure_Visc().unwrap();
 
@@ -539,7 +549,7 @@ mod tests {
         CEA.extract_coefficients(500.0).unwrap();
         CEA.set_lambda_unit(Some("mW/m/K".to_string())).unwrap();
         CEA.set_V_unit(Some("mkPa*s".to_string())).unwrap();
-        
+
         assert!(CEA.create_sym_Lambda().is_ok());
         assert!(CEA.create_sym_Visc().is_ok());
 
@@ -547,7 +557,7 @@ mod tests {
         let lambda_val = lambda_sym.lambdify1D()(500.0);
         let visc_sym = CEA.V_sym.as_ref().unwrap();
         let visc_val = visc_sym.lambdify1D()(500.0);
-        
+
         assert_relative_eq!(lambda_val, 39.2, epsilon = 1.);
         assert_relative_eq!(visc_val, 25.8, epsilon = 1.0);
 

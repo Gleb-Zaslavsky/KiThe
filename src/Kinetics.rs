@@ -1,19 +1,19 @@
 /// processing of user-chosen reactions.
 ///  So you define what reactions you need by using the constructor of mechanism from the mechfinder_api module or
-/// manually with help of kinetics_lib_api module. Now you ca
+/// manually with help of kinetics_lib_api module.
 #[allow(non_snake_case)]
 pub mod User_reactions;
-/// ru
-/// Модуль снабжен библиотекой кинетических параметров химических реакций, полученной в результате парсинга общедоступныхбаз данных
-/// Модуль берет на вход название библиотеки и вектор веществ а затем выдает следующие данные:
-/// 1) все реакции исходных веществ между собой, и всех их возможных продуктов между собой.
-/// 2) HashMap с кинетическими данными всех найденных реакций
-/// ----------------------------------------------------------------
 /// eng
 /// The module is equipped with a library of kinetic parameters of chemical reactions obtained as a result of parsing publicly available databases
 /// The module takes as input the name of the library and the vector of substances and then produces the following data:
 /// 1) all reactions of starting substances with each other, and all their possible products with each other.
 /// 2) HashMap with kinetic data of all found reactions
+/// ----------------------------------------------------------------
+/// ru
+/// Модуль снабжен библиотекой кинетических параметров химических реакций, полученной в результате парсинга общедоступныхбаз данных
+/// Модуль берет на вход название библиотеки и вектор веществ а затем выдает следующие данные:
+/// 1) все реакции исходных веществ между собой, и всех их возможных продуктов между собой.
+/// 2) HashMap с кинетическими данными всех найденных реакций
 pub mod mechfinder_api;
 /// ru
 /// Модуль берет на вход  вектор уравнений реации, заданных в виде String и выдает следующие данные:
