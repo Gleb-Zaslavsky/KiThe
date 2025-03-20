@@ -50,7 +50,6 @@ pub struct NISTdata {
     pub unit: Option<String>,
     ///
 
-
     /// heat capacity value at T
     pub Cp: f64,
     /// enthalpy value at T
@@ -81,7 +80,6 @@ impl NISTdata {
             input: input,
             unit: None,
 
-
             Cp: 0.0,
             dh: 0.0,
             ds: 0.0,
@@ -93,11 +91,11 @@ impl NISTdata {
             ds_sym: Expr::Const(0.0),
         }
     }
-        /// set energy unitsЖ J or calories
+    /// set energy unitsЖ J or calories
     pub fn set_unit(&mut self, unit: &str) -> Result<(), NISTError> {
-         self.input.set_unit(unit);
-            Ok(())
-        }
+        self.input.set_unit(unit);
+        Ok(())
+    }
     /// takes serde Value and parse it into structure
     pub fn from_serde(&mut self, serde: Value) -> Result<(), NISTError> {
         self.input = serde_json::from_value(serde)
@@ -106,9 +104,9 @@ impl NISTdata {
     }
     pub fn create_closures_Cp_dH_dS(&mut self, T: f64) {
         let (C_fun, dh_fun, ds_fun) = self
-        .input
-        .create_closure_cp_dh_ds(T)
-        .expect("Error calculating cp, dh, ds");
+            .input
+            .create_closure_cp_dh_ds(T)
+            .expect("Error calculating cp, dh, ds");
         (self.C_fun, self.dh_fun, self.ds_fun) = (C_fun, dh_fun, ds_fun);
     }
     pub fn create_sym_Cp_dH_dS(&mut self, T: f64) {

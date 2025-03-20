@@ -2,6 +2,7 @@ use crate::Thermodynamics::DBhandlers::CEAdata::CEAdata;
 use crate::Thermodynamics::DBhandlers::NASAdata::NASAdata;
 use crate::Thermodynamics::DBhandlers::TRANSPORTdata::TransportData;
 use crate::Thermodynamics::thermo_lib_api::ThermoData;
+use RustedSciThe::symbolic::symbolic_engine::Expr;
 use approx::assert_relative_eq;
 const R: f64 = 8.314;
 pub fn thermo_examples(thermotask: usize) {
@@ -117,7 +118,7 @@ pub fn thermo_examples(thermotask: usize) {
             let ds_value = ds_T(400.0);
             assert_relative_eq!(ds_value, NASA.ds, epsilon = 1e-6);
             // C
-            let taylor = NASA.Taylor_series_Cp_dH_dS(300.0);
+            let taylor = NASA.Taylor_series_Cp_dH_dS(300.0, 3);
             let Cp_taylor = taylor.0;
             let dh_taylor = taylor.1;
             let ds_taylor = taylor.2;
@@ -137,6 +138,53 @@ pub fn thermo_examples(thermotask: usize) {
                 ds_value
             );
             println!();
+        }
+        4 => {
+
+            use std::time::Instant;
+            let now = Instant::now();
+            let thermo_data = ThermoData::new();
+            let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
+            let CO_data = sublib.get("CO").unwrap();
+            println!("CO_data: {}", CO_data);
+            let mut tr = TransportData::new();
+            tr.from_serde(CO_data.clone());
+            tr.set_M_unit(Some("g/mol".to_owned()));
+            tr.set_P_unit(Some("atm".to_owned()));
+            tr.set_V_unit(Some("mkPa*s".to_owned()));
+            tr.set_lambda_unit(Some("mW/m/K".to_owned()));
+            let T = 2000.15; // K 
+            tr.P = 1.0;
+            tr.M = 28.0; // g/mol
+            tr.calculate_Visc(T);
+      
+            println!("Viscosity: {:?} mkPa*s", tr.V);
+         
+    
+            let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
+            let CO_data = sublib.get("CO").unwrap();
+            let mut NASA = NASAdata::new();
+            let _ = NASA.from_serde(CO_data.clone());
+            let _ =NASA.extract_coefficients(T);
+            let _ = NASA.create_sym_Cp_dH_dS();
+            let Cp_sym = NASA.clone().Cp_sym;
+            NASA.calculate_Cp_dH_dS(T);
+            let Cp = NASA.Cp;
+            println!("Cp: {}", Cp,);
+            let ro = (tr.P * 101325.0) * (tr.M / 1000.0) / (R * T);
+            let L = &tr.calculate_Lambda(Cp, ro, T);
+            tr.create_closure_Lambda(Cp, ro);
+            let Lambda_closure = &mut tr.Lambda_fun;
+            let Lambda_from_closure = Lambda_closure(T);
+          
+            assert_eq!(Lambda_from_closure, L.clone());
+            // let us prove that taylor series of order 2 is enough to calculate Lambda in the temperature range from 300 to 2000 
+            let taylor_series_Lambda = tr. Taylor_series_Lambda(Cp_sym, Expr::Const(ro), 800.0,  2);
+            let taylor_series_Lambda = taylor_series_Lambda.lambdify1D()(T);
+            let elapsed = now.elapsed().as_secs_f64();
+            println!("Elapsed: {:.2?}", elapsed);
+            println!("Lambda: {:?}, taylor_series_Lambda: {:?}", L, taylor_series_Lambda);
+             assert_relative_eq!(taylor_series_Lambda, L.clone(),epsilon = 3.0);
         }
         _ => println!("Invalid task number"),
     }

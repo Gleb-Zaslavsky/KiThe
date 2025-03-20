@@ -116,14 +116,23 @@ impl ReactionData {
         concentrations: Option<HashMap<String, f64>>,
     ) -> Vec<f64> {
         let mut K_const_values = Vec::new();
-        let T: Vec<f64> = (0..n)
-            .map(|i| T0 + i as f64 * (Tend - T0) / n as f64)
-            .collect();
+        let T =Self:: create_uniform_vector(T0, Tend, n);
         for Ti in T {
+           // println!("T, {}", Ti);
             let k = self.K_const(Ti, pres, concentrations.clone());
             K_const_values.push(k);
         }
         K_const_values
+    }
+    /// Creates a vector of n uniformly distributed numbers from T0 to Tend (inclusive)
+    pub fn create_uniform_vector(T0: f64, Tend: f64, n: usize) -> Vec<f64> {
+        if n < 2 {
+            panic!("n must be at least 2 to include both boundary values");
+        }
+        let step = (Tend - T0) / (n - 1) as f64;
+        (0..n)
+            .map(|i| T0 + i as f64 * step)
+            .collect()
     }
     /// generate the symbolic representation of the reaction rate constant
     pub fn K_sym(&self, pres: Option<f64>, concentrations: Option<HashMap<String, Expr>>) -> Expr {

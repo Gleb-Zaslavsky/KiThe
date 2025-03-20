@@ -8,6 +8,7 @@ use std::fmt;
 use std::f64::consts::PI;
 const K_B: f64 = 1.38e-23;
 const R: f64 = 8.314;
+#[allow(non_upper_case_globals)]
 const R_sym: Expr = Expr::Const(R);
 // Collision integral
 // Гиршфельдер. Молекулярная теория газов и жидкостей
@@ -169,7 +170,7 @@ fn calculate_Lambda_sym(p: TransportInput, um: f64, M: f64, P: f64, C: Expr, ro:
     let T = Expr::Var("T".to_owned());
     let omega_11 = omega_11_calc_sym(e_k, mu, sigma_k);
     // println!("Omega_11 {}, ro {}, M1, {}, {}, {}, {}, {}", omega_11 , ro, M, sigma_k, e_k, rot_relax, mu);
-    let T1 = (Expr::Const(e_k) / T.clone());
+    let T1 = Expr::Const(e_k) / T.clone();
     let f_t = Expr::Const(1.0)
         + Expr::Const(PI.powf(1.5) / 2.0) * (T1.clone()).pow(Expr::Const(0.5))
         + Expr::Const(2.0 + PI.powi(2) / 4.0) * T1.clone()
@@ -394,7 +395,7 @@ impl TransportData {
         let visc = move |t: f64| visc(M, t, e_k, sigma_k, mu) * vu;
         self.V_fun = Box::new(visc);
     }
-    pub fn calculate_Lambda_sym(&mut self, C: Expr, ro: Expr, T: Expr) {
+    pub fn calculate_Lambda_sym(&mut self, C: Expr, ro: Expr) {
         let p = self.input.clone();
         let um = self.L_unit_multiplier.clone();
 
@@ -403,6 +404,12 @@ impl TransportData {
         let ro = ro * Expr::Const(self.ro_unit_multiplier); // from other unit to kg/m3
         let Lambda = calculate_Lambda_sym(p, um, M, P, C, ro);
         self.Lambda_sym = Some(Lambda.clone());
+    }
+    pub fn Taylor_series_Lambda(&mut self, C:Expr, ro: Expr, T0: f64, n: usize) -> Expr {
+
+      self.calculate_Lambda_sym( C, ro);
+        let Lambda_series = self.Lambda_sym.clone().unwrap().taylor_series1D_("T", T0, n);
+        Lambda_series
     }
 }
 
@@ -498,19 +505,123 @@ mod tests {
         tr.calculate_Visc(T);
         assert_relative_eq!(tr.V, 25.2, epsilon = 5.0);
         println!("Viscosity: {:?} mkPa*s", tr.V);
-        let P = 1.0; // atm
+    
 
         let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
         let CO_data = sublib.get("CO").unwrap();
         let mut NASA = NASAdata::new();
-        NASA.from_serde(CO_data.clone());
-        NASA.extract_coefficients(T);
-        NASA.calculate_Cp_dH_dS(T);
+        let _ = NASA.from_serde(CO_data.clone());
+        let _ = NASA.extract_coefficients(T);
+        let _ =  NASA.calculate_Cp_dH_dS(T);
         let Cp = NASA.Cp;
         println!("Cp: {}", Cp,);
         let ro = (tr.P * 101325.0) * (tr.M / 1000.0) / (R * T);
         let L = tr.calculate_Lambda(Cp, ro, T);
         println!("Lambda: {}", L);
+
+        // let lambda = tr.calculate_Lambda(C, ro, T, M, P);
+        //  println!("Lamnda {}", lambda);
+        //  let visc = CEA.calculate_Visc(500.0);
+        //  println!("Lambda, mW/m/K: {:?}, Visc: {:?}", lambda, visc);
+    }
+
+    #[test]
+    fn test_with_real_data_sym() {
+        let thermo_data = ThermoData::new();
+        let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
+        let CO_data = sublib.get("CO").unwrap();
+        println!("CO_data: {}", CO_data);
+        let mut tr = TransportData::new();
+        tr.from_serde(CO_data.clone());
+        tr.set_M_unit(Some("g/mol".to_owned()));
+        tr.set_P_unit(Some("atm".to_owned()));
+        tr.set_V_unit(Some("mkPa*s".to_owned()));
+        tr.set_lambda_unit(Some("mW/m/K".to_owned()));
+        let T = 473.15; // K 
+        tr.P = 1.0;
+        tr.M = 28.0; // g/mol
+        tr.calculate_Visc(T);
+        assert_relative_eq!(tr.V, 25.2, epsilon = 5.0);
+        println!("Viscosity: {:?} mkPa*s", tr.V);
+  
+
+        let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
+        let CO_data = sublib.get("CO").unwrap();
+        let mut NASA = NASAdata::new();
+        let _ = NASA.from_serde(CO_data.clone());
+        let _ = NASA.extract_coefficients(T);
+        let _ = NASA.calculate_Cp_dH_dS(T);
+        let Cp = NASA.Cp;
+        println!("Cp: {}", Cp,);
+        let ro = (tr.P * 101325.0) * (tr.M / 1000.0) / (R * T);
+        let L = &tr.calculate_Lambda(Cp, ro, T);
+        tr.create_closure_Lambda(Cp, ro);
+        let Lambda_closure = &mut tr.Lambda_fun;
+        let Lambda_from_closure = Lambda_closure(T);
+      
+        assert_eq!(Lambda_from_closure, L.clone());
+
+         tr. calculate_Lambda_sym(Expr::Const(Cp), Expr::Const(ro));
+         let L_sym = tr.Lambda_sym.unwrap();
+         let L_from_sym = L_sym.lambdify1D()(T);
+
+         assert_relative_eq!(L_from_sym, L.clone(),epsilon = 1e-5);
+
+
+
+        // let lambda = tr.calculate_Lambda(C, ro, T, M, P);
+        //  println!("Lamnda {}", lambda);
+        //  let visc = CEA.calculate_Visc(500.0);
+        //  println!("Lambda, mW/m/K: {:?}, Visc: {:?}", lambda, visc);
+    }
+
+    #[test]
+    fn test_with_real_data_taylor_sym() {
+        use std::time::Instant;
+        let now = Instant::now();
+        let thermo_data = ThermoData::new();
+        let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
+        let CO_data = sublib.get("CO").unwrap();
+        println!("CO_data: {}", CO_data);
+        let mut tr = TransportData::new();
+        tr.from_serde(CO_data.clone());
+        tr.set_M_unit(Some("g/mol".to_owned()));
+        tr.set_P_unit(Some("atm".to_owned()));
+        tr.set_V_unit(Some("mkPa*s".to_owned()));
+        tr.set_lambda_unit(Some("mW/m/K".to_owned()));
+        let T = 473.15; // K 
+        tr.P = 1.0;
+        tr.M = 28.0; // g/mol
+        tr.calculate_Visc(T);
+        assert_relative_eq!(tr.V, 25.2, epsilon = 5.0);
+        println!("Viscosity: {:?} mkPa*s", tr.V);
+   
+
+        let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
+        let CO_data = sublib.get("CO").unwrap();
+        let mut NASA = NASAdata::new();
+        let _ = NASA.from_serde(CO_data.clone());
+        let _ = NASA.extract_coefficients(T);
+        let _ = NASA.create_sym_Cp_dH_dS();
+        let Cp_sym = NASA.clone().Cp_sym;
+        NASA.calculate_Cp_dH_dS(T);
+        let Cp = NASA.Cp;
+        println!("Cp: {}", Cp,);
+        let ro = (tr.P * 101325.0) * (tr.M / 1000.0) / (R * T);
+        let L = &tr.calculate_Lambda(Cp, ro, T);
+        tr.create_closure_Lambda(Cp, ro);
+        let Lambda_closure = &mut tr.Lambda_fun;
+        let Lambda_from_closure = Lambda_closure(T);
+      
+        assert_eq!(Lambda_from_closure, L.clone());
+
+        let taylor_series_Lambda = tr. Taylor_series_Lambda(Cp_sym, Expr::Const(ro), 400.0,  4);
+        let taylor_series_Lambda = taylor_series_Lambda.lambdify1D()(T);
+        let elapsed = now.elapsed().as_secs_f64();
+        println!("Elapsed: {:.2?}", elapsed);
+         assert_relative_eq!(taylor_series_Lambda, L.clone(),epsilon = 1.0);
+
+
 
         // let lambda = tr.calculate_Lambda(C, ro, T, M, P);
         //  println!("Lamnda {}", lambda);

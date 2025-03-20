@@ -498,9 +498,12 @@ impl KinData {
         if let Some(reactions) = &self.vec_of_reaction_data {
             let mut vec_of_K_const = Vec::new();
             for reaction in reactions.iter() {
+               
                 let K_vec = reaction.K_const_for_T_range(T0, Tend, n, pres, concentrations.clone());
+             
                 let max_K = K_vec.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
                 vec_of_K_const.push(*max_K);
+              
             }
             // Let us sort vec_of_K_const and rearrange vec_of_equations and vec_of_shortcuts in the same order,
             // Create a vector of indices
@@ -514,7 +517,7 @@ impl KinData {
             // Use the sorted indices to rearrange all vectors
             vec_of_K_const = indices.iter().map(|&i| vec_of_K_const[i]).collect();
             let vec_of_equations = self.rearrange_vectors(indices, save_rearranged);
-
+           // println!("reaction {:?}",vec_of_K_const);
             // create pretty table
             Self::pretty_print_constants(vec_of_equations, vec_of_K_const.clone());
             Ok(vec_of_K_const)
@@ -532,35 +535,52 @@ impl KinData {
         indices: Vec<usize>,
         save_rearranged: Option<bool>,
     ) -> Vec<String> {
-        let mut vec_of_equations = self.vec_of_equations.clone();
-        let mut vec_of_shortcuts = self.shortcut_reactions.as_ref().unwrap().clone();
-        let mut vec_of_pairs = self.vec_of_pairs.as_ref().unwrap().clone();
-        let mut vec_of_reaction_Values = self.vec_of_reaction_Values.as_ref().unwrap().clone();
-        let mut vec_of_reaction_data = self.vec_of_reaction_data.as_ref().unwrap().clone();
-        vec_of_equations = indices
-            .iter()
-            .map(|&i| vec_of_equations[i].clone())
-            .collect();
-        vec_of_shortcuts = indices
-            .iter()
-            .map(|&i| vec_of_shortcuts[i].clone())
-            .collect();
-        vec_of_pairs = indices.iter().map(|&i| vec_of_pairs[i].clone()).collect();
-        vec_of_reaction_Values = indices
-            .iter()
-            .map(|&i| vec_of_reaction_Values[i].clone())
-            .collect();
-        vec_of_reaction_data = indices
-            .iter()
-            .map(|&i| vec_of_reaction_data[i].clone())
-            .collect();
-        if save_rearranged.is_some() {
-            self.vec_of_equations = vec_of_equations.clone();
-            self.shortcut_reactions = Some(vec_of_shortcuts);
-            self.vec_of_pairs = Some(vec_of_pairs);
-            self.vec_of_reaction_Values = Some(vec_of_reaction_Values);
-            self.vec_of_reaction_data = Some(vec_of_reaction_data);
+        // If any of the required Option values are None, return current equations
+        if self.vec_of_equations.is_empty() {
+            return Vec::new();
         }
+
+        let mut vec_of_equations = self.vec_of_equations.clone();
+        if let (Some(shortcuts), Some(pairs), Some(values), Some(data)) = (
+            &self.shortcut_reactions,
+            &self.vec_of_pairs,
+            &self.vec_of_reaction_Values,
+            &self.vec_of_reaction_data,
+        ) {
+            let mut vec_of_shortcuts = shortcuts.clone();
+            let mut vec_of_pairs = pairs.clone();
+            let mut vec_of_reaction_Values = values.clone();
+            let mut vec_of_reaction_data = data.clone();
+
+            // Rearrange all vectors according to indices
+            vec_of_equations = indices
+                .iter()
+                .map(|&i| vec_of_equations[i].clone())
+                .collect();
+            vec_of_shortcuts = indices
+                .iter()
+                .map(|&i| vec_of_shortcuts[i].clone())
+                .collect();
+            vec_of_pairs = indices.iter().map(|&i| vec_of_pairs[i].clone()).collect();
+            vec_of_reaction_Values = indices
+                .iter()
+                .map(|&i| vec_of_reaction_Values[i].clone())
+                .collect();
+            vec_of_reaction_data = indices
+                .iter()
+                .map(|&i| vec_of_reaction_data[i].clone())
+                .collect();
+
+            // Only update the struct fields if save_rearranged is Some(true)
+            if save_rearranged == Some(true) {
+                self.vec_of_equations = vec_of_equations.clone();
+                self.shortcut_reactions = Some(vec_of_shortcuts);
+                self.vec_of_pairs = Some(vec_of_pairs);
+                self.vec_of_reaction_Values = Some(vec_of_reaction_Values);
+                self.vec_of_reaction_data = Some(vec_of_reaction_data);
+            }
+        }
+
         vec_of_equations
     }
     fn pretty_print_constants(vec_of_equations: Vec<String>, vec_of_K_const: Vec<f64>) {
@@ -584,7 +604,10 @@ impl KinData {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use crate::Kinetics::mechfinder_api::ReactionType;
+    use crate::Kinetics::mechfinder_api::kinetics::ElementaryStruct;
+    use approx::assert_relative_eq;
+    const R: f64 = 8.314;
     #[test]
     fn test_user_reactions_new() {
         let shortcut_reactions = Some(vec![
@@ -669,5 +692,104 @@ mod tests {
             "Meow_20", "Meow_21", "Meow_22", "Meow_23", "Meow_24", "Meow_25",
         ];
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_calc_K_const_for_1_react() {
+        let mut kin_data = KinData::new();
+        // Populate kin_data with some test reaction data
+        kin_data.vec_of_reaction_data = Some(vec![ReactionData {
+            reaction_type: ReactionType::Elem,
+            eq: "A + B -> C".to_string(),
+            react: None,
+            data: ReactionKinetics::Elementary(ElementaryStruct {
+                Arrenius: vec![1e13, 0.0, 20000.0],
+            }),
+        }]);
+
+        let result = kin_data.calc_K_const_for_1_react(0, 1000.0, None, None);
+        assert!(result.is_ok());
+        let k = result.unwrap();
+        let k_expected = 1e13 * f64::exp(-20000.0 / (R * 1000.0));
+        assert_relative_eq!(k, k_expected, epsilon = 1e0);
+    }
+
+    #[test]
+    fn test_calc_K_const_for_all_reactions() {
+        let mut kin_data = KinData::new();
+        // Populate kin_data with some test reaction data
+        kin_data.vec_of_reaction_data = Some(vec![
+            ReactionData {
+                reaction_type: ReactionType::Elem,
+                eq: "A + B -> C".to_string(),
+                react: None,
+                data: ReactionKinetics::Elementary(ElementaryStruct {
+                    Arrenius: vec![1e13, 0.0, 20000.0],
+                }),
+            },
+            ReactionData {
+                reaction_type: ReactionType::Elem,
+                eq: "C -> D".to_string(),
+                react: None,
+                data: ReactionKinetics::Elementary(ElementaryStruct {
+                    Arrenius: vec![1e12, 0.0, 20000.0],
+                }),
+            },
+        ]);
+        kin_data.vec_of_equations = vec!["A + B -> C".to_string(), "C -> D".to_string()];
+        kin_data.shortcut_reactions = Some(vec!["R1".to_string(), "R2".to_string()]);
+
+        let result = kin_data.calc_K_const_for_all_reactions(1000.0, None, None, Some(true));
+        assert!(result.is_ok());
+        let k_values = result.unwrap();
+        assert_eq!(k_values.len(), 2);
+        let k_expected1 = 1e13 * f64::exp(-20000.0 / (R * 1000.0));
+        let k_expected2 = 1e12 * f64::exp(-20000.0 / (R * 1000.0));
+        assert_relative_eq!(k_values[0], k_expected1, epsilon = 1e0);
+        assert_relative_eq!(k_values[1], k_expected2, epsilon = 1e0);
+    }
+
+    #[test]
+    fn test_calc_K_const_for_all_reactions_forTrange() {
+        let mut kin_data = KinData::new();
+        // Populate kin_data with some test reaction data
+        kin_data.vec_of_reaction_data = Some(vec![
+            ReactionData {
+                reaction_type: ReactionType::Elem,
+                eq: "A + B -> C".to_string(),
+                react: None,
+                data: ReactionKinetics::Elementary(ElementaryStruct {
+                    Arrenius: vec![1e13, 0.0, 20000.0],
+                }),
+            },
+            ReactionData {
+                reaction_type: ReactionType::Elem,
+                eq: "C -> D".to_string(),
+                react: None,
+                data: ReactionKinetics::Elementary(ElementaryStruct {
+                    Arrenius: vec![1e12, 0.0, 20000.0],
+                }),
+            },
+        ]);
+        kin_data.vec_of_equations = vec!["A + B -> C".to_string(), "C -> D".to_string()];
+        kin_data.shortcut_reactions = Some(vec!["R1".to_string(), "R2".to_string()]);
+
+        let result = kin_data.calc_K_const_for_all_reactions_forTrange(
+            800.0,
+            1200.0,
+            5,
+            None,
+            None,
+            Some(true),
+        );
+        assert!(result.is_ok());
+        let max_k_values = result.unwrap();
+        assert_eq!(max_k_values.len(), 2);
+        let k_expected1 = 1e13 * f64::exp(-20000.0 / (R * 1200.0));
+        let k_expected2 = 1e12 * f64::exp(-20000.0 / (R * 1200.0));
+        println!("max_k_values {} {}", f64::log10(max_k_values[0]), f64::log10(max_k_values[1]));
+        println!("k expected {}, {}",f64::log10( k_expected1), f64::log10(k_expected2));
+        assert_relative_eq!(max_k_values[0],  k_expected1, epsilon = 1e0);
+        assert_relative_eq!(max_k_values[1],  k_expected2, epsilon = 1e0);
     }
 }
