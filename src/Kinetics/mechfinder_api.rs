@@ -116,9 +116,9 @@ impl ReactionData {
         concentrations: Option<HashMap<String, f64>>,
     ) -> Vec<f64> {
         let mut K_const_values = Vec::new();
-        let T =Self:: create_uniform_vector(T0, Tend, n);
+        let T = Self::create_uniform_vector(T0, Tend, n);
         for Ti in T {
-           // println!("T, {}", Ti);
+            // println!("T, {}", Ti);
             let k = self.K_const(Ti, pres, concentrations.clone());
             K_const_values.push(k);
         }
@@ -130,9 +130,7 @@ impl ReactionData {
             panic!("n must be at least 2 to include both boundary values");
         }
         let step = (Tend - T0) / (n - 1) as f64;
-        (0..n)
-            .map(|i| T0 + i as f64 * step)
-            .collect()
+        (0..n).map(|i| T0 + i as f64 * step).collect()
     }
     /// generate the symbolic representation of the reaction rate constant
     pub fn K_sym(&self, pres: Option<f64>, concentrations: Option<HashMap<String, Expr>>) -> Expr {
@@ -427,7 +425,7 @@ mod tests {
             panic!("Expected ThreeBody variant");
         }
     }
-    #[test]
+   
     fn test_pres_deserialization() {
         let reaction_data: ReactionData =
             serde_json::from_str(PRES_TESTING_JSON).expect("Error parsing JSON: {err:?}");

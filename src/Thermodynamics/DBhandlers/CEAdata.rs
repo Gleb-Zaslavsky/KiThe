@@ -5,6 +5,9 @@ use std::error::Error;
 use std::fmt;
 
 use serde_json::Value;
+//use super::transport_api::{TransportCalculator, TransportError, LambdaUnit, ViscosityUnit};
+//use super::transport_api::{validate_temperature, validate_pressure, validate_molar_mass, validate_density};
+//use super::transport_api::{lambda_unit_to_multiplier, viscosity_unit_to_multiplier};
 
 #[derive(Debug)]
 pub enum CEAError {
@@ -36,8 +39,6 @@ impl From<serde_json::Error> for CEAError {
         CEAError::SerdeError(err)
     }
 }
-
-type Result<T> = std::result::Result<T, CEAError>;
 
 fn calculate_L(t: f64, e: f64, f: f64, k: f64, g: f64) -> f64 {
     //Вт/м*К
@@ -126,10 +127,10 @@ impl CEAdata {
 
     pub fn set_input(&mut self, input: CEAinput) {
         self.input = input;
-        self.parse_coefficients();
+        let _ = self.parse_coefficients();
     }
 
-    pub fn set_lambda_unit(&mut self, unit: Option<String>) -> Result<()> {
+    pub fn set_lambda_unit(&mut self, unit: Option<String>) -> Result<(), CEAError> {
         if let Some(unit) = unit {
             self.L_unit_multiplier = match unit.as_str() {
                 "W/m/K" => 1.0,
@@ -143,7 +144,7 @@ impl CEAdata {
         Ok(())
     }
 
-    pub fn set_V_unit(&mut self, unit: Option<String>) -> Result<()> {
+    pub fn set_V_unit(&mut self, unit: Option<String>) -> Result<(), CEAError> {
         if let Some(unit) = unit {
             self.V_unit_multiplier = match unit.as_str() {
                 "kg/m/s" => 1.0,
@@ -156,13 +157,13 @@ impl CEAdata {
         Ok(())
     }
 
-    pub fn from_serde(&mut self, serde: Value) -> Result<()> {
-        self.input = serde_json::from_value(serde)?;
-        self.parse_coefficients();
+    pub fn from_serde(&mut self, serde: Value) -> Result<(), CEAError> {
+        self.input = serde_json::from_value(serde).map_err(|e| CEAError::SerdeError(e))?;
+        let _ = self.parse_coefficients();
         Ok(())
     }
 
-    pub fn parse_coefficients(&mut self) -> Result<()> {
+    pub fn parse_coefficients(&mut self) -> Result<(), CEAError> {
         let LC = &self.input.LC;
         let model = &self.input.model;
 
@@ -209,7 +210,7 @@ impl CEAdata {
         Ok(())
     }
 
-    pub fn extract_coefficients(&mut self, t: f64) -> Result<()> {
+    pub fn extract_coefficients(&mut self, t: f64) -> Result<(), CEAError> {
         // Extract viscosity coefficients
         let V = self
             .coeffs
@@ -264,7 +265,7 @@ impl CEAdata {
         Ok(())
     }
 
-    pub fn calculate_Lambda(&mut self, t: f64) -> Result<f64> {
+    pub fn calculate_Lambda(&mut self, t: f64) -> Result<f64, CEAError> {
         if self.coeff_Lambda.len() != 4 {
             return Err(CEAError::MissingCoefficients(
                 "Lambda coefficients not properly initialized".to_string(),
@@ -277,7 +278,7 @@ impl CEAdata {
         Ok(Lambda)
     }
 
-    pub fn calculate_Visc(&mut self, t: f64) -> Result<f64> {
+    pub fn calculate_Visc(&mut self, t: f64) -> Result<f64, CEAError> {
         if self.coeff_Visc.len() != 4 {
             return Err(CEAError::MissingCoefficients(
                 "Viscosity coefficients not properly initialized".to_string(),
@@ -290,7 +291,7 @@ impl CEAdata {
         Ok(Visc)
     }
 
-    pub fn create_closure_Lambda(&mut self) -> Result<Box<dyn Fn(f64) -> f64>> {
+    pub fn create_closure_Lambda(&mut self) -> Result<Box<dyn Fn(f64) -> f64>, CEAError> {
         if self.coeff_Lambda.len() != 4 {
             return Err(CEAError::MissingCoefficients(
                 "Lambda coefficients not properly initialized".to_string(),
@@ -304,7 +305,7 @@ impl CEAdata {
         Ok(Box::new(Lambda))
     }
 
-    pub fn create_closure_Visc(&mut self) -> Result<Box<dyn Fn(f64) -> f64>> {
+    pub fn create_closure_Visc(&mut self) -> Result<Box<dyn Fn(f64) -> f64>, CEAError> {
         if self.coeff_Visc.len() != 4 {
             return Err(CEAError::MissingCoefficients(
                 "Viscosity coefficients not properly initialized".to_string(),
@@ -318,7 +319,7 @@ impl CEAdata {
         Ok(Box::new(V))
     }
 
-    pub fn create_sym_Lambda(&mut self) -> Result<()> {
+    pub fn create_sym_Lambda(&mut self) -> Result<(), CEAError> {
         if self.coeff_Lambda.len() != 4 {
             return Err(CEAError::MissingCoefficients(
                 "Lambda coefficients not properly initialized".to_string(),
@@ -332,7 +333,7 @@ impl CEAdata {
         Ok(())
     }
 
-    pub fn create_sym_Visc(&mut self) -> Result<()> {
+    pub fn create_sym_Visc(&mut self) -> Result<(), CEAError> {
         if self.coeff_Visc.len() != 4 {
             return Err(CEAError::MissingCoefficients(
                 "Viscosity coefficients not properly initialized".to_string(),
@@ -344,6 +345,18 @@ impl CEAdata {
         let V_sym = (Expr::Const(um) * calculate_V_sym(e, f, k, g)).symplify();
         self.V_sym = Some(V_sym);
         Ok(())
+    }
+    pub fn Taylor_series_Lambda(&mut self, T0: f64, n: usize) -> Result<Expr, CEAError> {
+        if T0 <= 0.0 {
+            return Err(CEAError::InvalidTemperature(T0));
+        }
+        self.create_sym_Lambda()?;
+        let Lambda_series = self
+            .Lambda_sym
+            .clone()
+            .ok_or_else(|| CEAError::MissingCoefficients("Lambda_sym not calculated".to_string()))?
+            .taylor_series1D_("T", T0, n);
+        Ok(Lambda_series)
     }
 }
 
@@ -360,8 +373,21 @@ impl Clone for CEAdata {
             coeff_Lambda: self.coeff_Lambda.clone(),
             Lambda: self.Lambda,
             V: self.V,
-            Lambda_fun: Box::new(|x| x), // Default closure
-            V_fun: Box::new(|x| x),      // Default closure
+            Lambda_fun: {
+                let c = self.coeff_Lambda.clone();
+                let um = self.L_unit_multiplier;
+                let (e, f, k, g) = (c[0], c[1], c[2], c[3]);
+                let Lambda = move |t: f64| um * calculate_L(t, e, f, k, g);
+
+                Box::new(Lambda)
+            },
+            V_fun: {
+                let c = self.coeff_Visc.clone();
+                let um = self.V_unit_multiplier;
+                let (e, f, k, g) = (c[0], c[1], c[2], c[3]);
+                let V = move |t: f64| um * calculate_V(t, e, f, k, g);
+                Box::new(V)
+            },
             Lambda_sym: self.Lambda_sym.clone(),
             V_sym: self.V_sym.clone(),
         }
@@ -386,6 +412,114 @@ impl fmt::Debug for CEAdata {
             .field("Lambda_sym", &self.Lambda_sym)
             .field("V_sym", &self.V_sym)
             .finish_non_exhaustive() //  The finish_non_exhaustive() method is used to indicate that not all fields are being displayed.
+    }
+}
+
+use super::transport_api::{LambdaUnit, TransportCalculator, ViscosityUnit};
+use super::transport_api::{lambda_dimension, validate_temperature, viscosity_dimension};
+impl TransportCalculator for CEAdata {
+    fn extract_coefficients(&mut self, t: f64) -> Result<(), super::transport_api::TransportError> {
+        self.parse_coefficients()?;
+        self.extract_coefficients(t)?;
+        Ok(())
+    }
+    fn calculate_lambda(
+        &mut self,
+        _C: Option<f64>,
+        _ro: Option<f64>,
+        T: f64,
+    ) -> Result<f64, super::transport_api::TransportError> {
+        validate_temperature(T)?;
+        let Lambda = self.calculate_Lambda(T)?;
+        self.Lambda = Lambda;
+        Ok(Lambda)
+    }
+
+    fn calculate_viscosity(&mut self, T: f64) -> Result<f64, super::transport_api::TransportError> {
+        validate_temperature(T)?;
+        let eta = self.calculate_Visc(T)?;
+        self.V = eta;
+        Ok(eta)
+    }
+
+    fn set_lambda_unit(
+        &mut self,
+        unit: Option<LambdaUnit>,
+    ) -> Result<(), super::transport_api::TransportError> {
+        if let Some(unit) = unit {
+            self.L_unit = Some(lambda_dimension(unit));
+        }
+        Ok(())
+    }
+
+    fn set_viscosity_unit(
+        &mut self,
+        unit: Option<ViscosityUnit>,
+    ) -> Result<(), super::transport_api::TransportError> {
+        if let Some(unit) = unit {
+            self.V_unit = Some(viscosity_dimension(unit));
+        }
+        Ok(())
+    }
+
+    fn create_lambda_closure(
+        &mut self,
+        _C: Option<f64>,
+        _ro: Option<f64>,
+    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+        let Lambda_fun = self.create_closure_Lambda()?;
+        Ok(Lambda_fun)
+    }
+
+    fn create_viscosity_closure(
+        &mut self,
+    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+        let visc = self.create_closure_Visc()?;
+
+        Ok(visc)
+    }
+
+    fn create_symbolic_lambda(
+        &mut self,
+        _C: Option<Expr>,
+        _ro: Option<Expr>,
+    ) -> Result<(), super::transport_api::TransportError> {
+        self.create_sym_Lambda()?;
+        Ok(())
+    }
+
+    fn create_symbolic_viscosity(&mut self) -> Result<(), super::transport_api::TransportError> {
+        self.create_sym_Visc()?;
+        Ok(())
+    }
+
+    fn taylor_series_lambda(
+        &mut self,
+        C: Option<Expr>,
+        ro: Option<Expr>,
+        t0: f64,
+        n: usize,
+    ) -> Result<Expr, super::transport_api::TransportError> {
+        validate_temperature(t0)?;
+        let Lambda_series = self.Taylor_series_Lambda(t0, n)?;
+        Ok(Lambda_series)
+    }
+
+    fn from_serde(
+        &mut self,
+        data: serde_json::Value,
+    ) -> Result<(), super::transport_api::TransportError> {
+        self.input = serde_json::from_value(data).map_err(|e| CEAError::SerdeError(e))?;
+        Ok(())
+    }
+
+    fn set_M(&mut self,M:f64,M_unit:Option<String>) -> Result<(),super::transport_api::TransportError> {
+  
+        Ok(())
+    }
+    fn set_P(&mut self,P:f64,P_unit:Option<String>) -> Result<(),super::transport_api::TransportError> {
+
+        Ok(())
     }
 }
 

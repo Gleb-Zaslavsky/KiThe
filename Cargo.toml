@@ -1,6 +1,6 @@
 [package]
 name = "KiThe"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 author = "Gleb Zasllavsky"
 license = "MIT"
@@ -23,6 +23,7 @@ reqwest = { version = "0.12.15", features = ["blocking"] }
 scraper = "0.23.1"
 url = "2.4"
 thiserror = "2.0.12"
+enum_dispatch = "0.3.13"
 
 [profile.release]
 lto = true

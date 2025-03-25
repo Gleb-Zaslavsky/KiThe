@@ -1,9 +1,42 @@
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
+use std::error::Error;
 use std::fmt;
+
+#[derive(Debug)]
+pub enum TransportError {
+    InvalidUnit(String),
+    SerdeError(serde_json::Error),
+    InvalidTemperature(f64),
+    InvalidPressure(f64),
+    InvalidMolarMass(f64),
+    InvalidDensity(f64),
+    CalculationError(String),
+}
+
+impl fmt::Display for TransportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TransportError::InvalidUnit(unit) => write!(f, "Invalid unit: {}", unit),
+            TransportError::SerdeError(e) => write!(f, "Serde error: {}", e),
+            TransportError::InvalidTemperature(t) => write!(f, "Invalid temperature value: {}", t),
+            TransportError::InvalidPressure(p) => write!(f, "Invalid pressure value: {}", p),
+            TransportError::InvalidMolarMass(m) => write!(f, "Invalid molar mass value: {}", m),
+            TransportError::InvalidDensity(d) => write!(f, "Invalid density value: {}", d),
+            TransportError::CalculationError(msg) => write!(f, "Calculation error: {}", msg),
+        }
+    }
+}
+
+impl Error for TransportError {}
+
+impl From<serde_json::Error> for TransportError {
+    fn from(err: serde_json::Error) -> Self {
+        TransportError::SerdeError(err)
+    }
+}
 
 use std::f64::consts::PI;
 const K_B: f64 = 1.38e-23;
@@ -227,9 +260,10 @@ pub struct TransportInput {
     pub well_depth: f64,
 }
 pub struct TransportData {
-    input: TransportInput,
+    pub input: TransportInput,
     pub M: f64,
     pub P: f64,
+    pub ro: Option<f64>,
     /// molar mass units choice
     pub M_unit: Option<String>,
     M_unit_multiplier: f64,
@@ -271,6 +305,7 @@ impl TransportData {
             input: input,
             M: 0.0,
             P: 0.0,
+            ro: None,
             M_unit: None,
             M_unit_multiplier: 1.0,
             P_unit: None,
@@ -294,122 +329,196 @@ impl TransportData {
         self.input = input.clone();
     }
 
-    pub fn set_lambda_unit(&mut self, unit: Option<String>) {
+    pub fn set_lambda_unit(&mut self, unit: Option<String>) -> Result<(), TransportError> {
         if let Some(unit) = unit {
+            self.L_unit = Some(unit.clone());
             match unit.as_str() {
                 "W/m/K" => self.L_unit_multiplier = 1.0,
                 "mW/m/K" => self.L_unit_multiplier = 1E3,
                 "mkW/m/K" => self.L_unit_multiplier = 1E6,
-
                 "mkW/sm/K" => self.L_unit_multiplier = 1E+4,
-                _ => panic!("Invalid unit: {}", unit),
+                _ => return Err(TransportError::InvalidUnit(unit)),
             }
         }
+        Ok(())
     }
 
-    pub fn set_V_unit(&mut self, unit: Option<String>) {
+    pub fn set_V_unit(&mut self, unit: Option<String>) -> Result<(), TransportError> {
         if let Some(unit) = unit {
+            self.V_unit = Some(unit.clone());
             match unit.as_str() {
-                "kg/m/s" => self.V_unit_multiplier = 1.0,
-                "Pa*s" => self.V_unit_multiplier = 1.0,
+                "kg/m/s" | "Pa*s" => self.V_unit_multiplier = 1.0,
                 "mkPa*s" => self.V_unit_multiplier = 1E6,
-
-                _ => panic!("Invalid unit: {}", unit),
+                _ => return Err(TransportError::InvalidUnit(unit)),
             }
         }
+        Ok(())
     }
-    pub fn set_M_unit(&mut self, unit: Option<String>) {
+
+    pub fn set_M_unit(&mut self, unit: Option<String>) -> Result<(), TransportError> {
         if let Some(unit) = unit {
+            self.M_unit = Some(unit.clone());
             match unit.as_str() {
                 "kg/mol" => self.M_unit_multiplier = 1.0,
                 "g/mol" => self.M_unit_multiplier = 1E-3,
-                _ => panic!("Invalid unit: {}", unit),
+                _ => return Err(TransportError::InvalidUnit(unit)),
             }
         }
+        Ok(())
     }
-    pub fn set_ro_unit(&mut self, unit: Option<String>) {
+
+    pub fn set_ro_unit(&mut self, unit: Option<String>) -> Result<(), TransportError> {
         if let Some(unit) = unit {
+            self.ro_unit = Some(unit.clone());
             match unit.as_str() {
                 "kg/m3" => self.ro_unit_multiplier = 1.0,
                 "g/cm3" => self.ro_unit_multiplier = 1E3,
-
-                _ => panic!("Invalid unit: {}", unit),
+                _ => return Err(TransportError::InvalidUnit(unit)),
             }
         }
+        Ok(())
     }
-    pub fn set_P_unit(&mut self, unit: Option<String>) {
+
+    pub fn set_P_unit(&mut self, unit: Option<String>) -> Result<(), TransportError> {
         if let Some(unit) = unit {
+            self.P_unit = Some(unit.clone());
             match unit.as_str() {
                 "Pa" => self.P_unit_multiplier = 1.0,
                 "atm" => self.P_unit_multiplier = 101325.0,
                 "bar" => self.P_unit_multiplier = 101325.0 / 1000.0,
-                _ => panic!("Invalid unit: {}", unit),
+                _ => return Err(TransportError::InvalidUnit(unit)),
             }
         }
+        Ok(())
     }
-    pub fn from_serde(&mut self, serde: Value) {
-        self.input = serde_json::from_value(serde).unwrap();
+
+    pub fn from_serde(
+        &mut self,
+        data: serde_json::Value,
+    ) -> Result<(), super::transport_api::TransportError> {
+        self.input = serde_json::from_value(data)
+            .map_err(|e| super::transport_api::TransportError::SerdeError(e))?;
+        Ok(())
     }
     /*
     e_k 'well_depth'
     sigma_k 'diam'
     mu - 'dipole'
     */
-    pub fn calculate_Visc(&mut self, T: f64) -> f64 {
+    pub fn calculate_Visc(&mut self, T: f64) -> Result<f64, TransportError> {
+        if T <= 0.0 {
+            return Err(TransportError::InvalidTemperature(T));
+        }
+        if self.M <= 0.0 {
+            return Err(TransportError::InvalidMolarMass(self.M));
+        }
+
         let p = self.input.clone();
         let M = self.M * self.M_unit_multiplier;
         let (_, sigma_k, e_k, _, mu) = (p.Form, p.diam, p.well_depth, p.rot_relax, p.dipole);
         let eta = visc(M, T, e_k, sigma_k, mu) * self.V_unit_multiplier;
         self.V = eta;
-        eta
+        Ok(eta)
     }
+    pub fn ideal_gas(&mut self, T: f64) {
+        let ro = (self.P * self.P_unit_multiplier) * (self.M * self.M_unit_multiplier) / (R * T);
+        self.ro = Some(ro);
+    }
+    pub fn calculate_Lambda(&mut self, C: f64, ro: Option<f64>, T: f64) -> Result<f64, TransportError> {
+        if T <= 0.0 {
+            return Err(TransportError::InvalidTemperature(T));
+        }
+        if self.M <= 0.0 {
+            return Err(TransportError::InvalidMolarMass(self.M));
+        }
+        if self.P <= 0.0 {
+            return Err(TransportError::InvalidPressure(self.P));
+        }
+        let ro = if let Some(ro ) = ro { ro } else {
+            self.ideal_gas(T);
+             self.ro.unwrap() };
+        if ro <= 0.0 {
+           return Err(TransportError::InvalidDensity(ro));
+     }
 
-    pub fn calculate_Lambda(&mut self, C: f64, ro: f64, T: f64) -> f64 {
         let p = self.input.clone();
         let um = self.L_unit_multiplier.clone();
-
         let M = self.M * self.M_unit_multiplier; // from other unit to kg/mol
         let P = self.P * self.P_unit_multiplier; // from other unit to Pa = N/m2
         let ro = ro * self.ro_unit_multiplier; // from other unit to kg/m3
         let Lambda = calculate_Lambda_(p, um, M, P, C, ro, T);
-        self.Lambda = Lambda.clone();
-        Lambda
+        self.Lambda = Lambda;
+        Ok(Lambda)
     }
-    pub fn create_closure_Lambda(&mut self, C: f64, ro: f64) {
+    pub fn create_closure_Lambda(&mut self, C: f64, ro: f64) -> Result<(), TransportError> {
+        if self.M <= 0.0 {
+            return Err(TransportError::InvalidMolarMass(self.M));
+        }
+        if self.P <= 0.0 {
+            return Err(TransportError::InvalidPressure(self.P));
+        }
+        if ro <= 0.0 {
+            return Err(TransportError::InvalidDensity(ro));
+        }
+
         let p = self.input.clone();
         let um = self.L_unit_multiplier.clone();
-
         let M = self.M * self.M_unit_multiplier; // from other unit to kg/mol
         let P = self.P * self.P_unit_multiplier; // from other unit to Pa = N/m2
         let ro = ro * self.ro_unit_multiplier; // from other unit to kg/m3
         let Lambda = move |t: f64| calculate_Lambda_(p.clone(), um, M, P, C, ro, t);
         self.Lambda_fun = Box::new(Lambda);
-        //    let Lambda = move |t: f64| self.calculate_Lambda_(C, ro, t);
-        //  Box::new(Lambda);
+        Ok(())
     }
-    pub fn create_closure_visc(&mut self) {
+    pub fn create_closure_visc(&mut self) -> Result<(), TransportError> {
+        if self.M <= 0.0 {
+            return Err(TransportError::InvalidMolarMass(self.M));
+        }
+
         let p = self.input.clone();
         let M = self.M * self.M_unit_multiplier;
         let vu = self.V_unit_multiplier;
         let (_, sigma_k, e_k, _, mu) = (p.Form, p.diam, p.well_depth, p.rot_relax, p.dipole);
         let visc = move |t: f64| visc(M, t, e_k, sigma_k, mu) * vu;
         self.V_fun = Box::new(visc);
+        Ok(())
     }
-    pub fn calculate_Lambda_sym(&mut self, C: Expr, ro: Expr) {
+    pub fn calculate_Lambda_sym(&mut self, C: Expr, ro: Expr) -> Result<(), TransportError> {
+        if self.M <= 0.0 {
+            return Err(TransportError::InvalidMolarMass(self.M));
+        }
+        if self.P <= 0.0 {
+            return Err(TransportError::InvalidPressure(self.P));
+        }
+
         let p = self.input.clone();
         let um = self.L_unit_multiplier.clone();
-
         let M = self.M * self.M_unit_multiplier; // from other unit to kg/mol
         let P = self.P * self.P_unit_multiplier; // from other unit to Pa = N/m2
         let ro = ro * Expr::Const(self.ro_unit_multiplier); // from other unit to kg/m3
         let Lambda = calculate_Lambda_sym(p, um, M, P, C, ro);
-        self.Lambda_sym = Some(Lambda.clone());
+        self.Lambda_sym = Some(Lambda);
+        Ok(())
     }
-    pub fn Taylor_series_Lambda(&mut self, C:Expr, ro: Expr, T0: f64, n: usize) -> Expr {
-
-      self.calculate_Lambda_sym( C, ro);
-        let Lambda_series = self.Lambda_sym.clone().unwrap().taylor_series1D_("T", T0, n);
-        Lambda_series
+    pub fn Taylor_series_Lambda(
+        &mut self,
+        C: Expr,
+        ro: Expr,
+        T0: f64,
+        n: usize,
+    ) -> Result<Expr, TransportError> {
+        if T0 <= 0.0 {
+            return Err(TransportError::InvalidTemperature(T0));
+        }
+        self.calculate_Lambda_sym(C, ro)?;
+        let Lambda_series = self
+            .Lambda_sym
+            .clone()
+            .ok_or_else(|| {
+                TransportError::CalculationError("Lambda_sym not calculated".to_string())
+            })?
+            .taylor_series1D_("T", T0, n);
+        Ok(Lambda_series)
     }
 }
 
@@ -417,6 +526,14 @@ impl fmt::Debug for TransportData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TransportData")
             .field("input", &self.input)
+            .field("M", &self.M)
+            .field("P", &self.P)
+            .field("M_unit", &self.M_unit)
+            .field("M_unit_multiplier", &self.M_unit_multiplier)
+            .field("P_unit", &self.P_unit)
+            .field("P_unit_multiplier", &self.P_unit_multiplier)
+            .field("ro_unit", &self.ro_unit)
+            .field("ro_unit_multiplier", &self.ro_unit_multiplier)
             .field("L_unit", &self.L_unit)
             .field("L_unit_multiplier", &self.L_unit_multiplier)
             .field("V_unit", &self.V_unit)
@@ -430,6 +547,167 @@ impl fmt::Debug for TransportData {
             .finish_non_exhaustive() //  The finish_non_exhaustive() method is used to indicate that not all fields are being displayed.
     }
 }
+use super::transport_api::{LambdaUnit, ViscosityUnit};
+use super::transport_api::{
+    lambda_dimension, validate_molar_mass, validate_pressure,
+    validate_temperature, viscosity_dimension,
+};
+impl super::transport_api::TransportCalculator for TransportData {
+    fn extract_coefficients(
+        &mut self,
+        _t: f64,
+    ) -> Result<(), super::transport_api::TransportError> {
+        
+        Ok(())
+    }
+    fn calculate_lambda(
+        &mut self,
+        C: Option<f64>,
+        ro: Option<f64>,
+        T: f64,
+    ) -> Result<f64, super::transport_api::TransportError> {
+        let C = C.unwrap();
+       // let ro = ro.unwrap();
+        validate_temperature(T)?;
+        validate_molar_mass(self.M)?;
+   
+        let Lambda = self.calculate_Lambda(C, ro, T)?;
+        self.Lambda = Lambda;
+        Ok(Lambda)
+    }
+
+    fn calculate_viscosity(&mut self, T: f64) -> Result<f64, super::transport_api::TransportError> {
+        validate_temperature(T)?;
+        let eta = self.calculate_Visc(T)?;
+        self.V = eta;
+        Ok(eta)
+    }
+
+    fn set_lambda_unit(
+        &mut self,
+        unit: Option<LambdaUnit>,
+    ) -> Result<(), super::transport_api::TransportError> {
+        if let Some(unit) = unit {
+            self.L_unit = Some(lambda_dimension(unit));
+        }
+        Ok(())
+    }
+
+    fn set_viscosity_unit(
+        &mut self,
+        unit: Option<ViscosityUnit>,
+    ) -> Result<(), super::transport_api::TransportError> {
+        if let Some(unit) = unit {
+            self.V_unit = Some(viscosity_dimension(unit));
+        }
+        Ok(())
+    }
+
+    fn create_lambda_closure(
+        &mut self,
+        C: Option<f64>,
+        ro: Option<f64>,
+    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+        validate_molar_mass(self.M)?;
+        validate_pressure(self.P)?;
+        let C = C.unwrap();
+        let ro = ro.unwrap();
+        let p = self.input.clone();
+        let um = self.L_unit_multiplier.clone();
+        let M = self.M * self.M_unit_multiplier; // from other unit to kg/mol
+        let P = self.P * self.P_unit_multiplier; // from other unit to Pa = N/m2
+        let ro = ro * self.ro_unit_multiplier; // from other unit to kg/m3
+        let Lambda = move |t: f64| calculate_Lambda_(p.clone(), um, M, P, C, ro, t);
+        self.Lambda_fun = Box::new(Lambda.clone());
+        Ok(Box::new(Lambda))
+    }
+
+    fn create_viscosity_closure(
+        &mut self,
+    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+        validate_molar_mass(self.M)?;
+
+        let p = self.input.clone();
+        let M = self.M * self.M_unit_multiplier;
+        let vu = self.V_unit_multiplier;
+        let (_, sigma_k, e_k, _, mu) = (p.Form, p.diam, p.well_depth, p.rot_relax, p.dipole);
+        let visc = move |t: f64| visc(M, t, e_k, sigma_k, mu) * vu;
+        self.V_fun = Box::new(visc.clone());
+        Ok(Box::new(visc))
+    }
+
+    fn create_symbolic_lambda(
+        &mut self,
+        C: Option<Expr>,
+        ro: Option<Expr>,
+    ) -> Result<(), super::transport_api::TransportError> {
+        validate_molar_mass(self.M)?;
+        validate_pressure(self.P)?;
+
+        let p = self.input.clone();
+        let um = self.L_unit_multiplier;
+        let M = self.M * self.M_unit_multiplier;
+        let P = self.P * self.P_unit_multiplier;
+        let ro = ro.unwrap();
+        let C = C.unwrap();
+
+        let Lambda = calculate_Lambda_sym(p, um, M, P, C, ro);
+        self.Lambda_sym = Some(Lambda);
+        Ok(())
+    }
+
+    fn create_symbolic_viscosity(&mut self) -> Result<(), super::transport_api::TransportError> {
+        validate_molar_mass(self.M)?;
+
+        let p = self.input.clone();
+        let M = self.M * self.M_unit_multiplier;
+        let vu = self.V_unit_multiplier;
+        let (_, sigma_k, e_k, _, mu) = (p.Form, p.diam, p.well_depth, p.rot_relax, p.dipole);
+        let V_sym = visc_sym(M, e_k, sigma_k, mu) * Expr::Const(vu);
+        self.V_sym = Some(V_sym);
+        Ok(())
+    }
+
+    fn taylor_series_lambda(
+        &mut self,
+        C: Option<Expr>,
+        ro: Option<Expr>,
+        t0: f64,
+        n: usize,
+    ) -> Result<Expr, super::transport_api::TransportError> {
+        validate_temperature(t0)?;
+        self.create_symbolic_lambda(C, ro)?;
+        let Lambda_series = self
+            .Lambda_sym
+            .clone()
+            .ok_or_else(|| {
+                super::transport_api::TransportError::CalculationError(
+                    "Lambda_sym not calculated".to_string(),
+                )
+            })?
+            .taylor_series1D_("T", t0, n);
+        Ok(Lambda_series)
+    }
+
+    fn from_serde(
+        &mut self,
+        data: serde_json::Value,
+    ) -> Result<(), super::transport_api::TransportError> {
+        self.input = serde_json::from_value(data)
+            .map_err(|e| super::transport_api::TransportError::SerdeError(e))?;
+        Ok(())
+    }
+    fn set_M(&mut self,M:f64,M_unit:Option<String>) -> Result<(),super::transport_api::TransportError> {
+        self.M = M;
+        self.set_M_unit(M_unit)?;
+        Ok(())
+    }
+    fn set_P(&mut self,P:f64,P_unit:Option<String>) -> Result<(),super::transport_api::TransportError> {
+        self.P = P;
+        self.set_P_unit(P_unit)?;
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -438,6 +716,7 @@ mod tests {
     use crate::Thermodynamics::DBhandlers::NASAdata::NASAdata;
     use crate::Thermodynamics::thermo_lib_api::ThermoData;
     use approx::assert_relative_eq;
+
     #[test]
     fn lambda_calc() {
         /*     N2   */
@@ -452,28 +731,20 @@ mod tests {
             well_depth: 97.0, // e_k
         };
         tr.input = input;
-        tr.set_M_unit(Some("g/mol".to_owned()));
-        tr.set_P_unit(Some("atm".to_owned()));
-        tr.set_V_unit(Some("mkPa*s".to_owned()));
-        tr.set_lambda_unit(Some("mW/m/K".to_owned()));
-        //  tr.set_ro_unit(Some("g/cm3".to_owned())  );
+        tr.set_M_unit(Some("g/mol".to_owned())).unwrap();
+        tr.set_P_unit(Some("atm".to_owned())).unwrap();
+        tr.set_V_unit(Some("mkPa*s".to_owned())).unwrap();
+        tr.set_lambda_unit(Some("mW/m/K".to_owned())).unwrap();
         tr.M = 28.0;
         tr.P = 1.0;
         let T = 300.0;
         let C = 29.15;
         let ro = (tr.P * 101325.0) * (tr.M / 1000.0) / (R * T);
-        let L = tr.calculate_Lambda(C, ro, T);
+        let L = tr.calculate_Lambda(C, Some(ro), T).unwrap();
         assert_relative_eq!(L, 26.0, epsilon = 5.0);
         println!("Lambda: {}", L);
-        /*
-        e_k 'well_depth'
-        sigma_k 'diam'
-        mu - 'dipole'
-        */ //                                 sigma_k, e_k, rot_relax, mu
-        //  calculate_Lambda(1, 29.15,  1.6, 300,  28, 1,  3.3, 97, 4, 0)
-        // print('H2O',Lambda_calc(2, 35.3,  1.6, 400,  16, 1,   2.605, 572.400, 4, 1.844) )
-        // print(Lambda_calc(  2,  2,   1, 600,   115, 10, 6.78, 521.551, 0.0, 0.0))
     }
+
     #[test]
     fn vis_calc() {
         // Пример из книги Рид, Праусниц стр 353
@@ -494,35 +765,29 @@ mod tests {
         let CO_data = sublib.get("CO").unwrap();
         println!("CO_data: {}", CO_data);
         let mut tr = TransportData::new();
-        tr.from_serde(CO_data.clone());
-        tr.set_M_unit(Some("g/mol".to_owned()));
-        tr.set_P_unit(Some("atm".to_owned()));
-        tr.set_V_unit(Some("mkPa*s".to_owned()));
-        tr.set_lambda_unit(Some("mW/m/K".to_owned()));
+        tr.from_serde(CO_data.clone()).unwrap();
+        tr.set_M_unit(Some("g/mol".to_owned())).unwrap();
+        tr.set_P_unit(Some("atm".to_owned())).unwrap();
+        tr.set_V_unit(Some("mkPa*s".to_owned())).unwrap();
+        tr.set_lambda_unit(Some("mW/m/K".to_owned())).unwrap();
         let T = 473.15; // K 
         tr.P = 1.0;
         tr.M = 28.0; // g/mol
-        tr.calculate_Visc(T);
+        let _ = tr.calculate_Visc(T);
         assert_relative_eq!(tr.V, 25.2, epsilon = 5.0);
         println!("Viscosity: {:?} mkPa*s", tr.V);
-    
 
         let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
         let CO_data = sublib.get("CO").unwrap();
         let mut NASA = NASAdata::new();
         let _ = NASA.from_serde(CO_data.clone());
         let _ = NASA.extract_coefficients(T);
-        let _ =  NASA.calculate_Cp_dH_dS(T);
+        let _ = NASA.calculate_Cp_dH_dS(T);
         let Cp = NASA.Cp;
-        println!("Cp: {}", Cp,);
+        println!("Cp: {}", Cp);
         let ro = (tr.P * 101325.0) * (tr.M / 1000.0) / (R * T);
-        let L = tr.calculate_Lambda(Cp, ro, T);
+        let L = tr.calculate_Lambda(Cp, Some(ro), T).unwrap();
         println!("Lambda: {}", L);
-
-        // let lambda = tr.calculate_Lambda(C, ro, T, M, P);
-        //  println!("Lamnda {}", lambda);
-        //  let visc = CEA.calculate_Visc(500.0);
-        //  println!("Lambda, mW/m/K: {:?}, Visc: {:?}", lambda, visc);
     }
 
     #[test]
@@ -532,18 +797,17 @@ mod tests {
         let CO_data = sublib.get("CO").unwrap();
         println!("CO_data: {}", CO_data);
         let mut tr = TransportData::new();
-        tr.from_serde(CO_data.clone());
-        tr.set_M_unit(Some("g/mol".to_owned()));
-        tr.set_P_unit(Some("atm".to_owned()));
-        tr.set_V_unit(Some("mkPa*s".to_owned()));
-        tr.set_lambda_unit(Some("mW/m/K".to_owned()));
+        tr.from_serde(CO_data.clone()).unwrap();
+        tr.set_M_unit(Some("g/mol".to_owned())).unwrap();
+        tr.set_P_unit(Some("atm".to_owned())).unwrap();
+        tr.set_V_unit(Some("mkPa*s".to_owned())).unwrap();
+        tr.set_lambda_unit(Some("mW/m/K".to_owned())).unwrap();
         let T = 473.15; // K 
         tr.P = 1.0;
         tr.M = 28.0; // g/mol
-        tr.calculate_Visc(T);
+        let _ = tr.calculate_Visc(T);
         assert_relative_eq!(tr.V, 25.2, epsilon = 5.0);
         println!("Viscosity: {:?} mkPa*s", tr.V);
-  
 
         let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
         let CO_data = sublib.get("CO").unwrap();
@@ -552,22 +816,21 @@ mod tests {
         let _ = NASA.extract_coefficients(T);
         let _ = NASA.calculate_Cp_dH_dS(T);
         let Cp = NASA.Cp;
-        println!("Cp: {}", Cp,);
+        println!("Cp: {}", Cp);
         let ro = (tr.P * 101325.0) * (tr.M / 1000.0) / (R * T);
-        let L = &tr.calculate_Lambda(Cp, ro, T);
-        tr.create_closure_Lambda(Cp, ro);
+        let L = tr.calculate_Lambda(Cp, Some(ro), T).unwrap();
+        tr.create_closure_Lambda(Cp, ro).unwrap();
         let Lambda_closure = &mut tr.Lambda_fun;
         let Lambda_from_closure = Lambda_closure(T);
-      
-        assert_eq!(Lambda_from_closure, L.clone());
 
-         tr. calculate_Lambda_sym(Expr::Const(Cp), Expr::Const(ro));
-         let L_sym = tr.Lambda_sym.unwrap();
-         let L_from_sym = L_sym.lambdify1D()(T);
+        assert_eq!(Lambda_from_closure, L);
 
-         assert_relative_eq!(L_from_sym, L.clone(),epsilon = 1e-5);
+        tr.calculate_Lambda_sym(Expr::Const(Cp), Expr::Const(ro))
+            .unwrap();
+        let L_sym = tr.Lambda_sym.unwrap();
+        let L_from_sym = L_sym.lambdify1D()(T);
 
-
+        assert_relative_eq!(L_from_sym, L.clone(), epsilon = 1e-5);
 
         // let lambda = tr.calculate_Lambda(C, ro, T, M, P);
         //  println!("Lamnda {}", lambda);
@@ -584,18 +847,17 @@ mod tests {
         let CO_data = sublib.get("CO").unwrap();
         println!("CO_data: {}", CO_data);
         let mut tr = TransportData::new();
-        tr.from_serde(CO_data.clone());
-        tr.set_M_unit(Some("g/mol".to_owned()));
-        tr.set_P_unit(Some("atm".to_owned()));
-        tr.set_V_unit(Some("mkPa*s".to_owned()));
-        tr.set_lambda_unit(Some("mW/m/K".to_owned()));
+        tr.from_serde(CO_data.clone()).unwrap();
+        tr.set_M_unit(Some("g/mol".to_owned())).unwrap();
+        tr.set_P_unit(Some("atm".to_owned())).unwrap();
+        tr.set_V_unit(Some("mkPa*s".to_owned())).unwrap();
+        tr.set_lambda_unit(Some("mW/m/K".to_owned())).unwrap();
         let T = 473.15; // K 
         tr.P = 1.0;
         tr.M = 28.0; // g/mol
-        tr.calculate_Visc(T);
+        let _ = tr.calculate_Visc(T);
         assert_relative_eq!(tr.V, 25.2, epsilon = 5.0);
         println!("Viscosity: {:?} mkPa*s", tr.V);
-   
 
         let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
         let CO_data = sublib.get("CO").unwrap();
@@ -606,26 +868,49 @@ mod tests {
         let Cp_sym = NASA.clone().Cp_sym;
         NASA.calculate_Cp_dH_dS(T);
         let Cp = NASA.Cp;
-        println!("Cp: {}", Cp,);
+        println!("Cp: {}", Cp);
         let ro = (tr.P * 101325.0) * (tr.M / 1000.0) / (R * T);
-        let L = &tr.calculate_Lambda(Cp, ro, T);
-        tr.create_closure_Lambda(Cp, ro);
+        let L = tr.calculate_Lambda(Cp, Some(ro), T).unwrap();
+        tr.create_closure_Lambda(Cp, ro).unwrap();
         let Lambda_closure = &mut tr.Lambda_fun;
         let Lambda_from_closure = Lambda_closure(T);
-      
-        assert_eq!(Lambda_from_closure, L.clone());
 
-        let taylor_series_Lambda = tr. Taylor_series_Lambda(Cp_sym, Expr::Const(ro), 400.0,  4);
+        assert_eq!(Lambda_from_closure, L);
+
+        let taylor_series_Lambda = tr
+            .Taylor_series_Lambda(Cp_sym, Expr::Const(ro), 400.0, 4)
+            .unwrap();
         let taylor_series_Lambda = taylor_series_Lambda.lambdify1D()(T);
         let elapsed = now.elapsed().as_secs_f64();
         println!("Elapsed: {:.2?}", elapsed);
-         assert_relative_eq!(taylor_series_Lambda, L.clone(),epsilon = 1.0);
+        assert_relative_eq!(taylor_series_Lambda, L, epsilon = 1.0);
+    }
 
+    #[test]
+    fn test_invalid_units() {
+        let mut tr = TransportData::new();
+        assert!(tr.set_lambda_unit(Some("invalid_unit".to_owned())).is_err());
+        assert!(tr.set_V_unit(Some("invalid_unit".to_owned())).is_err());
+        assert!(tr.set_M_unit(Some("invalid_unit".to_owned())).is_err());
+        assert!(tr.set_ro_unit(Some("invalid_unit".to_owned())).is_err());
+        assert!(tr.set_P_unit(Some("invalid_unit".to_owned())).is_err());
+    }
 
-
-        // let lambda = tr.calculate_Lambda(C, ro, T, M, P);
-        //  println!("Lamnda {}", lambda);
-        //  let visc = CEA.calculate_Visc(500.0);
-        //  println!("Lambda, mW/m/K: {:?}, Visc: {:?}", lambda, visc);
+    #[test]
+    fn test_invalid_parameters() {
+        let mut tr = TransportData::new();
+        let input = TransportInput {
+            Altname: None,
+            Form: 1.0,
+            diam: 3.3,
+            dipole: 0.0,
+            polar: 0.0,
+            rot_relax: 4.0,
+            well_depth: 97.0,
+        };
+        tr.input = input;
+        tr.M = -1.0;
+        assert!(tr.calculate_Visc(300.0).is_err());
+        assert!(tr.calculate_Lambda(29.15, Some(1.0), -300.0).is_err());
     }
 }

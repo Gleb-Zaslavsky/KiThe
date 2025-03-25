@@ -498,12 +498,10 @@ impl KinData {
         if let Some(reactions) = &self.vec_of_reaction_data {
             let mut vec_of_K_const = Vec::new();
             for reaction in reactions.iter() {
-               
                 let K_vec = reaction.K_const_for_T_range(T0, Tend, n, pres, concentrations.clone());
-             
+
                 let max_K = K_vec.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
                 vec_of_K_const.push(*max_K);
-              
             }
             // Let us sort vec_of_K_const and rearrange vec_of_equations and vec_of_shortcuts in the same order,
             // Create a vector of indices
@@ -517,7 +515,7 @@ impl KinData {
             // Use the sorted indices to rearrange all vectors
             vec_of_K_const = indices.iter().map(|&i| vec_of_K_const[i]).collect();
             let vec_of_equations = self.rearrange_vectors(indices, save_rearranged);
-           // println!("reaction {:?}",vec_of_K_const);
+            // println!("reaction {:?}",vec_of_K_const);
             // create pretty table
             Self::pretty_print_constants(vec_of_equations, vec_of_K_const.clone());
             Ok(vec_of_K_const)
@@ -787,9 +785,17 @@ mod tests {
         assert_eq!(max_k_values.len(), 2);
         let k_expected1 = 1e13 * f64::exp(-20000.0 / (R * 1200.0));
         let k_expected2 = 1e12 * f64::exp(-20000.0 / (R * 1200.0));
-        println!("max_k_values {} {}", f64::log10(max_k_values[0]), f64::log10(max_k_values[1]));
-        println!("k expected {}, {}",f64::log10( k_expected1), f64::log10(k_expected2));
-        assert_relative_eq!(max_k_values[0],  k_expected1, epsilon = 1e0);
-        assert_relative_eq!(max_k_values[1],  k_expected2, epsilon = 1e0);
+        println!(
+            "max_k_values {} {}",
+            f64::log10(max_k_values[0]),
+            f64::log10(max_k_values[1])
+        );
+        println!(
+            "k expected {}, {}",
+            f64::log10(k_expected1),
+            f64::log10(k_expected2)
+        );
+        assert_relative_eq!(max_k_values[0], k_expected1, epsilon = 1e0);
+        assert_relative_eq!(max_k_values[1], k_expected2, epsilon = 1e0);
     }
 }

@@ -6,17 +6,17 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
-
+use prettytable::{Cell, Row, Table};
 #[allow(non_upper_case_globals)]
 const R: f64 = 1.987; // кал/(K·моль)
 #[allow(non_upper_case_globals)]
 const Rsym: Expr = Expr::Const(1.987);
-
+use crate::Thermodynamics::DBhandlers::NIST_parser::{SearchType, Phase};
 #[derive(Debug)]
 pub enum NASAError {
     NoCoefficientsFound { temperature: f64, range: String },
     InvalidTemperatureRange,
-    DeserializationError(String),
+    SerdeError(String),
     UnsupportedUnit(String),
 }
 
@@ -33,7 +33,7 @@ impl fmt::Display for NASAError {
             NASAError::InvalidTemperatureRange => {
                 write!(f, "Invalid temperature range in coefficient data")
             }
-            NASAError::DeserializationError(msg) => {
+            NASAError::SerdeError(msg) => {
                 write!(f, "Failed to deserialize NASA data: {}", msg)
             }
             NASAError::UnsupportedUnit(unit) => {
@@ -228,8 +228,8 @@ impl NASAdata {
     }
     /// takes serde Value and parse it into structure
     pub fn from_serde(&mut self, serde: Value) -> Result<(), NASAError> {
-        self.input = serde_json::from_value(serde)
-            .map_err(|e| NASAError::DeserializationError(e.to_string()))?;
+        self.input =
+            serde_json::from_value(serde).map_err(|e| NASAError::SerdeError(e.to_string()))?;
         Ok(())
     }
 
@@ -353,20 +353,17 @@ impl NASAdata {
     }
     // Taylor series expension for Cp, dH, dS
     pub fn Taylor_series_Cp_dH_dS(&mut self, T0: f64, n: usize) -> (Expr, Expr, Expr) {
-        
-
         let Cp = self.Cp_sym.clone();
-       
+
         let Cp_taylor = Cp.taylor_series1D("T", T0, n);
 
         let dh = self.dh_sym.clone();
-      
+
         let dh_taylor = dh.taylor_series1D("T", T0, n);
 
         let ds = self.ds_sym.clone();
-   
+
         let ds_taylor = ds.taylor_series1D("T", T0, n);
-        ;
         (Cp_taylor, dh_taylor, ds_taylor)
     }
     /// calculate heat capacity, enthalpy, and entropy as a function of given temperature using the NASA7 format
@@ -376,6 +373,43 @@ impl NASAdata {
         self.Cp = unit * Cp(t, a, b, c, d, e);
         self.dh = unit * dh(t, a, b, c, d, e, f);
         self.ds = unit * ds(t, a, b, c, d, e, g);
+    }
+
+    pub fn pretty_print(&self) {
+        let data = self.input.Cp.clone();
+        let len =data.len();
+        // take temperatrure ranges from the data
+        let T: Vec<f64> = if len == 25 {data.clone().into_iter().take(4).collect()}
+        else if  len == 17 {data.clone().into_iter().take(3).collect()}
+        else if len == 9 {data.clone().into_iter().take(2).collect()}
+        else { vec![] };
+        // tale coefficients of the polynomial
+        let coeffs:Vec<Vec<f64>> = if len == 25 {data[4..].chunks(7).map(|chunk| chunk.to_vec()).collect()}
+        else if len == 17 {data[3..].chunks(7).map(|chunk| chunk.to_vec()).collect()}
+        else if len == 9 {data[2..].chunks(7).map(|chunk| chunk.to_vec()).collect()}
+        else { vec![] };
+
+        let mut table = Table::new();
+        let mut header_row = vec![Cell::new("Coefficients")];
+        for pairs in T.windows(2) {
+            let Tstr = format!("{:} - {:}   ", pairs[0], pairs[1]);
+            header_row.push(Cell::new(&Tstr));
+        }
+        table.add_row(Row::new(header_row));
+
+        let coeffs_names = vec!["A", "B", "C", "D", "E", "F", "G",];
+        for (i, coeff_name) in coeffs_names.iter().enumerate() {
+            let mut row = vec![Cell::new(coeff_name)];
+
+            for coeff_for_every_T in coeffs.iter() {
+                let coeff = coeff_for_every_T[i].to_string();
+                row.push(Cell::new(&format!("{:}", coeff)));
+            }
+            table.add_row(Row::new(row));
+        }
+
+        table.printstd();
+
     }
 }
 impl fmt::Debug for NASAdata {
@@ -401,7 +435,7 @@ impl Clone for NASAdata {
         let unit = self.unit_multiplier;
         NASAdata {
             input: self.input.clone(),
-            unit: self.unit.clone(),
+            unit: self.unit.clone(), 
             unit_multiplier: self.unit_multiplier,
             coeffs: self.coeffs,
             Cp: self.Cp,
@@ -432,6 +466,99 @@ impl Clone for NASAdata {
             dh_sym: self.dh_sym.clone(),
             ds_sym: self.ds_sym.clone(),
         }
+    }
+}
+use super::thermo_api::{EnergyUnit, ThermoCalculator, ThermoError, energy_dimension};
+impl ThermoCalculator for NASAdata {
+    fn newinstance(&mut self) -> Result<(), ThermoError> {
+        *self = NASAdata::new();
+        Ok(())
+    }
+    fn extract_model_coefficients(&mut self, t: f64) -> Result<(), ThermoError> {
+        self.extract_coefficients(t)?;
+        Ok(())
+    }
+    fn set_unit(&mut self, unit: Option<EnergyUnit>) -> Result<(), ThermoError> {
+        if let Some(unit) = unit {
+            self.set_unit(&energy_dimension(unit))
+                .map_err(|e| ThermoError::UnsupportedUnit(e.to_string()))?;
+        }
+        Ok(())
+    }
+    fn from_serde(&mut self, serde: Value) -> Result<(), ThermoError> {
+        self.from_serde(serde)
+            .map_err(|e| ThermoError::DeserializationError(e.to_string()))?;
+        Ok(())
+    }
+    fn calculate_Cp_dH_dS(&mut self, temperature: f64) -> Result<(), ThermoError> {
+        self.calculate_Cp_dH_dS(temperature);
+        Ok(())
+    }
+    fn create_closures_Cp_dH_dS(&mut self) -> Result<(), ThermoError> {
+        self.create_closures_Cp_dH_dS();
+        Ok(())
+    }
+    fn create_sym_Cp_dH_dS(&mut self) -> Result<(), ThermoError> {
+        self.create_sym_Cp_dH_dS();
+        Ok(())
+    }
+    fn Taylor_series_cp_dh_ds(
+        &mut self,
+        temperature: f64,
+        order: usize,
+    ) -> Result<(Expr, Expr, Expr), ThermoError> {
+        let (Cp, dh, ds) = self.Taylor_series_Cp_dH_dS(temperature, order);
+        Ok((Cp, dh, ds))
+    }
+    fn pretty_print_data(&self) -> Result<(), ThermoError> {
+         self.pretty_print();
+        Ok(())
+    }
+    fn renew_base(&mut self, sub_name:String, search_type: SearchType, phase: Phase) -> Result<(), ThermoError> {
+        Ok(())
+    }
+    fn get_coefficients(&self) -> Result<Vec<f64>, ThermoError> {
+        let (a, b, c, d, e, f, g) = self.coeffs;
+        Ok(vec![a, b, c, d, e, f, g])
+    }
+    fn print_instance(&self) -> Result<(),ThermoError> {
+        println!("{:?}", &self);
+        Ok(())
+    }
+    fn get_Cp(&self) -> Result<f64, ThermoError> {
+        Ok(self.Cp)
+    }
+
+    fn get_dh(&self) -> Result<f64, ThermoError> {
+        Ok(self.dh)
+    }
+
+    fn get_ds(&self) -> Result<f64, ThermoError> {
+        Ok(self.ds)
+    }
+
+    fn get_C_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, ThermoError> {
+        Ok(self.clone().C_fun)
+    }
+
+    fn get_dh_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, ThermoError> {
+        Ok(self.clone().dh_fun)
+    }
+
+    fn get_ds_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, ThermoError> {
+        Ok(self.clone().ds_fun)
+    }
+
+    fn get_Cp_sym(&self) -> Result<Expr, ThermoError> {
+        Ok(self.Cp_sym.clone())
+    }
+
+    fn get_dh_sym(&self) -> Result<Expr, ThermoError> {
+        Ok(self.dh_sym.clone())
+    }
+
+    fn get_ds_sym(&self) -> Result<Expr, ThermoError> {
+        Ok(self.ds_sym.clone())
     }
 }
 
@@ -569,4 +696,148 @@ mod tests {
         let ds_value = ds_T(400.0);
         assert_relative_eq!(ds_value, NASA.ds, epsilon = 1e-6);
     }
+
+    #[test]
+    fn test_thermo_calculator_error_handling() {
+        let mut nasa = NASAdata::new();
+
+        // Test invalid temperature range
+        let result = nasa.extract_model_coefficients(1000.0);
+        assert!(result.is_err());
+
+        // Test invalid unit
+        let result = nasa.set_unit(&energy_dimension(EnergyUnit::J));
+        assert!(result.is_ok());
+
+        // Test invalid serde data
+        let invalid_data = serde_json::json!({
+            "invalid": "data"
+        });
+        let result = nasa.from_serde(invalid_data);
+        assert!(result.is_err());
+    }
+    #[test]
+    fn test_with_real_data_ThermoCalc() {
+        use super::ThermoCalculator;
+        use crate::Thermodynamics::DBhandlers::thermo_api::create_thermal_by_name;
+        let thermo_data = ThermoData::new();
+        let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
+        let CO_data = sublib.get("CO").unwrap();
+        println!(" CO data \n {} \n", CO_data);
+        let mut NASA = create_thermal_by_name("NASA_gas");
+        let _ = NASA.newinstance();
+        let _ = NASA.from_serde(CO_data.clone());
+      //  assert!(NASA.from_serde(CO_data.clone()).is_ok()); 
+        print!(" this is NASA instance: \n");
+        let _ = NASA.print_instance();
+        assert!(NASA.extract_model_coefficients(400.0).is_ok());
+
+        let coeffs_len = {
+            let coeff_vec = NASA.get_coefficients().unwrap();
+            coeff_vec.len()
+        };
+        assert_eq!(coeffs_len, 7);
+
+        let _ = NASA.calculate_Cp_dH_dS(400.0);
+        let Cp = NASA.get_Cp().unwrap();
+        let dh = NASA.get_dh().unwrap();
+        let ds = NASA.get_ds().unwrap();
+
+        println!("Cp: {}, dh: {}, ds: {}", Cp, dh, ds);
+        assert!(Cp > 0.0);
+        assert!(dh < 0.0);
+        assert!(ds > 0.0);
+
+        let t = 400.0;
+        let _ = NASA.create_closures_Cp_dH_dS();
+
+        let Cp_fun = NASA.get_C_fun().unwrap();
+        let dh_fun = NASA.get_dh_fun().unwrap();
+        let ds_fun = NASA.get_ds_fun().unwrap();
+        assert_relative_eq!((Cp_fun)(t), Cp, epsilon = 1e-6);
+        assert_relative_eq!((dh_fun)(t), dh, epsilon = 1e-6);
+        assert_relative_eq!((ds_fun)(t), ds, epsilon = 1e-6);
+
+        let _ = NASA.create_sym_Cp_dH_dS();
+        let Cp_sym = NASA.get_Cp_sym().unwrap();
+        let Cp_T = Cp_sym.lambdify1D();
+        let Cp_value = Cp_T(400.0);
+        assert_relative_eq!(Cp_value, Cp, epsilon = 1e-6);
+        
+        let dh_sym = NASA.get_dh_sym().unwrap();
+        let dh_T = dh_sym.lambdify1D();
+        let dh_value = dh_T(400.0);
+        assert_relative_eq!(dh_value, dh, epsilon = 1e-6);
+        
+        let ds_sym = NASA.get_ds_sym().unwrap();
+        let ds_T = ds_sym.lambdify1D();
+        let ds_value = ds_T(400.0);
+        assert_relative_eq!(ds_value, ds, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_thermo_calculator_nasa() {
+       // use super::EnergyUnit;
+        let thermo_data = ThermoData::new();
+        let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
+        let CO_data = sublib.get("CO").unwrap();
+        let mut nasa = NASAdata::new();
+
+        // Test newinstance
+        assert!(nasa.newinstance().is_ok());
+
+        // Test from_serde
+        assert!(nasa.from_serde(CO_data.clone()).is_ok());
+
+        // Test set_unit
+       // assert!(nasa.set_unit(Some(EnergyUnit::J)).is_ok());
+       // assert!(nasa.set_unit(Some(EnergyUnit::Cal)).is_ok());
+
+        // Test extract_model_coefficients
+        assert!(nasa.extract_model_coefficients(400.0).is_ok());
+
+        // Test calculate_Cp_dH_dS
+        nasa.calculate_Cp_dH_dS(400.0);
+        assert!(nasa.Cp > 0.0);
+        assert!(nasa.dh != 0.0);
+        assert!(nasa.ds != 0.0);
+
+        // Test create_closures_Cp_dH_dS
+        nasa.create_closures_Cp_dH_dS();
+        let t = 400.0;
+        assert_relative_eq!((nasa.C_fun)(t), nasa.Cp, epsilon = 1e-6);
+        assert_relative_eq!((nasa.dh_fun)(t), nasa.dh, epsilon = 1e-6);
+        assert_relative_eq!((nasa.ds_fun)(t), nasa.ds, epsilon = 1e-6);
+
+        // Test create_sym_Cp_dH_dS
+        nasa.create_sym_Cp_dH_dS();
+        let Cp_sym = &nasa.Cp_sym;
+        let Cp_T = Cp_sym.lambdify1D();
+        let Cp_value = Cp_T(400.0);
+        let dh_sym = &nasa.dh_sym;
+        let dh_T = dh_sym.lambdify1D();
+        let dh_value = dh_T(400.0);
+        let ds_sym = &nasa.ds_sym;
+        let ds_T = ds_sym.lambdify1D();
+        let ds_value = ds_T(400.0);
+        assert_relative_eq!(Cp_value, nasa.Cp, epsilon = 1e-6);
+        assert_relative_eq!(dh_value, nasa.dh,epsilon = 1e-6 );
+        assert_relative_eq!(ds_value, nasa.ds,epsilon = 1e-6 );
+
+        // Test Taylor_series_cp_dh_ds
+        let (Cp_taylor, dh_taylor, ds_taylor) = nasa.Taylor_series_cp_dh_ds(300.0, 3).unwrap();
+        let Cp_taylor_T = Cp_taylor.lambdify1D();
+        let Cp_value = Cp_taylor_T(400.0);
+        assert_relative_eq!( Cp_value, nasa.Cp, epsilon = 3.0);   
+        assert!(!Cp_taylor.is_zero());
+        assert!(!dh_taylor.is_zero());
+        assert!(!ds_taylor.is_zero());
+
+        // Test pretty_print_data
+        assert!(nasa.pretty_print_data().is_ok());
+
+  
+    }
+
+
 }
