@@ -1,9 +1,9 @@
+use crate::Thermodynamics::DBhandlers::NIST_parser::{Phase, SearchType};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use enum_dispatch::enum_dispatch;
 use serde_json::Value;
 use std::error::Error;
 use std::fmt;
-use crate::Thermodynamics::DBhandlers::NIST_parser::{SearchType, Phase};
 #[derive(Debug)]
 pub enum ThermoError {
     NoCoefficientsFound { temperature: f64, range: String },
@@ -96,9 +96,14 @@ pub trait ThermoCalculator {
         order: usize,
     ) -> Result<(Expr, Expr, Expr), ThermoError>;
     fn pretty_print_data(&self) -> Result<(), ThermoError>;
-    fn renew_base(&mut self,sub_name:String, search_type: SearchType, phase: Phase) -> Result<(), ThermoError>;
+    fn renew_base(
+        &mut self,
+        sub_name: String,
+        search_type: SearchType,
+        phase: Phase,
+    ) -> Result<(), ThermoError>;
     fn get_coefficients(&self) -> Result<Vec<f64>, ThermoError>;
-    
+
     // Add getter methods for thermodynamic properties
     fn print_instance(&self) -> Result<(), ThermoError>;
     fn get_Cp(&self) -> Result<f64, ThermoError>;
@@ -111,6 +116,7 @@ pub trait ThermoCalculator {
     fn get_dh_sym(&self) -> Result<Expr, ThermoError>;
     fn get_ds_sym(&self) -> Result<Expr, ThermoError>;
 }
+#[derive(Clone, Debug)]
 #[enum_dispatch(ThermoCalculator)]
 pub enum ThermoEnum {
     NIST(super::NISTdata::NISTdata),
@@ -119,17 +125,17 @@ pub enum ThermoEnum {
 
 pub enum ThermoType {
     NIST,
-    NASA
+    NASA,
 }
 
-pub fn create_thermal(calc_type: ThermoType)-> ThermoEnum {
+pub fn create_thermal(calc_type: ThermoType) -> ThermoEnum {
     match calc_type {
         ThermoType::NIST => ThermoEnum::NIST(super::NISTdata::NISTdata::new()),
         ThermoType::NASA => ThermoEnum::NASA(super::NASAdata::NASAdata::new()),
     }
 }
 
-pub fn create_thermal_by_name(calc_name:&str) ->ThermoEnum  {
+pub fn create_thermal_by_name(calc_name: &str) -> ThermoEnum {
     match calc_name {
         "Cantera_nasa_base_gas"
         | "NASA_gas"
@@ -137,9 +143,9 @@ pub fn create_thermal_by_name(calc_name:&str) ->ThermoEnum  {
         | "Cantera_nasa_base_cond"
         | "nuig_thermo"
         | "NASA"
-        | "NASA7" =>ThermoEnum::NASA(super::NASAdata::NASAdata::new()),
+        | "NASA7" => ThermoEnum::NASA(super::NASAdata::NASAdata::new()),
         "NIST" | "NIST9" => ThermoEnum::NIST(super::NISTdata::NISTdata::new()),
-        _=> panic!("no such library!"),
+        _ => panic!("no such library!"),
     }
 }
 pub fn energy_dimension(unit: EnergyUnit) -> String {

@@ -1,11 +1,11 @@
 use crate::Thermodynamics::DBhandlers::NIST_parser::{
     NistInput, calculate_cp, calculate_dh, calculate_s,
 };
+use crate::Thermodynamics::DBhandlers::NIST_parser::{NistParser, Phase, SearchType};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
-use crate::Thermodynamics::DBhandlers::NIST_parser::{SearchType, Phase, NistParser};
 use serde_json::Value;
-use std::{error::Error, fmt::Debug};
 use std::fmt;
+use std::{error::Error, fmt::Debug};
 
 #[derive(Debug)]
 pub enum NISTError {
@@ -13,7 +13,6 @@ pub enum NISTError {
     InvalidTemperatureRange,
     DeserializationError(String),
     UnsupportedUnit(String),
-
 }
 
 impl fmt::Display for NISTError {
@@ -131,7 +130,11 @@ impl NISTdata {
         self.input.pretty_print();
         Ok(())
     }
-    pub fn Taylor_series_Cp_dH_dS(self, T0: f64, n: usize) -> Result<(Expr, Expr, Expr), NISTError> {
+    pub fn Taylor_series_Cp_dH_dS(
+        self,
+        T0: f64,
+        n: usize,
+    ) -> Result<(Expr, Expr, Expr), NISTError> {
         let Cp = self.Cp_sym.clone();
 
         let Cp_taylor = Cp.taylor_series1D("T", T0, n);
@@ -144,10 +147,13 @@ impl NISTdata {
 
         let ds_taylor = ds.taylor_series1D("T", T0, n);
         Ok((Cp_taylor, dh_taylor, ds_taylor))
-
-
     }
-    pub fn get_data_from_NIST(&mut self, sub_name:String, search_type: SearchType, phase: Phase) -> Result<(), NISTError>{
+    pub fn get_data_from_NIST(
+        &mut self,
+        sub_name: String,
+        search_type: SearchType,
+        phase: Phase,
+    ) -> Result<(), NISTError> {
         let parser_instance = NistParser::new();
         match parser_instance.get_data(&sub_name, search_type, phase) {
             Ok(input) => {
@@ -156,8 +162,8 @@ impl NISTdata {
             }
             Err(e) => Err(NISTError::NoCoefficientsFound {
                 temperature: 0.0, // Default temperature since we don't have a specific one
-                range: format!("Failed to get data for {}: {}", sub_name, e)
-            })
+                range: format!("Failed to get data for {}: {}", sub_name, e),
+            }),
         }
     }
 }
@@ -315,19 +321,25 @@ impl ThermoCalculator for NISTdata {
         Ok((Cp, dh, ds))
     }
     fn pretty_print_data(&self) -> Result<(), ThermoError> {
-         self.pretty_print()?;
+        self.pretty_print()?;
         Ok(())
     }
-    fn renew_base(&mut self, sub_name:String, search_type: SearchType, phase: Phase) -> Result<(), ThermoError> {
+    fn renew_base(
+        &mut self,
+        sub_name: String,
+        search_type: SearchType,
+        phase: Phase,
+    ) -> Result<(), ThermoError> {
         self.get_data_from_NIST(sub_name, search_type, phase)?;
-       
-        Ok(())}
+
+        Ok(())
+    }
     fn get_coefficients(&self) -> Result<Vec<f64>, ThermoError> {
-        let  (a, b, c, d, e, f, g, h )= self.input.coeffs.unwrap();
+        let (a, b, c, d, e, f, g, h) = self.input.coeffs.unwrap();
         Ok(vec![a, b, c, d, e, f, g, h])
-    }    
-    
-    fn print_instance(&self) -> Result<(),ThermoError> {
+    }
+
+    fn print_instance(&self) -> Result<(), ThermoError> {
         println!("{:?}", &self);
         Ok(())
     }
@@ -368,37 +380,34 @@ impl ThermoCalculator for NISTdata {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use approx::assert_relative_eq;
     use super::ThermoCalculator;
     use crate::Thermodynamics::DBhandlers::thermo_api::create_thermal_by_name;
+    use approx::assert_relative_eq;
 
     #[test]
     fn test_thermo_calculator_nist() {
-
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("CO".to_owned(), SearchType::All, Phase::Gas);
 
         // Test newinstance
-     //   assert!(nist.newinstance().is_ok());
+        //   assert!(nist.newinstance().is_ok());
 
         // Test from_serde
 
-
         // Test set_unit
-     //   assert!(nist.set_unit(EnergyUnit::J).is_ok()) ;
-     //   assert!(nist.set_unit(Some(EnergyUnit::Cal)).is_ok());
+        //   assert!(nist.set_unit(EnergyUnit::J).is_ok()) ;
+        //   assert!(nist.set_unit(Some(EnergyUnit::Cal)).is_ok());
 
         // Test extract_model_coefficients
-       // assert!(nist.extract_model_coefficients(400.0).is_ok());
+        // assert!(nist.extract_model_coefficients(400.0).is_ok());
 
         // Test calculate_Cp_dH_dS
-        let _ =  nist.extract_coefficients(400.0);
-        nist.calculate_Cp_dH_dS(400.0); 
+        let _ = nist.extract_coefficients(400.0);
+        nist.calculate_Cp_dH_dS(400.0);
         assert!(nist.Cp > 0.0);
         assert!(nist.dh != 0.0);
         assert!(nist.ds != 0.0);
@@ -425,15 +434,12 @@ mod tests {
 
         // Test pretty_print_data
         assert!(nist.pretty_print_data().is_ok());
-
-       
     }
 
     #[test]
     fn test_thermo_calculator_nist_error_handling() {
         let mut nist = NISTdata::new();
 
-      
         // Test invalid serde data
         let invalid_data = serde_json::json!({
             "invalid": "data"
@@ -445,19 +451,17 @@ mod tests {
     #[test]
     fn test_nist_clone() {
         let mut nist = NISTdata::new();
-  
+
         let _ = nist.get_data_from_NIST("CO".to_owned(), SearchType::All, Phase::Gas);
-        
-  
-      
-        let _ =  nist.extract_coefficients(400.0);
+
+        let _ = nist.extract_coefficients(400.0);
         nist.calculate_Cp_dH_dS(400.0);
         nist.create_closures_Cp_dH_dS();
         nist.create_sym_Cp_dH_dS();
 
         // Clone the instance
-        let  mut nist_clone = nist.clone();
-        let _ =  nist_clone.extract_coefficients(400.0);
+        let mut nist_clone = nist.clone();
+        let _ = nist_clone.extract_coefficients(400.0);
         // Test that the clone has the same values
         assert_relative_eq!(nist_clone.Cp, nist.Cp, epsilon = 1e-6);
         assert_relative_eq!(nist_clone.dh, nist.dh, epsilon = 1e-6);
@@ -475,30 +479,30 @@ mod tests {
         assert_eq!(nist_clone.ds_sym.to_string(), nist.ds_sym.to_string());
     }
     #[test]
-    fn ThermoCalculator_nist(){
+    fn ThermoCalculator_nist() {
         let mut nist = create_thermal_by_name("NIST");
         let _ = nist.newinstance();
         let _ = nist.renew_base("CO".to_owned(), SearchType::All, Phase::Gas);
         let T = 400.0;
         let _ = nist.extract_model_coefficients(T);
-        let _ = nist.calculate_Cp_dH_dS(400.0); 
+        let _ = nist.calculate_Cp_dH_dS(400.0);
         let Cp = nist.get_Cp().unwrap();
         let dh = nist.get_dh().unwrap();
         let ds = nist.get_ds().unwrap();
         assert!(Cp > 0.0);
-        assert!(dh  != 0.0);
-        assert!(ds  != 0.0);
+        assert!(dh != 0.0);
+        assert!(ds != 0.0);
 
         // Test create_closures_Cp_dH_dS
-        let _ =nist.create_closures_Cp_dH_dS();
+        let _ = nist.create_closures_Cp_dH_dS();
         let t = 400.0;
-        assert_relative_eq!((nist.get_C_fun().unwrap() )(t), Cp, epsilon = 1e-6);
-        assert_relative_eq!((nist.get_dh_fun().unwrap() )(t), dh, epsilon = 1e-6);
+        assert_relative_eq!((nist.get_C_fun().unwrap())(t), Cp, epsilon = 1e-6);
+        assert_relative_eq!((nist.get_dh_fun().unwrap())(t), dh, epsilon = 1e-6);
         assert_relative_eq!((nist.get_ds_fun().unwrap())(t), ds, epsilon = 1e-6);
 
         // Test create_sym_Cp_dH_dS
         let _ = nist.create_sym_Cp_dH_dS();
-        let Cp_sym = &nist.get_Cp_sym().unwrap(); 
+        let Cp_sym = &nist.get_Cp_sym().unwrap();
         let Cp_T = Cp_sym.lambdify1D();
         let Cp_value = Cp_T(400.0);
         assert_relative_eq!(Cp_value, Cp, epsilon = 1e-6);
@@ -511,8 +515,5 @@ mod tests {
 
         // Test pretty_print_data
         assert!(nist.pretty_print_data().is_ok());
-
-
-
     }
 }

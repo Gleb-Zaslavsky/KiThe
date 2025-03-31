@@ -1,6 +1,6 @@
 [package]
 name = "KiThe"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 author = "Gleb Zasllavsky"
 license = "MIT"
@@ -24,7 +24,7 @@ scraper = "0.23.1"
 url = "2.4"
 thiserror = "2.0.12"
 enum_dispatch = "0.3.13"
-
+tempfile = "3.19.1"
 [profile.release]
 lto = true
 codegen-units = 1

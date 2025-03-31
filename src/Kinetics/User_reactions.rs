@@ -11,8 +11,11 @@ use prettytable::{Cell, Row, Table, row};
 use serde_json::json;
 use serde_json::{Value, from_reader, to_writer_pretty};
 use std::collections::HashMap;
-use std::fs::File;
+
+use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
 
 use log::{info, warn};
 /// THE STRUCT KinData COLLECTS ALL THE INFORMATION ABOUT SPECIFIC REACTIONS, WHICH ARE NEEDED FOR FURTHER CALCULATIONS.
@@ -160,6 +163,13 @@ impl KinData {
             let addres = format!("{}_{}", task_library, reaction);
             full_addres.push(addres);
         }
+        self.vec_of_pairs = Some(
+            reactions
+                .clone()
+                .iter()
+                .map(|s| (task_library.clone(), s.to_owned()))
+                .collect(),
+        );
         self.shortcut_reactions = Some(full_addres);
         self.substances = found_mech.reactants;
     }
@@ -292,6 +302,77 @@ impl KinData {
             warn!("KinData: no vector of Values");
             Ok(())
         }
+    }
+    ///  algorithm: 1) takes the name of the file being created as an argument.
+    ///  2) checks if there is a "KINETICS" or "REACTIONS" header there; if not, it adds them, and under this header, it adds records to a
+    /// form available for use by serde (i.e., of the json type): "library_name":{"reaction_name":{ ...reaction data
+
+    pub fn create_kinetics_document(
+        &self,
+        file_name: &str,
+    ) -> std::io::Result<HashMap<String, HashMap<String, Value>>> {
+        let path = Path::new(file_name);
+        let file_exists = path.exists();
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .append(true)
+            .open(file_name)?;
+
+        if !file_exists {
+            writeln!(file, "KINETICS")?;
+        } else {
+            let reader = BufReader::new(File::open(file_name)?);
+            let has_header = reader.lines().any(|line| {
+                line.as_ref().unwrap().clone().trim().to_uppercase() == "KINETICS"
+                    || line.as_ref().unwrap().clone().trim().to_uppercase() == "REACTIONS"
+            });
+
+            if !has_header {
+                writeln!(file, "\nKINETICS")?;
+            }
+        }
+        let mut hashmap_to_save: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        // if got info of pairs - use pairs
+        if let Some(pairs) = self.vec_of_pairs.clone() {
+            for (i, (library_name, reaction_name)) in pairs.iter().enumerate() {
+                let reactdata = self.vec_of_reaction_Values.as_ref().unwrap()[i].clone();
+                if hashmap_to_save.contains_key(library_name) {
+                    hashmap_to_save
+                        .get_mut(library_name)
+                        .unwrap()
+                        .insert(reaction_name.clone(), reactdata);
+                } else {
+                    hashmap_to_save.insert(
+                        library_name.clone(),
+                        HashMap::from([(reaction_name.clone(), reactdata)]),
+                    );
+                }
+            }
+        } else if let Some(map_of_reactions) = self.map_of_reactions.clone() {
+            for (i, (library_name, reactions)) in map_of_reactions.iter().enumerate() {
+                let reactdata = self.vec_of_reaction_Values.as_ref().unwrap()[i].clone();
+                for reaction_id in reactions.iter() {
+                    if hashmap_to_save.contains_key(library_name) {
+                        hashmap_to_save
+                            .get_mut(library_name)
+                            .unwrap()
+                            .insert(reaction_id.clone(), reactdata.clone());
+                    } else {
+                        hashmap_to_save.insert(
+                            library_name.clone(),
+                            HashMap::from([(reaction_id.clone(), reactdata.clone())]),
+                        );
+                    }
+                } // 
+            } // for library_name
+        } //else if 
+
+        writeln!(file, "{}", serde_json::to_string_pretty(&hashmap_to_save)?)?;
+
+        Ok(hashmap_to_save)
     }
     /// load kinetic data of reactions with their shortcuts from json, where they are stored as dictionaries {"shortcut":"kinetic data"}
     /// and save them into vector of kinetic data serde values and vector of shortcuts
@@ -605,6 +686,8 @@ mod tests {
     use crate::Kinetics::mechfinder_api::ReactionType;
     use crate::Kinetics::mechfinder_api::kinetics::ElementaryStruct;
     use approx::assert_relative_eq;
+    use std::fs;
+    use tempfile::NamedTempFile;
     const R: f64 = 8.314;
     #[test]
     fn test_user_reactions_new() {
@@ -797,5 +880,80 @@ mod tests {
         );
         assert_relative_eq!(max_k_values[0], k_expected1, epsilon = 1e0);
         assert_relative_eq!(max_k_values[1], k_expected2, epsilon = 1e0);
+    }
+    #[test]
+    fn test_create_kinetics_document() {
+        let mut kin_data = KinData::new();
+
+        // Test with vec_of_pairs
+        kin_data.vec_of_pairs = Some(vec![
+            ("Library1".to_string(), "Reaction1".to_string()),
+            ("Library1".to_string(), "Reaction2".to_string()),
+            ("Library2".to_string(), "Reaction3".to_string()),
+        ]);
+        kin_data.vec_of_reaction_Values = Some(vec![
+            json!({"data": "value1"}),
+            json!({"data": "value2"}),
+            json!({"data": "value3"}),
+        ]);
+
+        let temp_file = NamedTempFile::new().unwrap();
+        let file_path = temp_file.path().to_str().unwrap();
+
+        let result = kin_data.create_kinetics_document(file_path);
+        assert!(result.is_ok());
+
+        let content = fs::read_to_string(file_path).unwrap();
+        assert!(content.contains("KINETICS"));
+        assert!(content.contains("Library1"));
+        assert!(content.contains("Library2"));
+        assert!(content.contains("Reaction1"));
+        assert!(content.contains("Reaction2"));
+        assert!(content.contains("Reaction3"));
+        assert!(content.contains("value1"));
+        assert!(content.contains("value2"));
+        assert!(content.contains("value3"));
+
+        // Test with map_of_reactions
+        kin_data.vec_of_pairs = None;
+        kin_data.map_of_reactions = Some(HashMap::from([
+            (
+                "Library3".to_string(),
+                vec!["Reaction4".to_string(), "Reaction5".to_string()],
+            ),
+            ("Library4".to_string(), vec!["Reaction6".to_string()]),
+        ]));
+        kin_data.vec_of_reaction_Values =
+            Some(vec![json!({"data": "value4"}), json!({"data": "value5"})]);
+
+        let temp_file = NamedTempFile::new().unwrap();
+        let file_path = temp_file.path().to_str().unwrap();
+
+        let result = kin_data.create_kinetics_document(file_path);
+        assert!(result.is_ok());
+
+        let content = fs::read_to_string(file_path).unwrap();
+        assert!(content.contains("KINETICS"));
+        assert!(content.contains("Library3"));
+        assert!(content.contains("Library4"));
+        assert!(content.contains("Reaction4"));
+        assert!(content.contains("Reaction5"));
+        assert!(content.contains("Reaction6"));
+        assert!(content.contains("value4"));
+        assert!(content.contains("value5"));
+
+        // Test with existing file and header
+        let temp_file = NamedTempFile::new().unwrap();
+        let file_path = temp_file.path().to_str().unwrap();
+        fs::write(file_path, "KINETICS\nSome existing content\n").unwrap();
+
+        let result = kin_data.create_kinetics_document(file_path);
+        assert!(result.is_ok());
+
+        let content = fs::read_to_string(file_path).unwrap();
+        assert_eq!(content.matches("KINETICS").count(), 1);
+        assert!(content.contains("Some existing content"));
+        assert!(content.contains("Library3"));
+        assert!(content.contains("Library4"));
     }
 }

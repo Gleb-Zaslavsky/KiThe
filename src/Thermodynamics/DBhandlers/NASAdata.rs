@@ -1,4 +1,5 @@
 use RustedSciThe::symbolic::symbolic_engine::Expr;
+use prettytable::{Cell, Row, Table};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -6,12 +7,11 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
-use prettytable::{Cell, Row, Table};
 #[allow(non_upper_case_globals)]
 const R: f64 = 1.987; // кал/(K·моль)
 #[allow(non_upper_case_globals)]
 const Rsym: Expr = Expr::Const(1.987);
-use crate::Thermodynamics::DBhandlers::NIST_parser::{SearchType, Phase};
+use crate::Thermodynamics::DBhandlers::NIST_parser::{Phase, SearchType};
 #[derive(Debug)]
 pub enum NASAError {
     NoCoefficientsFound { temperature: f64, range: String },
@@ -377,17 +377,27 @@ impl NASAdata {
 
     pub fn pretty_print(&self) {
         let data = self.input.Cp.clone();
-        let len =data.len();
+        let len = data.len();
         // take temperatrure ranges from the data
-        let T: Vec<f64> = if len == 25 {data.clone().into_iter().take(4).collect()}
-        else if  len == 17 {data.clone().into_iter().take(3).collect()}
-        else if len == 9 {data.clone().into_iter().take(2).collect()}
-        else { vec![] };
+        let T: Vec<f64> = if len == 25 {
+            data.clone().into_iter().take(4).collect()
+        } else if len == 17 {
+            data.clone().into_iter().take(3).collect()
+        } else if len == 9 {
+            data.clone().into_iter().take(2).collect()
+        } else {
+            vec![]
+        };
         // tale coefficients of the polynomial
-        let coeffs:Vec<Vec<f64>> = if len == 25 {data[4..].chunks(7).map(|chunk| chunk.to_vec()).collect()}
-        else if len == 17 {data[3..].chunks(7).map(|chunk| chunk.to_vec()).collect()}
-        else if len == 9 {data[2..].chunks(7).map(|chunk| chunk.to_vec()).collect()}
-        else { vec![] };
+        let coeffs: Vec<Vec<f64>> = if len == 25 {
+            data[4..].chunks(7).map(|chunk| chunk.to_vec()).collect()
+        } else if len == 17 {
+            data[3..].chunks(7).map(|chunk| chunk.to_vec()).collect()
+        } else if len == 9 {
+            data[2..].chunks(7).map(|chunk| chunk.to_vec()).collect()
+        } else {
+            vec![]
+        };
 
         let mut table = Table::new();
         let mut header_row = vec![Cell::new("Coefficients")];
@@ -397,7 +407,7 @@ impl NASAdata {
         }
         table.add_row(Row::new(header_row));
 
-        let coeffs_names = vec!["A", "B", "C", "D", "E", "F", "G",];
+        let coeffs_names = vec!["A", "B", "C", "D", "E", "F", "G"];
         for (i, coeff_name) in coeffs_names.iter().enumerate() {
             let mut row = vec![Cell::new(coeff_name)];
 
@@ -409,7 +419,6 @@ impl NASAdata {
         }
 
         table.printstd();
-
     }
 }
 impl fmt::Debug for NASAdata {
@@ -435,7 +444,7 @@ impl Clone for NASAdata {
         let unit = self.unit_multiplier;
         NASAdata {
             input: self.input.clone(),
-            unit: self.unit.clone(), 
+            unit: self.unit.clone(),
             unit_multiplier: self.unit_multiplier,
             coeffs: self.coeffs,
             Cp: self.Cp,
@@ -511,17 +520,22 @@ impl ThermoCalculator for NASAdata {
         Ok((Cp, dh, ds))
     }
     fn pretty_print_data(&self) -> Result<(), ThermoError> {
-         self.pretty_print();
+        self.pretty_print();
         Ok(())
     }
-    fn renew_base(&mut self, sub_name:String, search_type: SearchType, phase: Phase) -> Result<(), ThermoError> {
+    fn renew_base(
+        &mut self,
+        _sub_name: String,
+        _search_type: SearchType,
+        _phase: Phase,
+    ) -> Result<(), ThermoError> {
         Ok(())
     }
     fn get_coefficients(&self) -> Result<Vec<f64>, ThermoError> {
         let (a, b, c, d, e, f, g) = self.coeffs;
         Ok(vec![a, b, c, d, e, f, g])
     }
-    fn print_instance(&self) -> Result<(),ThermoError> {
+    fn print_instance(&self) -> Result<(), ThermoError> {
         println!("{:?}", &self);
         Ok(())
     }
@@ -727,7 +741,7 @@ mod tests {
         let mut NASA = create_thermal_by_name("NASA_gas");
         let _ = NASA.newinstance();
         let _ = NASA.from_serde(CO_data.clone());
-      //  assert!(NASA.from_serde(CO_data.clone()).is_ok()); 
+        //  assert!(NASA.from_serde(CO_data.clone()).is_ok());
         print!(" this is NASA instance: \n");
         let _ = NASA.print_instance();
         assert!(NASA.extract_model_coefficients(400.0).is_ok());
@@ -763,12 +777,12 @@ mod tests {
         let Cp_T = Cp_sym.lambdify1D();
         let Cp_value = Cp_T(400.0);
         assert_relative_eq!(Cp_value, Cp, epsilon = 1e-6);
-        
+
         let dh_sym = NASA.get_dh_sym().unwrap();
         let dh_T = dh_sym.lambdify1D();
         let dh_value = dh_T(400.0);
         assert_relative_eq!(dh_value, dh, epsilon = 1e-6);
-        
+
         let ds_sym = NASA.get_ds_sym().unwrap();
         let ds_T = ds_sym.lambdify1D();
         let ds_value = ds_T(400.0);
@@ -777,7 +791,7 @@ mod tests {
 
     #[test]
     fn test_thermo_calculator_nasa() {
-       // use super::EnergyUnit;
+        // use super::EnergyUnit;
         let thermo_data = ThermoData::new();
         let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
         let CO_data = sublib.get("CO").unwrap();
@@ -790,8 +804,8 @@ mod tests {
         assert!(nasa.from_serde(CO_data.clone()).is_ok());
 
         // Test set_unit
-       // assert!(nasa.set_unit(Some(EnergyUnit::J)).is_ok());
-       // assert!(nasa.set_unit(Some(EnergyUnit::Cal)).is_ok());
+        // assert!(nasa.set_unit(Some(EnergyUnit::J)).is_ok());
+        // assert!(nasa.set_unit(Some(EnergyUnit::Cal)).is_ok());
 
         // Test extract_model_coefficients
         assert!(nasa.extract_model_coefficients(400.0).is_ok());
@@ -821,23 +835,19 @@ mod tests {
         let ds_T = ds_sym.lambdify1D();
         let ds_value = ds_T(400.0);
         assert_relative_eq!(Cp_value, nasa.Cp, epsilon = 1e-6);
-        assert_relative_eq!(dh_value, nasa.dh,epsilon = 1e-6 );
-        assert_relative_eq!(ds_value, nasa.ds,epsilon = 1e-6 );
+        assert_relative_eq!(dh_value, nasa.dh, epsilon = 1e-6);
+        assert_relative_eq!(ds_value, nasa.ds, epsilon = 1e-6);
 
         // Test Taylor_series_cp_dh_ds
         let (Cp_taylor, dh_taylor, ds_taylor) = nasa.Taylor_series_cp_dh_ds(300.0, 3).unwrap();
         let Cp_taylor_T = Cp_taylor.lambdify1D();
         let Cp_value = Cp_taylor_T(400.0);
-        assert_relative_eq!( Cp_value, nasa.Cp, epsilon = 3.0);   
+        assert_relative_eq!(Cp_value, nasa.Cp, epsilon = 3.0);
         assert!(!Cp_taylor.is_zero());
         assert!(!dh_taylor.is_zero());
         assert!(!ds_taylor.is_zero());
 
         // Test pretty_print_data
         assert!(nasa.pretty_print_data().is_ok());
-
-  
     }
-
-
 }

@@ -142,6 +142,9 @@ impl ReactionData {
         }
     }
 }
+
+///parses each reaction data into a ReactionData struct, validates the reaction type, and stores the parsed data in a hash map (reaction_data_hash) with a unique code (react_code) as the key.
+///  It also collects the reaction equations in a vector (equations).
 pub fn parse_kinetic_data(
     big_mech: &str,
     vec_of_reactions: &[String],
@@ -425,7 +428,7 @@ mod tests {
             panic!("Expected ThreeBody variant");
         }
     }
-   
+
     fn test_pres_deserialization() {
         let reaction_data: ReactionData =
             serde_json::from_str(PRES_TESTING_JSON).expect("Error parsing JSON: {err:?}");

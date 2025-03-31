@@ -424,7 +424,12 @@ impl TransportData {
         let ro = (self.P * self.P_unit_multiplier) * (self.M * self.M_unit_multiplier) / (R * T);
         self.ro = Some(ro);
     }
-    pub fn calculate_Lambda(&mut self, C: f64, ro: Option<f64>, T: f64) -> Result<f64, TransportError> {
+    pub fn calculate_Lambda(
+        &mut self,
+        C: f64,
+        ro: Option<f64>,
+        T: f64,
+    ) -> Result<f64, TransportError> {
         if T <= 0.0 {
             return Err(TransportError::InvalidTemperature(T));
         }
@@ -434,12 +439,15 @@ impl TransportData {
         if self.P <= 0.0 {
             return Err(TransportError::InvalidPressure(self.P));
         }
-        let ro = if let Some(ro ) = ro { ro } else {
+        let ro = if let Some(ro) = ro {
+            ro
+        } else {
             self.ideal_gas(T);
-             self.ro.unwrap() };
+            self.ro.unwrap()
+        };
         if ro <= 0.0 {
-           return Err(TransportError::InvalidDensity(ro));
-     }
+            return Err(TransportError::InvalidDensity(ro));
+        }
 
         let p = self.input.clone();
         let um = self.L_unit_multiplier.clone();
@@ -450,23 +458,28 @@ impl TransportData {
         self.Lambda = Lambda;
         Ok(Lambda)
     }
-    pub fn create_closure_Lambda(&mut self, C: f64, ro: f64) -> Result<(), TransportError> {
+    pub fn create_closure_Lambda(&mut self, C: f64, ro: Option<f64>) -> Result<(), TransportError> {
+        let um = self.ro_unit_multiplier;
+        let M = self.M * self.M_unit_multiplier; // from other unit to kg/mol
+        let P = self.P * self.P_unit_multiplier; // from other unit to Pa = N/m2
         if self.M <= 0.0 {
             return Err(TransportError::InvalidMolarMass(self.M));
         }
         if self.P <= 0.0 {
             return Err(TransportError::InvalidPressure(self.P));
         }
-        if ro <= 0.0 {
-            return Err(TransportError::InvalidDensity(ro));
+        let ro_fn: Box<dyn Fn(f64) -> f64> = if let Some(ro) = ro {
+            Box::new(move |_| ro * um)
+        } else {
+            Box::new(move |T| um * P * M / (R * T))
+        };
+        if ro_fn(300.0) <= 0.0 {
+            return Err(TransportError::InvalidDensity(ro_fn(300.0)));
         }
 
         let p = self.input.clone();
         let um = self.L_unit_multiplier.clone();
-        let M = self.M * self.M_unit_multiplier; // from other unit to kg/mol
-        let P = self.P * self.P_unit_multiplier; // from other unit to Pa = N/m2
-        let ro = ro * self.ro_unit_multiplier; // from other unit to kg/m3
-        let Lambda = move |t: f64| calculate_Lambda_(p.clone(), um, M, P, C, ro, t);
+        let Lambda = move |t: f64| calculate_Lambda_(p.clone(), um, M, P, C, ro_fn(t), t);
         self.Lambda_fun = Box::new(Lambda);
         Ok(())
     }
@@ -549,15 +562,14 @@ impl fmt::Debug for TransportData {
 }
 use super::transport_api::{LambdaUnit, ViscosityUnit};
 use super::transport_api::{
-    lambda_dimension, validate_molar_mass, validate_pressure,
-    validate_temperature, viscosity_dimension,
+    lambda_dimension, validate_molar_mass, validate_pressure, validate_temperature,
+    viscosity_dimension,
 };
 impl super::transport_api::TransportCalculator for TransportData {
     fn extract_coefficients(
         &mut self,
         _t: f64,
     ) -> Result<(), super::transport_api::TransportError> {
-        
         Ok(())
     }
     fn calculate_lambda(
@@ -567,10 +579,10 @@ impl super::transport_api::TransportCalculator for TransportData {
         T: f64,
     ) -> Result<f64, super::transport_api::TransportError> {
         let C = C.unwrap();
-       // let ro = ro.unwrap();
+        // let ro = ro.unwrap();
         validate_temperature(T)?;
         validate_molar_mass(self.M)?;
-   
+
         let Lambda = self.calculate_Lambda(C, ro, T)?;
         self.Lambda = Lambda;
         Ok(Lambda)
@@ -697,15 +709,59 @@ impl super::transport_api::TransportCalculator for TransportData {
             .map_err(|e| super::transport_api::TransportError::SerdeError(e))?;
         Ok(())
     }
-    fn set_M(&mut self,M:f64,M_unit:Option<String>) -> Result<(),super::transport_api::TransportError> {
+    fn set_M(
+        &mut self,
+        M: f64,
+        M_unit: Option<String>,
+    ) -> Result<(), super::transport_api::TransportError> {
         self.M = M;
         self.set_M_unit(M_unit)?;
         Ok(())
     }
-    fn set_P(&mut self,P:f64,P_unit:Option<String>) -> Result<(),super::transport_api::TransportError> {
+    fn set_P(
+        &mut self,
+        P: f64,
+        P_unit: Option<String>,
+    ) -> Result<(), super::transport_api::TransportError> {
         self.P = P;
         self.set_P_unit(P_unit)?;
         Ok(())
+    }
+}
+
+impl Clone for TransportData {
+    fn clone(&self) -> Self {
+        // Create a new instance with default closures
+        let mut cloned = TransportData {
+            input: self.input.clone(),
+            M: self.M,
+            P: self.P,
+            ro: self.ro,
+            M_unit: self.M_unit.clone(),
+            M_unit_multiplier: self.M_unit_multiplier,
+            P_unit: self.P_unit.clone(),
+            P_unit_multiplier: self.P_unit_multiplier,
+            ro_unit: self.ro_unit.clone(),
+            ro_unit_multiplier: self.ro_unit_multiplier,
+            L_unit: self.L_unit.clone(),
+            L_unit_multiplier: self.L_unit_multiplier,
+            V_unit: self.V_unit.clone(),
+            V_unit_multiplier: self.V_unit_multiplier,
+            Lambda: self.Lambda,
+            V: self.V,
+            Lambda_fun: Box::new(|x| x), // Default closure
+            V_fun: Box::new(|x| x),      // Default closure
+            Lambda_sym: self.Lambda_sym.clone(),
+            V_sym: self.V_sym.clone(),
+        };
+
+        // Recreate the closures if necessary
+
+        let _ = cloned.create_closure_Lambda(self.Lambda, self.ro);
+
+        let _ = cloned.create_closure_visc();
+
+        cloned
     }
 }
 
@@ -819,7 +875,7 @@ mod tests {
         println!("Cp: {}", Cp);
         let ro = (tr.P * 101325.0) * (tr.M / 1000.0) / (R * T);
         let L = tr.calculate_Lambda(Cp, Some(ro), T).unwrap();
-        tr.create_closure_Lambda(Cp, ro).unwrap();
+        tr.create_closure_Lambda(Cp, Some(ro)).unwrap();
         let Lambda_closure = &mut tr.Lambda_fun;
         let Lambda_from_closure = Lambda_closure(T);
 
@@ -871,7 +927,7 @@ mod tests {
         println!("Cp: {}", Cp);
         let ro = (tr.P * 101325.0) * (tr.M / 1000.0) / (R * T);
         let L = tr.calculate_Lambda(Cp, Some(ro), T).unwrap();
-        tr.create_closure_Lambda(Cp, ro).unwrap();
+        tr.create_closure_Lambda(Cp, Some(ro)).unwrap();
         let Lambda_closure = &mut tr.Lambda_fun;
         let Lambda_from_closure = Lambda_closure(T);
 

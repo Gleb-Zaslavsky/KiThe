@@ -3,6 +3,11 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
+
+use std::fs::OpenOptions;
+
+use std::io::{BufRead, BufReader};
+use std::path::Path;
 // /Basis functionality to search in library of thermodymical and heat mass transfer data
 pub struct ThermoData {
     pub VecOfSubsAdresses: Vec<(String, String)>,
@@ -175,6 +180,47 @@ impl ThermoData {
         }
         table.printstd();
     }
+
+    pub fn create_substance_document(
+        &self,
+        file_name: &str,
+    ) -> std::io::Result<HashMap<String, HashMap<String, Value>>> {
+        let path = Path::new(file_name);
+        let file_exists = path.exists();
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .append(true)
+            .open(file_name)?;
+
+        if !file_exists {
+            writeln!(file, "SUBSTANCES DATA")?;
+        } else {
+            let reader = BufReader::new(File::open(file_name)?);
+            let has_header = reader.lines().any(|line| {
+                line.as_ref().unwrap().clone().trim().to_uppercase() == "SUBSTANCES DATA"
+                    || line.as_ref().unwrap().clone().trim().to_uppercase() == "SUBS DATA"
+            });
+
+            if !has_header {
+                writeln!(file, "\nSUBSTANCES DATA")?;
+            }
+        }
+        let hashmap_to_save: HashMap<String, HashMap<String, Value>> =
+            self.hashmap_of_thermo_data.clone();
+        if hashmap_to_save.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "hashmap_to_save is empty",
+            ));
+        }
+
+        writeln!(file, "{}", serde_json::to_string_pretty(&hashmap_to_save)?)?;
+
+        Ok(hashmap_to_save)
+    }
     pub fn what_handler_to_use(lib_name: &str) -> String {
         match lib_name {
             "Cantera_nasa_base_gas"
@@ -189,5 +235,166 @@ impl ThermoData {
             "Aramco_transpot" => "transport".to_string(),
             _ => lib_name.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_create_substance_document_new_file() {
+        let mut thermo_data = ThermoData::new();
+        let mut test_data = HashMap::new();
+        let mut substance_data = HashMap::new();
+        substance_data.insert(
+            "test_lib".to_string(),
+            serde_json::json!({"test_key": "test_value"}),
+        );
+        test_data.insert("test_substance".to_string(), substance_data);
+        thermo_data.hashmap_of_thermo_data = test_data;
+
+        let temp_file = NamedTempFile::new().unwrap();
+        let file_path = temp_file.path().to_str().unwrap();
+
+        let result = thermo_data.create_substance_document(file_path);
+        println!("result: {:#?}", result);
+        assert!(result.is_ok());
+
+        let mut file_content = String::new();
+        temp_file
+            .as_file()
+            .read_to_string(&mut file_content)
+            .unwrap();
+
+        assert!(file_content.contains("SUBSTANCES DATA"));
+        assert!(file_content.contains("test_substance"));
+        assert!(file_content.contains("test_lib"));
+        assert!(file_content.contains("test_key"));
+        assert!(file_content.contains("test_value"));
+    }
+    #[test]
+    fn NamedTempFiletest() {
+        let text = "Brian was here. Briefly.";
+
+        // Create a file inside of `env::temp_dir()`.
+        let mut named_temp_file = NamedTempFile::new().unwrap();
+
+        // Re-open it.
+        let mut file2 = named_temp_file.reopen().unwrap();
+
+        // Write some test data to the first handle.
+        named_temp_file.write_all(text.as_bytes()).unwrap();
+
+        // Read the test data using the second handle.
+        let mut buf = String::new();
+        file2.read_to_string(&mut buf).unwrap();
+        assert_eq!(buf, text);
+    }
+    #[test]
+    fn test_create_substance_document_existing_file() {
+        let mut thermo_data = ThermoData::new();
+        let mut test_data = HashMap::new();
+        let mut substance_data = HashMap::new();
+        substance_data.insert(
+            "test_lib".to_string(),
+            serde_json::json!({"test_key": "test_value"}),
+        );
+        test_data.insert("test_substance".to_string(), substance_data);
+        thermo_data.hashmap_of_thermo_data = test_data;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        // Re-open it.
+        let mut file2 = temp_file.reopen().unwrap();
+        writeln!(temp_file, "Existing content").unwrap();
+        temp_file.flush().unwrap();
+        let mut file_content = String::new();
+        file2.read_to_string(&mut file_content).unwrap();
+        println!("content \n {:#?}", file_content);
+        assert!(file_content.contains("Existing content"));
+
+        let file_path = temp_file.path().to_str().unwrap();
+        let result = thermo_data.create_substance_document(file_path);
+        assert!(result.is_ok());
+
+        let mut file_content = String::new();
+        file2.read_to_string(&mut file_content).unwrap();
+        println!("content \n \n {:#?}", file_content);
+        //    assert!(file_content.contains("Existing content\n"));
+        assert!(file_content.contains("SUBSTANCES DATA"));
+        assert!(file_content.contains("test_substance"));
+        assert!(file_content.contains("test_lib"));
+        assert!(file_content.contains("test_key"));
+        assert!(file_content.contains("test_value"));
+    }
+
+    #[test]
+    fn test_create_substance_document_empty_data() {
+        let thermo_data = ThermoData::new();
+        let temp_file = NamedTempFile::new().unwrap();
+        let file_path = temp_file.path().to_str().unwrap();
+
+        let result = thermo_data.create_substance_document(file_path);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    }
+    #[test]
+    fn test_with_real_data() {
+        let mut td = ThermoData::new();
+        let subdata = td.LibThermoData.get("NASA_gas").unwrap();
+        let CO_data = subdata.get("CO").unwrap();
+        println!("CO_data: {}", CO_data);
+        td.search_libs_for_subs(
+            vec!["CO".to_owned()],
+            Some(vec!["Cantera_nasa_base_gas".to_owned()]),
+        );
+        println!(
+            "td.hashmap_of_thermo_data: {:#?}",
+            td.hashmap_of_thermo_data
+        );
+        let mut temp_file = NamedTempFile::new().unwrap();
+        // Re-open it.
+        let mut file2 = temp_file.reopen().unwrap();
+        writeln!(temp_file, "Existing content").unwrap();
+        let file_path = temp_file.path().to_str().unwrap();
+        let result = td.create_substance_document(file_path);
+        assert!(result.is_ok());
+        let mut file_content = String::new();
+        file2.read_to_string(&mut file_content).unwrap();
+        println!("content \n \n {:#?}", file_content);
+        assert!(file_content.contains("Existing content\n"));
+        assert!(file_content.contains("SUBSTANCES DATA"));
+    }
+    #[test]
+    fn test_with_real_data2() {
+        let mut td = ThermoData::new();
+        let subdata = td.LibThermoData.get("NASA_gas").unwrap();
+        let CO_data = subdata.get("CO").unwrap();
+        println!("CO_data: {}", CO_data);
+        td.search_libs_for_subs(
+            vec!["CO".to_owned(), "O2".to_owned()],
+            Some(vec![
+                "Cantera_nasa_base_gas".to_owned(),
+                "Aramco_transport".to_owned(),
+            ]),
+        );
+        println!(
+            "td.hashmap_of_thermo_data: {:#?}",
+            td.hashmap_of_thermo_data
+        );
+        let mut temp_file = NamedTempFile::new().unwrap();
+        // Re-open it.
+        let mut file2 = temp_file.reopen().unwrap();
+        writeln!(temp_file, "Existing content").unwrap();
+        let file_path = temp_file.path().to_str().unwrap();
+        let result = td.create_substance_document(file_path);
+        assert!(result.is_ok());
+        let mut file_content = String::new();
+        file2.read_to_string(&mut file_content).unwrap();
+        // println!("content \n \n {:#?}", file_content);
+        assert!(file_content.contains("Existing content\n"));
+        assert!(file_content.contains("SUBSTANCES DATA"));
     }
 }

@@ -42,7 +42,7 @@ pub struct NistInput {
     pub cp: Option<Vec<Vec<f64>>>,
     pub T: Option<Vec<Vec<f64>>>,
     pub dh: Option<f64>,
-    pub coeffs: Option<(f64, f64, f64, f64,f64, f64, f64, f64 )>,
+    pub coeffs: Option<(f64, f64, f64, f64, f64, f64, f64, f64)>,
     ds: Option<f64>,
     molar_mass: Option<f64>,
     unit: Option<String>,
@@ -116,7 +116,7 @@ impl<C: HttpClient> NistParser<C> {
         let html_of_substance = self.fetch_page(&url_of_substance)?;
 
         let final_url = self.get_final_url(&html_of_substance, &url_of_substance, phase)?;
-        let html_of_phase = self.fetch_page(&final_url)?;
+        let _html_of_phase = self.fetch_page(&final_url)?;
         println!("\n \n Final URL found: {}", final_url);
         //   println!("\n \n HTML of phase: {}", html_of_phase);
 
@@ -462,13 +462,14 @@ impl NistInput {
         table.printstd();
     }
 
-    pub fn extract_coefficients(&mut self, T: f64) -> Result<(f64, f64, f64, f64,f64, f64, f64, f64 ), std::io::Error> {
-    
+    pub fn extract_coefficients(
+        &mut self,
+        T: f64,
+    ) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64), std::io::Error> {
         for (i, T_pairs) in self.T.clone().unwrap().iter().enumerate() {
             if T >= T_pairs[0] && T <= T_pairs[1] {
-          
                 let coeffs = self.cp.clone().unwrap()[i].clone();
-                
+
                 let (a, b, c, d, e, f, g, h) = (
                     coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5], coeffs[6],
                     coeffs[7],
@@ -482,28 +483,25 @@ impl NistInput {
             std::io::ErrorKind::NotFound,
             "No temperature range found for the given temperature",
         ))
-        
     }
     pub fn caclc_cp_dh_ds(&self, T: f64) -> Result<(f64, f64, f64), std::io::Error> {
         let um = self.unit_multiplier;
-            if let Some(coeffs )  = self.coeffs.clone(){
-                let T = T / 1000.0;
-                let (a, b, c, d, e, f, g, h) = (
-                    coeffs.0, coeffs.1, coeffs.2, coeffs.3, coeffs.4, coeffs.5, coeffs.6,
-                    coeffs.7,
-                );
-                let Cp = um * calculate_cp(T, a, b, c, d, e);
-                let dh0 = self.dh.clone().unwrap();
-                //  let ds0 = self.ds.clone().unwrap();
-                let dh = um * (calculate_dh(T, a, b, c, d, e, f, g, h) + dh0);
-                let ds = um * calculate_s(T, a, b, c, d, e, f, g, h);
-                println!(
-                    "\n \n Cp: {:?} \n \n dh: {:?} \n \n ds: {:?} \n \n",
-                    Cp, dh, ds
-                );
-                return Ok((Cp, dh, ds));
-    
-            }
+        if let Some(coeffs) = self.coeffs.clone() {
+            let T = T / 1000.0;
+            let (a, b, c, d, e, f, g, h) = (
+                coeffs.0, coeffs.1, coeffs.2, coeffs.3, coeffs.4, coeffs.5, coeffs.6, coeffs.7,
+            );
+            let Cp = um * calculate_cp(T, a, b, c, d, e);
+            let dh0 = self.dh.clone().unwrap();
+            //  let ds0 = self.ds.clone().unwrap();
+            let dh = um * (calculate_dh(T, a, b, c, d, e, f, g, h) + dh0);
+            let ds = um * calculate_s(T, a, b, c, d, e, f, g, h);
+            println!(
+                "\n \n Cp: {:?} \n \n dh: {:?} \n \n ds: {:?} \n \n",
+                Cp, dh, ds
+            );
+            return Ok((Cp, dh, ds));
+        }
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "No temperature range found for the given temperature",
@@ -512,20 +510,20 @@ impl NistInput {
 
     pub fn create_sym_cp_dh_ds(&self) -> Result<(Expr, Expr, Expr), std::io::Error> {
         let um = Expr::Const(self.unit_multiplier);
-        if let Some(coeffs )  = self.coeffs.clone(){
+        if let Some(coeffs) = self.coeffs.clone() {
             let (a, b, c, d, e, f, g, h) = (
-                coeffs.0, coeffs.1, coeffs.2, coeffs.3, coeffs.4, coeffs.5, coeffs.6,
-                coeffs.7,);
-                let Cp = um.clone() * calculate_cp_sym(a, b, c, d, e);
-                let dh0 = self.dh.clone().unwrap();
-                let dh = um.clone() * (calculate_dh_sym(a, b, c, d, e, f, g, h) + Expr::Const(dh0));
-                let ds = um.clone() * calculate_s_sym(a, b, c, d, e, f, g, h);
-                println!(
-                    "\n \n Cp: {:?} \n \n dh: {:?} \n \n ds: {:?} \n \n",
-                    Cp, dh, ds
-                );
-                return Ok((Cp.symplify(), dh.symplify(), ds.symplify()));
-            }
+                coeffs.0, coeffs.1, coeffs.2, coeffs.3, coeffs.4, coeffs.5, coeffs.6, coeffs.7,
+            );
+            let Cp = um.clone() * calculate_cp_sym(a, b, c, d, e);
+            let dh0 = self.dh.clone().unwrap();
+            let dh = um.clone() * (calculate_dh_sym(a, b, c, d, e, f, g, h) + Expr::Const(dh0));
+            let ds = um.clone() * calculate_s_sym(a, b, c, d, e, f, g, h);
+            println!(
+                "\n \n Cp: {:?} \n \n dh: {:?} \n \n ds: {:?} \n \n",
+                Cp, dh, ds
+            );
+            return Ok((Cp.symplify(), dh.symplify(), ds.symplify()));
+        }
 
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -535,7 +533,6 @@ impl NistInput {
 
     pub fn create_closure_cp_dh_ds(
         &self,
-    
     ) -> Result<
         (
             Box<dyn Fn(f64) -> f64>,
@@ -544,22 +541,18 @@ impl NistInput {
         ),
         std::io::Error,
     > {
-       
-            let um = self.unit_multiplier;
-            if let Some(coeffs )  = self.coeffs.clone(){
-                let (a, b, c, d, e, f, g, h) = (
-                    coeffs.0, coeffs.1, coeffs.2, coeffs.3, coeffs.4, coeffs.5, coeffs.6,
-                    coeffs.7,
-                );
-                let Cp = Box::new(move |t| um * calculate_cp(t / 1000.0, a, b, c, d, e));
-                let dh0 = self.dh.clone().unwrap();
-                let dh = Box::new(move |t| {
-                    um * (calculate_dh(t / 1000.0, a, b, c, d, e, f, g, h) + dh0)
-                });
-                let ds = Box::new(move |t| um * calculate_s(t / 1000.0, a, b, c, d, e, f, g, h));
-                return Ok((Cp, dh, ds));
-            }
-        
+        let um = self.unit_multiplier;
+        if let Some(coeffs) = self.coeffs.clone() {
+            let (a, b, c, d, e, f, g, h) = (
+                coeffs.0, coeffs.1, coeffs.2, coeffs.3, coeffs.4, coeffs.5, coeffs.6, coeffs.7,
+            );
+            let Cp = Box::new(move |t| um * calculate_cp(t / 1000.0, a, b, c, d, e));
+            let dh0 = self.dh.clone().unwrap();
+            let dh =
+                Box::new(move |t| um * (calculate_dh(t / 1000.0, a, b, c, d, e, f, g, h) + dh0));
+            let ds = Box::new(move |t| um * calculate_s(t / 1000.0, a, b, c, d, e, f, g, h));
+            return Ok((Cp, dh, ds));
+        }
 
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -815,7 +808,7 @@ mod tests {
         let T = 1200.15;
         let mut result = parser.get_data(substance, SearchType::All, Phase::Liquid);
         assert!(result.is_ok());
-   
+
         if let Ok(data) = result.as_mut() {
             let _ = data.extract_coefficients(T);
             let (Cp, dh, ds) = data

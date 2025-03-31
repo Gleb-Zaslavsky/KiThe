@@ -495,8 +495,8 @@ impl TransportCalculator for CEAdata {
 
     fn taylor_series_lambda(
         &mut self,
-        C: Option<Expr>,
-        ro: Option<Expr>,
+        _C: Option<Expr>,
+        _ro: Option<Expr>,
         t0: f64,
         n: usize,
     ) -> Result<Expr, super::transport_api::TransportError> {
@@ -513,12 +513,18 @@ impl TransportCalculator for CEAdata {
         Ok(())
     }
 
-    fn set_M(&mut self,M:f64,M_unit:Option<String>) -> Result<(),super::transport_api::TransportError> {
-  
+    fn set_M(
+        &mut self,
+        _M: f64,
+        _M_unit: Option<String>,
+    ) -> Result<(), super::transport_api::TransportError> {
         Ok(())
     }
-    fn set_P(&mut self,P:f64,P_unit:Option<String>) -> Result<(),super::transport_api::TransportError> {
-
+    fn set_P(
+        &mut self,
+        _P: f64,
+        _P_unit: Option<String>,
+    ) -> Result<(), super::transport_api::TransportError> {
         Ok(())
     }
 }

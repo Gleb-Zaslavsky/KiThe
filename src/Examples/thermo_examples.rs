@@ -171,7 +171,7 @@ pub fn thermo_examples(thermotask: usize) {
             println!("Cp: {}", Cp,);
             let ro = (tr.P * 101325.0) * (tr.M / 1000.0) / (R * T);
             let L = &tr.calculate_Lambda(Cp, Some(ro), T).unwrap();
-            let _ = tr.create_closure_Lambda(Cp, ro);
+            let _ = tr.create_closure_Lambda(Cp, Some(ro));
             let Lambda_closure = &mut tr.Lambda_fun;
             let Lambda_from_closure = Lambda_closure(T);
 
@@ -190,7 +190,6 @@ pub fn thermo_examples(thermotask: usize) {
             assert_relative_eq!(taylor_series_Lambda, L.clone(), epsilon = 3.0);
         }
         5 => {
-
             use crate::Thermodynamics::DBhandlers::thermo_api::ThermoCalculator;
             use crate::Thermodynamics::DBhandlers::thermo_api::create_thermal_by_name;
             let thermo_data = ThermoData::new();
@@ -200,53 +199,53 @@ pub fn thermo_examples(thermotask: usize) {
             let mut NASA = create_thermal_by_name("NASA_gas");
             let _ = NASA.newinstance();
             let _ = NASA.from_serde(CO_data.clone());
-          //  assert!(NASA.from_serde(CO_data.clone()).is_ok()); 
+            //  assert!(NASA.from_serde(CO_data.clone()).is_ok());
             print!(" this is NASA instance: \n");
             let _ = NASA.print_instance();
             assert!(NASA.extract_model_coefficients(400.0).is_ok());
-    
+
             let coeffs_len = {
                 let coeff_vec = NASA.get_coefficients().unwrap();
                 coeff_vec.len()
             };
             assert_eq!(coeffs_len, 7);
-    
+
             let _ = NASA.calculate_Cp_dH_dS(400.0);
             let Cp = NASA.get_Cp().unwrap();
             let dh = NASA.get_dh().unwrap();
             let ds = NASA.get_ds().unwrap();
-    
+
             println!("Cp: {}, dh: {}, ds: {}", Cp, dh, ds);
             assert!(Cp > 0.0);
             assert!(dh < 0.0);
             assert!(ds > 0.0);
-    
+
             let t = 400.0;
             let _ = NASA.create_closures_Cp_dH_dS();
-    
+
             let Cp_fun = NASA.get_C_fun().unwrap();
             let dh_fun = NASA.get_dh_fun().unwrap();
             let ds_fun = NASA.get_ds_fun().unwrap();
             assert_relative_eq!((Cp_fun)(t), Cp, epsilon = 1e-6);
             assert_relative_eq!((dh_fun)(t), dh, epsilon = 1e-6);
             assert_relative_eq!((ds_fun)(t), ds, epsilon = 1e-6);
-    
+
             let _ = NASA.create_sym_Cp_dH_dS();
             let Cp_sym = NASA.get_Cp_sym().unwrap();
             let Cp_T = Cp_sym.lambdify1D();
             let Cp_value = Cp_T(400.0);
             assert_relative_eq!(Cp_value, Cp, epsilon = 1e-6);
-            
+
             let dh_sym = NASA.get_dh_sym().unwrap();
             let dh_T = dh_sym.lambdify1D();
             let dh_value = dh_T(400.0);
             assert_relative_eq!(dh_value, dh, epsilon = 1e-6);
-            
+
             let ds_sym = NASA.get_ds_sym().unwrap();
             let ds_T = ds_sym.lambdify1D();
             let ds_value = ds_T(400.0);
             assert_relative_eq!(ds_value, ds, epsilon = 1e-6);
-            NASA.pretty_print_data();
+            _ = NASA.pretty_print_data();
         }
         _ => println!("Invalid task number"),
     }

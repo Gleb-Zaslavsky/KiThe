@@ -137,9 +137,8 @@ pub trait TransportCalculator {
 
     // Data loading
     fn from_serde(&mut self, data: serde_json::Value) -> Result<(), TransportError>;
-    fn set_M(&mut self, M:f64, M_unit:Option<String>) ->Result<(), TransportError>;
-    fn set_P(&mut self, P:f64, P_unit:Option<String>) ->Result<(), TransportError>;
-
+    fn set_M(&mut self, M: f64, M_unit: Option<String>) -> Result<(), TransportError>;
+    fn set_P(&mut self, P: f64, P_unit: Option<String>) -> Result<(), TransportError>;
 }
 
 // Helper functions for unit conversion
@@ -195,6 +194,7 @@ pub fn validate_density(d: f64) -> Result<(), TransportError> {
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // FACTORY METHODS  ////////////////////////////////////////////////////////////////////
+#[derive(Debug, Clone)]
 #[enum_dispatch(TransportCalculator)]
 pub enum TransportEnum {
     CEA(super::CEAdata::CEAdata),
@@ -218,10 +218,8 @@ pub fn create_transport_calculator(calc_type: TransportType) -> TransportEnum {
 pub fn create_transport_calculator_by_name(calc_name: &str) -> TransportEnum {
     match calc_name {
         "CEA" => TransportEnum::CEA(super::CEAdata::CEAdata::new()),
-        "Aramco_transpot" => {
-            TransportEnum::Collision(super::TRANSPORTdata::TransportData::new())
-        }
-        _=> panic!("No such library!"),
+        "Aramco_transpot" => TransportEnum::Collision(super::TRANSPORTdata::TransportData::new()),
+        _ => panic!("No such library!"),
     }
 }
 
@@ -229,7 +227,7 @@ pub fn create_transport_calculator_by_name(calc_name: &str) -> TransportEnum {
 mod tests {
     use super::*;
     use crate::Thermodynamics::thermo_lib_api::ThermoData;
-    use approx::assert_relative_eq;
+    // use approx::assert_relative_eq;
 
     #[test]
     fn test_unit_conversion() {}
@@ -257,7 +255,7 @@ mod tests {
     fn test_calculator_creation() {
         let thermo_data = ThermoData::new();
         let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
-        let CO_data = sublib.get("CO").unwrap();
+        let _CO_data = sublib.get("CO").unwrap();
         /*
         let mut calculator = create_transport_calculator("TRANSPORT");
         calculator.from_serde(CO_data.clone()).unwrap();
@@ -285,22 +283,19 @@ mod tests {
             .set_viscosity_unit(Some(ViscosityUnit::MKPaS))
             .unwrap();
 
-     
-         // Test calling methods on the enum
-         cea_calc.extract_coefficients(500.0).unwrap();
-         let lambda_cea = cea_calc.calculate_lambda(None, None, 500.0).unwrap();
-         let visc_cea = cea_calc.calculate_viscosity(500.0).unwrap();
-         assert!(lambda_cea > 0.0);
-         assert!(visc_cea > 0.0);
-       
+        // Test calling methods on the enum
+        cea_calc.extract_coefficients(500.0).unwrap();
+        let lambda_cea = cea_calc.calculate_lambda(None, None, 500.0).unwrap();
+        let visc_cea = cea_calc.calculate_viscosity(500.0).unwrap();
+        assert!(lambda_cea > 0.0);
+        assert!(visc_cea > 0.0);
     }
     #[test]
-    fn test_factory_method_Collision(){
-        
-           // Test Collision calculator creation
+    fn test_factory_method_Collision() {
+        // Test Collision calculator creation
         let thermo_data = ThermoData::new();
         let mut collision_calc = create_transport_calculator(TransportType::Collision);
-      
+
         let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
         let co_data = sublib.get("CO").unwrap();
         let T = 500.0;
@@ -321,11 +316,13 @@ mod tests {
         let mut nasa = NASAdata::new();
         let _ = nasa.from_serde(co_data.clone());
         let _ = nasa.calculate_Cp_dH_dS(T);
-      //  let ro = P;
-      
+        //  let ro = P;
+
         let Cp = nasa.Cp;
         //______________________________________________________________________
-        let lambda_collision = collision_calc.calculate_lambda(Some(Cp), None, 500.0).unwrap();
+        let lambda_collision = collision_calc
+            .calculate_lambda(Some(Cp), None, 500.0)
+            .unwrap();
         let visc_collision = collision_calc.calculate_viscosity(T).unwrap();
         assert!(lambda_collision > 0.0);
         assert!(visc_collision > 0.0);
