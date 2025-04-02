@@ -527,6 +527,10 @@ impl TransportCalculator for CEAdata {
     ) -> Result<(), super::transport_api::TransportError> {
         Ok(())
     }
+    fn print_instance(&self) -> Result<(), super::transport_api::TransportError> {
+        println!("{:?}", &self);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

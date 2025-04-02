@@ -9,6 +9,7 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 // /Basis functionality to search in library of thermodymical and heat mass transfer data
+#[derive(Debug, Clone)]
 pub struct ThermoData {
     pub VecOfSubsAdresses: Vec<(String, String)>,
     /// adresses of all substances (lib:sustance)

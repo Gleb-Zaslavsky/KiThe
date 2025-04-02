@@ -16,7 +16,7 @@ use crate::Thermodynamics::DBhandlers::NIST_parser::{Phase, SearchType};
 pub enum NASAError {
     NoCoefficientsFound { temperature: f64, range: String },
     InvalidTemperatureRange,
-    SerdeError(String),
+    SerdeError(serde_json::Error),
     UnsupportedUnit(String),
 }
 
@@ -48,6 +48,12 @@ impl fmt::Display for NASAError {
 }
 
 impl Error for NASAError {}
+
+impl From<serde_json::Error> for NASAError {
+    fn from(err: serde_json::Error) -> Self {
+        NASAError::SerdeError(err)
+    }
+}
 
 fn Cp(t: f64, a: f64, b: f64, c: f64, d: f64, e: f64) -> f64 {
     R * (a + b * t + c * t.powi(2) + d * t.powi(3) + e * t.powi(4))
@@ -228,8 +234,7 @@ impl NASAdata {
     }
     /// takes serde Value and parse it into structure
     pub fn from_serde(&mut self, serde: Value) -> Result<(), NASAError> {
-        self.input =
-            serde_json::from_value(serde).map_err(|e| NASAError::SerdeError(e.to_string()))?;
+        self.input = serde_json::from_value(serde).map_err(|e| NASAError::SerdeError(e))?;
         Ok(())
     }
 
@@ -495,8 +500,7 @@ impl ThermoCalculator for NASAdata {
         Ok(())
     }
     fn from_serde(&mut self, serde: Value) -> Result<(), ThermoError> {
-        self.from_serde(serde)
-            .map_err(|e| ThermoError::DeserializationError(e.to_string()))?;
+        self.from_serde(serde)?;
         Ok(())
     }
     fn calculate_Cp_dH_dS(&mut self, temperature: f64) -> Result<(), ThermoError> {

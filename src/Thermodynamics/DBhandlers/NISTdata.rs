@@ -11,7 +11,7 @@ use std::{error::Error, fmt::Debug};
 pub enum NISTError {
     NoCoefficientsFound { temperature: f64, range: String },
     InvalidTemperatureRange,
-    DeserializationError(String),
+    SerdeError(serde_json::Error),
     UnsupportedUnit(String),
 }
 
@@ -28,7 +28,7 @@ impl fmt::Display for NISTError {
             NISTError::InvalidTemperatureRange => {
                 write!(f, "Invalid temperature range in coefficient data")
             }
-            NISTError::DeserializationError(msg) => {
+            NISTError::SerdeError(msg) => {
                 write!(f, "Failed to deserialize NASA data: {}", msg)
             }
             NISTError::UnsupportedUnit(unit) => {
@@ -43,6 +43,12 @@ impl fmt::Display for NISTError {
 }
 
 impl Error for NISTError {}
+
+impl From<serde_json::Error> for NISTError {
+    fn from(err: serde_json::Error) -> Self {
+        NISTError::SerdeError(err)
+    }
+}
 
 pub struct NISTdata {
     /// data parsed from library
@@ -99,8 +105,7 @@ impl NISTdata {
     }
     /// takes serde Value and parse it into structure
     pub fn from_serde(&mut self, serde: Value) -> Result<(), NISTError> {
-        self.input = serde_json::from_value(serde)
-            .map_err(|e| NISTError::DeserializationError(e.to_string()))?;
+        self.input = serde_json::from_value(serde).map_err(|e| NISTError::SerdeError(e))?;
         Ok(())
     }
     pub fn extract_coefficients(&mut self, T: f64) -> Result<(), NISTError> {
@@ -296,8 +301,7 @@ impl ThermoCalculator for NISTdata {
         Ok(())
     }
     fn from_serde(&mut self, serde: Value) -> Result<(), ThermoError> {
-        self.from_serde(serde)
-            .map_err(|e| ThermoError::DeserializationError(e.to_string()))?;
+        self.from_serde(serde)?;
         Ok(())
     }
     fn calculate_Cp_dH_dS(&mut self, temperature: f64) -> Result<(), ThermoError> {

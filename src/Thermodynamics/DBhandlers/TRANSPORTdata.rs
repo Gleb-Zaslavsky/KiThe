@@ -727,6 +727,10 @@ impl super::transport_api::TransportCalculator for TransportData {
         self.set_P_unit(P_unit)?;
         Ok(())
     }
+    fn print_instance(&self) -> Result<(), super::transport_api::TransportError> {
+        println!("{:?}", &self);
+        Ok(())
+    }
 }
 
 impl Clone for TransportData {

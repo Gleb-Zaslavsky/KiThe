@@ -8,7 +8,7 @@ use std::fmt;
 pub enum ThermoError {
     NoCoefficientsFound { temperature: f64, range: String },
     InvalidTemperatureRange,
-    DeserializationError(String),
+
     UnsupportedUnit(String),
     SerdeError(serde_json::Error),
 }
@@ -26,7 +26,7 @@ impl fmt::Display for ThermoError {
             ThermoError::InvalidTemperatureRange => {
                 write!(f, "Invalid temperature range in coefficient data")
             }
-            ThermoError::DeserializationError(msg) => {
+            ThermoError::SerdeError(msg) => {
                 write!(f, "Failed to deserialize NASA data: {}", msg)
             }
             ThermoError::UnsupportedUnit(unit) => {
@@ -36,7 +36,6 @@ impl fmt::Display for ThermoError {
                     unit
                 )
             }
-            ThermoError::SerdeError(err) => write!(f, "Serde error: {}", err),
         }
     }
 }
@@ -52,9 +51,7 @@ impl From<super::NISTdata::NISTError> for ThermoError {
             super::NISTdata::NISTError::InvalidTemperatureRange => {
                 ThermoError::InvalidTemperatureRange
             }
-            super::NISTdata::NISTError::DeserializationError(msg) => {
-                ThermoError::DeserializationError(msg)
-            }
+            super::NISTdata::NISTError::SerdeError(msg) => ThermoError::SerdeError(msg),
             super::NISTdata::NISTError::UnsupportedUnit(unit) => ThermoError::UnsupportedUnit(unit),
             //    super::NISTdata::NISTError::SerdeError(err) => ThermoError::SerdeError(err),
         }
@@ -70,7 +67,7 @@ impl From<super::NASAdata::NASAError> for ThermoError {
             super::NASAdata::NASAError::InvalidTemperatureRange => {
                 ThermoError::InvalidTemperatureRange
             }
-            super::NASAdata::NASAError::SerdeError(msg) => ThermoError::DeserializationError(msg),
+            super::NASAdata::NASAError::SerdeError(msg) => ThermoError::SerdeError(msg),
             super::NASAdata::NASAError::UnsupportedUnit(unit) => ThermoError::UnsupportedUnit(unit),
         }
     }

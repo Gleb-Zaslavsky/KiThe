@@ -139,6 +139,7 @@ pub trait TransportCalculator {
     fn from_serde(&mut self, data: serde_json::Value) -> Result<(), TransportError>;
     fn set_M(&mut self, M: f64, M_unit: Option<String>) -> Result<(), TransportError>;
     fn set_P(&mut self, P: f64, P_unit: Option<String>) -> Result<(), TransportError>;
+    fn print_instance(&self) -> Result<(), TransportError>;
 }
 
 // Helper functions for unit conversion
@@ -218,7 +219,7 @@ pub fn create_transport_calculator(calc_type: TransportType) -> TransportEnum {
 pub fn create_transport_calculator_by_name(calc_name: &str) -> TransportEnum {
     match calc_name {
         "CEA" => TransportEnum::CEA(super::CEAdata::CEAdata::new()),
-        "Aramco_transpot" => TransportEnum::Collision(super::TRANSPORTdata::TransportData::new()),
+        "Aramco_transport" => TransportEnum::Collision(super::TRANSPORTdata::TransportData::new()),
         _ => panic!("No such library!"),
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "KiThe"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 author = "Gleb Zasllavsky"
 license = "MIT"
@@ -25,6 +25,7 @@ url = "2.4"
 thiserror = "2.0.12"
 enum_dispatch = "0.3.13"
 tempfile = "3.19.1"
+reborrow = "0.5.5"
 [profile.release]
 lto = true
 codegen-units = 1
