@@ -140,6 +140,10 @@ pub trait TransportCalculator {
     fn set_M(&mut self, M: f64, M_unit: Option<String>) -> Result<(), TransportError>;
     fn set_P(&mut self, P: f64, P_unit: Option<String>) -> Result<(), TransportError>;
     fn print_instance(&self) -> Result<(), TransportError>;
+    fn get_lambda_sym(&self) -> Result<Expr, TransportError>;
+    fn get_viscosity_sym(&self) -> Result<Expr, TransportError>;
+    fn get_lambda_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, TransportError>;
+    fn get_viscosity_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, TransportError>;
 }
 
 // Helper functions for unit conversion

@@ -68,6 +68,18 @@ pub enum DataType {
     dmu_fun,
 
     dmu_sym,
+
+    Lambda,
+
+    Lambda_fun,
+
+    Lambda_sym,
+
+    Visc,
+
+    Visc_fun,
+
+    Visc_sym,
 }
 /// Represents the type of calculator for a substance
 #[derive(Debug, Clone)]
@@ -84,8 +96,8 @@ pub enum WhatIsFound {
 ///SearchResult enum: Represents the result of searching for a substance
 #[derive(Debug, Clone)]
 pub struct SearchResult {
-    library: String,
-    priority_type: LibraryPriority,
+    pub library: String,
+    pub priority_type: LibraryPriority,
     data: Value,
     pub calculator: Option<CalculatorType>,
 }
@@ -94,6 +106,14 @@ pub struct SearchResult {
 pub enum LibraryPriority {
     Priority,
     Permitted,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Phases {
+    Liquid,
+    Gas,
+    Solid,
+    Condensed,
 }
 ///SubsData struct: Main structure managing the substances and search process
 
@@ -105,7 +125,11 @@ pub struct SubsData {
     /// Vector of substances to search for
     pub substances: Vec<String>,
     /// Maps libraries to their priority level
-    library_priorities: HashMap<String, LibraryPriority>,
+    pub library_priorities: HashMap<String, LibraryPriority>,
+    ///
+    ro_map: Option<HashMap<String, f64>>,
+    ///
+    ro_map_sym: Option<HashMap<String, Box<Expr>>>,
     /// Stores search results for each substance
     pub search_results: HashMap<String, HashMap<WhatIsFound, Option<SearchResult>>>,
     /// Reference to the thermo data library
@@ -116,6 +140,12 @@ pub struct SubsData {
     pub therm_map_of_fun: HashMap<String, HashMap<DataType, Option<Box<dyn Fn(f64) -> f64>>>>,
     ///
     pub therm_map_of_sym: HashMap<String, HashMap<DataType, Option<Box<Expr>>>>,
+    ///
+    pub transport_map_of_properties_values: HashMap<String, HashMap<DataType, Option<f64>>>,
+    ///
+    pub transport_map_of_fun: HashMap<String, HashMap<DataType, Option<Box<dyn Fn(f64) -> f64>>>>,
+    ///
+    pub transport_map_of_sym: HashMap<String, HashMap<DataType, Option<Box<Expr>>>>,
 }
 impl fmt::Debug for SubsData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -148,19 +178,40 @@ impl Clone for SubsData {
             }
             new_therm_map_of_fun.insert(substance.clone(), new_type_map);
         }
-        Self {
+        // Create a new empty map for the functions
+        let new_transport_map_of_fun = HashMap::new();
+
+        // We can't directly clone the functions, so we'll need to handle this field specially
+        // For now, we'll create an empty map structure that matches the original
+        for (substance, type_map) in &self.therm_map_of_fun {
+            let mut new_type_map = HashMap::new();
+            for (data_type, _) in type_map {
+                // We can't clone the functions, so we'll just insert None for each entry
+                new_type_map.insert(*data_type, None);
+            }
+            new_therm_map_of_fun.insert(substance.clone(), new_type_map);
+        }
+        let mut sd = SubsData {
             P: self.P,
             P_unit: self.P_unit.clone(),
             Molar_mass: self.Molar_mass.clone(),
             Molar_mass_unit: self.Molar_mass_unit.clone(),
             substances: self.substances.clone(),
             library_priorities: self.library_priorities.clone(),
+            ro_map: self.ro_map.clone(),
+            ro_map_sym: self.ro_map_sym.clone(),
             search_results: self.search_results.clone(),
             thermo_data: self.thermo_data.clone(),
             therm_map_of_properties_values: self.therm_map_of_properties_values.clone(),
             therm_map_of_fun: new_therm_map_of_fun,
             therm_map_of_sym: self.therm_map_of_sym.clone(),
-        }
+            transport_map_of_properties_values: self.transport_map_of_properties_values.clone(),
+            transport_map_of_fun: new_transport_map_of_fun,
+            transport_map_of_sym: self.transport_map_of_sym.clone(),
+        };
+        let _ = sd.calculate_transport_map_of_functions();
+        let _ = sd.calculate_therm_map_of_fun();
+        sd
     }
 }
 impl SubsData {
@@ -173,10 +224,15 @@ impl SubsData {
             substances: Vec::new(),
             library_priorities: HashMap::new(),
             search_results: HashMap::new(),
+            ro_map: None,
+            ro_map_sym: None,
             thermo_data: ThermoData::new(),
             therm_map_of_properties_values: HashMap::new(),
             therm_map_of_fun: HashMap::new(),
             therm_map_of_sym: HashMap::new(),
+            transport_map_of_properties_values: HashMap::new(),
+            transport_map_of_fun: HashMap::new(),
+            transport_map_of_sym: HashMap::new(),
         }
     }
 
@@ -411,6 +467,12 @@ impl SubsData {
         self.search_results.get(substance)
     }
 
+    pub fn get_substance_result_mut(
+        &mut self, // Changed to mutable reference
+        substance: &str,
+    ) -> Option<&mut HashMap<WhatIsFound, Option<SearchResult>>> {
+        self.search_results.get_mut(substance) // Use get_mut instead of get
+    }
     /// Get all search results
     pub fn get_all_results(&self) -> &HashMap<String, HashMap<WhatIsFound, Option<SearchResult>>> {
         &self.search_results
@@ -427,9 +489,16 @@ impl SubsData {
 
     /// Get a list of substances found in priority libraries
     pub fn get_priority_found_substances(&self) -> Vec<String> {
+        //search_results = HashMap<String, HashMap<WhatIsFound, Option<SearchResult>>>,
         self.search_results
-            .iter()
-            .filter(|(_, result)| result.values().any(|result| matches!(result.as_ref().unwrap(), SearchResult { priority_type, .. } if *priority_type == LibraryPriority::Priority)))
+            .iter()//  HashMap<WhatIsFound, Option<SearchResult> -> SearchResult = { priority_type: LibraryPriority::Priority, .. }
+            .filter(|(_, result)| result.values().any(|result| {
+                if let Some(result) = result.as_ref() {
+                    matches!(result, SearchResult { priority_type, .. } if *priority_type == LibraryPriority::Priority)
+                } else {
+                    false
+                }
+                 }))
             .map(|(substance, _)| substance.clone())
             .collect()
     }
@@ -437,47 +506,55 @@ impl SubsData {
     /// Get a list of substances found in permitted libraries
     pub fn get_permitted_found_substances(&self) -> Vec<String> {
         self.search_results
-        .iter()
-        .filter(|(_, result)| result.values().any(|result| matches!(result.as_ref().unwrap(), SearchResult { priority_type, .. } if *priority_type == LibraryPriority::Permitted)))
+        .iter()//  HashMap<WhatIsFound, Option<SearchResult> -> SearchResult = { priority_type: LibraryPriority::Priority, .. }
+        .filter(|(_, result)| result.values().any(|result| {
+            if let Some(result) = result.as_ref() {
+                matches!(result, SearchResult { priority_type, .. } if *priority_type == LibraryPriority::Permitted)
+            } else {
+                false
+            }
+             }))
         .map(|(substance, _)| substance.clone())
         .collect()
     }
+
+    ///////////////////////////////////////THERMAL PROPERTIES////////////////////////////////////
+    /// Extract coefficients for thermal polynoms for given substance
     pub fn extract_thermal_coeffs(
         &mut self,
         substance: &str,
         temperature: f64,
     ) -> Result<(), String> {
-        match self
-            .search_results
-            .get(substance)
+        // Get a mutable reference to the substance data
+        let datamap = self.get_substance_result_mut(substance).unwrap();
+
+        // Get a mutable reference to the Thermo entry
+        let thermo = datamap
+            .get_mut(&WhatIsFound::Thermo)
             .unwrap()
-            .get(&WhatIsFound::Thermo)
-            .unwrap()
-        {
-            //let's remember that search_results = Found{... calculator: Option<CalculatorType>}
-            Some(SearchResult {
-                calculator: Some(CalculatorType::Thermo(thermo)),
-                ..
-            }) => {
-                //thermo.print_instance();
-                let mut thermo = thermo.clone();
-                // Extract coefficients and calculate properties
-                if let Err(e) = thermo.extract_model_coefficients(temperature) {
-                    return Err(format!("Failed to extract coefficients: {}", e));
-                }
+            .as_mut()
+            .unwrap();
+
+        // Get a mutable reference to the calculator
+        let calculator = thermo.calculator.as_mut().unwrap();
+        match calculator {
+            CalculatorType::Thermo(thermo) => {
+                let _ = thermo.extract_model_coefficients(temperature);
                 Ok(())
             }
-
-            Some(SearchResult {
-                calculator: Some(CalculatorType::Transport(_)),
-                ..
-            }) => Err("Substance found but has transport calculator instead of thermo".to_string()),
-            Some(SearchResult {
-                calculator: None, ..
-            }) => Err("Substance found but has no calculator".to_string()),
-
-            None => Err("Substance not in search results".to_string()),
+            CalculatorType::Transport(_) => {
+                panic!("Substance found but has transport calculator instead of thermo");
+            }
         }
+    }
+    pub fn extract_all_thermal_coeffs(&mut self, temperature: f64) -> Result<(), String> {
+        for substance in self.clone().search_results.keys() {
+            match self.extract_thermal_coeffs(&substance, temperature) {
+                Ok(_) => (),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
     /// Calculate thermodynamic properties for a substance
     pub fn calculate_thermo_properties(
@@ -502,11 +579,6 @@ impl SubsData {
                 let mut thermo = thermo.clone();
                 //thermo.print_instance();
 
-                // Extract coefficients and calculate properties
-                if let Err(e) = thermo.extract_model_coefficients(temperature) {
-                    return Err(format!("Failed to extract coefficients: {}", e));
-                }
-
                 if let Err(e) = thermo.calculate_Cp_dH_dS(temperature) {
                     return Err(format!("Failed to calculate properties: {}", e));
                 }
@@ -527,74 +599,17 @@ impl SubsData {
             None => Err("Substance not in search results".to_string()),
         }
     }
-
+    /// Set Molar mass and molar mass unit
     pub fn set_M(&mut self, M_map: HashMap<String, f64>, M_unit: Option<String>) {
         self.Molar_mass = Some(M_map);
         self.Molar_mass_unit = M_unit;
     }
+    /// Set pressure and pressure unit
     pub fn set_P(&mut self, P: f64, P_unit: Option<String>) {
         self.P = Some(P);
         self.P_unit = P_unit;
     }
-    /// Calculate transport properties for a substance
-    pub fn calculate_transport_properties(
-        &mut self,
-        substance: &str,
-        temperature: f64,
-        Cp: Option<f64>,
-        ro: Option<f64>,
-    ) -> Result<(f64, f64), String> {
-        // println!(  "\n \n found  for substance {} {:?}", substance, &self.search_results.get(substance).unwrap().get(&WhatIsFound::Transport).unwrap());
-        match self
-            .search_results
-            .get_mut(substance)
-            .unwrap()
-            .get_mut(&WhatIsFound::Transport)
-            .unwrap()
-        {
-            Some(SearchResult {
-                calculator: Some(CalculatorType::Transport(transport)),
-                ..
-            }) => {
-                let mut transport = transport.clone();
-                println!("transport instance: {:?}", transport);
 
-                //  transport.print_instance();
-                // Extract coefficients and calculate properties
-                if let Err(e) = transport.extract_coefficients(temperature) {
-                    return Err(format!("Failed to extract coefficients: {}", e));
-                }
-                let P = self.P.expect("Pressure not set");
-                let P_unit = self.P_unit.clone();
-                let M_map = self.Molar_mass.clone().expect("Molar mass not set");
-                let M = M_map
-                    .get(substance)
-                    .expect("Molar mass for this substance not found");
-                let M_unit = self.Molar_mass_unit.clone();
-                let _ = transport.set_M(*M, M_unit);
-                let _ = transport.set_P(P, P_unit);
-                let lambda = transport
-                    .calculate_lambda(Cp, ro, temperature)
-                    .map_err(|e| format!("Failed to calculate lambda: {}", e))?;
-
-                let viscosity = transport
-                    .calculate_viscosity(temperature)
-                    .map_err(|e| format!("Failed to calculate viscosity: {}", e))?;
-
-                Ok((lambda, viscosity))
-            }
-            Some(SearchResult {
-                calculator: Some(CalculatorType::Thermo(_)),
-                ..
-            }) => Err("Substance found but has thermo calculator instead of transport".to_string()),
-            Some(SearchResult {
-                calculator: None, ..
-            }) => Err("Substance found but has no calculator".to_string()),
-
-            None => Err("Substance not in search results".to_string()),
-        }
-    }
-    // TODO:test that function
     /// Calculate and populate therm_map_of_properties_values for all substances at a given temperature
     pub fn calculate_therm_map_of_properties(&mut self, temperature: f64) -> Result<(), String> {
         for substance in &self.substances.clone() {
@@ -801,7 +816,331 @@ impl SubsData {
             .and_then(|map| map.get(&data_type))
             .and_then(|opt| opt.as_ref())
     }
+    /////////////////////////////TRANSPORT COEFFICIENTS////////////////////////////////////
+    /// Extract transport coefficients for a substance
+    pub fn extract_transport_coeffs(
+        &mut self,
+        substance: &str,
+        temperature: f64,
+    ) -> Result<(), String> {
+        // Get a mutable reference to the substance data
+        let datamap = self.get_substance_result_mut(substance).unwrap();
 
+        // Get a mutable reference to the Thermo entry
+        let transport = datamap
+            .get_mut(&WhatIsFound::Transport)
+            .unwrap()
+            .as_mut()
+            .unwrap();
+
+        // Get a mutable reference to the calculator
+        let calculator = transport.calculator.as_mut().unwrap();
+        match calculator {
+            CalculatorType::Thermo(_) => {
+                panic!("Substance found but has thermo calculator instead of transport");
+            }
+            CalculatorType::Transport(transport) => {
+                let _ = transport.extract_coefficients(temperature);
+                Ok(())
+            }
+        }
+    }
+    pub fn extract_all_transport_coeffs(&mut self, temperature: f64) -> Result<(), String> {
+        for substance in self.clone().search_results.keys() {
+            match self.extract_transport_coeffs(&substance, temperature) {
+                Ok(_) => (),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+    /// Calculate transport properties for a substance
+    pub fn calculate_transport_properties(
+        &mut self,
+        substance: &str,
+        temperature: f64,
+        Cp: Option<f64>,
+        ro: Option<f64>,
+    ) -> Result<(f64, f64), String> {
+        // println!(  "\n \n found  for substance {} {:?}", substance, &self.search_results.get(substance).unwrap().get(&WhatIsFound::Transport).unwrap());
+        match self
+            .search_results
+            .get_mut(substance)
+            .unwrap()
+            .get_mut(&WhatIsFound::Transport)
+            .unwrap()
+        {
+            Some(SearchResult {
+                calculator: Some(CalculatorType::Transport(transport)),
+                ..
+            }) => {
+                let mut transport = transport.clone();
+                println!("transport instance: {:?}", transport);
+
+                //  transport.print_instance();
+
+                let P = self.P.expect("Pressure not set");
+                let P_unit = self.P_unit.clone();
+                let M_map = self.Molar_mass.clone().expect("Molar mass not set");
+                let M = M_map
+                    .get(substance)
+                    .expect("Molar mass for this substance not found");
+                let M_unit = self.Molar_mass_unit.clone();
+                let _ = transport.set_M(*M, M_unit);
+                let _ = transport.set_P(P, P_unit);
+                let lambda = transport
+                    .calculate_lambda(Cp, ro, temperature)
+                    .map_err(|e| format!("Failed to calculate lambda: {}", e))?;
+
+                let viscosity = transport
+                    .calculate_viscosity(temperature)
+                    .map_err(|e| format!("Failed to calculate viscosity: {}", e))?;
+
+                Ok((lambda, viscosity))
+            }
+            Some(SearchResult {
+                calculator: Some(CalculatorType::Thermo(_)),
+                ..
+            }) => Err("Substance found but has thermo calculator instead of transport".to_string()),
+            Some(SearchResult {
+                calculator: None, ..
+            }) => Err("Substance found but has no calculator".to_string()),
+
+            None => Err("Substance not in search results".to_string()),
+        }
+    }
+    /// Calculate and populate transport_map_of_properties_values for all substances at a given temperature
+    pub fn calculate_transport_map_of_properties(
+        &mut self,
+        temperature: f64,
+    ) -> Result<(), String> {
+        for substance in &self.substances.clone() {
+            if let Some(Cp) = self
+                .therm_map_of_properties_values
+                .get(substance)
+                .unwrap()
+                .get(&DataType::Cp)
+                .unwrap()
+                .clone()
+            {
+                let ro = if let Some(ro_map) = self.ro_map.clone() {
+                    ro_map.get(substance).cloned()
+                } else {
+                    None
+                };
+                match self
+                    .calculate_transport_properties(substance, temperature, Some(Cp), ro)
+                    .clone()
+                {
+                    Ok((Lambda, Visc)) => {
+                        let mut property_map = HashMap::new();
+                        property_map.insert(DataType::Lambda, Some(Lambda));
+                        property_map.insert(DataType::Visc, Some(Visc));
+
+                        self.transport_map_of_properties_values
+                            .insert(substance.clone(), property_map);
+                    }
+                    Err(e) => {
+                        // If calculation fails, insert None for all properties
+                        let mut property_map = HashMap::new();
+                        property_map.insert(DataType::Cp, None);
+                        property_map.insert(DataType::dH, None);
+                        property_map.insert(DataType::dS, None);
+                        self.therm_map_of_properties_values
+                            .insert(substance.clone(), property_map);
+                        println!(
+                            "Warning: Failed to calculate properties for {}: {}",
+                            substance, e
+                        );
+                    }
+                } // match 
+            } else {
+                break;
+                // return Err("Cp not found".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    /// Calculate and populate transport_map_of_sym with symbolic expressions for all substances
+    pub fn calculate_transport_map_of_sym(&mut self) -> Result<(), String> {
+        for substance in &self.substances.clone() {
+            if let Some(Cp) = self
+                .therm_map_of_sym
+                .get(substance)
+                .unwrap()
+                .get(&DataType::Cp_sym)
+                .unwrap()
+                .clone()
+            {
+                let ro = if let Some(ro_map) = self.ro_map_sym.clone() {
+                    Some(*ro_map.get(substance).unwrap().clone())
+                } else {
+                    None
+                };
+                match self
+                    .search_results
+                    .get_mut(substance)
+                    .unwrap()
+                    .get_mut(&WhatIsFound::Transport)
+                    .unwrap()
+                {
+                    Some(SearchResult {
+                        calculator: Some(CalculatorType::Transport(transport)),
+                        ..
+                    }) => {
+                        let mut transport = transport.clone();
+
+                        // Create symbolic expressions for thermodynamic functions
+                        if let Err(e) = transport.create_symbolic_lambda(Some(*Cp), ro) {
+                            println!(
+                                "Warning: Failed to create symbolic expressions for {}: {}",
+                                substance, e
+                            );
+                            continue;
+                        }
+
+                        // Get the symbolic expressions and store them in the map
+                        let mut sym_map = HashMap::new();
+
+                        match transport.get_lambda_sym() {
+                            Ok(Lambda_sym) => {
+                                sym_map.insert(DataType::Lambda_sym, Some(Box::new(Lambda_sym)))
+                            }
+                            Err(e) => {
+                                println!(
+                                    "Warning: Failed to get Lambda symbolic expression for {}: {}",
+                                    substance, e
+                                );
+                                sym_map.insert(DataType::Lambda_sym, None)
+                            }
+                        };
+                        if let Err(e) = transport.create_symbolic_viscosity() {
+                            println!(
+                                "Warning: Failed to create symbolic expressions for {}: {}",
+                                substance, e
+                            );
+                            continue;
+                        }
+                        match transport.get_viscosity_sym() {
+                            Ok(visc_sym) => {
+                                sym_map.insert(DataType::Visc_sym, Some(Box::new(visc_sym)))
+                            }
+                            Err(e) => {
+                                println!(
+                                    "Warning: Failed to get dH symbolic expression for {}: {}",
+                                    substance, e
+                                );
+                                sym_map.insert(DataType::Visc_sym, None)
+                            }
+                        };
+
+                        self.transport_map_of_sym.insert(substance.clone(), sym_map);
+                    }
+                    _ => {
+                        // If substance not found or doesn't have a thermo calculator, insert None for all symbolic expressions
+                        let mut sym_map = HashMap::new();
+                        sym_map.insert(DataType::Lambda_sym, None);
+                        sym_map.insert(DataType::Visc_sym, None);
+
+                        self.therm_map_of_sym.insert(substance.clone(), sym_map);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn calculate_transport_map_of_functions(&mut self) -> Result<(), String> {
+        for substance in &self.substances.clone() {
+            if let Some(thermo_info) = self.therm_map_of_properties_values.get(substance) {
+                if let Some(Cp) = thermo_info.get(&DataType::Cp).unwrap().clone() {
+                    let ro = if let Some(ro_map) = self.ro_map.clone() {
+                        Some(ro_map.get(substance).unwrap().clone())
+                    } else {
+                        None
+                    };
+                    if self
+                        .search_results
+                        .get_mut(substance)
+                        .unwrap()
+                        .get_mut(&WhatIsFound::Transport)
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    match self
+                        .search_results
+                        .get_mut(substance)
+                        .unwrap()
+                        .get_mut(&WhatIsFound::Transport)
+                        .unwrap()
+                    {
+                        Some(SearchResult {
+                            calculator: Some(CalculatorType::Transport(transport)),
+                            ..
+                        }) => {
+                            let mut transport = transport.clone();
+
+                            // Create symbolic expressions for thermodynamic functions
+                            if let Err(e) = transport.create_lambda_closure(Some(Cp), ro) {
+                                println!(
+                                    "Warning: Failed to create symbolic expressions for {}: {}",
+                                    substance, e
+                                );
+                                continue;
+                            }
+
+                            // Get the symbolic expressions and store them in the map
+                            let mut fun_map = HashMap::new();
+
+                            match transport.get_lambda_fun() {
+                                Ok(Lambda_fun) => {
+                                    fun_map.insert(DataType::Lambda_fun, Some(Lambda_fun))
+                                }
+                                Err(e) => {
+                                    println!(
+                                        "Warning: Failed to get Lambda symbolic expression for {}: {}",
+                                        substance, e
+                                    );
+                                    fun_map.insert(DataType::Lambda_fun, None)
+                                }
+                            };
+                            if let Err(e) = transport.create_viscosity_closure() {
+                                println!(
+                                    "Warning: Failed to create symbolic expressions for {}: {}",
+                                    substance, e
+                                );
+                                continue;
+                            }
+                            match transport.get_viscosity_fun() {
+                                Ok(visc_fun) => fun_map.insert(DataType::Visc_fun, Some(visc_fun)),
+                                Err(e) => {
+                                    println!(
+                                        "Warning: Failed to get dH symbolic expression for {}: {}",
+                                        substance, e
+                                    );
+                                    fun_map.insert(DataType::Visc_fun, None)
+                                }
+                            };
+
+                            self.transport_map_of_fun.insert(substance.clone(), fun_map);
+                        }
+                        _ => {
+                            // If substance not found or doesn't have a thermo calculator, insert None for all symbolic expressions
+                            let mut fun_map = HashMap::new();
+                            fun_map.insert(DataType::Lambda_fun, None);
+                            fun_map.insert(DataType::Visc_fun, None);
+
+                            self.therm_map_of_sym.insert(substance.clone(), fun_map);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    ///////////////////////////////INPUT/OUTPUT///////////////////////////////////////////
     /// Print a summary of the search results with calculator types
     pub fn print_search_summary(&self) {
         println!("\nSearch Results Summary:");
@@ -851,455 +1190,5 @@ impl SubsData {
         );
         println!("Not found: {} \n ", self.get_not_found_substances().len());
         println!("--------End of Search Results Summary------------------ \n \n");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_user_substances_with_calculators() {
-        // Create a new SubsData instance with test substances
-        let substances = vec!["CO".to_string(), "H2O".to_string()];
-        let mut user_subs = SubsData::new();
-        user_subs.substances = substances;
-
-        // Set library priorities
-        user_subs.set_multiple_library_priorities(
-            vec!["NASA_gas".to_string()],
-            LibraryPriority::Priority,
-        );
-        user_subs.set_multiple_library_priorities(
-            vec!["Aramco_transport".to_string()],
-            LibraryPriority::Priority,
-        );
-
-        // Perform the search
-        user_subs.search_substances();
-
-        // Test thermo calculations
-        if let Ok((cp, dh, ds)) = user_subs.calculate_thermo_properties("CO", 400.0) {
-            println!("CO Thermo properties at 400K:");
-            println!("Cp: {}, dH: {}, dS: {}", cp, dh, ds);
-            assert!(cp > 0.0);
-        } else {
-            panic!("Failed to calculate CO properties");
-        }
-        let Cp = 33.8;
-        // Test transport calculations
-        user_subs.set_M(
-            HashMap::from([("H2O".to_string(), 18.0), ("CO".to_string(), 32.0)]),
-            None,
-        );
-        user_subs.set_P(1e5, None);
-        if let Ok((lambda, viscosity)) =
-            user_subs.calculate_transport_properties("H2O", 400.0, Some(Cp), None)
-        {
-            println!("CO Transport properties at 400K:");
-            println!("Lambda: {}, Viscosity: {}", lambda, viscosity);
-            assert!(lambda > 0.0);
-            assert!(viscosity > 0.0);
-        } else {
-            panic!("Failed to calculate H2O properties");
-        }
-
-        // Print full summary
-        user_subs.print_search_summary();
-    }
-    #[test]
-    fn test_user_substances_with_calculators_own_functions() {
-        // Create a new SubsData instance with test substances
-        let substances = vec!["CO".to_string(), "H2O".to_string()];
-        let mut user_subs = SubsData::new();
-        user_subs.substances = substances;
-
-        // Set library priorities
-        user_subs.set_multiple_library_priorities(
-            vec!["NASA_gas".to_string()],
-            LibraryPriority::Priority,
-        );
-        user_subs.set_multiple_library_priorities(
-            vec!["Aramco_transport".to_string()],
-            LibraryPriority::Priority,
-        );
-
-        // Perform the search
-        user_subs.search_substances();
-        // Print full summary
-        user_subs.print_search_summary();
-        let datamap = user_subs.get_substance_result("CO").unwrap();
-        let Thermo = datamap.get(&WhatIsFound::Thermo).unwrap().as_ref().unwrap();
-        let Calculator = Thermo.calculator.as_ref().unwrap();
-        let Cp;
-        match Calculator {
-            CalculatorType::Thermo(thermo) => {
-                // Test thermo calculations
-                let mut thermo = thermo.clone();
-                thermo.extract_model_coefficients(400.0).unwrap();
-                if let Ok(()) = thermo.calculate_Cp_dH_dS(400.0) {
-                    let (cp, dh, ds) = (
-                        thermo.get_Cp().unwrap(),
-                        thermo.get_dh().unwrap(),
-                        thermo.get_ds().unwrap(),
-                    ); //thermo.get_Cp().unwrap();
-                    println!("CO Thermo properties at 400K:");
-                    println!("Cp: {}, dH: {}, dS: {}", cp, dh, ds);
-                    Cp = cp;
-                    assert!(cp > 0.0);
-                } else {
-                    panic!("Failed to calculate CO properties");
-                }
-            }
-            _ => {
-                panic!("Failed to calculate CO properties");
-            }
-        }
-        let Transport = datamap
-            .get(&WhatIsFound::Transport)
-            .unwrap()
-            .as_ref()
-            .unwrap();
-        let Calculator = Transport.calculator.as_ref().unwrap();
-        match Calculator {
-            CalculatorType::Transport(transport) => {
-                // Test transport calculations
-                let mut transport = transport.clone();
-                let _ = transport.set_M(32.0, None);
-                let _ = transport.set_P(1e5, None);
-                transport.extract_coefficients(400.0).unwrap();
-                if let Ok(L) = transport.calculate_lambda(Some(Cp), None, 400.0) {
-                    println!("CO Transport properties at 400K:");
-                    println!("Lambda: {}", L);
-                    assert!(L > 0.0);
-                } else {
-                    panic!("Failed to calculate H2O properties");
-                }
-            }
-            _ => {
-                panic!("Failed to calculate CO properties");
-            }
-        }
-    }
-    #[test]
-    fn test_library_priority_setting() {
-        let mut user_subs = SubsData::new();
-
-        // Test setting single library priority
-        user_subs.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
-        assert_eq!(
-            user_subs.library_priorities.get("NASA_gas"),
-            Some(&LibraryPriority::Priority)
-        );
-
-        // Test setting multiple library priorities
-        user_subs.set_multiple_library_priorities(
-            vec!["NIST".to_string(), "CEA".to_string()],
-            LibraryPriority::Permitted,
-        );
-        assert_eq!(
-            user_subs.library_priorities.get("NIST"),
-            Some(&LibraryPriority::Permitted)
-        );
-        assert_eq!(
-            user_subs.library_priorities.get("CEA"),
-            Some(&LibraryPriority::Permitted)
-        );
-
-        // Test overriding priority
-        user_subs.set_library_priority("NIST".to_string(), LibraryPriority::Priority);
-        assert_eq!(
-            user_subs.library_priorities.get("NIST"),
-            Some(&LibraryPriority::Priority)
-        );
-    }
-
-    #[test]
-    fn test_substance_search() {
-        // fails
-        let mut user_subs = SubsData::new();
-        user_subs.substances = vec![
-            "H2O".to_string(),
-            "CO2".to_string(),
-            "NonExistentSubstance".to_string(),
-        ];
-
-        // Set library priorities
-        user_subs.set_multiple_library_priorities(
-            vec!["NASA_gas".to_string()],
-            LibraryPriority::Priority,
-        );
-        user_subs.set_multiple_library_priorities(
-            vec!["Aramco_transport".to_string()],
-            LibraryPriority::Permitted,
-        );
-
-        // Perform search
-        user_subs.search_substances();
-
-        // Check results
-        assert!(matches!(
-            user_subs
-                .get_substance_result("H2O")
-                .unwrap()
-                .get(&WhatIsFound::Thermo)
-                .unwrap(),
-            Some(SearchResult { .. })
-        ));
-        let _data_to_expect: HashMap<WhatIsFound, Option<SearchResult>> =
-            HashMap::from([(WhatIsFound::NotFound, None)]);
-        assert!(matches!(
-            user_subs.get_substance_result("NonExistentSubstance"),
-            Some(_data_to_expect)
-        ));
-
-        // Check substance lists
-        let not_found = user_subs.get_not_found_substances();
-        assert!(not_found.contains(&"NonExistentSubstance".to_string()));
-
-        let priority_found = user_subs.get_priority_found_substances();
-        let permitted_found = user_subs.get_permitted_found_substances();
-        println!(
-            "Priority found: {:?}, Permitted found: {:?}",
-            priority_found, permitted_found
-        );
-        // At least one of these should contain H2O
-        assert!(
-            priority_found.contains(&"H2O".to_string())
-                || permitted_found.contains(&"H2O".to_string())
-        );
-    }
-
-    #[test]
-    fn test_thermo_property_calculation() {
-        // fails
-        let mut user_subs = SubsData::new();
-        user_subs.substances = vec!["O2".to_string(), "CO".to_string()];
-
-        // Set library priorities
-        user_subs.set_multiple_library_priorities(
-            vec!["NASA_gas".to_string()],
-            LibraryPriority::Priority,
-        );
-
-        // Perform search
-        user_subs.search_substances();
-
-        // Test for O2
-        if let Ok((cp, dh, ds)) = user_subs.calculate_thermo_properties("O2", 400.0) {
-            println!(
-                "O2 Thermo properties at 400K: Cp={}, dH={}, dS={}",
-                cp, dh, ds
-            );
-            assert!(cp > 0.0);
-            assert!(ds > 0.0);
-        } else {
-            panic!("Failed to calculate O2 properties");
-        }
-
-        // Test for CO
-        if let Ok((cp, dh, ds)) = user_subs.calculate_thermo_properties("CO", 400.0) {
-            println!(
-                "CO Thermo properties at 400K: Cp={}, dH={}, dS={}",
-                cp, dh, ds
-            );
-            assert!(cp > 0.0);
-            assert!(ds > 0.0);
-        } else {
-            panic!("Failed to calculate CO properties");
-        }
-    }
-
-    #[test]
-    fn test_transport_property_calculation() {
-        let mut user_subs = SubsData::new();
-        user_subs.substances = vec!["H2O".to_string(), "CO".to_string()];
-
-        // Set library priorities
-        user_subs.set_multiple_library_priorities(
-            vec!["Aramco_transport".to_string()],
-            LibraryPriority::Priority,
-        );
-
-        // Perform search
-        user_subs.search_substances();
-        user_subs.set_M(
-            HashMap::from([("H2O".to_string(), 18.0), ("CO".to_string(), 32.0)]),
-            None,
-        );
-        user_subs.set_P(1e5, None);
-        // Test for substances that should have transport data
-        for substance in &["H2O", "CO"] {
-            if let Ok((lambda, viscosity)) =
-                user_subs.calculate_transport_properties(substance, 400.0, Some(33.0), None)
-            {
-                println!(
-                    "{} Transport properties at 400K: Lambda={}, Viscosity={}",
-                    substance, lambda, viscosity
-                );
-                assert!(lambda > 0.0);
-                assert!(viscosity > 0.0);
-            }
-        }
-    }
-
-    #[test]
-    fn test_property_maps_calculation() {
-        // fails
-        let mut user_subs = SubsData::new();
-        user_subs.substances = vec!["H2O".to_string(), "CO".to_string()];
-
-        // Set library priorities
-        user_subs.set_multiple_library_priorities(
-            vec!["NASA_gas".to_string()],
-            LibraryPriority::Priority,
-        );
-
-        // Perform search
-        user_subs.search_substances();
-
-        // Calculate property values at 400K
-        user_subs
-            .calculate_therm_map_of_properties(500.0)
-            .expect("Failed to calculate property map");
-
-        // Check that values were stored
-        for substance in &["H2O", "CO"] {
-            let property_map = user_subs.therm_map_of_properties_values.get(*substance);
-            assert!(property_map.is_some());
-
-            let property_map = property_map.unwrap();
-            assert!(property_map.get(&DataType::Cp).unwrap().is_some());
-            assert!(property_map.get(&DataType::dH).unwrap().is_some());
-            assert!(property_map.get(&DataType::dS).unwrap().is_some());
-
-            // Check that values are reasonable
-            assert!(property_map.get(&DataType::Cp).unwrap().unwrap() > 0.0);
-        }
-    }
-
-    #[test]
-    fn test_function_maps_calculation() {
-        // fails
-        let mut user_subs = SubsData::new();
-        user_subs.substances = vec!["H2O".to_string()];
-
-        // Set library priorities
-        user_subs.set_multiple_library_priorities(
-            vec!["NASA_gas".to_string()],
-            LibraryPriority::Priority,
-        );
-
-        // Perform search
-        user_subs.search_substances();
-
-        // Calculate function closures
-        user_subs
-            .calculate_therm_map_of_fun()
-            .expect("Failed to calculate function map");
-
-        // Check that functions were stored and work
-        let cp_fun = user_subs.get_thermo_function("H2O", DataType::Cp_fun);
-        assert!(cp_fun.is_some());
-
-        // Test the function at different temperatures
-        let cp_fun = cp_fun.unwrap();
-        let cp_300 = cp_fun(300.0);
-        let cp_400 = cp_fun(400.0);
-        let cp_500 = cp_fun(500.0);
-
-        println!(
-            "H2O Cp values: 300K={}, 400K={}, 500K={}",
-            cp_300, cp_400, cp_500
-        );
-
-        // Cp should be positive and should change with temperature
-        assert!(cp_300 > 0.0);
-        assert!(cp_400 > 0.0);
-        assert!(cp_500 > 0.0);
-        assert!(cp_300 != cp_400); // Values should differ with temperature
-    }
-
-    #[test]
-    fn test_symbolic_maps_calculation() {
-        let mut user_subs = SubsData::new();
-        user_subs.substances = vec!["H2O".to_string()];
-
-        // Set library priorities
-        user_subs.set_multiple_library_priorities(
-            vec!["NASA_gas".to_string()],
-            LibraryPriority::Priority,
-        );
-
-        // Perform search
-        user_subs.search_substances();
-
-        // Calculate symbolic expressions
-        user_subs
-            .calculate_therm_map_of_sym()
-            .expect("Failed to calculate symbolic map");
-
-        // Check that symbolic expressions were stored
-        let cp_sym = user_subs.get_thermo_symbolic("H2O", DataType::Cp_sym);
-        assert!(cp_sym.is_some());
-
-        // Check that the expression is not empty
-        let cp_sym = cp_sym.unwrap();
-        println!("H2O Cp symbolic expression: {}", cp_sym.to_string());
-        assert!(!cp_sym.to_string().is_empty());
-    }
-
-    #[test]
-    fn test_integration_all_features() {
-        let mut user_subs = SubsData::new();
-        user_subs.substances = vec!["H2O".to_string(), "CO".to_string(), "CH4".to_string()];
-
-        // Set library priorities
-        user_subs.set_multiple_library_priorities(
-            vec!["NASA_gas".to_string()],
-            LibraryPriority::Priority,
-        );
-        user_subs.set_multiple_library_priorities(
-            vec!["NIST".to_string(), "Aramco_transport".to_string()],
-            LibraryPriority::Permitted,
-        );
-
-        // Perform search
-        user_subs.search_substances();
-
-        // Calculate all types of data
-        user_subs
-            .calculate_therm_map_of_properties(400.0)
-            .expect("Failed to calculate property map");
-        user_subs
-            .calculate_therm_map_of_fun()
-            .expect("Failed to calculate function map");
-        user_subs
-            .calculate_therm_map_of_sym()
-            .expect("Failed to calculate symbolic map");
-
-        // Print search summary
-        user_subs.print_search_summary();
-
-        // Verify that we have data for all substances
-        for substance in &["H2O", "CO", "CH4"] {
-            // Check if found in any library
-            let result = user_subs.get_substance_result(substance);
-            assert!(result.is_some());
-
-            // If found, check that we have property values
-            if let Some(_map) = result {
-                let property_map = user_subs.therm_map_of_properties_values.get(*substance);
-                assert!(property_map.is_some());
-
-                // Check that we have at least one function
-                let function_map = user_subs.therm_map_of_fun.get(*substance);
-                assert!(function_map.is_some());
-
-                // Check that we have at least one symbolic expression
-                let sym_map = user_subs.therm_map_of_sym.get(*substance);
-                assert!(sym_map.is_some());
-            }
-        }
     }
 }

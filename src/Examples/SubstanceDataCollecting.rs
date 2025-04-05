@@ -9,7 +9,7 @@ pub fn collecting_thermo_data(thermotask: usize) {
             // Create a new SubsData instance with test substances
             let substances = vec!["CO".to_string(), "H2O".to_string()];
             let mut user_subs = SubsData::new();
-            user_subs.substances = substances;
+            user_subs.substances = substances.clone();
 
             // Set library priorities
             user_subs.set_multiple_library_priorities(
@@ -25,6 +25,7 @@ pub fn collecting_thermo_data(thermotask: usize) {
             user_subs.search_substances();
             user_subs.extract_thermal_coeffs("CO", 400.0).unwrap();
             user_subs.extract_thermal_coeffs("H2O", 400.0).unwrap();
+
             // Test thermo calculations
             let (cp, dh, ds) = user_subs.calculate_thermo_properties("CO", 400.0).unwrap();
             println!("CO Thermo properties at 400K:");
@@ -40,6 +41,12 @@ pub fn collecting_thermo_data(thermotask: usize) {
                 None,
             );
             user_subs.set_P(1e5, None);
+            user_subs
+                .extract_thermal_coeffs(substances[0].as_str(), 400.0)
+                .unwrap();
+            user_subs
+                .extract_thermal_coeffs(substances[1].as_str(), 400.0)
+                .unwrap();
             let (lambda, viscosity) = user_subs
                 .calculate_transport_properties("H2O", 400.0, Some(Cp), None)
                 .unwrap();
@@ -52,7 +59,8 @@ pub fn collecting_thermo_data(thermotask: usize) {
         }
         1 => {
             let mut user_subs = SubsData::new();
-            user_subs.substances = vec!["H2O".to_string(), "CO".to_string()];
+            let substances = vec!["H2O".to_string(), "CO".to_string()];
+            user_subs.substances = substances.clone();
 
             // Set library priorities
             user_subs.set_multiple_library_priorities(
@@ -62,7 +70,12 @@ pub fn collecting_thermo_data(thermotask: usize) {
 
             // Perform search
             user_subs.search_substances();
-
+            user_subs
+                .extract_thermal_coeffs(substances[0].as_str(), 400.0)
+                .unwrap();
+            user_subs
+                .extract_thermal_coeffs(substances[1].as_str(), 400.0)
+                .unwrap();
             // Calculate property values at 400K
             user_subs
                 .calculate_therm_map_of_properties(500.0)
@@ -81,6 +94,7 @@ pub fn collecting_thermo_data(thermotask: usize) {
                 // Check that values are reasonable
                 assert!(property_map.get(&DataType::Cp).unwrap().unwrap() > 0.0);
             }
+            user_subs.print_search_summary();
         }
         2 => {
             // Create a new SubsData instance with test substances
@@ -100,6 +114,8 @@ pub fn collecting_thermo_data(thermotask: usize) {
 
             // Perform the search
             user_subs.search_substances();
+            user_subs.extract_thermal_coeffs("CO", 400.0).unwrap();
+            user_subs.extract_thermal_coeffs("H2O", 400.0).unwrap();
             // Print full summary
             user_subs.print_search_summary();
             let datamap = user_subs.get_substance_result("CO").unwrap();
@@ -154,6 +170,7 @@ pub fn collecting_thermo_data(thermotask: usize) {
                     panic!("Failed to calculate CO properties");
                 }
             }
+            user_subs.print_search_summary();
         }
         _ => {
             println!("Invalid task number. Please choose from 1 or 2.");

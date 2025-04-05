@@ -531,6 +531,32 @@ impl TransportCalculator for CEAdata {
         println!("{:?}", &self);
         Ok(())
     }
+    fn get_lambda_sym(&self) -> Result<Expr, super::transport_api::TransportError> {
+        match &self.Lambda_sym {
+            Some(lambda_sym) => Ok(lambda_sym.clone()),
+            None => Err(super::transport_api::TransportError::CalculationError(
+                "Lambda_sym not calculated".to_string(),
+            )),
+        }
+    }
+    fn get_viscosity_sym(&self) -> Result<Expr, super::transport_api::TransportError> {
+        match &self.V_sym {
+            Some(viscosity_sym) => Ok(viscosity_sym.clone()),
+            None => Err(super::transport_api::TransportError::CalculationError(
+                "V_sym not calculated".to_string(),
+            )),
+        }
+    }
+    fn get_lambda_fun(
+        &self,
+    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+        Ok(self.clone().Lambda_fun)
+    }
+    fn get_viscosity_fun(
+        &self,
+    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+        Ok(self.clone().V_fun)
+    }
 }
 
 #[cfg(test)]

@@ -9,6 +9,8 @@ pub mod Thermodynamics;
 #[allow(non_snake_case)]
 pub mod Utils;
 #[allow(unused_imports)]
+use Examples::ClassicalThermodynamics_examples::SubsData_examples;
+#[allow(unused_imports)]
 use Examples::NIST_examples::NIST_examples;
 #[allow(unused_imports)]
 use Examples::SubstanceDataCollecting::collecting_thermo_data;
@@ -16,7 +18,6 @@ use Examples::SubstanceDataCollecting::collecting_thermo_data;
 use Examples::kinetics_examples::kin_examples;
 #[allow(unused_imports)]
 use Examples::thermo_examples::thermo_examples;
-
 pub fn main() {
     //
     #[allow(unused_variables)]
@@ -24,5 +25,6 @@ pub fn main() {
     //kin_examples(3);
     //  thermo_examples(task);
     // NIST_examples(task);
-    collecting_thermo_data(task);
+    // collecting_thermo_data(task);
+    SubsData_examples(task);
 }
