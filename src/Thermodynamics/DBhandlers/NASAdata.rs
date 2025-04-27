@@ -578,6 +578,9 @@ impl ThermoCalculator for NASAdata {
     fn get_ds_sym(&self) -> Result<Expr, ThermoError> {
         Ok(self.ds_sym.clone())
     }
+    fn get_composition(&self) -> Result<Option<HashMap<String, f64>>, ThermoError> {
+        Ok(self.input.composition.clone())
+    }
 }
 
 #[cfg(test)]

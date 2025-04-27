@@ -4,6 +4,7 @@ use crate::Thermodynamics::DBhandlers::NIST_parser::{
 use crate::Thermodynamics::DBhandlers::NIST_parser::{NistParser, Phase, SearchType};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fmt;
 use std::{error::Error, fmt::Debug};
 
@@ -335,6 +336,10 @@ impl ThermoCalculator for NISTdata {
         phase: Phase,
     ) -> Result<(), ThermoError> {
         self.get_data_from_NIST(sub_name, search_type, phase)?;
+        println!(
+            "Cp found {:?}\n for temperature ranges {:?}\n",
+            self.input.cp, self.input.T
+        );
 
         Ok(())
     }
@@ -381,6 +386,9 @@ impl ThermoCalculator for NISTdata {
 
     fn get_ds_sym(&self) -> Result<Expr, ThermoError> {
         Ok(self.ds_sym.clone())
+    }
+    fn get_composition(&self) -> Result<Option<HashMap<String, f64>>, ThermoError> {
+        Ok(None)
     }
 }
 
@@ -435,7 +443,7 @@ mod tests {
         assert!(!Cp_taylor.is_zero());
         assert!(!dh_taylor.is_zero());
         assert!(!ds_taylor.is_zero());
-
+        nist.pretty_print_data().unwrap();
         // Test pretty_print_data
         assert!(nist.pretty_print_data().is_ok());
     }

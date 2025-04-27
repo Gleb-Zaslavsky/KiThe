@@ -2,6 +2,7 @@ use crate::Thermodynamics::DBhandlers::NIST_parser::{Phase, SearchType};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use enum_dispatch::enum_dispatch;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 #[derive(Debug)]
@@ -112,6 +113,7 @@ pub trait ThermoCalculator {
     fn get_Cp_sym(&self) -> Result<Expr, ThermoError>;
     fn get_dh_sym(&self) -> Result<Expr, ThermoError>;
     fn get_ds_sym(&self) -> Result<Expr, ThermoError>;
+    fn get_composition(&self) -> Result<Option<HashMap<String, f64>>, ThermoError>;
 }
 #[derive(Clone, Debug)]
 #[enum_dispatch(ThermoCalculator)]

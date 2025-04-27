@@ -5,7 +5,7 @@ mod tests {
     use crate::Thermodynamics::DBhandlers::thermo_api::ThermoCalculator;
     use crate::Thermodynamics::DBhandlers::transport_api::TransportCalculator;
     use crate::Thermodynamics::User_substances::{
-        CalculatorType, DataType, LibraryPriority, SearchResult, SubsData, WhatIsFound,
+        CalculatorType, DataType, LibraryPriority, Phases, SearchResult, SubsData, WhatIsFound,
     };
     use std::collections::HashMap;
 
@@ -14,6 +14,12 @@ mod tests {
         // Create a new SubsData instance with test substances
         let substances = vec!["CO".to_string(), "H2O".to_string()];
         let mut user_subs = SubsData::new();
+        user_subs
+            .map_of_phases
+            .insert("CO".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("H2O".to_string(), Some(Phases::Gas));
         user_subs.substances = substances.clone();
 
         // Set library priorities
@@ -75,6 +81,12 @@ mod tests {
         // Create a new SubsData instance with test substances
         let substances = vec!["CO".to_string(), "H2O".to_string()];
         let mut user_subs = SubsData::new();
+        user_subs
+            .map_of_phases
+            .insert("CO".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("H2O".to_string(), Some(Phases::Gas));
         user_subs.substances = substances.clone();
 
         // Set library priorities
@@ -250,6 +262,12 @@ mod tests {
             vec!["NASA_gas".to_string()],
             LibraryPriority::Priority,
         );
+        user_subs
+            .map_of_phases
+            .insert("CO".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("O2".to_string(), Some(Phases::Gas));
 
         // Perform search
         user_subs.search_substances();
@@ -288,6 +306,12 @@ mod tests {
     fn test_transport_property_calculation() {
         let mut user_subs = SubsData::new();
         user_subs.substances = vec!["H2O".to_string(), "CO".to_string()];
+        user_subs
+            .map_of_phases
+            .insert("CO".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("H2O".to_string(), Some(Phases::Gas));
 
         // Set library priorities
         user_subs.set_multiple_library_priorities(
@@ -323,6 +347,12 @@ mod tests {
     fn test_property_maps_calculation() {
         let mut user_subs = SubsData::new();
         let substances = vec!["H2O".to_string(), "CO".to_string()];
+        user_subs
+            .map_of_phases
+            .insert("CO".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("H2O".to_string(), Some(Phases::Gas));
         user_subs.substances = substances.clone();
 
         // Set library priorities
@@ -365,6 +395,9 @@ mod tests {
         let mut user_subs = SubsData::new();
         user_subs.substances = vec!["H2O".to_string()];
 
+        user_subs
+            .map_of_phases
+            .insert("H2O".to_string(), Some(Phases::Gas));
         // Set library priorities
         user_subs.set_multiple_library_priorities(
             vec!["NASA_gas".to_string()],
@@ -406,6 +439,9 @@ mod tests {
     fn test_symbolic_maps_calculation() {
         let mut user_subs = SubsData::new();
         user_subs.substances = vec!["H2O".to_string()];
+        user_subs
+            .map_of_phases
+            .insert("H2O".to_string(), Some(Phases::Gas));
 
         // Set library priorities
         user_subs.set_multiple_library_priorities(
@@ -435,6 +471,15 @@ mod tests {
     fn test_integration_all_features() {
         let mut user_subs = SubsData::new();
         let substances = vec!["H2O".to_string(), "CO".to_string(), "CH4".to_string()];
+        user_subs
+            .map_of_phases
+            .insert("H2O".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("CO".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("CH4".to_string(), Some(Phases::Gas));
         user_subs.substances = substances.clone();
 
         // Set library priorities
@@ -499,16 +544,26 @@ mod tests {
 mod tests2 {
 
     use crate::Thermodynamics::User_substances::{
-        DataType, LibraryPriority, SubsData, WhatIsFound,
+        DataType, LibraryPriority, Phases, SubsData, WhatIsFound,
     };
+    use approx::assert_relative_eq;
+    use core::panic;
     use std::collections::HashMap;
-
     // Helper function to create a test SubsData instance with common setup
     fn create_test_subsdata() -> SubsData {
         let mut user_subs = SubsData::new();
 
         // Set up test substances
         user_subs.substances = vec!["H2O".to_string(), "CO2".to_string(), "CH4".to_string()];
+        user_subs
+            .map_of_phases
+            .insert("H2O".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("CO2".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("CH4".to_string(), Some(Phases::Gas));
 
         // Set library priorities
         user_subs.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
@@ -870,5 +925,182 @@ mod tests2 {
             cloned_subs.therm_map_of_fun.keys().count(),
             user_subs.therm_map_of_fun.keys().count()
         );
+    }
+    #[test]
+    fn test_if_not_found_go_NIST() {
+        let mut user_subs = SubsData::new();
+
+        // Set up test substances
+        user_subs.substances = vec![
+            "H2O".to_string(),
+            "CO2".to_string(),
+            "CH4".to_string(),
+            "NH4ClO4".to_string(),
+        ];
+        user_subs
+            .map_of_phases
+            .insert("H2O".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("CO2".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("CH4".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("NH4ClO4".to_string(), Some(Phases::Solid));
+        // Set library priorities
+        user_subs.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        user_subs.set_library_priority("NUIG_thermo".to_string(), LibraryPriority::Permitted);
+
+        // Set pressure and molar mass
+        user_subs.set_P(1.0, Some("atm".to_string()));
+        user_subs.search_substances();
+        user_subs.if_not_found_go_NIST().unwrap();
+        println!("\n\n Search results: {:#?}", user_subs.search_results);
+        assert!(user_subs.search_results.contains_key("NH4ClO4"));
+        assert!(user_subs.search_results.get("NH4ClO4").is_some());
+        assert!(
+            user_subs
+                .search_results
+                .get("NH4ClO4")
+                .unwrap()
+                .contains_key(&WhatIsFound::Thermo)
+        );
+        let not_found = user_subs.get_not_found_substances();
+        println!("Not found: {:#?}", not_found);
+        //panic!("Test failed");
+    }
+    // Test the calculate_elem_composition_and_molar_mass function
+    #[test]
+    fn test_calculate_elem_composition_and_molar_mass() {
+        // Create a test instance with some substances
+        let mut user_subs = create_test_subsdata();
+
+        // Add specific substances with known compositions
+        user_subs.substances = vec!["H2O".to_string(), "CO2".to_string(), "CH4".to_string()];
+
+        // Search for substances in the libraries
+        user_subs.search_substances();
+
+        // Calculate element composition and molar mass
+        let result = user_subs.calculate_elem_composition_and_molar_mass(None);
+        assert!(result.is_ok());
+
+        // Check that the element composition matrix was created
+        assert!(user_subs.elem_composition_matrix.is_some());
+
+        // Check that molar masses were calculated correctly
+        assert!(user_subs.hasmap_of_molar_mass.contains_key("H2O"));
+        assert!(user_subs.hasmap_of_molar_mass.contains_key("CO2"));
+        assert!(user_subs.hasmap_of_molar_mass.contains_key("CH4"));
+
+        // Check approximate molar mass values
+        let h2o_mass = user_subs.hasmap_of_molar_mass.get("H2O").unwrap();
+        let co2_mass = user_subs.hasmap_of_molar_mass.get("CO2").unwrap();
+        let ch4_mass = user_subs.hasmap_of_molar_mass.get("CH4").unwrap();
+
+        assert_relative_eq!(*h2o_mass, 18.0, epsilon = 0.1);
+        assert_relative_eq!(*co2_mass, 44.0, epsilon = 0.1);
+        assert_relative_eq!(*ch4_mass, 16.0, epsilon = 0.1);
+
+        // Check the dimensions of the element composition matrix
+        let matrix = user_subs.elem_composition_matrix.as_ref().unwrap();
+        assert_eq!(matrix.nrows(), 3); // 3 substances
+        assert!(matrix.ncols() >= 3); // At least 3 elements (C, H, O)
+
+        // Test with custom chemical groups
+        let mut groups = HashMap::new();
+        let mut methyl_group = HashMap::new();
+        methyl_group.insert("C".to_string(), 1);
+        methyl_group.insert("H".to_string(), 3);
+        groups.insert("Me".to_string(), methyl_group);
+
+        // Create a new test instance with substances containing the custom group
+        let mut user_subs_with_groups = create_test_subsdata();
+        user_subs_with_groups.substances = vec!["MeOH".to_string()]; // Methanol
+
+        // Search for substances
+        user_subs_with_groups.search_substances();
+
+        // Calculate with custom groups
+        let result = user_subs_with_groups.calculate_elem_composition_and_molar_mass(Some(groups));
+        assert!(result.is_ok());
+
+        // Check that molar mass for methanol is correct
+        if let Some(meoh_mass) = user_subs_with_groups.hasmap_of_molar_mass.get("MeOH") {
+            assert_relative_eq!(*meoh_mass, 32.0, epsilon = 0.1); // CH3OH = 32 g/mol
+        } else {
+            panic!("Molar mass for MeOH not calculated");
+        }
+    }
+
+    #[test]
+    fn test_calculate_elem_composition_matrix_structure() {
+        // Create a test instance with substances having known compositions
+        let mut user_subs = create_test_subsdata();
+        user_subs.substances = vec!["H2".to_string(), "O2".to_string(), "H2O".to_string()];
+
+        // Search for substances
+        user_subs.search_substances();
+
+        // Calculate element composition and molar mass
+        let result = user_subs.calculate_elem_composition_and_molar_mass(None);
+        assert!(result.is_ok());
+
+        // Get the matrix
+        let matrix = user_subs.elem_composition_matrix.as_ref().unwrap();
+        println!("Matrix: {}", matrix);
+
+        // Check matrix dimensions
+        assert_eq!(matrix.nrows(), 3); // 3 substances
+        assert_eq!(matrix.ncols(), 2); // 2 elements (H, O)
+
+        // Check specific values in the matrix
+        // H2 should have 2 H atoms and 0 O atoms
+        assert_eq!(matrix[(0, 0)], 2.0); // H in H2
+        assert_eq!(matrix[(0, 1)], 0.0); // O in H2
+
+        // O2 should have 0 H atoms and 2 O atoms
+        assert_eq!(matrix[(1, 0)], 0.0); // H in O2
+        assert_eq!(matrix[(1, 1)], 2.0); // O in O2
+
+        // H2O should have 2 H atoms and 1 O atom
+        assert_eq!(matrix[(2, 0)], 2.0); // H in H2O 
+        assert_eq!(matrix[(2, 1)], 1.0); // O in H2O
+    }
+
+    #[test]
+    fn test_calculate_elem_composition_with_complex_molecules() {
+        // Create a test instance with more complex molecules
+        let mut user_subs = create_test_subsdata();
+        user_subs.substances = vec![
+            "C6H12O6".to_string(),
+            "C2H5OH".to_string(),
+            "NH3".to_string(),
+        ];
+
+        // Search for substances
+        user_subs.search_substances();
+
+        // Calculate element composition and molar mass
+        let result = user_subs.calculate_elem_composition_and_molar_mass(None);
+        assert!(result.is_ok());
+
+        // Check molar masses
+        let glucose_mass = user_subs.hasmap_of_molar_mass.get("C6H12O6").unwrap();
+        let ethanol_mass = user_subs.hasmap_of_molar_mass.get("C2H5OH").unwrap();
+        let ammonia_mass = user_subs.hasmap_of_molar_mass.get("NH3").unwrap();
+
+        assert_relative_eq!(*glucose_mass, 180.0, epsilon = 0.5); // C6H12O6 = 180 g/mol
+        assert_relative_eq!(*ethanol_mass, 46.0, epsilon = 0.5); // C2H5OH = 46 g/mol
+        assert_relative_eq!(*ammonia_mass, 17.0, epsilon = 0.5); // NH3 = 17 g/mol
+
+        // Get the matrix
+        let matrix = user_subs.elem_composition_matrix.as_ref().unwrap();
+
+        // Check matrix dimensions
+        assert_eq!(matrix.nrows(), 3); // 3 substances
+        assert!(matrix.ncols() >= 4); // At least 4 elements (C, H, O, N)
     }
 }

@@ -8,10 +8,11 @@ pub fn NIST_examples(nist_examples: usize) {
             // Example usage
             let substance = "CH4";
             match parser.get_data(substance, SearchType::All, Phase::Gas) {
-                Ok(data) => {
+                Ok(mut data) => {
                     println!("Data for {}: {:?}", substance, data);
 
                     data.pretty_print();
+                    let _ = data.extract_coefficients(298.15);
                     #[allow(non_snake_case)]
                     let (Cp, dh, ds) = data
                         .caclc_cp_dh_ds(298.15)
@@ -26,10 +27,11 @@ pub fn NIST_examples(nist_examples: usize) {
             let parser = NistParser::new();
             let substance = "NaCl";
             match parser.get_data(substance, SearchType::All, Phase::Solid) {
-                Ok(data) => {
+                Ok(mut data) => {
                     println!("Data for {}: {:?}", substance, data);
 
                     data.pretty_print();
+                    let _ = data.extract_coefficients(298.15);
                     #[allow(non_snake_case)]
                     let (Cp, dh, ds) = data
                         .caclc_cp_dh_ds(298.15)
@@ -40,10 +42,11 @@ pub fn NIST_examples(nist_examples: usize) {
             }
 
             match parser.get_data(substance, SearchType::All, Phase::Liquid) {
-                Ok(data) => {
+                Ok(mut data) => {
                     println!("Data for {}: {:?}", substance, data);
 
                     data.pretty_print();
+                    let _ = data.extract_coefficients(1200.15);
                     #[allow(non_snake_case)]
                     let (Cp, dh, ds) = data
                         .caclc_cp_dh_ds(1200.15)

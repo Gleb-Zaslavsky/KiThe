@@ -11,7 +11,7 @@ pub struct Element {
 }
 
 // Define a list of elements and their atomic masses
-const ELEMENTS: &[Element] = &[
+pub const ELEMENTS: &[Element] = &[
     Element {
         name: "H",
         atomic_mass: 1.008,
@@ -484,6 +484,22 @@ pub fn calculate_molar_mass(
     (molar_mass, counts)
 }
 
+pub fn calculate_molar_mass_for_composition(counts: HashMap<String, usize>) -> f64 {
+    println!("\n___________CALCULATE MOAR MASS FOR COMPOSITION___________");
+
+    let mut molar_mass = 0.0;
+    for (element, count) in counts.clone() {
+        for e in ELEMENTS {
+            if e.name == element {
+                println!("found element: {}, number of atoms  {}", e.name, count);
+                molar_mass += e.atomic_mass * count as f64;
+                break;
+            }
+        }
+    }
+    molar_mass
+}
+
 // Function to calculate the molar mass of a vector of chemical formulas
 pub fn calculate_molar_mass_of_vector_of_subs(
     vec_of_formulae: Vec<&str>,
@@ -536,6 +552,38 @@ pub fn create_elem_composition_matrix(
     }
     println!("\n___________CREATE ELEMENTS COMPOSITION MATRIX ENDED___________");
     (matrix.transpose(), unique_vec_of_elems)
+}
+
+pub fn create_elem_composition_matrix_and_molar_masses(
+    vec_of_formulae: Vec<&str>,
+    groups: Option<HashMap<String, HashMap<String, usize>>>,
+) -> (DMatrix<f64>, Vec<String>, Vec<f64>) {
+    println!("\n___________CREATE ELEMENTS COMPOSITION MATRIX AND MOLAR MASSES___________");
+    let mut hashset_of_elems: HashSet<String> = HashSet::new();
+    let mut vec_of_compositions = Vec::new();
+    let mut vec_of_molar_masses = Vec::new();
+    for formula in vec_of_formulae.iter() {
+        // create a unique list of elements from the given formula vector
+        let (molar_mass, counts) = calculate_molar_mass(formula.to_string(), groups.clone());
+        vec_of_molar_masses.push(molar_mass);
+        vec_of_compositions.push(counts.clone());
+        let elements = counts.keys().map(|el| el.clone()).collect::<Vec<_>>();
+        hashset_of_elems.extend(elements);
+    }
+    let unique_vec_of_elems = hashset_of_elems.into_iter().collect::<Vec<_>>();
+    let num_rows = unique_vec_of_elems.len();
+    let num_cols = vec_of_compositions.len();
+    let mut matrix = DMatrix::zeros(num_rows, num_cols);
+    for substance_i in 0..vec_of_formulae.len() {
+        for j in 0..unique_vec_of_elems.len() {
+            let element_j = unique_vec_of_elems[j].clone();
+            if let Some(count) = vec_of_compositions[substance_i].get(&element_j) {
+                matrix[(j, substance_i)] += *count as f64;
+            }
+        }
+    }
+    println!("\n___________CREATE ELEMENTS COMPOSITION MATRIX AND MOLAR MASSES ENDED___________");
+    (matrix.transpose(), unique_vec_of_elems, vec_of_molar_masses)
 }
 
 /*
