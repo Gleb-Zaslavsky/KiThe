@@ -68,3 +68,4 @@ pub mod ClassicalThermodynamics;
 pub mod ClassicalThermodynamics2;
 mod ClassicalThermodynamics_tests;
 mod ClassicalThermodynamics_tests2;
+mod Solver;

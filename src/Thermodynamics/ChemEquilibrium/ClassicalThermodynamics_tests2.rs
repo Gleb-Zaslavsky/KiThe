@@ -10,8 +10,9 @@ mod tests {
     use crate::Thermodynamics::User_substances::{DataType, LibraryPriority, Phases, SubsData};
     use RustedSciThe::symbolic::symbolic_engine::Expr;
     use approx::assert_relative_eq;
+    use core::panic;
     use nalgebra::{DMatrix, DVector};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::vec;
 
     #[test]
@@ -168,8 +169,13 @@ mod tests {
         let subs = vec!["H2".to_string(), "O2".to_string()];
         let T = 400.0;
         let P = 101325.0;
+        let mut nv = HashMap::new();
+        nv.insert(None, (Some(1.0), (Some(vec![0.5, 0.5]))));
+
         let mut n = HashMap::new();
-        n.insert(None, (Some(1.0), (Some(vec![0.5, 0.5]))));
+        let map_of_moles_num = HashMap::from([("H2".to_string(), 0.5), ("O2".to_string(), 0.5)]);
+        n.insert(None, (Some(1.0), (Some(map_of_moles_num))));
+
         let mut n_sym = HashMap::new();
         n_sym.insert(
             None,
@@ -195,7 +201,7 @@ mod tests {
         )
         .unwrap();
 
-        let dG = customsubs.calcutate_Gibbs_free_energy(T, P, n.clone());
+        let dG = customsubs.calcutate_Gibbs_free_energy(T, P, nv.clone());
 
         let dG_sym = customsubs.calculate_Gibbs_sym(T, n_sym.clone());
         assert!(dG.is_ok());
@@ -236,8 +242,8 @@ mod tests {
         println!("initial_composition: {:?}", initial_composition);
         assert_eq!(initial_composition, &vec![1.0, 1.0]);
         td.composition_equations().unwrap();
-        let all_mole_nums = n_sym.clone().get(&None).unwrap().1.clone().unwrap();
-        td.composition_equation_sym(all_mole_nums);
+        //
+        td.composition_equation_sym().unwrap();
         let composition_equations: &Vec<Box<dyn Fn(DVector<f64>) -> f64>> =
             &td.solver.elements_conditions;
         let composition_equation_sym = &td.solver.elements_conditions_sym;
@@ -251,6 +257,8 @@ mod tests {
         println!("composition_equations: {:?}", composition_equation_sym);
         // symbolic variables representing Lagrangian multipliers and equilibrium concentrations
         td.create_indexed_variables();
+        let all_mole_nums = n_sym.clone().get(&None).unwrap().1.clone().unwrap();
+        assert_eq!(all_mole_nums, td.solver.n.clone());
         let Lamda_sym = td.solver.Lambda.clone();
         let n = td.solver.n.clone();
         println!("Lamda_sym: {:?}", Lamda_sym);
@@ -302,13 +310,14 @@ mod tests {
 
             assert_relative_eq!(eq_sym_fun_value, eq_mu_fun_value[i], epsilon = 1e-6);
         }
-
+        td.create_sum_of_mole_numbers_sym().unwrap();
         td.form_full_system_sym().unwrap();
-        let full_system = td.solver.full_system_sym;
+        let full_system = &td.solver.full_system_sym;
         println!("full_system: {:?}", full_system);
         println!("eq_s: {:?}", eq_s);
+        td.pretty_print_full_system();
     }
-    /*
+
     #[test]
     fn test_calculate_elem_composition_and_molar_mass() {
         // Setup test data
@@ -411,61 +420,6 @@ mod tests {
         assert_relative_eq!(thermo.initial_vector_of_elements[2], 0.3, epsilon = 1e-10);
     }
 
-    #[test]
-    fn test_create_thermodynamics() {
-        // Setup test data
-        let mut subdata = SubsData::new();
-        let subs = vec!["H2".to_string(), "O2".to_string()];
-
-        subdata
-            .map_of_phases
-            .insert(subs[0].clone(), Some(Phases::Gas));
-        subdata
-            .map_of_phases
-            .insert(subs[1].clone(), Some(Phases::Gas));
-        subdata.substances = subs.clone();
-
-        // Mock property values
-        let mut h2_properties = HashMap::new();
-        h2_properties.insert(DataType::Cp, Some(28.8));
-        h2_properties.insert(DataType::dH, Some(-0.0));
-        h2_properties.insert(DataType::dS, Some(130.7));
-
-        let mut o2_properties = HashMap::new();
-        o2_properties.insert(DataType::Cp, Some(29.4));
-        o2_properties.insert(DataType::dH, Some(0.0));
-        o2_properties.insert(DataType::dS, Some(205.2));
-
-        subdata
-            .therm_map_of_properties_values
-            .insert("H2".to_string(), h2_properties);
-        subdata
-            .therm_map_of_properties_values
-            .insert("O2".to_string(), o2_properties);
-
-        // Create a CustomSubstance
-        let mut custom_substance = CustomSubstance::OnePhase(subdata);
-
-        // Use the ThermodynamicCalculations trait to create a Thermodynamics instance
-        let result = custom_substance.create_thermodynamics(
-            400.0,
-            101325.0,
-            Some(vec![0.5, 0.5]),
-            None,
-            None,
-        );
-
-        assert!(result.is_ok());
-        let thermo = result.unwrap();
-
-        // Verify the created Thermodynamics instance
-        assert_eq!(thermo.T, 400.0);
-        assert_eq!(thermo.P, 101325.0);
-        assert_eq!(thermo.vec_of_subs, subs);
-
-        // Check that Gibbs and entropy calculations were performed
-    }
-
     fn setup_test_thermodynamics() -> Thermodynamics {
         // Create a basic SubsData instance
         let mut subdata = SubsData::new();
@@ -496,11 +450,11 @@ mod tests {
 
         // Set initial concentrations
         let mut concentrations = HashMap::new();
-        concentrations.insert("H2O".to_string(), 1.0);
+        concentrations.insert("H2O".to_string(), 0.25);
         concentrations.insert("H2".to_string(), 0.5);
         concentrations.insert("O2".to_string(), 0.25);
         thermodynamics.map_of_concentration = concentrations;
-
+        thermodynamics.create_indexed_variables();
         thermodynamics
     }
 
@@ -513,11 +467,15 @@ mod tests {
         assert!(result.is_ok());
 
         // Check that the initial vector of elements is calculated correctly
-        // H: 2*1.0 (H2O) + 2*0.5 (H2) + 0*0.25 (O2) = 3.0
-        // O: 1*1.0 (H2O) + 0*0.5 (H2) + 2*0.25 (O2) = 1.5
+        // H: 2*0.25 (H2O) + 2*0.5 (H2) + 0*0.25 (O2) = 1.5
+        // O: 1*0.25 (H2O) + 0*0.0 (H2) + 2*0.25 (O2) = 0.75
+        println!(
+            "Initial vector of elements: {:#?}",
+            thermodynamics.initial_vector_of_elements
+        );
         assert_eq!(thermodynamics.initial_vector_of_elements.len(), 2);
-        assert!((thermodynamics.initial_vector_of_elements[0] - 3.0).abs() < 1e-10);
-        assert!((thermodynamics.initial_vector_of_elements[1] - 1.5).abs() < 1e-10);
+        assert!((thermodynamics.initial_vector_of_elements[0] - 1.5).abs() < 1e-10);
+        assert!((thermodynamics.initial_vector_of_elements[1] - 0.75).abs() < 1e-10);
     }
 
     #[test]
@@ -543,19 +501,174 @@ mod tests {
         let _ = thermodynamics.initial_composition();
 
         // Create symbolic concentration variables
-        let n1 = Expr::Var("n1".to_string());
-        let n2 = Expr::Var("n2".to_string());
-        let n3 = Expr::Var("n3".to_string());
-        let vec_of_concentrations_sym = vec![n1, n2, n3];
-
+        let n1 = Expr::Var("N0".to_string());
+        let n2 = Expr::Var("N1".to_string());
+        let n3 = Expr::Var("N2".to_string());
+        let vec_of_concentrations_sym_expect = vec![n1, n2, n3];
+        assert_eq!(vec_of_concentrations_sym_expect, thermodynamics.solver.n);
         // Test the composition_equation_sym method
-        let result = thermodynamics.composition_equation_sym(vec_of_concentrations_sym);
+        let result = thermodynamics.composition_equation_sym();
         assert!(result.is_ok());
 
         // Check that the elements_conditions_sym vector has the correct length
         assert_eq!(thermodynamics.solver.elements_conditions_sym.len(), 2);
     }
 
+    #[test]
+    fn test_calculate_equilibrium() {
+        // Setup test data
+
+        let subs = vec![
+            "H2".to_string(),
+            "O2".to_string(),
+            "H2O".to_string(),
+            "O".to_string(),
+            "H".to_string(),
+        ];
+        let T = 400.0;
+        let P = 101325.0;
+
+        let search_in_NIST = false;
+        let explicit_search_insructions = None;
+        let library_priorities = vec!["NASA_gas".to_string()];
+        let permitted_libraries = vec!["NUIG".to_string()];
+        let container = SubstancesContainer::SinglePhase(subs.clone());
+        let mut customsubs = SubstanceSystemFactory::create_system(
+            container,
+            library_priorities,
+            permitted_libraries,
+            explicit_search_insructions,
+            search_in_NIST,
+        )
+        .unwrap();
+        let mut n = HashMap::new();
+        let map_of_concentration = HashMap::from([
+            ("H2".to_string(), 0.5),
+            ("O2".to_string(), 0.5),
+            ("H2O".to_string(), 0.1),
+        ]);
+        n.insert(None, (Some(1.0), Some(map_of_concentration)));
+        // create thermodynamics instance
+        let td = customsubs.create_thermodynamics(T, P, Some(n), None);
+        assert!(td.is_ok());
+        let mut td = td.unwrap();
+        td.set_P_to_sym();
+        //  td.initial_composition().unwrap();
+        // symbolic variables representing Lagrangian multipliers and equilibrium concentrations
+        //   td.create_indexed_variables();
+        println!("Lambda: {:#?} \n", td.solver.Lambda);
+        println!("n: {:#?} \n", td.solver.n);
+        println!("n_sym: {:#?} \n", td.solver.Np);
+        // calculate element composition matrix
+        td.calculate_elem_composition_and_molar_mass(None);
+        // set initial concentrations
+        println!(
+            "Initial vector of elements: {:#?} \n",
+            td.initial_vector_of_elements
+        );
+        println!(
+            "composition: {}, ncols = {}\n",
+            &td.clone().elem_composition_matrix.unwrap(),
+            &td.clone().elem_composition_matrix.unwrap().ncols()
+        );
+        td.composition_equations().unwrap();
+        //
+        td.composition_equation_sym().unwrap();
+        //
+        td.set_T_to_sym();
+        td.create_nonlinear_system_sym().unwrap();
+        td.create_nonlinear_system_fun().unwrap();
+        td.create_sum_of_mole_numbers_sym().unwrap();
+        td.form_full_system_sym().unwrap();
+        td.pretty_print_full_system();
+    }
+
+    #[test]
+    fn test_calculate_equilibrium2() {
+        // Setup test data
+
+        let subs = vec![
+            "H2".to_string(),
+            "O2".to_string(),
+            "H2O".to_string(),
+            "O".to_string(),
+            "H".to_string(),
+        ];
+        let T = 400.0;
+        let P = 101325.0;
+
+        let search_in_NIST = false;
+        let explicit_search_insructions = None;
+        let library_priorities = vec!["NASA_gas".to_string()];
+        let permitted_libraries = vec!["NUIG".to_string()];
+        let container = SubstancesContainer::SinglePhase(subs.clone());
+        let mut customsubs = SubstanceSystemFactory::create_system(
+            container,
+            library_priorities,
+            permitted_libraries,
+            explicit_search_insructions,
+            search_in_NIST,
+        )
+        .unwrap();
+        let mut n = HashMap::new();
+        let map_of_concentration = HashMap::from([
+            ("H2".to_string(), 0.5),
+            ("O2".to_string(), 0.5),
+            ("H2O".to_string(), 0.1),
+        ]);
+        n.insert(None, (Some(1.0), Some(map_of_concentration)));
+        // create thermodynamics instance
+        let td = customsubs.create_thermodynamics(T, P, Some(n), None);
+        assert!(td.is_ok());
+        let mut td = td.unwrap();
+
+        td.find_composition_for_const_TP().unwrap();
+    }
+
+    #[test]
+    fn test_calculate_equilibrium3() {
+        // Setup test data
+
+        let subs = vec![
+            "H2".to_string(),
+            "O2".to_string(),
+            "H2O".to_string(),
+            "O".to_string(),
+            "H".to_string(),
+        ];
+        let T = 400.0;
+        let P = 101325.0;
+
+        let search_in_NIST = false;
+        let explicit_search_insructions = None;
+        let library_priorities = vec!["NASA_gas".to_string()];
+        let permitted_libraries = vec!["NUIG".to_string()];
+        let container = SubstancesContainer::SinglePhase(subs.clone());
+        let mut customsubs = SubstanceSystemFactory::create_system(
+            container,
+            library_priorities,
+            permitted_libraries,
+            explicit_search_insructions,
+            search_in_NIST,
+        )
+        .unwrap();
+        let mut n = HashMap::new();
+        let map_of_concentration = HashMap::from([
+            ("H2".to_string(), 0.5),
+            ("O2".to_string(), 0.5),
+            ("H2O".to_string(), 0.1),
+        ]);
+        n.insert(None, (Some(1.0), Some(map_of_concentration)));
+        // create thermodynamics instance
+        let td = customsubs.create_thermodynamics(T, P, None, None);
+        assert!(td.is_ok());
+        let mut td = td.unwrap();
+        td.set_number_of_moles(Some(n));
+        td.initial_composition().unwrap();
+        td.create_indexed_variables();
+        td.find_composition_for_const_TP().unwrap();
+    }
+    /*
     #[test]
     fn test_indexed_variables() {
         let mut thermodynamics = setup_test_thermodynamics();

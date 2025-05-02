@@ -181,8 +181,10 @@ mod tests {
         let mut custom_substance = CustomSubstance::OnePhase(subs_data);
 
         // Test create_thermodynamics method
-        let mut n: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)> = HashMap::new();
-        n.insert(None, (Some(1.0), Some(vec![0.5, 0.5])));
+        let mut n: HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)> =
+            HashMap::new();
+        let map_of_moles_num = HashMap::from([("CO".to_string(), 0.5), ("CO2".to_string(), 0.5)]);
+        n.insert(None, (Some(1.0), (Some(map_of_moles_num))));
         let result = custom_substance.create_thermodynamics(400.0, 101325.0, Some(n), None);
 
         assert!(result.is_ok());
@@ -259,8 +261,12 @@ mod tests {
         assert!(result.is_ok());
 
         let mut custom_substance = result.unwrap();
+        let mut nv = HashMap::new();
+        nv.insert(None, (Some(1.0), Some(vec![0.5, 0.5])));
+
         let mut n = HashMap::new();
-        n.insert(None, (Some(1.0), Some(vec![0.5, 0.5])));
+        let map_of_moles_num = HashMap::from([("CO".to_string(), 0.5), ("CO2".to_string(), 0.5)]);
+        n.insert(None, (Some(1.0), Some(map_of_moles_num)));
         // Create thermodynamics from the custom substance
         let result = custom_substance.create_thermodynamics(400.0, 101325.0, Some(n.clone()), None);
 
@@ -275,7 +281,7 @@ mod tests {
         assert!(!thermo.dS_sym.is_empty());
 
         // Test recalculation at a different temperature
-        thermo.calculate_Gibbs_free_energy(500.0, n);
+        thermo.calculate_Gibbs_free_energy(500.0, nv);
         assert_eq!(thermo.T, 500.0);
 
         // Test set_P_to_sym

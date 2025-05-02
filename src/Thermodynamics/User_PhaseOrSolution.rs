@@ -45,6 +45,52 @@ impl SubstancesContainer {
         subs
     } // get all substances in all phases
 }
+
+impl CustomSubstance {
+    pub fn extract_SubstancesContainer(&mut self) -> Result<SubstancesContainer, String> {
+        match self {
+            CustomSubstance::OnePhase(subs_data) => Ok(SubstancesContainer::SinglePhase(
+                subs_data.substances.clone(),
+            )),
+            CustomSubstance::PhaseOrSolution(phase_or_solution) => {
+                let mut all_substances = Vec::new();
+                for (_, subs_data) in &phase_or_solution.subs_data {
+                    all_substances.extend(subs_data.substances.clone());
+                }
+                let subs: HashSet<String> = HashSet::from_iter(all_substances.clone());
+                let mut subs: Vec<String> = subs.into_iter().collect();
+                subs.sort();
+                Ok(SubstancesContainer::SinglePhase(subs))
+            }
+        }
+    } // get all substances in all phases
+
+    /// tkaes a map of non-zero number of moles and creates a full map of number of moles
+    pub fn create_full_map_of_mole_numbers(
+        &self,
+        non_zero_number_of_moles: HashMap<
+            Option<String>,
+            (Option<f64>, Option<HashMap<String, f64>>),
+        >,
+    ) -> Result<
+        (
+            HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
+            HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
+            HashMap<String, f64>,
+        ),
+        String,
+    > {
+        match self {
+            CustomSubstance::OnePhase(subs_data) => {
+                subs_data.create_full_map_of_mole_numbers(non_zero_number_of_moles)
+            }
+            CustomSubstance::PhaseOrSolution(phase_or_solution) => {
+                phase_or_solution.create_full_map_of_mole_numbers(non_zero_number_of_moles)
+            }
+        }
+    }
+}
+
 ///  structure contains map: phase name - substances data in this phase
 #[derive(Debug, Clone)]
 pub struct PhaseOrSolution {
@@ -148,6 +194,20 @@ pub trait ThermodynamicsCalculatorTrait {
         >,
     ) -> Result<
         Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
+        String,
+    >;
+    fn create_full_map_of_mole_numbers(
+        &self,
+        non_zero_number_of_moles: HashMap<
+            Option<String>,
+            (Option<f64>, Option<HashMap<String, f64>>),
+        >,
+    ) -> Result<
+        (
+            HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
+            HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
+            HashMap<String, f64>,
+        ),
         String,
     >;
 }
@@ -381,7 +441,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         A: DMatrix<f64>, // hasmap {phase or solution, {substance, expression}}
         G: HashMap<Option<String>, HashMap<String, Expr>>,
     ) -> Result<Vec<Expr>, String> {
-        let A = A.transpose(); // now rows are elements and columns are substances
+        let A = A.clone().transpose(); // now rows are elements and columns are substances
         let n_elements = A.nrows();
         // create a vector of Lagrange multipliers for each element
         let Lambda = Expr::IndexedVars(n_elements, "Lambda").0;
@@ -458,6 +518,59 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
             vec_of_eqs
         };
         Ok(Box::new(f))
+    }
+
+    fn create_full_map_of_mole_numbers(
+        &self,
+        non_zero_number_of_moles: HashMap<
+            Option<String>,
+            (Option<f64>, Option<HashMap<String, f64>>),
+        >,
+    ) -> Result<
+        (
+            HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
+            HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
+            HashMap<String, f64>,
+        ),
+        String,
+    > {
+        //  hashmap  HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>, we iterate through it and when some string from vector Vec<String> is not
+        // found as the key in the inner map it is inserted in the inner map with value 0.0
+        let mut full_map_of_mole_numbers = non_zero_number_of_moles.clone();
+
+        let mut map_of_mole_num_vecs: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)> =
+            HashMap::new();
+
+        //hashmap  HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)> keys of the inner may can be the same.
+        //let's generate map HashMap<String, f64> where f64 is the sum of the values of inner map with same keys
+        let mut initial_map_of_mole_numbers: HashMap<String, f64> = HashMap::new();
+        let subs_cloned: HashMap<Option<String>, SubsData> = self.subs_data.clone();
+        for (phase, value) in full_map_of_mole_numbers.iter_mut() {
+            if let (Np, Some(mut inner_map)) = (value.0.clone(), value.1.clone()) {
+                let subsdata = subs_cloned.get(phase).unwrap();
+                let subs = subsdata.clone().get_all_substances();
+                // For each required key, insert with 0.0 if not present
+                for key in &subs {
+                    inner_map.entry(key.clone()).or_insert(0.0);
+                }
+                // making
+                let inner_map = inner_map.clone();
+                let vec_of_mole_nums = inner_map.values().cloned().collect::<Vec<f64>>();
+                map_of_mole_num_vecs.insert(phase.clone(), (Np, Some(vec_of_mole_nums)));
+                // making initial map of mole numbers
+                for (keys, values) in inner_map.iter().clone() {
+                    *initial_map_of_mole_numbers
+                        .entry(keys.clone())
+                        .or_insert(0.0) += values;
+                }
+            }
+        }
+
+        Ok((
+            non_zero_number_of_moles,
+            map_of_mole_num_vecs,
+            initial_map_of_mole_numbers,
+        ))
     }
 }
 /// Implementation of the ThermodynamicsCalculatorTrait for SubsData (single phase case)
@@ -694,6 +807,53 @@ impl ThermodynamicsCalculatorTrait for SubsData {
                 vec_of_eqs
             };
         Ok(Box::new(fun))
+    }
+
+    fn create_full_map_of_mole_numbers(
+        &self,
+        non_zero_number_of_moles: HashMap<
+            Option<String>,
+            (Option<f64>, Option<HashMap<String, f64>>),
+        >,
+    ) -> Result<
+        (
+            HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
+            HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
+            HashMap<String, f64>,
+        ),
+        String,
+    > {
+        let mut full_map_of_mole_numbers = non_zero_number_of_moles.clone();
+        let mut map_of_mole_num_vecs: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)> =
+            HashMap::new();
+
+        let mut initial_map_of_mole_numbers: HashMap<String, f64> = HashMap::new();
+        let subs = self.substances.clone();
+
+        for (_, value) in full_map_of_mole_numbers.iter_mut() {
+            if let (Np, Some(mut inner_map)) = (value.0.clone(), value.1.clone()) {
+                // For each required key, insert with 0.0 if not present
+                for key in &subs {
+                    inner_map.entry(key.clone()).or_insert(0.0);
+                }
+                let inner_map = inner_map.clone();
+                let vec_of_mole_nums = inner_map.values().cloned().collect::<Vec<f64>>();
+                map_of_mole_num_vecs.insert(None, (Np, Some(vec_of_mole_nums)));
+
+                // making initial map of mole numbers
+                for (keys, values) in inner_map.iter().clone() {
+                    *initial_map_of_mole_numbers
+                        .entry(keys.clone())
+                        .or_insert(0.0) += values;
+                }
+            }
+        }
+
+        Ok((
+            non_zero_number_of_moles,
+            map_of_mole_num_vecs,
+            initial_map_of_mole_numbers,
+        ))
     }
 }
 ////////////////////FACTORY METHODS////////////////////

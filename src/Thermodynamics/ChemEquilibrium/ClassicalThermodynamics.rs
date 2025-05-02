@@ -27,7 +27,9 @@ pub trait ThermodynamicCalculations {
         &mut self,
         temperature: f64,
         pressure: f64,
-        concentrations: Option<HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>>,
+        non_zero_moles_number: Option<
+            HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
+        >,
 
         groups: Option<HashMap<String, HashMap<String, usize>>>,
     ) -> Result<Thermodynamics, String>;
@@ -38,35 +40,50 @@ impl ThermodynamicCalculations for CustomSubstance {
         &mut self,
         temperature: f64,
         pressure: f64,
-        concentrations: Option<HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>>,
+        // non-zero concentrations of substances in the mixture
+        non_zero_moles_number: Option<
+            HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
+        >,
 
         groups: Option<HashMap<String, HashMap<String, usize>>>,
     ) -> Result<Thermodynamics, String> {
         let mut thermodynamics = Thermodynamics::new();
-        let subs_container = self.extract_SubstancesContainer()?;
-        //   let vec_of_substances = subs_container.get_all_substances();
-        let vec_of_substances = self.get_all_substances();
-        let (elem_composition_matrix, _hashmap_of_molar_masses, vec_of_elements) = self
-            .calculate_elem_composition_and_molar_mass(groups)
-            .unwrap();
         thermodynamics.subdata = self.clone();
+        let subs_container = self.extract_SubstancesContainer()?;
+        thermodynamics.subs_container = subs_container;
+        if let Some(non_zero_moles_number) = non_zero_moles_number {
+            let full_map_of_moles_number = &self
+                .create_full_map_of_mole_numbers(non_zero_moles_number)
+                .unwrap();
+            thermodynamics.map_of_map_mole_numbers_and_phases = full_map_of_moles_number.0.clone();
+            thermodynamics.map_of_vec_mole_numbers_and_phases = full_map_of_moles_number.1.clone();
+            thermodynamics.map_of_concentration = full_map_of_moles_number.2.clone();
+            thermodynamics
+                .calculate_Gibbs_free_energy(temperature, full_map_of_moles_number.1.clone());
+            thermodynamics.calculate_S(temperature, full_map_of_moles_number.1.clone());
+            let vec_of_substances = self.get_all_substances();
+            thermodynamics.vec_of_subs = vec_of_substances;
+            thermodynamics.calculate_elem_composition_and_molar_mass(groups);
+            thermodynamics.initial_composition().unwrap();
+            thermodynamics.create_indexed_variables();
+        } else {
+            let vec_of_substances = self.get_all_substances();
+            thermodynamics.vec_of_subs = vec_of_substances;
+            thermodynamics.calculate_elem_composition_and_molar_mass(groups);
+            // with no concentrations specified, no initiial composition is calculated, self.solver.b0 is not calculated, and Lambda vector is created empty
+            thermodynamics.create_indexed_variables();
+        }
+        //   let vec_of_substances = subs_container.get_all_substances();
 
         thermodynamics.T = temperature;
         thermodynamics.P = pressure;
-        thermodynamics.create_indexed_variables();
-        thermodynamics.vec_of_subs = vec_of_substances;
-        thermodynamics.subs_container = subs_container;
-        thermodynamics.elem_composition_matrix = Some(elem_composition_matrix);
-        thermodynamics.unique_elements = vec_of_elements;
-        if let Some(concentrations) = concentrations {
-            thermodynamics.calculate_Gibbs_free_energy(temperature, concentrations.clone());
-            thermodynamics.calculate_S(temperature, concentrations);
-        }
+
         thermodynamics.calculate_Gibbs_sym(temperature);
         thermodynamics.calculate_Gibbs_fun(temperature);
 
         thermodynamics.calculate_S_sym(temperature);
         thermodynamics.calculate_S_fun(temperature);
+
         thermodynamics.set_P_to_sym();
 
         Ok(thermodynamics)
@@ -79,6 +96,13 @@ pub struct Thermodynamics {
     pub subs_container: SubstancesContainer,
     /// map of concentration of substances
     pub vec_of_subs: Vec<String>,
+    /// map of values {Option<phase or solution>, Option{total number of moles in phase or solution, map of moles of substances in phase or solution}}
+    pub map_of_map_mole_numbers_and_phases:
+        HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
+    /// map of values {Option<phase or solution>, {total number of moles in phase or solution, vec of moles of substances in phase or solution}}  
+    pub map_of_vec_mole_numbers_and_phases:
+        HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
+    /// initial composition of the mixture
     pub map_of_concentration: HashMap<String, f64>,
     /// map of symbolic variables {phase or solutuion, {total number of moles in phase or solution, symbolic vector of number of moles}}
     pub symbolic_vars: HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)>,
@@ -88,9 +112,9 @@ pub struct Thermodynamics {
     pub stoichio_matrix: Option<Vec<Vec<f64>>>,
     /// matrix of elements composition of substances, where columns are elements and rows are substances
     pub elem_composition_matrix: Option<DMatrix<f64>>,
-    ///
+    /// vector of elements names of the substances
     pub unique_elements: Vec<String>,
-    //
+    ///
     pub initial_vector_of_elements: Vec<f64>,
     pub T: f64,
     pub P: f64,
@@ -114,6 +138,7 @@ pub struct Thermodynamics {
     >,
     /// hashmap of Gibbs free energy of a given mixure of substances (symbolic result at given T, P, concentration)
     pub dG_sym: HashMap<Option<String>, HashMap<String, Expr>>,
+    /// Structure for solver of nonlinear equations
     pub solver: Solver,
 }
 
@@ -161,14 +186,18 @@ impl Clone for Thermodynamics {
             elements_conditions_sym: self.solver.elements_conditions_sym.clone(),
             Lambda: self.solver.Lambda.clone(),
             n: self.solver.n.clone(),
+            Np: self.solver.Np.clone(),
             eq_mu: self.solver.eq_mu.clone(),
             eq_mu_fun: Box::new(|_, _, _, _| vec![]),
+            eq_sum_mole_numbers: self.solver.eq_sum_mole_numbers.clone(),
             full_system_sym: self.solver.full_system_sym.clone(),
             all_unknowns: self.solver.all_unknowns.clone(),
         };
         let mut cloned_instance = Thermodynamics {
             subs_container: self.subs_container.clone(),
             vec_of_subs: self.vec_of_subs.clone(),
+            map_of_map_mole_numbers_and_phases: self.map_of_map_mole_numbers_and_phases.clone(),
+            map_of_vec_mole_numbers_and_phases: self.map_of_vec_mole_numbers_and_phases.clone(),
             map_of_concentration: self.map_of_concentration.clone(),
             symbolic_vars: self.symbolic_vars.clone(),
             symbolic_vars_for_every_subs: self.symbolic_vars_for_every_subs.clone(),
@@ -217,6 +246,8 @@ impl Thermodynamics {
         Self {
             subs_container: SubstancesContainer::SinglePhase(Vec::new()),
             vec_of_subs: Vec::new(),
+            map_of_map_mole_numbers_and_phases: HashMap::new(),
+            map_of_vec_mole_numbers_and_phases: HashMap::new(),
             map_of_concentration: HashMap::new(),
             symbolic_vars: HashMap::new(),
             symbolic_vars_for_every_subs: HashMap::new(),
@@ -260,6 +291,7 @@ impl Thermodynamics {
             }
         }
     }
+    /// function to calculate chemical elements composition and molar mass of all substances
     pub fn calculate_elem_composition_and_molar_mass(
         &mut self,
         groups: Option<HashMap<String, HashMap<String, usize>>>,
@@ -268,19 +300,45 @@ impl Thermodynamics {
             .subdata
             .calculate_elem_composition_and_molar_mass(groups)
             .unwrap();
+        //  println!("composition_matrix = {:#?} \n vec_of_elements = {:#?}", composition_matrix, vec_of_elements);
         self.elem_composition_matrix = Some(composition_matrix);
         self.unique_elements = vec_of_elements;
     }
-
+    ///create symbolic variables for equations:
+    ///  - Lambda - lafrangian multipliers ( dG per chemical element)
+    ///  - Np - mole numbers for each phase or solution
+    ///  - n - number of moles of each substance
     pub fn create_indexed_variables(&mut self) {
         let symbolic_vars = self.subdata.indexed_moles_variables().unwrap();
         self.symbolic_vars = symbolic_vars.0;
         let number_of_elements = self.solver.b0.len();
+        //  if number_of_elements == 0 {panic!("number_of_elements == 0");}
         let Lambda = Expr::IndexedVars(number_of_elements, "Lambda").0;
         self.symbolic_vars_for_every_subs = symbolic_vars.3;
         self.solver.Lambda = Lambda;
         self.solver.n = symbolic_vars.1;
+        self.solver.Np = symbolic_vars.2;
     }
+    /// function takes map {Option<Phase_name> : (Option<Number of moles in phase>, Option<{substance_name : Number of moles}>}> }
+    /// where Number of moles are non zero and creates full map of mole numbers
+    ///
+    pub fn set_number_of_moles(
+        &mut self,
+        non_zero_moles_number: Option<
+            HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
+        >,
+    ) {
+        if let Some(non_zero_moles_number) = non_zero_moles_number {
+            let full_map_of_moles_number = &self
+                .subdata
+                .create_full_map_of_mole_numbers(non_zero_moles_number)
+                .unwrap();
+            self.map_of_map_mole_numbers_and_phases = full_map_of_moles_number.0.clone();
+            self.map_of_vec_mole_numbers_and_phases = full_map_of_moles_number.1.clone();
+            self.map_of_concentration = full_map_of_moles_number.2.clone();
+        }
+    }
+
     //////////////////////////////////////////dG//////////////////////////////////////////////
 
     /// Function for calculating Gibbs free energy of a given mixure of substances (numerical result at given T, P, concentration)
@@ -303,7 +361,7 @@ impl Thermodynamics {
         let sd = &mut self.subdata;
         self.dG_sym = sd.calculate_Gibbs_sym(T, n).unwrap();
     }
-
+    /// Function for making Gibbs free energy closure of a given mixure of substances (as function of given T, P, concentration)
     pub fn calculate_Gibbs_fun(&mut self, T: f64) {
         self.T = T;
         let P = self.P;
@@ -311,7 +369,7 @@ impl Thermodynamics {
         self.dG_fun = sd.calculate_Gibbs_fun(T, P);
     }
     ////////////////////////////////////////////S - ENTHROPY///////////////////////////////////////////////////////////
-
+    /// Function for calculating enthropy of a given mixure of substances (numerical result at given T, P, concentration)
     pub fn calculate_S(
         &mut self,
         T: f64,
@@ -323,7 +381,7 @@ impl Thermodynamics {
         self.dS = sd.calculate_S(T, P, n).unwrap();
     }
 
-    /// Function for calculating enthropy of a given mixure of substances ( symbolic result at given T, P, concentration)
+    ///Symbolic  function for calculating enthropy of a given mixure of substances ( symbolic result at given T, P, concentration)
     pub fn calculate_S_sym(&mut self, T: f64) {
         self.T = T;
         let n: HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)> =
@@ -332,13 +390,13 @@ impl Thermodynamics {
         self.dS_sym = sd.calculate_S_sym(T, n).unwrap();
     }
 
-    /// Function for calculating enthropy of a given mixure of substances (numerical result at given T, P, concentration)
+    /// Function for making enthropy closure of a given mixure of substances (as function of given T, P, concentration)
     pub fn calculate_S_fun(&mut self, T: f64) {
         self.T = T;
         let sd = &mut self.subdata;
         self.dS_fun = sd.calculate_S_fun(T, self.P);
     }
-
+    /// convert synbolic variable P in G symbolic function to numerical value
     pub fn set_P_to_sym(&mut self) {
         let P = self.P;
         for (_phase_or_solution_name, sym_fun) in self.dG_sym.iter_mut() {
@@ -347,7 +405,7 @@ impl Thermodynamics {
             }
         }
     }
-
+    /// convert synbolic variable T in G symbolic function to numerical value
     pub fn set_T_to_sym(&mut self) {
         let T = self.T;
         for (_phase_or_solution_name, sym_fun) in self.dG_sym.iter_mut() {
@@ -359,8 +417,8 @@ impl Thermodynamics {
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     /// Functions for initial composition
-    /// This function calculates the initial composition of elements in a system given the composition matrix and initial concentrations 
-    /// of substances. It checks if the number of columns matches the number of elements, then performs a matrix multiplication to 
+    /// This function calculates the initial composition of elements in a system given the composition matrix and initial concentrations
+    /// of substances. It checks if the number of columns matches the number of elements, then performs a matrix multiplication to
     /// calculate the initial amount of each element. The result is stored in self.initial_vector_of_elements and self.solver.b0.
     pub fn initial_composition(&mut self) -> Result<(), std::io::Error> {
         let vec_of_substances = self.vec_of_subs.clone();
@@ -369,17 +427,25 @@ impl Thermodynamics {
             let A = A.transpose(); // now rows are elements and columns are substances
             let n_elements = A.nrows();
             if A.ncols() != vec_of_substances.len() {
+                println!(
+                    "A.ncols() {} != vec_of_substances.len() {}",
+                    A.ncols(),
+                    vec_of_substances.len()
+                );
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "The number of columns is not equal to the number of elements",
                 ));
             }
-            let vec_of_initional_concentrations = self
-                .map_of_concentration
-                .clone()
+            let vec_of_initional_concentrations: Vec<f64> = self
+                .vec_of_subs
                 .iter()
-                .map(|(_, v)| *v)
-                .collect::<Vec<f64>>();
+                .map(|v| {
+                    let conc = self.map_of_concentration.get(v).unwrap();
+                    *conc
+                })
+                .collect();
+
             //let vec_of_initional_concentrations = DVector::from_vec(vec_of_initional_concentrations);
             let mut initial_vector_of_elements: Vec<f64> = Vec::new();
             for i in 0..n_elements {
@@ -404,7 +470,8 @@ impl Thermodynamics {
         }
         Ok(())
     }
-    /// Function for conservation of  the elements  condition
+    /// Function to create closure for conservation of  the elements  condition
+    ///  SUM_j (a_ij * x_j) = b_i
     pub fn composition_equations(&mut self) -> Result<(), std::io::Error> {
         if let Some(A) = self.elem_composition_matrix.clone() {
             let vec_of_substances = self.vec_of_subs.clone();
@@ -437,18 +504,22 @@ impl Thermodynamics {
     }
     /// This function generates symbolic equations for conservation of elements in a chemical reaction. It takes a vector of symbolic
     ///  concentrations as input and returns a vector of symbolic equations representing the conservation of each element.
+    /// SUM_j (a_ij * x_j) = b_i
     /// The equations are constructed by multiplying the element composition matrix (transposed) with the symbolic concentrations and
     ///  equating the result to the initial amount of each element. The resulting equations are stored in self.solver.elements_conditions_sym.
-    pub fn composition_equation_sym(
-        &mut self,
-        vec_of_concentrations_sym: Vec<Expr>,
-    ) -> Result<(), std::io::Error> {
+    pub fn composition_equation_sym(&mut self) -> Result<(), std::io::Error> {
+        let vec_of_concentrations_sym: Vec<Expr> = self.solver.n.clone();
         if let Some(A) = self.elem_composition_matrix.clone() {
             let vec_of_substances = self.vec_of_subs.clone();
 
             let A = A.transpose(); // now rows are elements and columns are substances
             let n_elements = A.nrows();
             if A.ncols() != vec_of_substances.len() {
+                println!(
+                    "The number of columns {} is not equal to the number of elements {}",
+                    A.ncols(),
+                    vec_of_substances.len()
+                );
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "The number of substances is not equal to the number of elements",
@@ -503,8 +574,8 @@ impl Thermodynamics {
     /// The function returns an `Err` if the `elem_composition_matrix` is not set in the `SubsData`
     /// struct, or if the `calculate_Lagrange_equations_sym` function fails.
     pub fn create_nonlinear_system_sym(&mut self) -> Result<(), std::io::Error> {
-        let A = self.elem_composition_matrix.clone().unwrap().transpose();
-
+        let A = self.elem_composition_matrix.clone().unwrap();
+        // println!("A: {}, ncols: {}, nrows: {}", A, A.ncols(), A.nrows()) ;
         let eq = self
             .subdata
             .calculate_Lagrange_equations_sym(A, self.dG_sym.clone())
@@ -551,19 +622,44 @@ impl Thermodynamics {
             as Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>;
         Ok(f)
     }
-
+    /// creates symbolic equations representing the idea that sum  of mole numbers in this phase is equal to the total number of moles in this phase
+    pub fn create_sum_of_mole_numbers_sym(&mut self) -> Result<Vec<Expr>, std::io::Error> {
+        let sym_variables = self.symbolic_vars.clone();
+        let mut vec_of_sum_of_mole_numbers: Vec<Expr> = Vec::new();
+        for (_phase, phase_data) in sym_variables.iter() {
+            let phase_data = phase_data.clone();
+            if let (Some(Np), Some(vec_of_mole_numbers)) = (phase_data.0, phase_data.1) {
+                let sum_of_mole_numbers = vec_of_mole_numbers
+                    .iter()
+                    .fold(Expr::Const(0.0), |acc, x| acc + x.clone());
+                let eq = sum_of_mole_numbers.symplify() - Np;
+                vec_of_sum_of_mole_numbers.push(eq);
+            }
+        }
+        //  println!("vec_of_sum_of_mole_numbers {:?}", vec_of_sum_of_mole_numbers);
+        self.solver.eq_sum_mole_numbers = vec_of_sum_of_mole_numbers.clone();
+        Ok(vec_of_sum_of_mole_numbers)
+    }
     /// construct the full system of equations for the nonlinear solver.
-    ///
+    /// It takes the Lagrange equations, the element conservation equations, and the sum of mole numbers equations and creates a single system of equations.
+    /// Check if the number of equations is equal to the number of variables
     pub fn form_full_system_sym(&mut self) -> Result<(), std::io::Error> {
         let mut eq = self.solver.eq_mu.clone();
+        //adding equations SUM j (a_ij * x_j) - b_i = 0
         eq.extend(self.solver.elements_conditions_sym.clone());
+        eq.extend(self.solver.eq_sum_mole_numbers.clone());
         //  println!("equation system {:?}", eq);
         let n_eq = eq.len(); // number of equations
         let mut x = self.solver.n.clone();
         x.extend(self.solver.Lambda.clone());
+        x.extend(self.solver.Np.clone());
         let n_vars = x.len(); // number of variables
 
         if n_eq != n_vars {
+            println!(
+                "The number of equations {}:{:?} the number of variables {}:{:?}",
+                n_eq, eq, n_vars, x
+            );
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "The number of equations is not equal to the number of variables",
@@ -573,7 +669,7 @@ impl Thermodynamics {
         self.solver.all_unknowns = x;
         Ok(())
     }
-
+    /// create symbolic variables for the nonlinear solver (function for checking and debugging)
     pub fn symbolic_variables_extract(&mut self) -> Result<Vec<Expr>, std::io::Error> {
         let mut vec_of_subs: Vec<String> = Vec::new();
         for eq in &self.solver.eq_mu {
@@ -594,11 +690,35 @@ impl Thermodynamics {
             Expr::parse_vector_expression(vars_unique.iter().map(|v| v.as_str()).collect());
         Ok(vec_of_subs)
     }
+    /// shortcut function to create the full system equations for a given T and P
+    /// runs the following functions:
+    ///  set_P_to_sym();
+    ///  composition_equations().unwrap();
+    ///  composition_equation_sym().unwrap();
+    ///  set_T_to_sym();
+    ///  create_nonlinear_system_sym().unwrap();
+    ///  create_nonlinear_system_fun().unwrap();
+    ///  create_sum_of_mole_numbers_sym().unwrap();
+    ///  form_full_system_sym().unwrap();
+    ///  pretty_print_full_system();
+    pub fn find_composition_for_const_TP(&mut self) -> Result<(), std::io::Error> {
+        self.set_P_to_sym();
+        self.composition_equations().unwrap();
+        self.composition_equation_sym().unwrap();
+        self.set_T_to_sym();
+        self.create_nonlinear_system_sym().unwrap();
+        self.create_nonlinear_system_fun().unwrap();
+        self.create_sum_of_mole_numbers_sym().unwrap();
+        self.form_full_system_sym().unwrap();
+        self.pretty_print_full_system();
+
+        Ok(())
+    }
     // pub fn construct_nonlinear_syste(&mut self) -> Result<(), std::io::Error> {}
     ////////////////////////INPUT/OUTPUT////////////////////////////////////////////////////////
 
     /// Prints the data of the substance to the console
-    pub fn pretty_print(&self) -> Result<(), std::io::Error> {
+    pub fn pretty_print_thermo(&self) -> Result<(), std::io::Error> {
         println!("__________subs properties at {} K__________", self.T);
         let mut table = Table::new();
 
@@ -722,6 +842,7 @@ impl Thermodynamics {
         println!("_____________________________________________________________");
         Ok(())
     } //pretty_print_substances_verbose
+    /// Print Lagrange equations as a table
     pub fn pretty_print_Lagrange_equations(&self) -> Result<(), std::io::Error> {
         println!("___________________NONLINEAR EQUATIONS________________________");
         let mut elem_table = Table::new();
@@ -760,25 +881,70 @@ impl Thermodynamics {
         }
         for (i, eq) in self.solver.elements_conditions_sym.iter().enumerate() {
             let mut row = vec![Cell::new(&Lambda[i].to_string().clone())];
-       
-            row.push(Cell::new(&eq.to_string().clone()  )  );
+
+            row.push(Cell::new(&eq.to_string().clone()));
             elem_table.add_row(Row::new(row));
         }
         elem_table.printstd();
         println!("_____________________________________________________________");
         Ok(())
     }
+    /// Print sum of mole numbers as a table
+    pub fn pretty_print_sum_mole_numbers(&self) -> Result<(), std::io::Error> {
+        println!("___________________SUM OF MOLE NUMBERS________________________");
+        let mut elem_table = Table::new();
+        let Np = self.solver.Np.clone();
+        if Np.len() == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "No substances in the system",
+            ));
+        }
+        for (i, eq) in self.solver.eq_sum_mole_numbers.iter().enumerate() {
+            let mut row = vec![Cell::new(&Np[i].to_string().clone())];
+            row.push(Cell::new(&eq.to_string().clone()));
+            elem_table.add_row(Row::new(row));
+        }
+        elem_table.printstd();
+        println!("_____________________________________________________________");
+        Ok(())
+    }
+    /// Print all Lagrange equations, composition equations and sum of mole numbers as a table
+    pub fn pretty_print_full_system(&self) {
+        self.pretty_print_Lagrange_equations().unwrap();
+        self.pretty_print_composition_equations().unwrap();
+        self.pretty_print_sum_mole_numbers().unwrap();
+    }
 }
-
+/// structure for solving chemical equilibrium problem
+/// its fields include:
+/// 1) initial elements composition
+/// 2) Lagrange equations
+/// 3) equations representing the idea that sum  of mole numbers in this phase is equal to the total number of moles in this phase  
+/// 4) unknowns: mole numbers and Lagrange multipliers
+/// 5) instance of the solver of the system of nonlinear equations
 pub struct Solver {
+    /// Initial elements composition
     pub b0: Vec<f64>,
+    /// closure for elements conditions: SUM_j(a_ij*n_j) = b_i =0  , i = 1..m
     pub elements_conditions: Vec<Box<dyn Fn(DVector<f64>) -> f64>>,
+    /// symbolic elements conditions: SUM_j(a_ij*n_j) = b_i =0  , i = 1..m
     pub elements_conditions_sym: Vec<Expr>,
+    // Lagrange multipliers
     pub Lambda: Vec<Expr>,
+    /// mole numbers
     pub n: Vec<Expr>,
+    ///  mole numbers of each phase
+    pub Np: Vec<Expr>,
+    /// equations
     pub eq_mu: Vec<Expr>, // T, n,
+    ///
     pub eq_mu_fun: Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
+    ///  symbolic equations representing the idea that sum  of mole numbers in this phase is equal to the total number of moles in this phase
+    pub eq_sum_mole_numbers: Vec<Expr>,
+    /// full system of equations
     pub full_system_sym: Vec<Expr>,
+    /// Lambda, n, Np,
     pub all_unknowns: Vec<Expr>,
 }
 impl Solver {
@@ -789,8 +955,10 @@ impl Solver {
             elements_conditions_sym: vec![],
             Lambda: vec![],
             n: vec![],
+            Np: vec![],
             eq_mu: vec![],
             eq_mu_fun: Box::new(|_, _, _, _| vec![]),
+            eq_sum_mole_numbers: vec![],
             full_system_sym: vec![],
             all_unknowns: vec![],
         }
