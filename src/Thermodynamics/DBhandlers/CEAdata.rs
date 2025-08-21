@@ -1,3 +1,43 @@
+//! # CEA Transport Properties Data Handler Module
+//!
+//! ## Aim
+//! This module handles NASA-CEA (Chemical Equilibrium with Applications) transport property data
+//! for thermal conductivity and viscosity calculations. It processes CEA database format with
+//! exponential temperature correlations and provides both numerical and symbolic computations.
+//!
+//! ## Main Data Structures and Logic
+//! - `CEAdata`: Main structure storing CEA coefficients and calculated transport properties
+//! - `CEAinput`: Input structure for parsing CEA database entries with temperature ranges and coefficients
+//! - Uses exponential correlations: λ = 10⁻⁴ × exp(E×ln(T) + F/T + K/T² + G)
+//! - Automatically selects appropriate coefficient set based on temperature range
+//!
+//! ## Key Methods
+//! - `parse_coefficients()`: Extracts temperature ranges and coefficients from CEA format
+//! - `extract_coefficients(T)`: Selects appropriate coefficient set for given temperature
+//! - `calculate_Lambda(T)`: Computes thermal conductivity using CEA correlation
+//! - `calculate_Visc(T)`: Computes viscosity using CEA correlation
+//! - `create_sym_*()`: Creates symbolic expressions for temperature-dependent properties
+//! - `Taylor_series_Lambda()`: Generates Taylor series expansion around specified temperature
+//!
+//! ## Usage
+//! ```rust, ignore
+//! let mut cea = CEAdata::new();
+//! cea.from_serde(database_entry)?;
+//! cea.set_lambda_unit(Some("mW/m/K".to_string()))?;
+//! cea.set_V_unit(Some("mkPa*s".to_string()))?;
+//! cea.extract_coefficients(500.0)?;
+//! let lambda = cea.calculate_Lambda(500.0)?;
+//! let viscosity = cea.calculate_Visc(500.0)?;
+//! ```
+//!
+//! ## Interesting Features
+//! - Handles multiple temperature ranges with automatic coefficient selection
+//! - Supports various unit systems (W/m/K, mW/m/K, Pa·s, μPa·s)
+//! - Implements Taylor series expansion for approximations near operating points
+//! - Uses exponential correlations optimized for high-temperature gas properties
+//! - Provides both closure functions and symbolic expressions for flexible integration
+//! - Implements Clone trait with proper function reconstruction for thread safety
+
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

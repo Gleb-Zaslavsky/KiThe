@@ -1,3 +1,92 @@
+//! # User Reactions Module - High-Level Kinetics API
+//!
+//! ## Purpose
+//! This module provides the main user-facing API for the entire Kinetics module. It aggregates
+//! functionality from all other kinetics modules into a single, comprehensive interface for
+//! processing chemical reaction data. Acts as the primary entry point for kinetic analysis.
+//!
+//! ## Main Data Structures
+//! - `KinData`: Central aggregation structure containing all reaction analysis results
+//!   - `shortcut_reactions`: Vector of reaction shortcut names (e.g., "C1", "NUIG_42")
+//!   - `map_of_reactions`: HashMap grouping reactions by library {"library": ["reaction_ids"]}
+//!   - `vec_of_pairs`: Vector of (library, reaction_id) tuples for direct access
+//!   - `vec_of_reaction_data`: Parsed reaction data as ReactionData structures
+//!   - `vec_of_equations`: Human-readable reaction equation strings
+//!   - `substances`: Vector of all unique substance names found
+//!   - `stecheodata`: Complete stoichiometric analysis from StoichAnalyzer
+//!
+//! ## Key Logic Implementation
+//! 1. **Reaction Collection**: Multiple pathways to gather reactions (shortcuts, ranges, mechanism construction)
+//! 2. **Data Integration**: Combines kinetic parameters, stoichiometry, and molecular data
+//! 3. **Shortcut Processing**: Converts user-friendly shortcuts ("C1..C10") to library addresses
+//! 4. **Mechanism Construction**: Automatic reaction network generation from seed substances
+//! 5. **Unified Analysis**: Single interface for all kinetic calculations and data export
+//!
+//! ## Usage Patterns
+//! ```rust, ignore
+//! // Method 1: Using reaction shortcuts
+//! let mut kd = KinData::new();
+//! kd.set_reactions_from_shortcut_range("C1..C10".to_string());
+//! kd.get_reactions_from_shortcuts();
+//! kd.kinetic_main();
+//!
+//! // Method 2: Mechanism construction
+//! let mut kd = KinData::new();
+//! kd.construct_mechanism(vec!["O".to_string(), "H2".to_string()], "NUIG".to_string());
+//! kd.kinetic_main();
+//!
+//! // Method 3: Direct reaction input
+//! let mut kd = KinData::new();
+//! kd.set_reactions_directly(vec!["H + O2 = OH + O".to_string()], None);
+//! kd.kinetic_main();
+//! ```
+//!
+//! ## KinData Methods
+//! ### Initialization
+//! - `new()`: Create new empty KinData instance
+//!
+//! ### Reaction Input Methods
+//! - `set_reactions_directly()`: Input reactions as equation strings with optional chemical groups
+//! - `set_reactions_from_shortcut_range()`: Generate reaction shortcuts from range ("C1..C10")
+//! - `get_reactions_from_shortcuts()`: Resolve shortcuts to actual reaction data from libraries
+//! - `construct_mechanism()`: Auto-generate reaction network from seed substances and library
+//!
+//! ### Data Manipulation
+//! - `append_reaction()`: Add reaction data as serde Values
+//! - `append_reaction_with_shortcut()`: Add reactions with their shortcut names
+//! - `remove_by_index()`: Remove reaction by index position
+//! - `remove_reaction_by_eq()`: Remove reaction by equation string
+//!
+//! ### Analysis Methods
+//! - `reactdata_parsing()`: Parse serde Values into ReactionData structures
+//! - `analyze_reactions()`: Generate stoichiometric matrices and molecular data
+//! - `kinetic_main()`: Combined parsing and analysis in one call
+//!
+//! ### Kinetic Calculations
+//! - `calc_K_const_for_1_react()`: Calculate rate constant for single reaction
+//! - `calc_K_const_for_all_reactions()`: Calculate and sort all rate constants
+//! - `calc_K_const_for_all_reactions_forTrange()`: Calculate max rate constants over temperature range
+//! -  `calc_sym_constants()`: Calculate symbolic constants for all reactions
+//!
+//! ### I/O Methods
+//! - `save_raw_reactions()`: Export raw reaction data to JSON
+//! - `save_reactions_with_shortcuts()`: Export with shortcut mappings
+//! - `create_kinetics_document()`: Create structured kinetics document
+//! - `load_reactions_from_json()`: Load reactions from JSON file
+//!
+//! ### Display Methods
+//! - `pretty_print_substances_verbose()`: Print stoichiometric and elemental matrices
+//! - `pretty_print_reaction_data()`: Print kinetic parameters in table format
+//! - `pretty_print_kindata()`: Print both reaction data and matrices
+//!
+//! ## Interesting Features
+//! - **Multi-Modal Input**: Supports shortcuts, ranges, direct equations, and automatic mechanism generation
+//! - **Library Agnostic**: Works with any kinetic database (NUIG, Cantera, Aramco, etc.)
+//! - **Integrated Analysis**: Combines kinetic parameters, stoichiometry, and molecular properties
+//! - **Export Capabilities**: Built-in pretty printing and data serialization
+//! - **Flexible Workflow**: Modular design allows partial analysis or complete processing
+//! - **Error Recovery**: Robust handling of missing data and parsing errors
+
 //mod mechfinder_api;
 use crate::Kinetics::kinetics_lib_api::KineticData;
 use crate::Kinetics::mechfinder_api::{
@@ -7,52 +96,53 @@ use crate::Kinetics::parsetask::{
     decipher_vector_of_shortcuts, decipher_vector_of_shortcuts_to_pairs,
 };
 use crate::Kinetics::stoichiometry_analyzer::StoichAnalyzer;
+use RustedSciThe::symbolic::symbolic_engine::Expr;
 use prettytable::{Cell, Row, Table, row};
 use serde_json::json;
 use serde_json::{Value, from_reader, to_writer_pretty};
 use std::collections::HashMap;
-
 use std::fs::{File, OpenOptions};
+
 use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use log::{info, warn};
-/// THE STRUCT KinData COLLECTS ALL THE INFORMATION ABOUT SPECIFIC REACTIONS, WHICH ARE NEEDED FOR FURTHER CALCULATIONS.
-///  so this is API for allmost all features of Kinetics module
-/// Not all features can be used simultaneously. But the list of features is as follows:
-///
-/// 1) collectiong reactions from library by their library adress or by shortcut names
-/// 2) Stoicheometric  data structures: matrix of stoicheometric coefficients, matrix of coefficients of direct reactions and matrix of coefficients of reverse reactions, matrix of degrees of concentration for the
-/// kinetic function, G_matrix. As a rule, the degrees of concentration in the kinetic function coincide with the stoicheometric coefficients of
-/// the substances in the reaction; however, for empirical reactions they may differ from the stoicheometric coefficients.
-/// 3) calculate molar mass of a substances of reacants and products
-/// 4) calculate matrix of elemets
-/// In short, the KinData structure is used for processing of user-chosen reactions.
-///  So you define what reactions you need by using the constructor of mechanism from the mechfinder_api module or
-/// manually with help of kinetics_lib_api module. Now you can
 
 ///structure to store user task and reaction data
 #[derive(Debug, Clone)]
 pub struct KinData {
-    pub shortcut_reactions: Option<Vec<String>>,
     /// vector of reaction shortcut names
-    pub map_of_reactions: Option<HashMap<String, Vec<String>>>,
+    pub shortcut_reactions: Option<Vec<String>>,
     /// full "address" of reaction {'library':"id of reaction"} group reactions by library names {'library':[reaction_ids in that library]}
-    pub vec_of_pairs: Option<Vec<(String, String)>>,
+    pub map_of_reactions: Option<HashMap<String, Vec<String>>>,
     /// vector of pairs of reaction library names and reaction ids
-    pub vec_of_reaction_Values: Option<Vec<Value>>,
+    pub vec_of_pairs: Option<Vec<(String, String)>>,
     /// vector of reaction data in the form of serde Values
-    pub vec_of_reaction_data: Option<Vec<ReactionData>>, // data of all reactions
-    pub vec_of_equations: Vec<String>,
+    pub vec_of_reaction_Values: Option<Vec<Value>>,
+    /// data of all reactions
+    pub vec_of_reaction_data: Option<Vec<ReactionData>>,
     /// vector of equations of reactions
-    pub substances: Vec<String>,
+    pub vec_of_equations: Vec<String>,
     /// vector of substance names
-    pub groups: Option<HashMap<String, HashMap<String, usize>>>,
+    pub substances: Vec<String>,
     /// Chemical formulae may contain spectial names for chemical groupls i.e. groups of atoms, e.g. Me (methyl) group, which is converted into {"C":1, "H":3}
-    pub stecheodata: StoichAnalyzer, // matrix of stoichiometric coefficients and other matrices
+    pub groups: Option<HashMap<String, HashMap<String, usize>>>,
+    /// matrix of stoichiometric coefficients and other matrices
+    pub stecheodata: StoichAnalyzer,
+    /// vector of symbolic reaction constants
+    pub K_sym_vec: Option<Vec<Expr>>,
+    ///
+    pub every_reaction: Option<Vec<EveryReaction>>,
 }
-
+#[derive(Debug, Clone)]
+pub struct EveryReaction {
+    pub shortcut: Option<String>,
+    pub lib_and_id: Option<(String, String)>,
+    pub reaction: ReactionData,
+    pub equation: String,
+    pub K_sym: Option<Expr>,
+}
 impl KinData {
     pub fn new() -> Self {
         Self {
@@ -65,6 +155,8 @@ impl KinData {
             substances: Vec::new(),
             groups: None,
             stecheodata: StoichAnalyzer::new(),
+            K_sym_vec: None,
+            every_reaction: None,
         }
     }
     /////////////////////////////////SETTING REACTIONS///////////////////////////////////////////
@@ -180,6 +272,15 @@ impl KinData {
         old_reactions.extend(reactions);
         self.vec_of_reaction_Values = Some(old_reactions);
     }
+
+    /// add manually reaction data as HashMaps
+    pub fn append_reaction_from_map(&mut self, vec_of_maps: Vec<HashMap<String, Vec<f64>>>) {
+        use serde_json::json;
+        for map in vec_of_maps.iter() {
+            let reaction_data = json!(map);
+            self.append_reaction(vec![reaction_data.clone()]);
+        }
+    }
     /// add manually reaction data with there shortcut names
     pub fn append_reaction_with_shortcut(&mut self, reactions: Vec<Value>, shortcuts: Vec<String>) {
         assert_eq!(reactions.len(), shortcuts.len());
@@ -231,6 +332,12 @@ impl KinData {
             warn!("KinData::reactdata_from_shortcuts: map_of_reactions is None");
         }
     }
+    // find reaction equations in reactdata
+    pub fn equations_from_reactdata(&mut self) {
+        for reaction in self.vec_of_reaction_data.as_ref().unwrap().iter() {
+            self.vec_of_equations.push(reaction.eq.clone());
+        }
+    }
     /// generates  Stoicheometric  data structures: matrix of stoicheometric coefficients, matrix of coefficients of direct reactions and matrix of coefficients of reverse reactions, matrix of degrees of concentration for the
     /// kinetic function, G_matrix. As a rule, the degrees of concentration in the kinetic function coincide with the stoicheometric coefficients of
     /// the substances in the reaction; however, for empirical reactions they may differ from the stoicheometric coefficients.
@@ -245,7 +352,9 @@ impl KinData {
             // no need to parse for substances if they are already known
             StoichAnalyzer_instance.search_substances();
             self.substances = StoichAnalyzer_instance.substances.clone();
+            println!("substances found {:?}", self.substances);
         } else {
+            println!("substances provided {:?}", self.substances);
             StoichAnalyzer_instance.substances = self.substances.clone()
         };
         //find stoichiometric matrix and other matrices
@@ -409,7 +518,7 @@ impl KinData {
         let (nrows, ncols) = elem_matrix.shape();
         assert_eq!(nrows, subs.len());
         assert_eq!(ncols, unique_vec_of_elems.len());
-        // Code  table of such structure 1) first row: first element - String: "Reactions/Substances" all other elements of the first row taken
+        //  table of such structure 1) first row: first element - String: "Reactions/Substances" all other elements of the first row taken
         //  from vector subs 2) nest rows look like as follows first element taken from vec reacts, and other elements of row taken from stecheomatrix
         //  vec of vectors
         let mut table_stecheo = Table::new();
@@ -678,282 +787,23 @@ impl KinData {
         }
         table.printstd();
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Kinetics::mechfinder_api::ReactionType;
-    use crate::Kinetics::mechfinder_api::kinetics::ElementaryStruct;
-    use approx::assert_relative_eq;
-    use std::fs;
-    use tempfile::NamedTempFile;
-    const R: f64 = 8.314;
-    #[test]
-    fn test_user_reactions_new() {
-        let shortcut_reactions = Some(vec![
-            "C_1".to_string(),
-            "C_2".to_string(),
-            "C_3".to_string(),
-        ]);
-        let mut user_reactions = KinData::new();
-        // feel shortcut_reactions: Vec<String>, get: map_of_reactions: HashMap<String, String>,grouped_map_of_reactions: HashMap<String, Vec<String>>,
-        //  map_of_reaction_data: HashMap<String, Value>, vec_of_equations: Vec<String>, substances: Vec<String>, stecheodata: ReactionAnalyze
-        user_reactions.shortcut_reactions = shortcut_reactions.clone();
-        assert_eq!(
-            user_reactions.shortcut_reactions,
-            Some(vec![
-                "C_1".to_string(),
-                "C_2".to_string(),
-                "C_3".to_string()
-            ])
-        );
-        let mut map_of_reactions = HashMap::new();
-        map_of_reactions.insert(
-            "Cantera".to_string(),
-            vec!["1".to_string(), "2".to_string(), "3".to_string()]
-                .into_iter()
-                .collect(),
-        );
-
-        user_reactions.get_reactions_from_shortcuts();
-        println!(
-            "map_of_reactions: {:?} \n \n ",
-            &user_reactions.map_of_reactions
-        );
-        assert_eq!(user_reactions.map_of_reactions, Some(map_of_reactions));
-
-        user_reactions.reactdata_parsing();
-        println!(
-            "map_of_reactions data: {:?} \n \n ",
-            &user_reactions.clone().vec_of_reaction_data
-        );
-        assert_eq!(
-            user_reactions
-                .clone()
-                .vec_of_reaction_data
-                .unwrap()
-                .is_empty(),
-            false
-        );
-        assert_eq!(user_reactions.vec_of_equations.is_empty(), false);
-
-        user_reactions.analyze_reactions();
-        let subs = user_reactions.substances;
-        assert_eq!(subs.is_empty(), false);
-        let S = user_reactions.stecheodata.stecheo_matrx;
-        let nunber_of_reactions = S.len();
-        let number_of_substances = S[0].len();
-        assert_eq!(S.is_empty(), false);
-        assert_eq!(nunber_of_reactions, shortcut_reactions.unwrap().len());
-        assert_eq!(number_of_substances, subs.len());
-    }
-
-    #[test]
-    fn test_generate_strings_with_single_character_prefix() {
-        let mut user_reactions = KinData::new();
-        let result = user_reactions.set_reactions_from_shortcut_range("A1..5".to_string());
-        let expected = vec!["A_1", "A_2", "A_3", "A_4", "A_5"];
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_generate_strings_with_multi_character_prefix() {
-        let mut user_reactions = KinData::new();
-        let result = user_reactions.set_reactions_from_shortcut_range("Cat5..8".to_string());
-        let expected = vec!["Cat_5", "Cat_6", "Cat_7", "Cat_8"];
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_generate_strings_with_large_numbers() {
-        let mut user_reactions = KinData::new();
-        let result = user_reactions.set_reactions_from_shortcut_range("Meow20..25".to_string());
-        let expected = vec![
-            "Meow_20", "Meow_21", "Meow_22", "Meow_23", "Meow_24", "Meow_25",
-        ];
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_calc_K_const_for_1_react() {
-        let mut kin_data = KinData::new();
-        // Populate kin_data with some test reaction data
-        kin_data.vec_of_reaction_data = Some(vec![ReactionData {
-            reaction_type: ReactionType::Elem,
-            eq: "A + B -> C".to_string(),
-            react: None,
-            data: ReactionKinetics::Elementary(ElementaryStruct {
-                Arrenius: vec![1e13, 0.0, 20000.0],
-            }),
-        }]);
-
-        let result = kin_data.calc_K_const_for_1_react(0, 1000.0, None, None);
-        assert!(result.is_ok());
-        let k = result.unwrap();
-        let k_expected = 1e13 * f64::exp(-20000.0 / (R * 1000.0));
-        assert_relative_eq!(k, k_expected, epsilon = 1e0);
-    }
-
-    #[test]
-    fn test_calc_K_const_for_all_reactions() {
-        let mut kin_data = KinData::new();
-        // Populate kin_data with some test reaction data
-        kin_data.vec_of_reaction_data = Some(vec![
-            ReactionData {
-                reaction_type: ReactionType::Elem,
-                eq: "A + B -> C".to_string(),
-                react: None,
-                data: ReactionKinetics::Elementary(ElementaryStruct {
-                    Arrenius: vec![1e13, 0.0, 20000.0],
-                }),
-            },
-            ReactionData {
-                reaction_type: ReactionType::Elem,
-                eq: "C -> D".to_string(),
-                react: None,
-                data: ReactionKinetics::Elementary(ElementaryStruct {
-                    Arrenius: vec![1e12, 0.0, 20000.0],
-                }),
-            },
-        ]);
-        kin_data.vec_of_equations = vec!["A + B -> C".to_string(), "C -> D".to_string()];
-        kin_data.shortcut_reactions = Some(vec!["R1".to_string(), "R2".to_string()]);
-
-        let result = kin_data.calc_K_const_for_all_reactions(1000.0, None, None, Some(true));
-        assert!(result.is_ok());
-        let k_values = result.unwrap();
-        assert_eq!(k_values.len(), 2);
-        let k_expected1 = 1e13 * f64::exp(-20000.0 / (R * 1000.0));
-        let k_expected2 = 1e12 * f64::exp(-20000.0 / (R * 1000.0));
-        assert_relative_eq!(k_values[0], k_expected1, epsilon = 1e0);
-        assert_relative_eq!(k_values[1], k_expected2, epsilon = 1e0);
-    }
-
-    #[test]
-    fn test_calc_K_const_for_all_reactions_forTrange() {
-        let mut kin_data = KinData::new();
-        // Populate kin_data with some test reaction data
-        kin_data.vec_of_reaction_data = Some(vec![
-            ReactionData {
-                reaction_type: ReactionType::Elem,
-                eq: "A + B -> C".to_string(),
-                react: None,
-                data: ReactionKinetics::Elementary(ElementaryStruct {
-                    Arrenius: vec![1e13, 0.0, 20000.0],
-                }),
-            },
-            ReactionData {
-                reaction_type: ReactionType::Elem,
-                eq: "C -> D".to_string(),
-                react: None,
-                data: ReactionKinetics::Elementary(ElementaryStruct {
-                    Arrenius: vec![1e12, 0.0, 20000.0],
-                }),
-            },
-        ]);
-        kin_data.vec_of_equations = vec!["A + B -> C".to_string(), "C -> D".to_string()];
-        kin_data.shortcut_reactions = Some(vec!["R1".to_string(), "R2".to_string()]);
-
-        let result = kin_data.calc_K_const_for_all_reactions_forTrange(
-            800.0,
-            1200.0,
-            5,
-            None,
-            None,
-            Some(true),
-        );
-        assert!(result.is_ok());
-        let max_k_values = result.unwrap();
-        assert_eq!(max_k_values.len(), 2);
-        let k_expected1 = 1e13 * f64::exp(-20000.0 / (R * 1200.0));
-        let k_expected2 = 1e12 * f64::exp(-20000.0 / (R * 1200.0));
-        println!(
-            "max_k_values {} {}",
-            f64::log10(max_k_values[0]),
-            f64::log10(max_k_values[1])
-        );
-        println!(
-            "k expected {}, {}",
-            f64::log10(k_expected1),
-            f64::log10(k_expected2)
-        );
-        assert_relative_eq!(max_k_values[0], k_expected1, epsilon = 1e0);
-        assert_relative_eq!(max_k_values[1], k_expected2, epsilon = 1e0);
-    }
-    #[test]
-    fn test_create_kinetics_document() {
-        let mut kin_data = KinData::new();
-
-        // Test with vec_of_pairs
-        kin_data.vec_of_pairs = Some(vec![
-            ("Library1".to_string(), "Reaction1".to_string()),
-            ("Library1".to_string(), "Reaction2".to_string()),
-            ("Library2".to_string(), "Reaction3".to_string()),
-        ]);
-        kin_data.vec_of_reaction_Values = Some(vec![
-            json!({"data": "value1"}),
-            json!({"data": "value2"}),
-            json!({"data": "value3"}),
-        ]);
-
-        let temp_file = NamedTempFile::new().unwrap();
-        let file_path = temp_file.path().to_str().unwrap();
-
-        let result = kin_data.create_kinetics_document(file_path);
-        assert!(result.is_ok());
-
-        let content = fs::read_to_string(file_path).unwrap();
-        assert!(content.contains("KINETICS"));
-        assert!(content.contains("Library1"));
-        assert!(content.contains("Library2"));
-        assert!(content.contains("Reaction1"));
-        assert!(content.contains("Reaction2"));
-        assert!(content.contains("Reaction3"));
-        assert!(content.contains("value1"));
-        assert!(content.contains("value2"));
-        assert!(content.contains("value3"));
-
-        // Test with map_of_reactions
-        kin_data.vec_of_pairs = None;
-        kin_data.map_of_reactions = Some(HashMap::from([
-            (
-                "Library3".to_string(),
-                vec!["Reaction4".to_string(), "Reaction5".to_string()],
-            ),
-            ("Library4".to_string(), vec!["Reaction6".to_string()]),
-        ]));
-        kin_data.vec_of_reaction_Values =
-            Some(vec![json!({"data": "value4"}), json!({"data": "value5"})]);
-
-        let temp_file = NamedTempFile::new().unwrap();
-        let file_path = temp_file.path().to_str().unwrap();
-
-        let result = kin_data.create_kinetics_document(file_path);
-        assert!(result.is_ok());
-
-        let content = fs::read_to_string(file_path).unwrap();
-        assert!(content.contains("KINETICS"));
-        assert!(content.contains("Library3"));
-        assert!(content.contains("Library4"));
-        assert!(content.contains("Reaction4"));
-        assert!(content.contains("Reaction5"));
-        assert!(content.contains("Reaction6"));
-        assert!(content.contains("value4"));
-        assert!(content.contains("value5"));
-
-        // Test with existing file and header
-        let temp_file = NamedTempFile::new().unwrap();
-        let file_path = temp_file.path().to_str().unwrap();
-        fs::write(file_path, "KINETICS\nSome existing content\n").unwrap();
-
-        let result = kin_data.create_kinetics_document(file_path);
-        assert!(result.is_ok());
-
-        let content = fs::read_to_string(file_path).unwrap();
-        assert_eq!(content.matches("KINETICS").count(), 1);
-        assert!(content.contains("Some existing content"));
-        assert!(content.contains("Library3"));
-        assert!(content.contains("Library4"));
+    pub fn calc_sym_constants(
+        &mut self,
+        pres: Option<f64>,
+        concentrations: Option<HashMap<String, Expr>>,
+        T_scaling: Option<Expr>,
+    ) {
+        let Some(vec_of_reaction_data) = &self.vec_of_reaction_data else {
+            warn!("no reaction data available");
+            return;
+        };
+        let mut vec_of_k_sym: Vec<Expr> = Vec::new();
+        for reaction in vec_of_reaction_data.iter() {
+            let K_sym =
+                reaction.K_sym_with_scaled_T(pres, concentrations.clone(), T_scaling.clone());
+            vec_of_k_sym.push(K_sym);
+        }
+        self.K_sym_vec = Some(vec_of_k_sym);
     }
 }

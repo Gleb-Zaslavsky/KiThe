@@ -263,6 +263,7 @@ pub fn SubsData_examples(thermotask: usize) {
             let container = SubstancesContainer::SinglePhase(subs.clone());
             let mut customsubs = SubstanceSystemFactory::create_system(
                 container,
+                None,
                 library_priorities,
                 permitted_libraries,
                 explicit_search_insructions,
@@ -405,6 +406,7 @@ pub fn SubsData_examples(thermotask: usize) {
             let container = SubstancesContainer::SinglePhase(subs.clone());
             let mut customsubs = SubstanceSystemFactory::create_system(
                 container,
+                None,
                 library_priorities,
                 permitted_libraries,
                 explicit_search_insructions,
@@ -453,6 +455,134 @@ pub fn SubsData_examples(thermotask: usize) {
 
             td.form_full_system_sym().unwrap();
             td.pretty_print_full_system();
+        }
+        5 => {
+            let gas_subs = vec![
+                "CO".to_string(),
+                "O".to_string(),
+                "CO2".to_string(),
+                "O2".to_string(),
+            ];
+            let map_of_subs = HashMap::from([
+                ("gas".to_string(), gas_subs.clone()),
+                ("solid".to_string(), vec!["C".to_string()]),
+            ]);
+            let T = 400.0;
+            let P = 101325.0;
+
+            let search_in_NIST = false;
+            let explicit_search_insructions = None;
+            let library_priorities = vec!["NASA_gas".to_string()];
+            let permitted_libraries = vec!["NUIG".to_string()];
+            let container = SubstancesContainer::MultiPhase(map_of_subs.clone());
+            let mut customsubs = SubstanceSystemFactory::create_system(
+                container,
+                None,
+                library_priorities,
+                permitted_libraries,
+                explicit_search_insructions,
+                search_in_NIST,
+            )
+            .unwrap();
+            println!("{:#?} \n", customsubs);
+
+            match customsubs {
+                CustomSubstance::PhaseOrSolution(ref phase) => {
+                    let subs_data = &phase.subs_data;
+                    assert!(subs_data.get(&Some("gas".to_string())).is_some());
+                    assert!(subs_data.get(&Some("solid".to_string())).is_some());
+                }
+                _ => panic!(),
+            }
+
+            let mut n = HashMap::new();
+            let map_of_gas = HashMap::from([("O2".to_string(), 0.5)]);
+            let map_of_solid = HashMap::from([("C".to_string(), 0.5)]);
+            n.insert(Some("gas".to_string()), (Some(1.0), Some(map_of_gas)));
+            n.insert(Some("solid".to_string()), (Some(1.0), Some(map_of_solid)));
+            // create thermodynamics instance
+            let td = customsubs.create_thermodynamics(T, P, Some(n), None);
+            assert!(td.is_ok());
+
+            let mut td = td.unwrap();
+            td.set_P_to_sym();
+            //  td.initial_composition().unwrap();
+            // symbolic variables representing Lagrangian multipliers and equilibrium concentrations
+            //   td.create_indexed_variables();
+            println!("\n \n Lambda: {:#?} \n", td.solver.Lambda);
+            println!("n: {:#?} \n", td.solver.n);
+            println!("n_sym: {:#?} \n", td.solver.Np);
+            // calculate element composition matrix
+            td.calculate_elem_composition_and_molar_mass(None);
+            // set initial concentrations
+            println!(
+                "Initial vector of elements: {:#?} \n",
+                td.initial_vector_of_elements
+            );
+            println!(
+                "composition: {}, ncols = {}\n",
+                &td.clone().elem_composition_matrix.unwrap(),
+                &td.clone().elem_composition_matrix.unwrap().ncols()
+            );
+            td.composition_equations().unwrap();
+            //
+            td.composition_equation_sym().unwrap();
+            //
+            td.set_T_to_sym();
+            td.create_nonlinear_system_sym().unwrap();
+            td.create_nonlinear_system_fun().unwrap();
+            td.create_sum_of_mole_numbers_sym().unwrap();
+            td.form_full_system_sym().unwrap();
+            td.pretty_print_full_system();
+
+            td.solver.solve(None, 1e-4, 100, None, None, None);
+        }
+        6 => {
+            let subs = vec!["CO2".to_string(), "CO".to_string(), "O2".to_string()];
+            let T = 273.15;
+            let P = 101325.0;
+
+            let search_in_NIST = false;
+            let explicit_search_insructions = None;
+            let library_priorities = vec!["NASA_gas".to_string()];
+            let permitted_libraries = vec!["NUIG".to_string()];
+            let container = SubstancesContainer::SinglePhase(subs.clone());
+            let mut customsubs = SubstanceSystemFactory::create_system(
+                container,
+                None,
+                library_priorities,
+                permitted_libraries,
+                explicit_search_insructions,
+                search_in_NIST,
+            )
+            .unwrap();
+            let mut n = HashMap::new();
+            let map_of_concentration = HashMap::from([
+                ("CO".to_string(), 0.4999),
+                ("CO2".to_string(), 0.5),
+                ("O2".to_string(), 0.0001),
+            ]);
+            n.insert(None, (Some(1.0), Some(map_of_concentration)));
+            // create thermodynamics instance
+            let td = customsubs.create_thermodynamics(T, P, Some(n), None);
+            assert!(td.is_ok());
+            let mut td = td.unwrap();
+            td.set_P_to_sym();
+            td.initial_composition().unwrap();
+            // symbolic variables representing Lagrangian multipliers and equilibrium concentrations
+            td.create_indexed_variables();
+            println!("Lambda: {:#?} \n", td.solver.Lambda);
+            println!("n: {:#?} \n", td.solver.n);
+            println!("n_sym: {:#?} \n", td.solver.Np);
+            // calculate element composition matrix
+            td.calculate_elem_composition_and_molar_mass(None);
+            td.find_composition_for_const_TP().unwrap();
+
+            td.solver
+                .solve(None, 5.0 * 1e-3, 200, Some(0.005), None, None);
+            let result = td.solver.map_of_solutions;
+
+            println!("result: {:#?}", result);
         }
         _ => {
             panic!("Invalid test case");

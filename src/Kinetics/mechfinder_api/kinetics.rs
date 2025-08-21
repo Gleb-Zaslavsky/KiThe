@@ -39,7 +39,7 @@ impl ElementaryStruct {
         let n = Expr::Const(n);
         let E = Expr::Const(E);
         let k0 = A * (T.clone()).pow(n);
-        let k = k0 * (E / (Rsym * T)).exp();
+        let k = k0 * (-E / (Rsym * T)).exp();
         return k;
     }
 }
@@ -161,7 +161,7 @@ impl FalloffStruct {
                 return Eff;
             }
         }
-        let k = {
+        let k: Expr = {
             if let Some(troe) = &self.troe {
                 let F_c = if troe.len() == 3 {
                     let A = Expr::Const(troe[0]);
@@ -202,7 +202,7 @@ impl FalloffStruct {
             }; //troe
         }; //k
 
-        let K_const_ = Eff * k;
+        let K_const_ = k * Eff;
         return K_const_;
     }
 }

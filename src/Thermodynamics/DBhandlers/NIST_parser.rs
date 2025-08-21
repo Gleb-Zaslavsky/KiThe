@@ -1,3 +1,44 @@
+//! # NIST Chemistry WebBook Parser Module
+//!
+//! ## Aim
+//! This module provides automated web scraping capabilities for the NIST Chemistry WebBook
+//! (https://webbook.nist.gov). It extracts thermodynamic data including heat capacity coefficients,
+//! formation enthalpies, entropies, and molar masses directly from NIST web pages.
+//!
+//! ## Main Data Structures and Logic
+//! - `NistParser<C>`: Generic parser with dependency injection for HTTP client (enables testing)
+//! - `NistInput`: Structure storing parsed thermodynamic data in Shomate equation format
+//! - `Phase` enum: Handles gas, liquid, and solid phase data extraction
+//! - `SearchType` enum: Specifies which properties to extract (Cp, ΔH, ΔS, molar mass, or all)
+//! - Uses CSS selectors to parse HTML tables and extract numerical data
+//!
+//! ## Key Methods
+//! - `get_data()`: Main method orchestrating the complete data extraction process
+//! - `construct_url()`: Builds appropriate NIST URLs based on substance identifier type
+//! - `extract_cp()`: Parses Shomate equation coefficients from HTML tables
+//! - `extract_thermodynamic_data()`: Extracts formation enthalpy and entropy values
+//! - `extract_molar_mass()`: Parses molecular weight information
+//! - `caclc_cp_dh_ds()`: Computes thermodynamic properties using Shomate equations
+//!
+//! ## Usage
+//! ```rust, ignore
+//! let parser = NistParser::new();
+//! let data = parser.get_data("CH4", SearchType::All, Phase::Gas)?;
+//! data.pretty_print();  // Display formatted results
+//! let (cp, dh, ds) = data.caclc_cp_dh_ds(298.15)?;
+//! ```
+//!
+//! ## Interesting Features
+//! - Intelligent URL construction: detects CAS numbers, chemical formulas, or names
+//! - Robust HTML parsing with CSS selectors for reliable data extraction
+//! - Handles NIST's multi-page navigation automatically (search results → substance page → data page)
+//! - Supports dependency injection for HTTP client (enables mocking in tests)
+//! - Implements Shomate equation calculations with symbolic expression support
+//! - Provides both numerical functions and symbolic expressions for integration
+//! - Handles multiple temperature ranges with automatic coefficient selection
+//! - Includes comprehensive error handling for network issues and parsing failures
+//! - Creates pretty-printed tables for data visualization
+
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use prettytable::{Cell, Row, Table};
 use reqwest::blocking::Client;

@@ -1,3 +1,45 @@
+//! # Stoichiometry Analyzer Module
+//!
+//! ## Purpose
+//! This module analyzes chemical reaction equations and generates comprehensive stoichiometric data.
+//! It parses reaction strings, extracts substances, and creates matrices for kinetic modeling.
+//! Handles database parsing artifacts and supports empirical reactions with custom power coefficients.
+//!
+//! ## Main Data Structures
+//! - `StoichAnalyzer`: Core structure containing all stoichiometric analysis results
+//!   - `reactions`: Vector of reaction equation strings
+//!   - `substances`: Vector of unique substance names found in reactions
+//!   - `stecheo_matrx`: Stoichiometric coefficient matrix (reactions × substances)
+//!   - `stecheo_reags`/`stecheo_prods`: Separate matrices for reactants and products
+//!   - `G_matrix_reag`/`G_matrix_prod`: Power coefficient matrices for kinetic equations
+//!   - `matrix_of_elements`: Elemental composition matrix
+//!   - `vec_of_molmasses`: Molecular masses of substances
+//!
+//! ## Key Logic Implementation
+//! 1. **Artifact Cleaning**: Removes database parsing artifacts like '_DUP', 'M)', phase markers
+//! 2. **Regex Parsing**: Uses complex regex patterns to handle various reaction arrow formats (=, ->, =>, <=>)
+//! 3. **Substance Extraction**: Parses stoichiometric coefficients and power coefficients (A**0.3)
+//! 4. **Matrix Construction**: Builds multiple matrices for different aspects of kinetic modeling
+//! 5. **Third Body Handling**: Recognizes and filters out collision partners marked as 'M'
+//!
+//! ## Usage Pattern
+//! ```rust
+//! use KiThe::Kinetics::stoichiometry_analyzer::StoichAnalyzer;
+//! let mut analyzer = StoichAnalyzer::new();
+//! analyzer.reactions = vec!["A=2B".to_string(), "B->A + 3C".to_string()];
+//! analyzer.search_substances();  // Find all unique substances
+//! analyzer.analyse_reactions();  // Generate stoichiometric matrices
+//! analyzer.create_matrix_of_elements();  // Generate elemental composition
+//! ```
+//!
+//! ## Interesting Features
+//! - **Empirical Reaction Support**: Handles power coefficients different from stoichiometric (A**0.5)
+//! - **Database Artifact Cleaning**: Removes '_DUP', '_dup' suffixes and collision partner markers
+//! - **Flexible Arrow Recognition**: Supports =, ->, =>, <=>, and variations with spaces
+//! - **Third Body Recognition**: Automatically filters out 'M' and '(M)' collision partners
+//! - **Dual Matrix System**: Separate tracking of stoichiometric vs kinetic power coefficients
+//! - **Integrated Molecular Data**: Combines with molmass module for complete substance characterization
+
 use crate::Kinetics::molmass::{
     calculate_molar_mass_of_vector_of_subs, create_elem_composition_matrix,
 };
@@ -344,10 +386,13 @@ impl StoichAnalyzer {
         self.substances = found_substances;
     }
     pub fn create_matrix_of_elements(&mut self) {
-        self.vec_of_molmasses = Some(calculate_molar_mass_of_vector_of_subs(
-            self.substances.iter().map(|s| s.as_str()).collect(),
-            self.groups.clone(),
-        ));
+        // Only calculate molar masses if they haven't been set manually
+        if self.vec_of_molmasses.is_none() {
+            self.vec_of_molmasses = Some(calculate_molar_mass_of_vector_of_subs(
+                self.substances.iter().map(|s| s.as_str()).collect(),
+                self.groups.clone(),
+            ));
+        }
         let (matrix, vec_of_elems) = create_elem_composition_matrix(
             self.substances.iter().map(|s| s.as_str()).collect(),
             self.groups.clone(),
@@ -356,7 +401,9 @@ impl StoichAnalyzer {
         self.unique_vec_of_elems = Some(vec_of_elems);
     }
 } // end of impl ReactionAnalyzer
-
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// TESTS
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use super::*;

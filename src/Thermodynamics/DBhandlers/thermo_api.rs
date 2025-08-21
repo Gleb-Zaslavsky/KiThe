@@ -1,3 +1,45 @@
+//! # Thermodynamic Calculation API Module
+//!
+//! ## Aim
+//! This module provides a unified trait-based API for thermodynamic property calculations
+//! across different data sources (NASA, NIST, etc.). It implements the strategy pattern
+//! using enum_dispatch for zero-cost abstractions and provides factory methods for
+//! creating appropriate calculators based on database type.
+//!
+//! ## Main Data Structures and Logic
+//! - `ThermoCalculator` trait: Unified interface for all thermodynamic calculation implementations
+//! - `ThermoEnum`: Enum dispatch wrapper providing zero-cost polymorphism
+//! - `ThermoError`: Comprehensive error handling with automatic conversion from specific errors
+//! - `EnergyUnit` enum: Standardized energy unit handling (Joules vs Calories)
+//! - Factory pattern implementation for creating calculators by type or name
+//!
+//! ## Key Methods
+//! - `extract_model_coefficients()`: Extract appropriate coefficients for given temperature
+//! - `calculate_Cp_dH_dS()`: Compute thermodynamic properties at specified conditions
+//! - `create_closures_Cp_dH_dS()`: Generate efficient closure functions for repeated calculations
+//! - `create_sym_Cp_dH_dS()`: Create symbolic expressions for analytical work
+//! - `Taylor_series_cp_dh_ds()`: Generate Taylor series expansions around operating points
+//! - `renew_base()`: Update calculator with new substance data (for NIST web scraping)
+//!
+//! ## Usage
+//! ```rust, ignore
+//! let mut calc = create_thermal_by_name("NASA_gas");
+//! calc.from_serde(database_entry)?;
+//! calc.extract_model_coefficients(400.0)?;
+//! calc.calculate_Cp_dH_dS(400.0)?;
+//! let cp = calc.get_Cp()?;
+//! let symbolic_cp = calc.get_Cp_sym()?;
+//! ```
+//!
+//! ## Interesting Features
+//! - Zero-cost abstractions using enum_dispatch for runtime polymorphism without vtables
+//! - Automatic error conversion between different calculator error types
+//! - Factory methods supporting both enum-based and string-based calculator creation
+//! - Unified interface hiding implementation details of different thermodynamic databases
+//! - Support for both numerical and symbolic computation modes
+//! - Comprehensive getter methods for accessing calculated properties and functions
+//! - Integration with web scraping for real-time NIST data access
+
 use crate::Thermodynamics::DBhandlers::NIST_parser::{Phase, SearchType};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use enum_dispatch::enum_dispatch;

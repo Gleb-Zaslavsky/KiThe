@@ -9,14 +9,25 @@ PROJECT NEWS: added search substances thermodynamincs and heat-mass transfer dat
 ## Content
 - [Kinetics](# Kinetics)
 - [Thermodynamics](# Thermodynamics)
-- [Chemical thermodynamics](# Chemical thermodynamics)
-- [NIST scrapper](# NIST scrapper)
+- [Chemicalthermodynamics](# Chemical_thermodynamics)
+- [NISTscrapper](# NIST_scrapper)
 - [Testing](# Testing)
 - [Contributing](#contributing)
 - [To do](#to-do)
 
-
-
+## Features
+* Chemical kinetics
+    * crate is equipped with a libraries of kinetic parameters of chemical reactions obtained as a result of parsing publicly available databases;
+    * searching inside local kinetic libraries by reagents, products, etc. 
+    * parsing reaction equations into a list of substances; 
+    * parsing reaction equations into a stoichiometric matrix, matrix of coefficients of direct reactions and matrix  of coefficients of reverse reactions, matrix of degrees of concentration for the kinetic function;
+    * calculation of atomic composition, molar masses and matrix of atomic composition;
+    * Automatic (for found in libs reactions) and by function call constucting of kinetic functions of all main types (elemntary, fall-off, troe, etc) - both rust functions and symbolic expressions;
+    * Automatic chemical mechanism constructor (say you have some reagents and want to find all possible reactions 
+    between original species and all their products)
+* Thermodynamics
+    * many libraries on board with thermodynamics and transport properties and handlers for them
+* Combustion/Plug-flow steady-state boundary value problem
 ## Kinetics
 - parse reaction equations into a list of substances 
 - parse reaction equations into a stoichiometric matrix, matrix of coefficients of direct reactions and matrix of coefficients of reverse reactions, matrix of degrees of concentration for the kinetic function,
@@ -296,7 +307,7 @@ assert_relative_eq!(dh_value, NASA.dh, epsilon = 1e-6);
         let ds_value = ds_T(400.0);
         assert_relative_eq!(ds_value, NASA.ds, epsilon = 1e-6);
 ```
-## Chemical thermodynamics
+## Chemical_thermodynamics
 - calculating Gibbs free energy for gasess and solids (and their mixtures). Only ideal gases are supported now.
 
 ```rust
@@ -360,7 +371,7 @@ for substance in &thermo.vec_of_substances {
 
 ```
 
-## NIST scrapper
+## NIST_scrapper
 NIST Chemistry WebBook contains huge amount of thermochemical data. This module can scrap 
 data automatically and use it 
 ```rust

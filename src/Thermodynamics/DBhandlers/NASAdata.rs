@@ -1,3 +1,46 @@
+//! # NASA Thermodynamic Data Handler Module
+//!
+//! ## Aim
+//! This module handles NASA polynomial format thermodynamic data for heat capacity (Cp),
+//! enthalpy (H), and entropy (S) calculations. It processes NASA-7 coefficient format
+//! with temperature-dependent polynomials and provides numerical, functional, and symbolic computations.
+//!
+//! ## Main Data Structures and Logic
+//! - `NASAdata`: Main structure storing NASA-7 coefficients and calculated thermodynamic properties
+//! - `NASAinput`: Input structure for parsing NASA database entries with composition and coefficients
+//! - Uses NASA-7 polynomial format: Cp/R = a₁ + a₂T + a₃T² + a₄T³ + a₅T⁴
+//! - Supports multiple temperature ranges (typically 2-3 ranges per substance)
+//! - Handles both gas and condensed phase data
+//!
+//! ## Key Methods
+//! - `extract_coefficients(T)`: Selects appropriate coefficient set for given temperature
+//! - `calculate_Cp_dH_dS(T)`: Computes thermodynamic properties at specified temperature
+//! - `create_closures_Cp_dH_dS()`: Creates closure functions for efficient repeated calculations
+//! - `create_sym_Cp_dH_dS()`: Creates symbolic expressions for analytical work
+//! - `Taylor_series_Cp_dH_dS()`: Generates Taylor series expansions around specified temperature
+//! - `pretty_print()`: Displays coefficient data in formatted table
+//!
+//! ## Usage
+//! ```rust, ignore
+//! let mut nasa = NASAdata::new();
+//! nasa.from_serde(database_entry)?;
+//! nasa.set_unit("J")?;  // or "cal" for calories
+//! nasa.extract_coefficients(400.0)?;
+//! nasa.calculate_Cp_dH_dS(400.0);
+//! let cp = nasa.Cp;  // Heat capacity
+//! let dh = nasa.dh;  // Enthalpy
+//! let ds = nasa.ds;  // Entropy
+//! ```
+//!
+//! ## Interesting Features
+//! - Handles complex composition parsing from string format ("{C:1, H:4}")
+//! - Supports both Joules and calories with automatic unit conversion
+//! - Implements NASA-7 polynomial integration for enthalpy and entropy calculations
+//! - Provides Taylor series expansion for local approximations
+//! - Uses custom deserialization for composition data parsing
+//! - Implements comprehensive error handling for temperature range validation
+//! - Creates both numerical functions and symbolic expressions for flexible usage
+
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use prettytable::{Cell, Row, Table};
 use serde::de::Deserializer;

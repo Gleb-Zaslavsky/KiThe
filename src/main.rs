@@ -21,7 +21,7 @@ use Examples::thermo_examples::thermo_examples;
 pub fn main() {
     //
     #[allow(unused_variables)]
-    let task: usize = 4;
+    let task: usize = 6;
     //kin_examples(3);
     //  thermo_examples(task);
     // NIST_examples(task);

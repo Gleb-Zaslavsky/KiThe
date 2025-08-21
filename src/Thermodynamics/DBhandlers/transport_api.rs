@@ -1,3 +1,46 @@
+//! # Transport Properties Calculation API Module
+//!
+//! ## Aim
+//! This module provides a unified trait-based API for transport property calculations
+//! (viscosity, thermal conductivity, diffusion) across different calculation methods
+//! (CEA correlations, collision theory). It implements zero-cost abstractions using
+//! enum_dispatch and provides comprehensive error handling and unit management.
+//!
+//! ## Main Data Structures and Logic
+//! - `TransportCalculator` trait: Unified interface for all transport property implementations
+//! - `TransportEnum`: Enum dispatch wrapper for zero-cost polymorphism between CEA and collision theory
+//! - `TransportError`: Comprehensive error handling with automatic conversion from specific errors
+//! - `LambdaUnit` and `ViscosityUnit` enums: Standardized unit handling for transport properties
+//! - Factory pattern for creating calculators by type or database name
+//!
+//! ## Key Methods
+//! - `calculate_lambda()`: Compute thermal conductivity with optional heat capacity and density
+//! - `calculate_viscosity()`: Compute dynamic viscosity using appropriate correlation
+//! - `create_lambda_closure()`: Generate efficient closure functions for repeated calculations
+//! - `create_symbolic_lambda()`: Create symbolic expressions for analytical work
+//! - `taylor_series_lambda()`: Generate Taylor series expansions around operating points
+//! - `extract_coefficients()`: Extract model coefficients for given temperature
+//!
+//! ## Usage
+//! ```rust, ignore
+//! let mut calc = create_transport_calculator_by_name("CEA");
+//! calc.from_serde(database_entry)?;
+//! calc.set_lambda_unit(Some(LambdaUnit::MWPerMK))?;
+//! calc.extract_coefficients(500.0)?;
+//! let lambda = calc.calculate_lambda(Some(cp), Some(density), 500.0)?;
+//! let viscosity = calc.calculate_viscosity(500.0)?;
+//! ```
+//!
+//! ## Interesting Features
+//! - Zero-cost abstractions using enum_dispatch for runtime polymorphism without performance overhead
+//! - Comprehensive unit system support with automatic conversions (W/m/K, mW/m/K, Pa·s, μPa·s)
+//! - Validation functions for physical parameters (temperature, pressure, density, molar mass)
+//! - Support for both CEA exponential correlations and collision theory calculations
+//! - Integration of heat capacity and density effects in thermal conductivity calculations
+//! - Automatic error conversion between different calculator error types
+//! - Factory methods supporting both enum-based and string-based calculator creation
+//! - Symbolic computation support for analytical derivatives and integration
+
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 use enum_dispatch::enum_dispatch;

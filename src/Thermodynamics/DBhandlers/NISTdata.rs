@@ -1,3 +1,44 @@
+//! # NIST Thermodynamic Data Handler Module
+//!
+//! ## Aim
+//! This module provides a high-level interface to NIST thermodynamic data by wrapping the NIST_parser
+//! functionality. It handles NIST Shomate equation format for thermodynamic property calculations
+//! and provides integration with the broader thermodynamic calculation framework.
+//!
+//! ## Main Data Structures and Logic
+//! - `NISTdata`: Wrapper structure around `NistInput` providing unified interface
+//! - Uses NIST Shomate equation format: Cp = A + BT + CT² + DT³ + E/T²
+//! - Integrates with `NistParser` for automatic web scraping of NIST Chemistry WebBook
+//! - Supports gas, liquid, and solid phases with appropriate correlations
+//!
+//! ## Key Methods
+//! - `get_data_from_NIST()`: Automatically fetches data from NIST Chemistry WebBook
+//! - `extract_coefficients(T)`: Selects appropriate coefficient set for temperature
+//! - `calculate_Cp_dH_dS(T)`: Computes thermodynamic properties using Shomate equations
+//! - `create_closures_Cp_dH_dS()`: Creates efficient closure functions
+//! - `create_sym_Cp_dH_dS()`: Creates symbolic expressions for analytical work
+//! - `Taylor_series_Cp_dH_dS()`: Generates Taylor series expansions
+//!
+//! ## Usage
+//! ```rust, ignore
+//! let mut nist = NISTdata::new();
+//! nist.get_data_from_NIST("CO".to_string(), SearchType::All, Phase::Gas)?;
+//! nist.extract_coefficients(400.0)?;
+//! nist.calculate_Cp_dH_dS(400.0);
+//! let cp = nist.Cp;  // Heat capacity
+//! let dh = nist.dh;  // Enthalpy
+//! let ds = nist.ds;  // Entropy
+//! ```
+//!
+//! ## Interesting Features
+//! - Automatic web scraping integration with NIST Chemistry WebBook
+//! - Supports real-time data fetching for any substance in NIST database
+//! - Handles multiple temperature ranges with automatic coefficient selection
+//! - Implements complex Clone trait with proper function reconstruction
+//! - Provides seamless integration between web-scraped data and calculation framework
+//! - Uses Shomate equation format optimized for accurate thermodynamic predictions
+//! - Supports both numerical and symbolic computation modes
+
 use crate::Thermodynamics::DBhandlers::NIST_parser::{
     NistInput, calculate_cp, calculate_dh, calculate_s,
 };

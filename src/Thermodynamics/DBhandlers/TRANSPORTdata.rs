@@ -1,3 +1,39 @@
+//! # Transport Properties Data Handler Module
+//!
+//! ## Aim
+//! This module handles transport properties (viscosity, thermal conductivity, diffusion) calculations
+//! using collision theory and molecular kinetic theory. It implements the Aramco transport database
+//! format and provides both numerical and symbolic calculations for gas transport properties.
+//!
+//! ## Main Data Structures and Logic
+//! - `TransportData`: Main structure containing molecular parameters (sigma, epsilon, dipole moment)
+//!   and calculated transport properties. Implements collision integrals and kinetic theory equations.
+//! - `TransportInput`: Input structure for molecular parameters from database
+//! - `TransportError`: Comprehensive error handling for invalid parameters and calculations
+//!
+//! ## Key Methods
+//! - `calculate_Visc()`: Calculates dynamic viscosity using Chapman-Enskog theory
+//! - `calculate_Lambda()`: Calculates thermal conductivity using kinetic theory with rotational/vibrational contributions
+//! - `create_sym_*()`: Creates symbolic expressions for temperature-dependent properties
+//! - `from_serde()`: Parses transport data from JSON database format
+//!
+//! ## Usage
+//! ```rust, ignore
+//! let mut transport = TransportData::new();
+//! transport.from_serde(database_entry)?;
+//! transport.set_M(28.0, Some("g/mol".to_string()))?;
+//! transport.set_P(101325.0, Some("Pa".to_string()))?;
+//! let viscosity = transport.calculate_Visc(500.0)?;
+//! let conductivity = transport.calculate_Lambda(heat_capacity, density, 500.0)?;
+//! ```
+//!
+//! ## Interesting Features
+//! - Implements collision integrals (Ω₁₁, Ω₂₂) with dipole moment corrections
+//! - Handles molecular geometry effects (linear vs non-linear molecules)
+//! - Provides both numerical functions and symbolic expressions for integration with symbolic math
+//! - Uses Hirschfelder molecular theory for accurate gas transport predictions
+//! - Supports multiple unit systems with automatic conversion
+
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 use serde::{Deserialize, Serialize};

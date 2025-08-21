@@ -1,7 +1,46 @@
+//! # Molecular Mass and Atomic Composition Module
+//!
+//! ## Purpose
+//! This module provides comprehensive functionality for parsing chemical formulas and calculating
+//! molecular properties. It handles complex chemical notation including parentheses, stoichiometric
+//! coefficients, phase markers, and custom chemical groups.
+//!
+//! ## Main Data Structures
+//! - `Element`: Structure containing element name and atomic mass
+//! - `ELEMENTS`: Static array of periodic table elements with atomic masses
+//! - Chemical formula parser that returns `HashMap<String, usize>` (element -> count)
+//! - Matrix operations using nalgebra::DMatrix for elemental composition matrices
+//!
+//! ## Key Logic Implementation
+//! 1. **Formula Parsing**: Complex regex-based parser handling nested parentheses and coefficients
+//! 2. **Phase Filtering**: Removes phase markers like (g), (l), (s), (c) from formulas
+//! 3. **Group Expansion**: Converts chemical groups (e.g., "Me" -> {"C":1, "H":3}) into elements
+//! 4. **Bracket Processing**: Handles nested parentheses with multipliers like Ca(NO3)2
+//! 5. **Matrix Construction**: Creates elemental composition matrices for multiple substances
+//!
+//! ## Usage Patterns
+//! ```rust, ignore
+//! // Basic usage
+//! let (mass, composition) = calculate_molar_mass("C6H8O6".to_string(), None);
+//!
+//! // With chemical groups
+//! let groups = Some(HashMap::from([("Me".to_string(),
+//!     HashMap::from([("C".to_string(), 1), ("H".to_string(), 3)]))]);
+//! let composition = parse_formula("C6H5Me".to_string(), groups);
+//!
+//! // Matrix operations
+//! let (matrix, elements) = create_elem_composition_matrix(vec!["H2O", "CO2"], None);
+//! ```
+//!
+//! ## Interesting Features
+//! - **Intelligent Parsing**: Handles complex cases like "Ca(NO3)2", "C(OOH)2N(ClO)3"
+//! - **Phase Awareness**: Automatically strips phase indicators from formulas
+//! - **Group Support**: Extensible system for custom chemical groups (methyl, phenyl, etc.)
+//! - **Matrix Generation**: Creates elemental composition matrices for stoichiometric analysis
+//! - **Robust Error Handling**: Comprehensive validation and error reporting
+//! - **Case Sensitivity**: Smart handling of element capitalization (Ca vs CA)
+
 use nalgebra::DMatrix;
-/// Module to calculate the atomic composition and molar mass of a chemical formula
-///
-///
 use std::collections::{HashMap, HashSet};
 
 // Define a struct to hold element data
@@ -209,6 +248,9 @@ fn handle_groups(
     mut counts: HashMap<String, usize>,
     groups: Option<HashMap<String, HashMap<String, usize>>>,
 ) -> HashMap<String, usize> {
+    //println!("DEBUG handle_groups: Input counts: {:?}", counts);
+    //println!("DEBUG handle_groups: Groups: {:?}", groups);
+
     if let Some(groups) = groups {
         let mut to_remove = Vec::new();
 
@@ -216,18 +258,27 @@ fn handle_groups(
             // if a group is found in the dictionary
             // we should get rid of it and turn it into regular elements, i.e. Me (methyl) group is converted into {"C":1, "H":3}
             if let Some(&number_of_chemical_groups) = counts.get(chemical_group) {
+                // println!("DEBUG handle_groups: Found group '{}' with count {}, composition: {:?}",
+                //  chemical_group, number_of_chemical_groups, atomic_composition);
                 to_remove.push(chemical_group.clone());
                 for (atom, &quantity) in atomic_composition.iter() {
-                    *counts.entry(atom.clone()).or_insert(quantity) +=
+                    // let old_count = counts.get(atom).unwrap_or(&0);
+                    // let new_count = old_count + quantity * number_of_chemical_groups;
+                    // println!("DEBUG handle_groups: Adding {} {} atoms (was {}, now {})",
+                    //  quantity * number_of_chemical_groups, atom, old_count, new_count);
+                    *counts.entry(atom.clone()).or_insert(0) +=
                         quantity * number_of_chemical_groups;
                 }
             }
         }
 
         for group in to_remove {
+            //   println!("DEBUG handle_groups: Removing group '{}'", group);
             counts.remove(&group);
         }
     }
+
+    //  println!("DEBUG handle_groups: Final counts: {:?}", counts);
     counts
 }
 fn after_bracket_stoichio(end_bracket: usize, formula: String) -> usize {
@@ -258,7 +309,8 @@ pub fn parse_formula(
     let mut i = 0;
     let mut formula = formula.replace(" ", "");
     let initial_formula = formula.clone();
-    println!("PARSING FORMULA: {}", formula);
+    // println!("DEBUG PARSE_FORMULA: Starting to parse '{}'", formula);
+    // println!("DEBUG PARSE_FORMULA: Groups provided: {:?}", groups);
     formula = filter_phases_marks(&formula);
     let mut start_bracket = 0;
     let mut end_bracket = 0;
@@ -303,8 +355,24 @@ pub fn parse_formula(
             element_names.extend(add_groups_to_elements);
         }
 
+        // Check if we have a group name that matches from current position
+        // Sort by length descending to match longer group names first
+        let mut found_group = false;
+        if let Some(groups) = groups.as_ref() {
+            let mut group_names: Vec<&String> = groups.keys().collect();
+            group_names.sort_by(|a, b| b.len().cmp(&a.len())); // Sort by length descending
+            for group_name in group_names {
+                if formula[i..].starts_with(group_name) {
+                    //  println!("DEBUG: Found group match '{}' in formula '{}' at position {}", group_name, formula, i);
+                    i += group_name.len();
+                    found_group = true;
+                    break;
+                }
+            }
+        }
+
         // if letter in the current position is uppercase it is an element or a first latter of an element name
-        if formula.chars().nth(i).unwrap().is_uppercase() && i < formula.len() {
+        if !found_group && formula.chars().nth(i).unwrap().is_uppercase() && i < formula.len() {
             println!(
                 "Find uppercase letter: {},  move to the next position {}",
                 formula.chars().nth(i).unwrap(),
@@ -353,11 +421,16 @@ pub fn parse_formula(
             break;
         }
 
+        // Skip if we already processed a group
+        if found_group && element.is_empty() {
+            continue;
+        }
+
         //let element = &formula[start..i];
         println!("element found: {}", element);
-        // if element is empty we should panic
+        // if element is empty we should skip
         if element.is_empty() {
-            panic!("element is empty");
+            continue;
         }
 
         let mut count = 1;
@@ -461,7 +534,9 @@ pub fn parse_formula(
             );
         }
     } //  end of while loop
-    let counts = handle_groups(counts, groups);
+
+    // Handle groups after parsing the formula
+    counts = handle_groups(counts, groups);
     counts
 } // end of parse_formula
 
@@ -506,20 +581,27 @@ pub fn calculate_molar_mass_of_vector_of_subs(
     groups: Option<HashMap<String, HashMap<String, usize>>>,
 ) -> Vec<f64> {
     println!("\n___________CALCULATE MOLAR MASS OF VECTOR OF SUBS___________");
+    // println!("DEBUG: Input formulae: {:?}", vec_of_formulae);
+    //  println!("DEBUG: Groups: {:?}", groups);
     let mut molar_masses = Vec::new();
-    for formula in vec_of_formulae {
+    for (i, formula) in vec_of_formulae.iter().enumerate() {
+        //  println!("DEBUG: Processing formula {}: '{}'", i, formula);
         let counts = parse_formula(formula.to_string(), groups.clone());
+        //   println!("DEBUG: Parsed counts for '{}': {:?}", formula, counts);
         let mut molar_mass = 0.0;
         for (element, count) in counts {
             for e in ELEMENTS {
                 if e.name == element {
+                    //    println!("DEBUG: Found element '{}' with count {} and atomic mass {}", element, count, e.atomic_mass);
                     molar_mass += e.atomic_mass * count as f64;
                     break;
                 }
             }
         }
+        //   println!("DEBUG: Calculated molar mass for '{}': {}", formula, molar_mass);
         molar_masses.push(molar_mass);
     }
+    // println!("DEBUG: Final molar masses: {:?}", molar_masses);
     println!("___________CALCULATE MOLAR MASS OF VECTOR OF SUBS ENDED___________");
     molar_masses
 }
@@ -695,5 +777,21 @@ mod tests {
         println!("{}", matrix);
         assert_eq!(matrix.nrows(), 4);
         assert_eq!(matrix.ncols(), 5);
+    }
+    #[test]
+    fn test_hmx() {
+        let hmx = HashMap::from([
+            ("H".to_string(), 4),
+            ("N".to_string(), 8),
+            ("C".to_string(), 8),
+            ("O".to_string(), 8),
+        ]);
+        let groups = Some(HashMap::from([("HMX".to_string(), hmx.clone())]));
+        let formula = "HMX".to_string();
+        let a = parse_formula(formula.clone(), groups.clone());
+        println!("{:?}", a);
+        assert!(a == hmx);
+        let (molar_mass, _) = calculate_molar_mass(formula, groups);
+        println!("molar mass: {}", molar_mass);
     }
 }

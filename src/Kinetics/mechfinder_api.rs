@@ -73,6 +73,66 @@ pub enum ReactionKinetics {
     Elementary(ElementaryStruct),
 }
 impl ReactionData {
+    /// Create elementary reaction
+    pub fn new_elementary(
+        eq: String,
+        arrenius: Vec<f64>,
+        react: Option<HashMap<String, f64>>,
+    ) -> Self {
+        Self {
+            reaction_type: ReactionType::Elem,
+            eq,
+            react: react,
+            data: ReactionKinetics::Elementary(ElementaryStruct::new(arrenius)),
+        }
+    }
+
+    /// Create falloff reaction
+    pub fn new_falloff(
+        eq: String,
+        low_rate: Vec<f64>,
+        high_rate: Vec<f64>,
+        eff: Option<HashMap<String, f64>>,
+        troe: Option<Vec<f64>>,
+        react: Option<HashMap<String, f64>>,
+    ) -> Self {
+        Self {
+            reaction_type: ReactionType::Falloff,
+            eq,
+            react: react,
+            data: ReactionKinetics::Falloff(FalloffStruct::new(low_rate, high_rate, eff, troe)),
+        }
+    }
+
+    /// Create three-body reaction
+    pub fn new_three_body(
+        eq: String,
+        arrenius: Vec<f64>,
+        eff: HashMap<String, f64>,
+        react: Option<HashMap<String, f64>>,
+    ) -> Self {
+        Self {
+            reaction_type: ReactionType::ThreeBody,
+            eq,
+            react: react,
+            data: ReactionKinetics::ThreeBody(ThreeBodyStruct::new(arrenius, eff)),
+        }
+    }
+
+    /// Create pressure-dependent reaction
+    pub fn new_pressure(
+        eq: String,
+        arrenius: HashMap<String, Vec<f64>>,
+        react: Option<HashMap<String, f64>>,
+    ) -> Self {
+        Self {
+            reaction_type: ReactionType::Pressure,
+            eq,
+            react: react,
+            data: ReactionKinetics::Pressure(PressureStruct::new(arrenius)),
+        }
+    }
+
     ///function that checks if the reaction_type field matches the variant of the data field in a ReactionData instance.
     /// If they don't match, the function will panic
     pub fn validate_reaction_type(&self) {
@@ -140,6 +200,19 @@ impl ReactionData {
             ReactionKinetics::Pressure(data) => data.K_expr(pres.clone().unwrap()),
             ReactionKinetics::ThreeBody(data) => data.K_expr(concentrations.clone().unwrap()),
         }
+    }
+    /// it is often prefered to use a scaled temperature, so this function returns the symbolic representation of the reaction rate constant with scaled temperature
+    pub fn K_sym_with_scaled_T(
+        &self,
+        pres: Option<f64>,
+        concentrations: Option<HashMap<String, Expr>>,
+        scaling_T: Option<Expr>,
+    ) -> Expr {
+        let mut K_sym = self.K_sym(pres, concentrations);
+        if let Some(scaling_T) = scaling_T {
+            K_sym = K_sym.substitute_variable("T", &scaling_T);
+        }
+        K_sym
     }
 }
 

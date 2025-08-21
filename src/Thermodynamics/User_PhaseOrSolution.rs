@@ -9,7 +9,8 @@ use nalgebra::{DMatrix, DVector};
 
 use std::collections::{HashMap, HashSet};
 use std::f64;
-
+const R: f64 = 8.314;
+const R_sym: Expr = Expr::Const(R);
 /// One phase or multiple phases or solutions
 #[derive(Debug, Clone)]
 #[enum_dispatch(ThermodynamicsCalculatorTrait)]
@@ -65,13 +66,14 @@ impl CustomSubstance {
         }
     } // get all substances in all phases
 
-    /// tkaes a map of non-zero number of moles and creates a full map of number of moles
+    /// takes a map of non-zero number of moles and creates a full map of number of moles
     pub fn create_full_map_of_mole_numbers(
         &self,
         non_zero_number_of_moles: HashMap<
             Option<String>,
             (Option<f64>, Option<HashMap<String, f64>>),
         >,
+        //  physiscal_nature_of_phase_or_solution: Option<HashMap<String, Phases>>,
     ) -> Result<
         (
             HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
@@ -184,6 +186,7 @@ pub trait ThermodynamicsCalculatorTrait {
         &mut self,
         A: DMatrix<f64>,
         G: HashMap<Option<String>, HashMap<String, Expr>>,
+        Tm: f64,
     ) -> Result<Vec<Expr>, String>;
     fn calculate_Lagrange_equations_fun(
         &mut self,
@@ -192,6 +195,7 @@ pub trait ThermodynamicsCalculatorTrait {
             Option<String>,
             HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
         >,
+        Tm: f64,
     ) -> Result<
         Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
         String,
@@ -202,6 +206,7 @@ pub trait ThermodynamicsCalculatorTrait {
             Option<String>,
             (Option<f64>, Option<HashMap<String, f64>>),
         >,
+        //  physiscal_nature_of_phase_or_solution: Option<HashMap<String, Phases>>,
     ) -> Result<
         (
             HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
@@ -440,24 +445,28 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         &mut self,
         A: DMatrix<f64>, // hasmap {phase or solution, {substance, expression}}
         G: HashMap<Option<String>, HashMap<String, Expr>>,
+        Tm: f64,
     ) -> Result<Vec<Expr>, String> {
         let A = A.clone().transpose(); // now rows are elements and columns are substances
         let n_elements = A.nrows();
+
         // create a vector of Lagrange multipliers for each element
         let Lambda = Expr::IndexedVars(n_elements, "Lambda").0;
         let n_substances = A.ncols();
-
-        if n_substances != G.len() {
+        // number of key values pairs in the nested hashmaps = number of substances
+        let G_len: usize = G.values().map(|inner_map| inner_map.len()).sum();
+        if n_substances != G_len {
+            println!("A {} \n  G = {:?} \n, Lambda = {:?}", A, G, Lambda);
             return Err(format!(
                 "The number of substances ({}) does not match the number of mole variables ({})",
-                n_substances,
-                G.len()
+                n_substances, G_len
             ));
         }
         let substances = self.get_all_substances();
         let mut vec_of_eqs: Vec<Expr> = Vec::new();
         for (_phasse_or_solution, G_phase) in G.iter() {
             for i in 0..n_substances {
+                let Tm = Expr::Const(Tm);
                 let substance_i = &substances[i];
                 if let Some(G_i) = G_phase.get(substance_i) {
                     // get vector of numbers of elements corresponding to the i-th substance
@@ -473,7 +482,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
                         .map(|(aij, Lambda_j)| aij.clone() * Lambda_j.clone())
                         .fold(Expr::Const(0.0), |acc, x| acc + x)
                         .symplify();
-                    let eq_i = sum_by_elemnts - G_i.clone();
+                    let eq_i = sum_by_elemnts + (G_i.clone() / (R_sym * Tm)).symplify();
                     vec_of_eqs.push(eq_i);
                 }
             }
@@ -488,6 +497,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
             Option<String>, //T, number of moles of each substance, total number of moles in phase
             HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
         >,
+        Tm: f64,
     ) -> Result<
         Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
         String,
@@ -510,7 +520,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
                         let col_of_subs_i: DVector<f64> = DVector::from(col_i);
                         // sum over all elements of the i-th substance multiplied by the corresponding Lagrange multiplier
                         let sum_by_elemnts: f64 = col_of_subs_i.dot(&Lambda);
-                        let eq_i = sum_by_elemnts - G_i(T, n.clone(), Np);
+                        let eq_i = sum_by_elemnts + G_i(T, n.clone(), Np) / (R * Tm);
                         vec_of_eqs.push(eq_i);
                     } // if let Some(G_i)
                 } // for i
@@ -519,13 +529,17 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         };
         Ok(Box::new(f))
     }
-
+    /// This function, create_full_map_of_mole_numbers, takes a hashmap of non-zero mole numbers and returns a tuple of three hashmaps.
+    /// The first hashmap is the original input with missing substances inserted with a value of 0.0.
+    /// The second hashmap contains the same information as the first, but with the inner hashmap values converted to a vector of floats.
+    /// The third hashmap contains the sum of the values of the inner hashmap for each substance across all phases.
     fn create_full_map_of_mole_numbers(
         &self,
         non_zero_number_of_moles: HashMap<
             Option<String>,
             (Option<f64>, Option<HashMap<String, f64>>),
         >,
+        //  physiscal_nature_of_phase_or_solution: Option<HashMap<String, Phases>>,
     ) -> Result<
         (
             HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
@@ -546,7 +560,9 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         let mut initial_map_of_mole_numbers: HashMap<String, f64> = HashMap::new();
         let subs_cloned: HashMap<Option<String>, SubsData> = self.subs_data.clone();
         for (phase, value) in full_map_of_mole_numbers.iter_mut() {
-            if let (Np, Some(mut inner_map)) = (value.0.clone(), value.1.clone()) {
+            if let (Np, Some(inner_map)) = (value.0.clone(), &mut value.1) {
+                //  println!("phase: {}", phase.clone().is_none());
+                //  println!("subdata: {:?}", subs_cloned);
                 let subsdata = subs_cloned.get(phase).unwrap();
                 let subs = subsdata.clone().get_all_substances();
                 // For each required key, insert with 0.0 if not present
@@ -567,7 +583,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         }
 
         Ok((
-            non_zero_number_of_moles,
+            full_map_of_mole_numbers,
             map_of_mole_num_vecs,
             initial_map_of_mole_numbers,
         ))
@@ -729,8 +745,9 @@ impl ThermodynamicsCalculatorTrait for SubsData {
         &mut self,
         A: DMatrix<f64>,
         G: HashMap<Option<String>, HashMap<String, Expr>>,
+        Tm: f64,
     ) -> Result<Vec<Expr>, String> {
-        let A = A.transpose(); // now rows are elements and columns are substances
+        let A = A.clone().transpose(); // now rows are elements and columns are substances
         let n_elements = A.nrows();
         // create a vector of Lagrange multipliers for each element
         let Lambda = Expr::IndexedVars(n_elements, "Lambda").0;
@@ -746,6 +763,7 @@ impl ThermodynamicsCalculatorTrait for SubsData {
         let subs = self.substances.clone();
         let mut vec_of_eqs: Vec<Expr> = Vec::new();
         for i in 0..n_substances {
+            let Tm = Expr::Const(Tm);
             let subst_i = subs[i].clone();
             let G_i = G.get(&subst_i).unwrap().clone();
             // get vector of numbers of elements corresponding to the i-th substance
@@ -761,7 +779,7 @@ impl ThermodynamicsCalculatorTrait for SubsData {
                 .map(|(aij, Lambda_j)| aij.clone() * Lambda_j.clone())
                 .fold(Expr::Const(0.0), |acc, x| acc + x)
                 .symplify();
-            let eq_i = sum_by_elemnts - G_i.clone();
+            let eq_i = sum_by_elemnts + (G_i.clone() / (R_sym * Tm)).symplify();
             vec_of_eqs.push(eq_i.symplify());
         }
         Ok(vec_of_eqs)
@@ -774,6 +792,7 @@ impl ThermodynamicsCalculatorTrait for SubsData {
             Option<String>,
             HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
         >,
+        Tm: f64,
     ) -> Result<
         Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
         String,
@@ -801,7 +820,7 @@ impl ThermodynamicsCalculatorTrait for SubsData {
                         .zip(Lambda.iter())
                         .map(|(aij, Lambda_j)| aij * Lambda_j)
                         .fold(0.0, |acc, x| acc + x);
-                    let eq_i = sum_by_elemnts - G_i(T, n.clone(), Np.clone());
+                    let eq_i = sum_by_elemnts + G_i(T, n.clone(), Np.clone()) / (R * Tm);
                     vec_of_eqs.push(eq_i);
                 }
                 vec_of_eqs
@@ -815,6 +834,7 @@ impl ThermodynamicsCalculatorTrait for SubsData {
             Option<String>,
             (Option<f64>, Option<HashMap<String, f64>>),
         >,
+        // physiscal_nature_of_phase_or_solution: Option<HashMap<String, Phases>>,
     ) -> Result<
         (
             HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
@@ -831,7 +851,7 @@ impl ThermodynamicsCalculatorTrait for SubsData {
         let subs = self.substances.clone();
 
         for (_, value) in full_map_of_mole_numbers.iter_mut() {
-            if let (Np, Some(mut inner_map)) = (value.0.clone(), value.1.clone()) {
+            if let (Np, Some(inner_map)) = (value.0.clone(), &mut value.1) {
                 // For each required key, insert with 0.0 if not present
                 for key in &subs {
                     inner_map.entry(key.clone()).or_insert(0.0);
@@ -848,9 +868,10 @@ impl ThermodynamicsCalculatorTrait for SubsData {
                 }
             }
         }
+        //  println!("full_map_of_mole_numbers,: {:#?},\n map_of_mole_num_vecs {:?}, \n initial_map_of_mole_numbers {:?} ",full_map_of_mole_numbers, map_of_mole_num_vecs, initial_map_of_mole_numbers); panic!();
 
         Ok((
-            non_zero_number_of_moles,
+            full_map_of_mole_numbers,
             map_of_mole_num_vecs,
             initial_map_of_mole_numbers,
         ))
@@ -871,6 +892,7 @@ impl SubstanceSystemFactory {
     /// A configured CustomSubstance ready for thermodynamic calculations
     pub fn create_system(
         container: SubstancesContainer,
+        physiscal_nature_of_phase_or_solution: Option<HashMap<String, Phases>>,
         library_priorities: Vec<String>,
         permitted_libraries: Vec<String>,
         explicit_search_insructions: Option<HashMap<String, String>>,
@@ -929,13 +951,21 @@ impl SubstanceSystemFactory {
                         permitted_libraries.clone(),
                         LibraryPriority::Permitted,
                     );
-
+                    /*
                     // Set default phases based on phase name or default to Gas
                     let default_phase = match phase_name.to_lowercase().as_str() {
                         "gas" | "vapor" => Phases::Gas,
                         "liquid" => Phases::Liquid,
                         "solid" => Phases::Solid,
                         _ => Phases::Gas,
+                    };
+                    */
+                    let default_phase = match physiscal_nature_of_phase_or_solution {
+                        Some(ref map_of_phases) => {
+                            let phase = map_of_phases.get(&phase_name);
+                            phase.unwrap_or(&Phases::Gas)
+                        }
+                        None => &Phases::Gas,
                     };
 
                     for substance in &phase_data.substances {
@@ -957,6 +987,9 @@ impl SubstanceSystemFactory {
                     //  let _ = phase_data.extract_all_thermal_coeffs(298.15);
 
                     // Add to phase collection
+
+                    //  println!("creating phase or solution with phase_name: {} and phase_data {:?}", phase_name, phase_data.clone());
+
                     phase_or_solution
                         .subs_data
                         .insert(Some(phase_name), phase_data);

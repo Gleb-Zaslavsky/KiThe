@@ -30,6 +30,10 @@ pub fn calc_dG_for_one_phase(
         let dh = map_property_values.get(&DataType::dH).unwrap().unwrap();
         let ds = map_property_values.get(&DataType::dS).unwrap().unwrap();
         let dG = dh - T * ds;
+        println!(
+            "substance:{}: dh {}, ds {}, dG {} \n",
+            substance, dh, ds, dG
+        );
         // gas_correrction = 0 if w = None or if Phase is not Gas, else gas_correrction = R*T*ln(P/101325) + R*T*ln(w[i])
         // if Phase is Gas or Phase is None
         let gas_correrction: f64 = if let Some(ref n) = n {

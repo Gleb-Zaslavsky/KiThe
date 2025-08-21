@@ -1,10 +1,44 @@
-//v 0.1.1
+//! # Kinetics Library API Module
+//!
+//! ## Purpose
+//! This module provides a comprehensive API for accessing and searching chemical reaction databases.
+//! It enables users to load kinetic libraries, search for reactions by various criteria, and retrieve
+//! detailed reaction data including Arrhenius parameters and reaction mechanisms.
+//!
+//! ## Main Data Structures
+//! - `KineticData`: Core structure that manages reaction libraries and provides search functionality
+//!   - `LibKineticData`: HashMap storing reaction ID -> reaction data mappings
+//!   - `HashMapOfReactantsAndProducts`: Nested HashMap for substance-based searches
+//!   - `AllLibraries`: Vector of available reaction library names
+//!   - Search result vectors for found reactions by products/reagents
+//!
+//! ## Key Logic Implementation
+//! 1. **Library Loading**: Reads JSON files containing reaction databases (Reactbase.json, dict_reaction.json)
+//! 2. **Multi-criteria Search**: Supports searching by reaction ID, equation, substances, or field values
+//! 3. **Substance Matching**: Uses HashSet operations for efficient subset matching of reagents/products
+//! 4. **Data Retrieval**: Returns structured reaction data as serde_json::Value objects
+//!
+//! ## Usage Pattern
+//! ```rust
+//! use KiThe::Kinetics::kinetics_lib_api::KineticData;
+//! let mut kin_instance = KineticData::new();
+//! kin_instance.open_json_files("NUIG");  // Load library
+//! kin_instance.print_all_reactions();    // Get all reactions
+//! kin_instance.search_reaction_by_reagents_and_products(vec!["CO".to_string()]);
+//! println!("Found reactions: {:?}", kin_instance.FoundReactionsByProducts);
+//! ```
+//!
+//! ## Interesting Features
+//! - **Dual JSON Structure**: Uses separate files for kinetic parameters and substance mappings
+//! - **Flexible Search**: Supports both exact matches and subset searches for reaction participants
+//! - **Library Agnostic**: Can work with multiple reaction databases (NUIG, Cantera, Aramco, etc.)
+//! - **Efficient Indexing**: Pre-builds equation-to-ID mappings for fast lookups
+
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 
 use serde_json::Value;
-// /Basis functionality to search in reaction library
 
 pub struct KineticData {
     pub HashMapOfReactantsAndProducts: HashMap<String, HashMap<String, HashSet<String>>>, // {'reaction ID':{'reagent'/"product": HashSet[substance]}}
@@ -189,7 +223,9 @@ pub enum SearchVariants {
     FoundReactionsByProducts,
     FoundReactionsByReagents,
 }
-
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// TESTS
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +275,21 @@ mod tests {
         assert_eq!(kin_instance.FoundReactionsByReagents.is_empty(), false);
         kin_instance.search_reactdata_for_vector_of_IDs(vec!["1".to_string(), "2".to_string()]);
         assert_eq!(kin_instance.FoundReactionDatasByIDs.is_empty(), false);
+    }
+
+    #[test]
+    fn test_search_value() {
+        let mut kin_instance = KineticData::new();
+        let lib = "NUIG";
+
+        // collecting reaction data for library name lib
+        kin_instance.open_json_files(lib);
+        // veiew all reactions in library
+        kin_instance.print_all_reactions();
+
+        // search reaction by equation
+        let data_of_reacion = kin_instance.LibKineticData.get("1").unwrap();
+        println!(" data_of_reacion {:?}", data_of_reacion);
     }
 
     #[test]
