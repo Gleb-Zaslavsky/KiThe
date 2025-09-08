@@ -1,7 +1,7 @@
 use super::SimpleReactorBVP::SimpleReactorTask;
+use RustedSciThe::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
 use RustedSciThe::Utils::plots::{plots, plots_gnulot};
 use RustedSciThe::symbolic::symbolic_integration::QuadMethod;
-
 pub struct AfterSolution {}
 impl SimpleReactorTask {
     /////////////////////////////////////////POSTPROCESSING///////////////////////////////////////////
@@ -18,12 +18,12 @@ impl SimpleReactorTask {
             let T_scale = self.scaling.T_scale;
             let L = self.L;
             for (i, mut sol_for_var) in y.column_iter_mut().enumerate() {
-                if &unknowns[i] == "q" {
+                if &unknowns[i] == "Teta" {
                     sol_for_var
                         .iter_mut()
                         .for_each(|Teta_i| *Teta_i = *Teta_i * T_scale + dT);
                 }
-                if &unknowns[i] == "Teta" {
+                if &unknowns[i] == "q" {
                     sol_for_var
                         .iter_mut()
                         .for_each(|q_i| *q_i = *q_i * T_scale / L);
@@ -34,6 +34,7 @@ impl SimpleReactorTask {
             }
         }
     }
+    ////////////////////////////////////////////////I/O/////////////////////////////////////////////////////
     pub fn plot(&self) {
         let y = self.solver.solution.clone().unwrap();
         let x_mesh = self.solver.x_mesh.clone().unwrap();
@@ -47,6 +48,40 @@ impl SimpleReactorTask {
         let arg = "x".to_owned();
         let values = self.solver.unknowns.clone();
         plots_gnulot(arg, values, x_mesh, y);
+    }
+
+    pub fn save_to_file(&self, filename: Option<String>) {
+        let name = if let Some(name) = filename {
+            format!("{}.txt", name)
+        } else {
+            "result.txt".to_string()
+        };
+
+        let y = self.solver.solution.clone().unwrap();
+        let x_mesh = self.solver.x_mesh.clone().unwrap();
+        let _ = save_matrix_to_file(
+            &y,
+            &self.solver.unknowns,
+            &name,
+            &x_mesh,
+            &self.solver.arg_name,
+        );
+    }
+    pub fn save_to_csv(&self, filename: Option<String>) {
+        let name = if let Some(name) = filename {
+            name
+        } else {
+            "result_table".to_string()
+        };
+        let y = self.solver.solution.clone().unwrap();
+        let x_mesh = self.solver.x_mesh.clone().unwrap();
+        let _ = save_matrix_to_csv(
+            &y,
+            &self.solver.unknowns,
+            &name,
+            &x_mesh,
+            &self.solver.arg_name,
+        );
     }
 
     pub fn estimate_values(&self) {
@@ -67,7 +102,25 @@ impl SimpleReactorTask {
         let unknowns = self.solver.unknowns.clone();
         let heat_release = self.heat_release.clone();
         let x = self.solver.x_mesh.clone().unwrap();
+
         let y = self.solver.solution.clone().unwrap();
         let heat_release_fun = heat_release.lambdify(unknowns.iter().map(|x| x.as_str()).collect());
+    }
+
+    fn energy_balance(&self) {
+        let i = self.solver.unknowns.iter().position(|x| x == "q").unwrap();
+        let q:Vec<f64> = self.solver.solution.as_ref().unwrap().column(i).iter().cloned().collect::<Vec<f64>>();
+        let q_f = q.last().unwrap();
+        let q_0 = q.first().unwrap();
+        let dq = q_f - q_0;
+        let i = self.solver.unknowns.iter().position(|x| x == "Teta").unwrap();
+        let T = self.solver.solution.as_ref().unwrap().column(i).iter().cloned().collect::<Vec<f64>>();
+        let T_f = T.last().unwrap();
+        let T_0 = T.first().unwrap();
+        let m = self.m;
+        let Cp = self.Cp;
+        let dT = m*Cp*(T_f - T_0);
+
+
     }
 }

@@ -8,23 +8,28 @@ pub mod ReactorsBVP;
 pub mod Thermodynamics;
 #[allow(non_snake_case)]
 pub mod Utils;
-#[allow(unused_imports)]
-use Examples::ClassicalThermodynamics_examples::SubsData_examples;
-#[allow(unused_imports)]
-use Examples::NIST_examples::NIST_examples;
-#[allow(unused_imports)]
-use Examples::SubstanceDataCollecting::collecting_thermo_data;
-#[allow(unused_imports)]
-use Examples::kinetics_examples::kin_examples;
-#[allow(unused_imports)]
-use Examples::thermo_examples::thermo_examples;
+#[allow(non_snake_case)]
+pub mod cli;
+
+use ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
+use cli::cli_main::run_interactive_menu;
+use std::env;
+use std::path::PathBuf;
+
 pub fn main() {
-    //
-    #[allow(unused_variables)]
-    let task: usize = 6;
-    //kin_examples(3);
-    //  thermo_examples(task);
-    // NIST_examples(task);
-    // collecting_thermo_data(task);
-    SubsData_examples(task);
+    run_interactive_menu();
+    /*
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() > 1 {
+        // Command line argument provided - direct file solving
+        let file_path = PathBuf::from(&args[1]);
+        println!("Solving reactor problem from file: {:?}", file_path);
+        let mut reactor = SimpleReactorTask::new();
+        reactor.solve_from_file(file_path);
+    } else {
+        // No arguments - show interactive menu
+        run_interactive_menu();
+    }
+    */
 }

@@ -30,13 +30,9 @@
 use crate::Kinetics::User_reactions::KinData;
 use crate::Kinetics::mechfinder_api::ReactionData;
 use crate::ReactorsBVP::reactor_BVP_utils::{
-    BoundsConfig,
-    ScalingConfig,
-    ToleranceConfig,
-    create_tolerance_map,
-    create_bounds_map
+    BoundsConfig, ScalingConfig, ToleranceConfig, create_bounds_map, create_tolerance_map,
 };
-use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP;
+use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{NRBVP, SolverParams};
 use RustedSciThe::numerical::BVP_sci::BVP_sci_symb::BVPwrap as BVPsci;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use log::info;
@@ -118,7 +114,6 @@ pub struct FastElemReact {
     /// Heat of reaction (J/kg)
     pub Q: f64,
 }
-
 
 /// Main reactor modeling structure that aggregates all reactor properties and methods
 ///
@@ -221,7 +216,7 @@ impl BVPSolver {
         n_steps: usize,
         scheme: String,
         strategy: String,
-        strategy_params: Option<HashMap<String, Option<Vec<f64>>>>,
+        strategy_params: Option<SolverParams>,
         linear_sys_method: Option<String>,
         method: String,
         abs_tolerance: f64,
@@ -255,7 +250,7 @@ impl BVPSolver {
         n_steps: usize,
         scheme: String,
         strategy: String,
-        strategy_params: Option<HashMap<String, Option<Vec<f64>>>>,
+        strategy_params: Option<SolverParams>,
         linear_sys_method: Option<String>,
         method: String,
         abs_tolerance: f64,
@@ -292,7 +287,7 @@ impl BVPSolver {
         n_steps: usize,
         scheme: String,
         strategy: String,
-        strategy_params: Option<HashMap<String, Option<Vec<f64>>>>,
+        strategy_params: Option<SolverParams>,
         linear_sys_method: Option<String>,
         method: String,
         abs_tolerance: f64,
@@ -329,7 +324,7 @@ impl BVPSolver {
         n_steps: usize,
         scheme: String,
         strategy: String,
-        strategy_params: Option<HashMap<String, Option<Vec<f64>>>>,
+        strategy_params: Option<SolverParams>,
         linear_sys_method: Option<String>,
         method: String,
         abs_tolerance: f64,
@@ -339,12 +334,15 @@ impl BVPSolver {
         loglevel: Option<String>,
     ) -> Result<(), ReactorError> {
         info!("starting solver!");
+        let BC = self.BorderConditions.clone();
+        let BC: HashMap<String, Vec<(usize, f64)>> =
+            BC.iter().map(|(k, v)| (k.clone(), vec![*v])).collect();
         let mut bvp = NRBVP::new(
             self.eq_system.clone(),
             initial_guess,
             self.unknowns.clone(),
             self.arg_name.clone(),
-            self.BorderConditions.clone(),
+            BC,
             self.x_range.0,
             self.x_range.1,
             n_steps,

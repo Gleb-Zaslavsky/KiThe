@@ -57,9 +57,9 @@
 //! Each template type implements its mathematical function inline using match
 //! expressions, making the code both readable and efficient.
 
-use std::collections::HashMap;
-use nalgebra::DMatrix;
 use super::SimpleReactorBVP::ReactorError;
+use nalgebra::DMatrix;
+use std::collections::HashMap;
 
 /// Template types for initial guess generation
 #[derive(Debug, Clone)]
@@ -73,36 +73,38 @@ pub enum InitialTemplate {
     /// Constant value throughout domain
     Constant { value: f64 },
     /// Sigmoid transition: start + (end-start) / (1 + exp(-steepness*(z-center)))
-    Sigmoid { start: f64, end: f64, steepness: f64, center: f64 },
+    Sigmoid {
+        start: f64,
+        end: f64,
+        steepness: f64,
+        center: f64,
+    },
 }
 
 impl InitialTemplate {
     /// Generate values for n_steps grid points
     pub fn generate(&self, n_steps: usize) -> Vec<f64> {
         let mut values = Vec::with_capacity(n_steps);
-        
+
         for i in 0..n_steps {
             let z = i as f64 / (n_steps - 1) as f64; // z ∈ [0, 1]
-            
+
             let value = match self {
-                InitialTemplate::Linear { start, end } => {
-                    start + (end - start) * z
-                }
-                InitialTemplate::DecreasingExp { start, decay } => {
-                    start * (-decay * z).exp()
-                }
-                InitialTemplate::IncreasingExp { end, growth } => {
-                    end * (1.0 - (-growth * z).exp())
-                }
+                InitialTemplate::Linear { start, end } => start + (end - start) * z,
+                InitialTemplate::DecreasingExp { start, decay } => start * (-decay * z).exp(),
+                InitialTemplate::IncreasingExp { end, growth } => end * (1.0 - (-growth * z).exp()),
                 InitialTemplate::Constant { value } => *value,
-                InitialTemplate::Sigmoid { start, end, steepness, center } => {
-                    start + (end - start) / (1.0 + (-steepness * (z - center)).exp())
-                }
+                InitialTemplate::Sigmoid {
+                    start,
+                    end,
+                    steepness,
+                    center,
+                } => start + (end - start) / (1.0 + (-steepness * (z - center)).exp()),
             };
-            
+
             values.push(value);
         }
-        
+
         values
     }
 }
@@ -124,12 +126,12 @@ impl InitialConfig {
             templates: HashMap::new(),
         }
     }
-    
+
     /// Set template for variable type ("C", "J", "Teta", "q")
     pub fn set_template(&mut self, var_type: &str, template: InitialTemplate) {
         self.templates.insert(var_type.to_string(), template);
     }
-    
+
     /// Generate initial guess matrix
     pub fn generate_initial_guess(
         &self,
@@ -138,20 +140,23 @@ impl InitialConfig {
     ) -> Result<DMatrix<f64>, ReactorError> {
         let n_vars = unknowns.len();
         let mut data = Vec::with_capacity(n_vars * n_steps);
-        
+
         for unknown in unknowns {
             let var_type = self.get_variable_type(unknown)?;
             let template = self.templates.get(&var_type).ok_or_else(|| {
-                ReactorError::MissingData(format!("No template found for variable type: {}", var_type))
+                ReactorError::MissingData(format!(
+                    "No template found for variable type: {}",
+                    var_type
+                ))
             })?;
-            
+
             let values = template.generate(n_steps);
             data.extend(values);
         }
-        
+
         Ok(DMatrix::from_vec(n_vars, n_steps, data))
     }
-    
+
     /// Determine variable type from unknown name
     fn get_variable_type(&self, unknown: &str) -> Result<String, ReactorError> {
         if unknown == "Teta" {
@@ -163,9 +168,10 @@ impl InitialConfig {
         } else if unknown.starts_with('J') {
             Ok("J".to_string())
         } else {
-            Err(ReactorError::InvalidConfiguration(
-                format!("Unknown variable type for: {}", unknown)
-            ))
+            Err(ReactorError::InvalidConfiguration(format!(
+                "Unknown variable type for: {}",
+                unknown
+            )))
         }
     }
 }
@@ -173,13 +179,25 @@ impl InitialConfig {
 impl Default for InitialConfig {
     fn default() -> Self {
         let mut config = Self::new();
-        
+
         // Default templates
-        config.set_template("C", InitialTemplate::Linear { start: 0.5, end: 0.1 });
+        config.set_template(
+            "C",
+            InitialTemplate::Linear {
+                start: 0.5,
+                end: 0.1,
+            },
+        );
         config.set_template("J", InitialTemplate::Constant { value: 0.0 });
-        config.set_template("Teta", InitialTemplate::Linear { start: 0.0, end: 1.0 });
+        config.set_template(
+            "Teta",
+            InitialTemplate::Linear {
+                start: 0.0,
+                end: 1.0,
+            },
+        );
         config.set_template("q", InitialTemplate::Constant { value: 0.0 });
-        
+
         config
     }
 }

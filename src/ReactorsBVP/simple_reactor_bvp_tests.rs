@@ -5,16 +5,15 @@ mod tests {
     use crate::Kinetics::mechfinder_api::{ReactionData, ReactionType};
     use crate::Kinetics::stoichiometry_analyzer::StoichAnalyzer;
     use crate::ReactorsBVP::reactor_BVP_utils::{
-    BoundsConfig,
-    ScalingConfig,
-    ToleranceConfig,
-    create_tolerance_map,
-    create_bounds_map
-};
+        BoundsConfig, ScalingConfig, ToleranceConfig, create_bounds_map, create_tolerance_map,
+    };
+    use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{
+        AdaptiveGridConfig, SolverParams,
+    };
+    use RustedSciThe::numerical::BVP_Damp::grid_api::GridRefinementMethod;
     use approx::assert_relative_eq;
     use nalgebra::DMatrix;
     use std::collections::HashMap;
-
     use std::vec;
 
     fn create_test_reactor() -> SimpleReactorTask {
@@ -604,13 +603,25 @@ mod tests {
         let Q_g = 3000.0 * 1e3 / 100.0; // J/kg -> J/mole 
         let L = 9e-4;
         let mut reactor = create_hmx(Q_g, L);
-        let n_steps = 200;
-        let strategy_params = Some(HashMap::from([
-            ("max_jac".to_string(), None),
-            ("maxDampIter".to_string(), None),
-            ("DampFacor".to_string(), None),
-            ("adaptive".to_string(), None),
-        ]));
+        let n_steps = 100;
+
+        let grid_method = GridRefinementMethod::Pearson(0.0, 3.5);
+        // GridRefinementMethod::GrcarSmooke(0.1, 0.1, 3.5);
+        //GridRefinementMethod::Pearson(0.09, 3.5);
+        // or GridRefinementMethod::Pearson(0.05, 2.5);
+        let adaptive = AdaptiveGridConfig {
+            version: 1,
+            max_refinements: 2,
+            grid_method,
+        };
+
+        let strategy_params = SolverParams {
+            max_jac: Some(3),
+            max_damp_iter: Some(3),
+            damp_factor: Some(0.5),
+            adaptive: None,
+        };
+
         let max_iterations = 100;
         let abs_tolerance = 1e-6;
 
@@ -624,7 +635,7 @@ mod tests {
         let substances = vec!["HMX".to_string(), "HMXprod".to_string()];
         // Using the new bounds helper
         let bounds_config = BoundsConfig::new(
-            (0.0, 1.0),      // C bounds
+            (-0.1, 1.1),     // C bounds
             (-1e20, 1e20),   // J bounds
             (-100.0, 100.0), // Teta bounds
             (-1e20, 1e20),   // q bounds
@@ -637,7 +648,7 @@ mod tests {
             n_steps,
             scheme,
             strategy,
-            strategy_params,
+            Some(strategy_params),
             linear_sys_method,
             method,
             abs_tolerance,
@@ -719,18 +730,29 @@ mod tests {
     #[test]
     fn hmx_test4() {
         let Q_g = 3000.0 * 1e3 * 0.034; // J/kg -> J/mole
-        let L = 7e-4;
+        let L = 2.7e-4;
         let mut reactor = create_hmx(Q_g, L);
 
-        let n_steps = 400;
-        let strategy_params = Some(HashMap::from([
-            ("max_jac".to_string(), None),
-            ("maxDampIter".to_string(), None),
-            ("DampFacor".to_string(), None),
-            ("adaptive".to_string(), None),
-        ]));
+        let n_steps = 50;
+        let grid_method = GridRefinementMethod::GrcarSmooke(0.1, 0.1, 2.5);
+        // GridRefinementMethod::GrcarSmooke(0.1, 0.1, 3.5);
+        //GridRefinementMethod::Pearson(0.09, 3.5);
+        // or GridRefinementMethod::Pearson(0.05, 2.5);
+        let adaptive = AdaptiveGridConfig {
+            version: 1,
+            max_refinements: 3,
+            grid_method,
+        };
+
+        let strategy_params = SolverParams {
+            max_jac: Some(3),
+            max_damp_iter: Some(10),
+            damp_factor: Some(0.5),
+            adaptive: Some(adaptive),
+        };
+
         let max_iterations = 100;
-        let abs_tolerance = 1e-6;
+        let abs_tolerance = 1e-8;
 
         let loglevel = Some("info".to_string());
         let scheme = "forward".to_string();
@@ -738,16 +760,16 @@ mod tests {
         let strategy = "Damped".to_string();
         let linear_sys_method = None;
         // Using the new tolerance helper - much simpler!
-        let tolerance_config = ToleranceConfig::new(1e-5, 1e-5, 1e-5, 1e-6);
+        let tolerance_config = ToleranceConfig::new(1e-7, 1e-7, 1e-7, 1e-6);
         let substances = vec!["HMX".to_string(), "HMXprod".to_string()];
         // Using the new bounds helper
         let bounds_config = BoundsConfig::new(
-            (0.0, 1.0),      // C bounds
+            (-100.0, 100.1), // C bounds
             (-1e20, 1e20),   // J bounds
             (-100.0, 100.0), // Teta bounds
             (-1e20, 1e20),   // q bounds
         );
-        let ig = vec![1e-2; n_steps * reactor.solver.unknowns.len()];
+        let ig = vec![1e-5; n_steps * reactor.solver.unknowns.len()];
         let initial_guess = DMatrix::from_vec(reactor.solver.unknowns.len(), n_steps, ig);
         // Using the new convenience method with both configs:
         let _ = reactor.solver.solve_NRBVP_with_configs(
@@ -755,7 +777,7 @@ mod tests {
             n_steps,
             scheme,
             strategy,
-            strategy_params,
+            Some(strategy_params),
             linear_sys_method,
             method,
             abs_tolerance,
@@ -765,6 +787,7 @@ mod tests {
             max_iterations,
             loglevel,
         );
+
         //  reactor.postprocessing();
         reactor.gnuplot();
         println!("BC {:?}", &reactor.solver.BorderConditions);

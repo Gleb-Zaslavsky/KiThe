@@ -4,14 +4,13 @@
 
 This is a package of structures, functions and databases useful for such areas as chemical thermodynamics, chemical kinetics, as well as modeling of chemical reactors, combustion, processes in shock tubes and rocket engines, propulsion. 
 
-PROJECT NEWS: added search substances thermodynamincs and heat-mass transfer data through all libraries with storing of data in a structure. Calculaton of Gibbs free energy of a given mixure of substances (numerical result at given T, P, concentration) and symbolic Gibbs free energy of a given mixure of substances (symbolic result at given T, P, concentration).
-
+PROJECT NEWS: BVP solver for conbustion/plug-flow steady state reactor now called via CLI menu
 ## Content
-- [Kinetics](# Kinetics)
-- [Thermodynamics](# Thermodynamics)
-- [Chemicalthermodynamics](# Chemical_thermodynamics)
-- [NISTscrapper](# NIST_scrapper)
-- [Testing](# Testing)
+- [Kinetics](#Kinetics)
+- [Thermodynamics](#Thermodynamics)
+- [Chemical thermodynamics](#Chemical_thermodynamics)
+- [NIST scrapper](#NIST_scrapper)
+- [Testing](#Testing)
 - [Contributing](#contributing)
 - [To do](#to-do)
 
@@ -26,8 +25,13 @@ PROJECT NEWS: added search substances thermodynamincs and heat-mass transfer dat
     * Automatic chemical mechanism constructor (say you have some reagents and want to find all possible reactions 
     between original species and all their products)
 * Thermodynamics
-    * many libraries on board with thermodynamics and transport properties and handlers for them
-* Combustion/Plug-flow steady-state boundary value problem
+    * many libraries on board with thermodynamics and transport properties (NASA, NASA-CEA, NIST, Aramco transport, etc.) and handlers for them;
+    * search substances thermodynamics and heat-mass transfer data through all libraries with storing of data in a structure;
+    * Calculaton of Gibbs free energy of a given mixure of substances (numerical result at given T, P, concentration) and symbolic Gibbs free energy of a given mixure of substances (symbolic result at given T, P, concentration).
+    * automatic NIST parser for thermochemical data;
+* Combustion/Plug-flow steady-state 1D boundary value problem
+    
+
 ## Kinetics
 - parse reaction equations into a list of substances 
 - parse reaction equations into a stoichiometric matrix, matrix of coefficients of direct reactions and matrix of coefficients of reverse reactions, matrix of degrees of concentration for the kinetic function,
