@@ -1,6 +1,6 @@
 use super::SimpleReactorBVP::SimpleReactorTask;
 use RustedSciThe::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
-use RustedSciThe::Utils::plots::{plots, plots_gnulot};
+use RustedSciThe::Utils::plots::{plots, plots_gnulot, plots_terminal};
 use RustedSciThe::symbolic::symbolic_integration::QuadMethod;
 pub struct AfterSolution {}
 impl SimpleReactorTask {
@@ -49,7 +49,13 @@ impl SimpleReactorTask {
         let values = self.solver.unknowns.clone();
         plots_gnulot(arg, values, x_mesh, y);
     }
-
+    pub fn plot_in_terminal(&self) {
+        let y = self.solver.solution.clone().unwrap();
+        let x_mesh = self.solver.x_mesh.clone().unwrap();
+        let arg = "x".to_owned();
+        let values = self.solver.unknowns.clone();
+        plots_terminal(arg, values, x_mesh, y);
+    }
     pub fn save_to_file(&self, filename: Option<String>) {
         let name = if let Some(name) = filename {
             format!("{}.txt", name)
@@ -99,28 +105,49 @@ impl SimpleReactorTask {
                 T_fin
             );
         }
-        let unknowns = self.solver.unknowns.clone();
-        let heat_release = self.heat_release.clone();
-        let x = self.solver.x_mesh.clone().unwrap();
-
-        let y = self.solver.solution.clone().unwrap();
-        let heat_release_fun = heat_release.lambdify(unknowns.iter().map(|x| x.as_str()).collect());
     }
 
     fn energy_balance(&self) {
         let i = self.solver.unknowns.iter().position(|x| x == "q").unwrap();
-        let q:Vec<f64> = self.solver.solution.as_ref().unwrap().column(i).iter().cloned().collect::<Vec<f64>>();
+        let q: Vec<f64> = self
+            .solver
+            .solution
+            .as_ref()
+            .unwrap()
+            .column(i)
+            .iter()
+            .cloned()
+            .collect::<Vec<f64>>();
         let q_f = q.last().unwrap();
         let q_0 = q.first().unwrap();
         let dq = q_f - q_0;
-        let i = self.solver.unknowns.iter().position(|x| x == "Teta").unwrap();
-        let T = self.solver.solution.as_ref().unwrap().column(i).iter().cloned().collect::<Vec<f64>>();
+        let i = self
+            .solver
+            .unknowns
+            .iter()
+            .position(|x| x == "Teta")
+            .unwrap();
+        let T = self
+            .solver
+            .solution
+            .as_ref()
+            .unwrap()
+            .column(i)
+            .iter()
+            .cloned()
+            .collect::<Vec<f64>>();
         let T_f = T.last().unwrap();
         let T_0 = T.first().unwrap();
         let m = self.m;
         let Cp = self.Cp;
-        let dT = m*Cp*(T_f - T_0);
-
-
+        let dT = m * Cp * (T_f - T_0);
+        let unknowns = self.solver.unknowns.clone();
+        let heat_release = self.heat_release.clone();
+        let heat_release_fun = heat_release.lambdify(unknowns.iter().map(|x| x.as_str()).collect());
+        let mut heat_releas_val = Vec::new();
+        for solution_for_timestep in self.solver.solution.as_ref().unwrap().row_iter() {
+            let solution_for_timestep = solution_for_timestep.iter().cloned().collect::<Vec<f64>>();
+            heat_releas_val.push(heat_release_fun(solution_for_timestep));
+        }
     }
 }

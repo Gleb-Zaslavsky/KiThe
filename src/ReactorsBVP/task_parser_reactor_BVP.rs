@@ -50,10 +50,11 @@
 //! providing clear error messages for missing required configuration.
 
 use super::SimpleReactorBVP::{FastElemReact, SimpleReactorTask};
+use crate::ReactorsBVP::reactor_BVP_utils::InitialConfig;
 use crate::ReactorsBVP::reactor_BVP_utils::{BoundsConfig, ScalingConfig, ToleranceConfig};
 use RustedSciThe::Utils::task_parser::{DocumentMap, DocumentParser};
 use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{NRBVP, SolverParams};
-use nalgebra::DMatrix;
+use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 impl SimpleReactorTask {
     /// Parses reactor parameters from a DocumentMap and populates the SimpleReactorTask structure.
@@ -466,11 +467,22 @@ impl SimpleReactorTask {
             None
         };
         // return from dimensionless to dimensioned unknowns
-        let return_to_dimension = if let Some(return_to_dimension) = solver_settings.get("return_to_dimension") {
-            return_to_dimension.clone().unwrap()[0].as_boolean().unwrap()
-        } else {
-            true
-        };
+        let return_to_dimension =
+            if let Some(return_to_dimension) = solver_settings.get("return_to_dimension") {
+                return_to_dimension.clone().unwrap()[0]
+                    .as_boolean()
+                    .unwrap()
+            } else {
+                true
+            };
+        let no_plots_in_terminal =
+            if let Some(no_plots_in_terminal) = solver_settings.get("no_plots_in_terminal") {
+                no_plots_in_terminal.clone().unwrap()[0]
+                    .as_boolean()
+                    .unwrap()
+            } else {
+                false
+            };
         if return_to_dimension {
             self.postprocessing();
         }
@@ -480,15 +492,89 @@ impl SimpleReactorTask {
         if gnuplot_flag {
             self.gnuplot();
         };
+        if !no_plots_in_terminal {
+            self.plot_in_terminal();
+        }
         if save_flag {
             self.save_to_file(name.clone())
         };
         if save_to_csv {
             self.save_to_csv(name);
         };
-
     }
 
+    pub fn set_initial_guess_from_map(
+        &mut self,
+        parser: DocumentParser,
+        n_steps: usize,
+    ) -> DMatrix<f64> {
+        let result: DocumentMap = parser.get_result().unwrap().clone();
+        let inconfing = InitialConfig::new();
+        let initial_guess: DMatrix<f64> = if let Some(guess_info) = result.get("initial_guess") {
+            
+            let res = if let Some(universal) = guess_info.get("universal") {
+                let val = universal.clone().expect("there must be value")[0]
+                    .as_float()
+                    .unwrap();
+                let res = inconfing.only_one_value_for_all_initial(
+                    val,
+                    n_steps,
+                    self.solver.unknowns.len(),
+                );
+                println!("int the task found universal initial condition {}", val);
+                res.unwrap()
+            } else {
+                // for every type of variable its own initial guess
+                let C_val = guess_info
+                    .get("C")
+                    .expect("no initial guess C")
+                    .clone()
+                    .unwrap()[0]
+                    .as_float()
+                    .unwrap();
+                let J_val = guess_info
+                    .get("J")
+                    .expect("no initial guess J")
+                    .clone()
+                    .unwrap()[0]
+                    .as_float()
+                    .unwrap();
+                let Teta_val = guess_info
+                    .get("Teta")
+                    .expect("no initial guess Teta")
+                    .clone()
+                    .unwrap()[0]
+                    .as_float()
+                    .unwrap();
+                let q_val = guess_info
+                    .get("q")
+                    .expect("no initial guess q")
+                    .clone()
+                    .unwrap()[0]
+                    .as_float()
+                    .unwrap();
+                let map = HashMap::from([
+                    ("C".to_string(), C_val),
+                    ("J".to_string(), J_val),
+                    ("Teta".to_string(), Teta_val),
+                    ("q".to_string(), q_val),
+                ]);
+                let res = inconfing.all_const_initial(map, n_steps);
+                res.unwrap()
+            };
+            res
+        } else {
+            println!(
+                "no initial guess is set: default initial value - 1e-2 for all variables and mesh"
+            );
+            let res =
+                inconfing.only_one_value_for_all_initial(1e-2, n_steps, self.solver.unknowns.len());
+            res.unwrap()
+        };
+        println!("got initial guess of shape {:?}", initial_guess.shape());
+
+        initial_guess
+    }
     /// Complete workflow: parses configuration, sets up BVP, configures solver, and solves the problem.
     ///
     /// This is a high-level method that orchestrates the entire process from parsed document
@@ -531,11 +617,12 @@ impl SimpleReactorTask {
         nr.t0 = t0;
         nr.t_end = t_end;
         nr.arg = arg.clone();
-        self.solver.arg_name = arg;
-        let ig = vec![1e-2; n_steps * self.solver.unknowns.len()];
-        let initial_guess = DMatrix::from_vec(self.solver.unknowns.len(), n_steps, ig);
-        nr.initial_guess = initial_guess;
         nr.n_steps = n_steps;
+        self.solver.arg_name = arg;
+        let initial_guess = self.set_initial_guess_from_map(parser.clone(), n_steps);
+        //  let ig = vec![1e-2; n_steps *self.solver.unknowns.len()];
+        // let initial_guess = DMatrix::from_vec(self.solver.unknowns.len(), n_steps, ig);
+        nr.initial_guess = initial_guess;
         nr.before_solve_preprocessing();
         nr.solve();
         self.solver.x_mesh = Some(nr.x_mesh.clone());
@@ -614,9 +701,23 @@ pub fn create_template() {
     use std::fs::File;
     use std::io::Write;
 
-    let template_content = r#"# Reactor BVP Configuration Template
+    let template_content = r#"
+# Reactor BVP Configuration Template
+// This template provides a starting point for configuring reactor BVP tasks.
+// Users should fill in the values below for their specific problem.
+// The template includes all required sections with example values and explanatory comments.
+//
+// some fields are filled with Some(value) it means the value in this field
+// will be used in the task, otherwise the default value will be used
+// if the field is None, the default value will be used
+//
 # Fill in the values below for your specific problem
-
+# initial guess - if not set, default is 1e-2 for all variables and mesh
+# if set universal:some_value - for all variables and mesh will be set this value
+# if set C: some_value, J: some_value, Teta: some_value, q: some_value - for all 
+# corresponing variables will be set this values
+initial_guess:
+universal: 1e-2
 # Process conditions - main problem parameters
 process_conditions
 # Optional problem identification
@@ -624,17 +725,22 @@ problem_name: Some(YourProblemName)
 problem_description: Some(YourProblemDescription)
 # List of chemical substances (comma-separated)
 substances: Substance1, Substance2
-# Start position/time
+# Start position (real length is set in L field, so 
+# t0 and t_end are dimensionless and reasonable to leave 
+# them 0.0 and 1.0 )
 t0: 0.0
-# End position/time
+# End position 
 t_end: 1.0
-# Number of grid points
+# Number of grid points - the more you set 
+# the more accurate the solution will be, but 
+# the more time it will take to solve the problem
 n_steps: 200
 # Independent variable name (x, t, etc.)
 arg: x
-# Maximum temperature [K]
+# Maximum temperature in the front of reaction [K]
 Tm: 1500.0
-# Characteristic length [m]
+# Characteristic length [m] - should be chosen in such 
+# way that all reactions are ended at the end of the distance
 L: 9e-4
 # Temperature difference [K]
 dT: 600.0
@@ -646,7 +752,7 @@ P: 1e6
 Cp: 1464.4
 # Thermal conductivity [W/m/K]
 Lambda: 0.07
-# Mass parameter [kg]
+# Mass velocity [kg/m2*s]
 m: 0.0043
 # Molar mass [kg/mol]
 M: 0.0342
@@ -689,7 +795,8 @@ O: 1
 # Chemical reactions with Arrhenius parameters
 # Format: Reactant=>Product: [A, n, E, Q]
 # A: pre-exponential factor, n: temperature exponent
-# E: activation energy [J/mol], Q: heat of reaction [J/mol]
+# E: activation energy [J/mol/K],
+# Q: heat of reaction [J/mol]
 reactions
 Substance1=>Substance2: [130000.0, 0.0, 20920.0, 102000.0]
 
@@ -768,6 +875,8 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
     const task_content: &str = r#"
+        initial_guess
+        universal:1e-2
         process_conditions
         problem_name: Some(HMXTest)
         problem_description: Some(HMXdecompositiontest)
@@ -804,7 +913,7 @@ mod tests {
         C: 1
         O: 1
         reactions
-        HMX=>HMXprod: [130000.0, 0.0, 20920.0, 102000.0]
+        HMX=>10HMXprod: [130000.0, 0.0, 20920.0, 102000.0]
         solver_settings
         scheme: forward
         method: Sparse
@@ -901,7 +1010,7 @@ mod tests {
 
         // Verify reactions were parsed
         assert_eq!(reactor.kindata.vec_of_equations.len(), 1);
-        assert_eq!(reactor.kindata.vec_of_equations[0], "HMX=>HMXprod");
+        assert_eq!(reactor.kindata.vec_of_equations[0], "HMX=>10HMXprod");
     }
 
     #[test]

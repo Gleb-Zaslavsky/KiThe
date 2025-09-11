@@ -1,5 +1,7 @@
 use crate::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
 use crate::ReactorsBVP::task_parser_reactor_BVP::create_template;
+use RustedSciThe::Utils::task_parser::pretty_print_map;
+use crate::cli::reactor_help::{REACTOR_RU_HELPER, REACTOR_ENG_HELPER};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -9,6 +11,8 @@ pub fn reactor_menu() {
         println!("\x1b[33m1. Solve from file\x1b[0m");
         println!("\x1b[33m2. Auto-discover problem files\x1b[0m");
         println!("\x1b[33m3. Generate template\x1b[0m");
+        println!("\x1b[33m4. Read help (eng)\x1b[0m");
+        println!("\x1b[33m5. Read help (ru)\x1b[0m");
         println!("\x1b[33m0. Back to main menu\x1b[0m");
         print!("\x1b[36mEnter your choice: \x1b[0m");
         io::stdout().flush().unwrap();
@@ -21,6 +25,8 @@ pub fn reactor_menu() {
                 create_template();
                 println!("Template generated successfully!");
             }
+            "4" => show_help_english(),
+            "5" => show_help_russian(),
             "0" => break,
             _ => println!("Invalid choice. Please try again."),
         }
@@ -34,7 +40,7 @@ fn solve_from_file() {
     let path = PathBuf::from(file_path.trim());
 
     if path.exists() {
-      solve_from_file_dialog(path);
+        solve_from_file_dialog(path);
     } else {
         println!("File not found: {}", file_path.trim());
     }
@@ -86,21 +92,36 @@ pub fn solve_from_file_dialog(path: std::path::PathBuf) {
     match parser.parse_document() {
         Ok(result) => {
             println!("Document parsed successfully");
-           println!("parsing result: {:?}", result);
-           
-           print!("\x1b[36mStart calculation? (y/n): \x1b[0m");
-           io::stdout().flush().unwrap();
-           let choice = get_user_input();
-           
-           if choice.trim().to_lowercase() == "y" || choice.trim().to_lowercase() == "yes" {
-               reactor.solve_from_map(parser);
-           } else {
-               println!("Calculation cancelled. Returning to menu.");
-           }
+            pretty_print_map(&result);
+
+            print!("\x1b[36mStart calculation? (y/n): \x1b[0m");
+            io::stdout().flush().unwrap();
+            let choice = get_user_input();
+
+            if choice.trim().to_lowercase() == "y" || choice.trim().to_lowercase() == "yes" {
+                reactor.solve_from_map(parser);
+            } else {
+                println!("Calculation cancelled. Returning to menu.");
+            }
         }
         Err(_) => {
             let err = parser.get_error().unwrap();
             println!("Error parsing document: {}", err);
         }
     }
+    
+}
+
+fn show_help_english() {
+    println!("\n=== Reactor BVP Help (English) ===");
+    println!("\nPress Enter to return to menu...");
+        println!("{}", REACTOR_ENG_HELPER);
+    let _ = get_user_input();
+}
+
+fn show_help_russian() {
+    println!("\n=== Справка по реакторам (Русский) ===");
+    println!("\nНажмите Enter для возврата в меню...");
+    println!("{}", REACTOR_RU_HELPER);
+    let _ = get_user_input();
 }

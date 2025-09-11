@@ -174,6 +174,36 @@ impl InitialConfig {
             )))
         }
     }
+
+    pub fn all_const_initial(
+        &self,
+        map_of_values: HashMap<String, f64>,
+        n_steps: usize,
+    ) -> Result<DMatrix<f64>, ReactorError> {
+        let unknowns: Vec<String> = map_of_values
+            .iter()
+            .map(|(unknown, _)| unknown.clone())
+            .collect();
+        let mut templates = HashMap::new();
+        for (unknown, value) in map_of_values.iter() {
+            let template = InitialTemplate::Constant { value: *value };
+            templates.insert(unknown.to_string(), template);
+        }
+        let mut inconfg = InitialConfig::new();
+        inconfg.templates = templates;
+        let initial_guess = inconfg.generate_initial_guess(&unknowns, n_steps);
+        initial_guess
+    }
+    pub fn only_one_value_for_all_initial(
+        &self,
+        value: f64,
+        n_steps: usize,
+        n_values: usize,
+    ) -> Result<DMatrix<f64>, ReactorError> {
+        let ig = vec![value; n_steps * n_values];
+        let initial_guess = DMatrix::from_vec(n_values, n_steps, ig);
+        Ok(initial_guess)
+    }
 }
 
 impl Default for InitialConfig {

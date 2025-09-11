@@ -1,6 +1,5 @@
 use super::SimpleReactorBVP::SimpleReactorTask;
 
-
 impl SimpleReactorTask {
     ////////////////////////PRETTY PRINTING/////////////////////////////
 

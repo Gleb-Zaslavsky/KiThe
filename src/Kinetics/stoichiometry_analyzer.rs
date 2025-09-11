@@ -262,7 +262,7 @@ impl StoichAnalyzer {
                 reaction = clean_off_DUP(reaction_);
                 println!("Reaction after dup: {}", &reaction);
                 // разделяем уравнение реакции на половины относящиеся к реагентам и продуктам по соответствующему знаку = или -> или =>
-                let re = Regex::new(r"=|->|=>|- >|= >|<=>|< = >|<= >|< =>").unwrap();
+                let re = Regex::new(r"<= >|< =>|<=>|=>|->|=").unwrap();
                 let sides: Vec<String> = re // divide reaction ino products and reagents
                     .split(reaction) // reaction.split(|s| s == '=' )
                     .map(|s| s.trim())
@@ -357,7 +357,7 @@ impl StoichAnalyzer {
                 println!("Reaction after dup: {}", &reaction);
                 // разделяем уравнение реакции на половины относящиеся к реагентам и продуктам по соответствующему знаку = или -> или =>
                 // let re = Regex::new(r"=|->|=>").unwrap();
-                let re = Regex::new(r"=|->|=>|<=>|<= >|< =>").unwrap();
+                let re = Regex::new(r"<= >|< =>|<=>|=>|->|=").unwrap();
                 let sides: Vec<String> = re
                     .split(reaction) // reaction.split(|s| s == '=' )
                     .map(|s| s.trim())
@@ -417,6 +417,25 @@ mod tests {
         assert_eq!(g_list, vec![1.0, 1.0]);
     }
 
+    #[test]
+    fn test_analyse_substances_with_exotic_names() { 
+ let mut ReactionAnalyzer_instance = StoichAnalyzer::new(); 
+        let reactions_: Vec<&str> = vec!["HMX=>7HMXprod"];
+        let reaction = reactions_.iter().map(|s| s.to_string()).collect();
+        ReactionAnalyzer_instance.reactions = reaction;
+        // ReactionAnalyzer_instance.search_substances();
+        // assert_eq!(ReactionAnalyzer_instance.substances, vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+        let substancses_ = vec!["HMX", "HMXprod"];
+        let substancses = substancses_.iter().map(|s| s.to_string()).collect();
+        ReactionAnalyzer_instance.substances = substancses;
+        ReactionAnalyzer_instance.analyse_reactions();
+        let stecheo_matrx = ReactionAnalyzer_instance.stecheo_matrx;
+        let result = [
+            [-1.0, 7.0],
+        ];
+        let result: Vec<Vec<f64>> = result.iter().map(|row| row.to_vec()).collect();
+        assert_eq!(stecheo_matrx, result);
+    }
     #[test]
     fn test_clean_off_artifacts_and_DUP() {
         let mut item = "A=2BM)".to_string();

@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod tests { 
     use super::super::SimpleReactorBVP::*;
     use crate::Kinetics::User_reactions::KinData;
     use crate::Kinetics::mechfinder_api::{ReactionData, ReactionType};
@@ -501,7 +501,7 @@ mod tests {
 
     fn create_hmx(Q_g: f64, L: f64) -> SimpleReactorTask {
         /////////////////// setting up kinetics
-        let eq = "HMX=>HMXprod".to_string();
+        let eq = "HMX=>10HMXprod".to_string();
 
         let C_p = 0.35 * 4.184 * 1000.0;
         let Lambda_eff = 0.07; // W/m-K 
@@ -790,6 +790,7 @@ mod tests {
 
         //  reactor.postprocessing();
         reactor.gnuplot();
+      //  reactor.plot_in_terminal();
         println!("BC {:?}", &reactor.solver.BorderConditions);
         println!("unknowns {:?}", &reactor.solver.unknowns);
         for (i, eq) in reactor.solver.eq_system.clone().iter().enumerate() {
