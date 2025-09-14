@@ -45,6 +45,27 @@ use std::fmt;
 /// Universal gas constant in J/(mol·K)
 pub const R_G: f64 = 8.314;
 
+#[derive(Debug, Clone)]
+pub struct SolutionQuality {
+    pub energy_balane_error_abs: f64,
+    pub energy_balane_error_rel: f64,
+
+    /// steps where sum of molar fractions is larger then threshhold
+    pub sum_of_mass_fractions: Vec<(usize, f64)>,
+    pub atomic_mass_balance_error: Vec<(usize, f64)>,
+}
+
+impl Default for SolutionQuality {
+    fn default() -> Self {
+        Self {
+            energy_balane_error_abs: 0.0,
+            energy_balane_error_rel: 0.0,
+
+            sum_of_mass_fractions: Vec::new(),
+            atomic_mass_balance_error: Vec::new(),
+        }
+    }
+}
 /// Error types for reactor modeling operations
 #[derive(Debug)]
 pub enum ReactorError {
@@ -191,6 +212,8 @@ pub struct BVPSolver {
     pub solution: Option<DMatrix<f64>>,
     /// Spatial mesh points
     pub x_mesh: Option<DVector<f64>>,
+    /// struct that stores balance errors - filled at the end of solution
+    pub quality: SolutionQuality,
 }
 
 impl Default for BVPSolver {
@@ -203,6 +226,7 @@ impl Default for BVPSolver {
             BorderConditions: HashMap::new(),
             solution: None,
             x_mesh: None,
+            quality: SolutionQuality::default(),
         }
     }
 }
@@ -877,7 +901,7 @@ impl SimpleReactorTask {
         // ro at standard conditions
         // PV = (m/M)*RT => ro = m/V = P*M/RT;
         let ro0 = self.M * P / (R_G * 298.15);
-        dbg!(&ro0, self.M);
+        // dbg!(&ro0, self.M);
         let mut D_ro_map = HashMap::new();
         for subs in self.kindata.substances.iter() {
             if let Some(D_i) = self.Diffusion.get(subs) {

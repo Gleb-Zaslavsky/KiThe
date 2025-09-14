@@ -15,6 +15,7 @@ PROJECT NEWS: BVP solver for conbustion/plug-flow steady state gas-phase reactor
 - [To do](#to-do)
 
 ## Features
+When install as library:
 * Chemical kinetics
     * crate is equipped with a libraries of kinetic parameters of chemical reactions obtained as a result of parsing publicly available databases;
     * searching inside local kinetic libraries by reagents, products, etc. 
@@ -30,7 +31,9 @@ PROJECT NEWS: BVP solver for conbustion/plug-flow steady state gas-phase reactor
     * Calculaton of Gibbs free energy of a given mixure of substances (numerical result at given T, P, concentration) and symbolic Gibbs free energy of a given mixure of substances (symbolic result at given T, P, concentration).
     * automatic NIST parser for thermochemical data;
 * Combustion/Plug-flow steady-state 1D boundary value problem
-    
+ When install as executable:
+  CLI instrument to solve some of the heat-mass transfer, combustion, chemical engeneering problems. Now available BVP solver 
+  for gas phase steady-state combustion BVP problem   
 
 ## Kinetics
 - parse reaction equations into a list of substances 

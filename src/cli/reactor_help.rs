@@ -1,6 +1,4 @@
-pub const REACTOR_RU_HELPER:&'static str = 
-
-"
+pub const REACTOR_RU_HELPER:&'static str ="
                                 Общие соображения. \n
 При использовании программы следует помнить, что все величины необходимо указывать в системе СИ. Это стоит иметь в виду и \n
 тщательно проверять размерность вводимых физических величин! \n
@@ -73,6 +71,9 @@ substances: %substance_1%, %substance_2%,… - поле с перечнем ве
 * return_to_dimension – опциональное поле с булевым значением - означает переходить ли от безразмерных переменных к размерным.\n
  Значение по умолчанию true – то есть если поле вообще не задать будет установлено именно это значение. Однако, иногда \n
  полезно посмотреть на безразмерные переменные в этом случае можно указать return_to_dimension: false \n
+* no_plots_in_terminal – опциональное поле с булевым значение. Устанавливает печатать ли графики в виде ASCII символов в \n 
+терминале. Значение по умолчанию false (печатать графики) – то есть если поле вообще не задать будет установлено именно это \n
+значение.
 
 
 
@@ -146,5 +147,10 @@ it is added to the Path. \n
 * solve_to_csv:true  command saves the solution to a csv file. \n
 If the filename field is not set to %name_you_chose%, the txt and csv files will be named result. Therefore, the optional \n
 filename field is responsible for the names of the files being created. \n
+* return_to_dimension – optional field with a Boolean value – sets whether to transition from dimensionless variables to \n
+dimensional ones. The default value is true – that is, if the field is not specified at all, this value will be set. However, it \n
+is sometimes useful to look at dimensionless variables; in this case, you can specify return_to_dimension: false. \n
+* no_plots_in_terminal – optional field with a Boolean value. Sets whether to print graphs as ASCII characters in the terminal.\n
+ The default value is false (print graphs) – that is, if the field is not set at all, this value will be set \n
 
 ";

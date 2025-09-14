@@ -418,8 +418,8 @@ mod tests {
     }
 
     #[test]
-    fn test_analyse_substances_with_exotic_names() { 
- let mut ReactionAnalyzer_instance = StoichAnalyzer::new(); 
+    fn test_analyse_substances_with_exotic_names() {
+        let mut ReactionAnalyzer_instance = StoichAnalyzer::new();
         let reactions_: Vec<&str> = vec!["HMX=>7HMXprod"];
         let reaction = reactions_.iter().map(|s| s.to_string()).collect();
         ReactionAnalyzer_instance.reactions = reaction;
@@ -430,9 +430,7 @@ mod tests {
         ReactionAnalyzer_instance.substances = substancses;
         ReactionAnalyzer_instance.analyse_reactions();
         let stecheo_matrx = ReactionAnalyzer_instance.stecheo_matrx;
-        let result = [
-            [-1.0, 7.0],
-        ];
+        let result = [[-1.0, 7.0]];
         let result: Vec<Vec<f64>> = result.iter().map(|row| row.to_vec()).collect();
         assert_eq!(stecheo_matrx, result);
     }

@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests { 
+mod tests {
     use super::super::SimpleReactorBVP::*;
     use crate::Kinetics::User_reactions::KinData;
     use crate::Kinetics::mechfinder_api::{ReactionData, ReactionType};
@@ -790,7 +790,7 @@ mod tests {
 
         //  reactor.postprocessing();
         reactor.gnuplot();
-      //  reactor.plot_in_terminal();
+        //  reactor.plot_in_terminal();
         println!("BC {:?}", &reactor.solver.BorderConditions);
         println!("unknowns {:?}", &reactor.solver.unknowns);
         for (i, eq) in reactor.solver.eq_system.clone().iter().enumerate() {

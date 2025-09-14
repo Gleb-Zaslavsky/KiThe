@@ -1,7 +1,7 @@
 use crate::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
 use crate::ReactorsBVP::task_parser_reactor_BVP::create_template;
+use crate::cli::reactor_help::{REACTOR_ENG_HELPER, REACTOR_RU_HELPER};
 use RustedSciThe::Utils::task_parser::pretty_print_map;
-use crate::cli::reactor_help::{REACTOR_RU_HELPER, REACTOR_ENG_HELPER};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -109,13 +109,12 @@ pub fn solve_from_file_dialog(path: std::path::PathBuf) {
             println!("Error parsing document: {}", err);
         }
     }
-    
 }
 
 fn show_help_english() {
     println!("\n=== Reactor BVP Help (English) ===");
     println!("\nPress Enter to return to menu...");
-        println!("{}", REACTOR_ENG_HELPER);
+    println!("{}", REACTOR_ENG_HELPER);
     let _ = get_user_input();
 }
 

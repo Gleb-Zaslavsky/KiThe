@@ -52,6 +52,7 @@
 use super::SimpleReactorBVP::{FastElemReact, SimpleReactorTask};
 use crate::ReactorsBVP::reactor_BVP_utils::InitialConfig;
 use crate::ReactorsBVP::reactor_BVP_utils::{BoundsConfig, ScalingConfig, ToleranceConfig};
+use crate::Utils::show_this_pic::show_image;
 use RustedSciThe::Utils::task_parser::{DocumentMap, DocumentParser};
 use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{NRBVP, SolverParams};
 use nalgebra::{DMatrix, DVector};
@@ -425,6 +426,7 @@ impl SimpleReactorTask {
     }
 
     pub fn set_postpocessing_from_hashmap(&mut self, parser: &mut DocumentParser) {
+        self.check_balances();
         let result: DocumentMap = parser.get_result().unwrap().clone();
         let solver_settings = result
             .get("postprocessing")
@@ -488,9 +490,11 @@ impl SimpleReactorTask {
         }
         if plot_flag {
             self.plot();
+            let _ = show_image("Teta");
         }
         if gnuplot_flag {
             self.gnuplot();
+            let _ = show_image("Teta");
         };
         if !no_plots_in_terminal {
             self.plot_in_terminal();
@@ -501,6 +505,7 @@ impl SimpleReactorTask {
         if save_to_csv {
             self.save_to_csv(name);
         };
+        self.estimate_values();
     }
 
     pub fn set_initial_guess_from_map(
@@ -511,7 +516,6 @@ impl SimpleReactorTask {
         let result: DocumentMap = parser.get_result().unwrap().clone();
         let inconfing = InitialConfig::new();
         let initial_guess: DMatrix<f64> = if let Some(guess_info) = result.get("initial_guess") {
-            
             let res = if let Some(universal) = guess_info.get("universal") {
                 let val = universal.clone().expect("there must be value")[0]
                     .as_float()
@@ -883,10 +887,10 @@ mod tests {
         substances: HMX, HMXprod
         t0: 0.0
         t_end: 1.0
-        n_steps: 200
+        n_steps: 400
         arg:x
         Tm: 1500.0
-        L: 9e-4
+        L: 5e-4
         dT: 600.0
         T_scale: 600.0
         P: 1e6
@@ -919,7 +923,7 @@ mod tests {
         method: Sparse
         strategy: Damped
         linear_sys_method: None
-        abs_tolerance: 1e-5
+        abs_tolerance: 1e-7
         max_iterations: 100
         loglevel: Some(info)
         dont_save_logs: true
@@ -929,17 +933,17 @@ mod tests {
         Teta:-100.0, 100.0
         q: -1e20, 1e20
         rel_tolerance
-        C: 1e-5
-        J: 1e-5
-        Teta: 1e-5
-        q:  1e-5
+        C: 1e-7
+        J: 1e-7
+        Teta: 1e-7
+        q:  1e-7
         strategy_params
         max_jac: Some(3)
         max_damp_iter: Some(10)
         damp_factor: Some(0.5)
         adaptive: None
         postprocessing
-        gnuplot:true
+        gnuplot:false
         save_to_csv:false
         filename: meow
         "#;
@@ -1038,10 +1042,10 @@ mod tests {
             .expect("Failed to parse tolerances and bounds");
 
         // Verify tolerance config
-        assert_eq!(tolerance_config.C, 1e-5);
-        assert_eq!(tolerance_config.J, 1e-5);
-        assert_eq!(tolerance_config.Teta, 1e-5);
-        assert_eq!(tolerance_config.q, 1e-5);
+        assert_eq!(tolerance_config.C, 1e-7);
+        assert_eq!(tolerance_config.J, 1e-7);
+        assert_eq!(tolerance_config.Teta, 1e-7);
+        assert_eq!(tolerance_config.q, 1e-7);
 
         // Verify bounds config
         assert_eq!(bounds_config.C, (-10.0, 10.0));
@@ -1092,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn test_solve_from_map() {
+    fn test_solve_from_map() { 
         let mut reactor = SimpleReactorTask::new();
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("hmx_task.txt");
