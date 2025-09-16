@@ -32,8 +32,9 @@ When install as library:
     * automatic NIST parser for thermochemical data;
 * Combustion/Plug-flow steady-state 1D boundary value problem
  When install as executable:
-  CLI instrument to solve some of the heat-mass transfer, combustion, chemical engeneering problems. Now available BVP solver 
-  for gas phase steady-state combustion BVP problem   
+  CLI instrument to solve some of the heat-mass transfer, combustion, chemical engeneering problems. Now available:
+  * BVP solver for gas phase steady-state combustion BVP problem   
+  * IVP problem for multiple solid state kinetic models with constant or linear increasing temperature
 
 ## Kinetics
 - parse reaction equations into a list of substances 

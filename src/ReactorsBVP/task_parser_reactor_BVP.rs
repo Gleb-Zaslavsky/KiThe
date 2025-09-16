@@ -738,7 +738,7 @@ t_end: 1.0
 # Number of grid points - the more you set 
 # the more accurate the solution will be, but 
 # the more time it will take to solve the problem
-n_steps: 200
+n_steps: 30
 # Independent variable name (x, t, etc.)
 arg: x
 # Maximum temperature in the front of reaction [K]
@@ -853,8 +853,23 @@ max_jac: Some(3)
 max_damp_iter: Some(10)
 # Damping factor
 damp_factor: Some(0.5)
-# Adaptive strategy
-adaptive: None
+
+# Adaptive grid refinement settings (optional)
+adaptive_strategy
+# Refinement version
+version: 1
+# Maximum refinement iterations
+max_refinements: 3
+        
+#Grid refinement method and parameters
+grid_refinement
+// Available methods:
+// doubleoints: []
+// easy: [parameter]
+// grcarsmooke: [param1, param2, param3]
+// pearson: [param1, param2]
+// twopnt: [param1, param2, param3]
+pearson: [0.1, 1.5]
 
 # Output and visualization options
 postprocessing
@@ -887,7 +902,7 @@ mod tests {
         substances: HMX, HMXprod
         t0: 0.0
         t_end: 1.0
-        n_steps: 400
+        n_steps: 25
         arg:x
         Tm: 1500.0
         L: 5e-4
@@ -941,9 +956,24 @@ mod tests {
         max_jac: Some(3)
         max_damp_iter: Some(10)
         damp_factor: Some(0.5)
-        adaptive: None
+        # Adaptive grid refinement settings (optional)
+        adaptive_strategy
+        # Refinement version
+        version: 1
+        # Maximum refinement iterations
+        max_refinements: 3
+                
+        #Grid refinement method and parameters
+        grid_refinement
+        // Available methods:
+        // doubleoints: []
+        // easy: [parameter]
+        // grcarsmooke: [param1, param2, param3]
+        // pearson: [param1, param2]
+        // twopnt: [param1, param2, param3]
+        grcarsmooke: [0.05, 0.05, 1.25]
         postprocessing
-        gnuplot:false
+        gnuplot:true
         save_to_csv:false
         filename: meow
         "#;
@@ -1096,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn test_solve_from_map() { 
+    fn test_solve_from_map() {
         let mut reactor = SimpleReactorTask::new();
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("hmx_task.txt");

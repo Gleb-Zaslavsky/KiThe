@@ -1,6 +1,6 @@
 [package]
 name = "KiThe"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 author = "Gleb Zasllavsky"
 license = "MIT"
@@ -11,9 +11,12 @@ repository = "https://github.com/Gleb-Zaslavsky/KiThe"
 [dependencies]
 regex = "1.11.1"
 serde = { version = "1.0.219", features = ["derive"] }
+tabled = "0.20.0"
+strum = "0.27.2"
+strum_macros = "0.27.2"
 serde_json = "1.0.143"
 loc = "0.5.0"
-RustedSciThe = "0.3.19"
+RustedSciThe = "0.3.20"
 nalgebra = { version = "0.34.0", features = ["serde"] }
 prettytable-rs = "0.10.0"
 simplelog = "0.12.2"

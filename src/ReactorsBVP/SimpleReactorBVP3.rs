@@ -1,9 +1,9 @@
 //! # Reactor BVP Post-Processing and Analysis Module
 //!
 //! ## Aim and General Description
-//! This module provides comprehensive post-processing, validation, and analysis capabilities for 
-//! 1D steady-state plug-flow/combustion reactor boundary value problems (BVP). It handles the 
-//! conversion of dimensionless solver results back to physical units, performs rigorous energy 
+//! This module provides comprehensive post-processing, validation, and analysis capabilities for
+//! 1D steady-state plug-flow/combustion reactor boundary value problems (BVP). It handles the
+//! conversion of dimensionless solver results back to physical units, performs rigorous energy
 //! and mass balance checks, and provides various output formats for visualization and data export.
 //!
 //! The module is designed to work with chemical reactor simulations involving:
@@ -94,7 +94,7 @@ use nalgebra::{DMatrix, DVector};
 pub struct AfterSolution {}
 impl SimpleReactorTask {
     /// Performs comprehensive balance validation for the reactor solution.
-    /// 
+    ///
     /// Calls both energy and material balance checking methods to validate
     /// the numerical solution against conservation laws.
     pub fn check_balances(&mut self) {
@@ -102,7 +102,7 @@ impl SimpleReactorTask {
         self.check_material_balance();
     }
     /// Validates energy conservation using integral heat balance equations.
-    /// 
+    ///
     /// Checks the energy balance equation: -∇q - ∫F dx + ṁCₚΔT = 0
     /// where F is the heat release function. Calculates both absolute and
     /// relative errors and stores them in solver quality metrics.
@@ -216,10 +216,10 @@ impl SimpleReactorTask {
     }
 
     /// Extracts concentration variables from the full solution matrix.
-    /// 
+    ///
     /// Filters the solution matrix to return only columns corresponding to
     /// concentration variables (those starting with "C").
-    /// 
+    ///
     /// # Returns
     /// Matrix containing only concentration data with dimensions (n_points, n_species)
     fn get_only_concentrations(&mut self) -> DMatrix<f64> {
@@ -239,13 +239,13 @@ impl SimpleReactorTask {
         only_concentrations
     }
     /// Converts mass fractions to molar fractions using molecular weights.
-    /// 
+    ///
     /// Performs the conversion: x_i = (w_i/M_i) / Σ(w_j/M_j)
     /// where w_i is mass fraction, M_i is molecular weight, x_i is molar fraction.
-    /// 
+    ///
     /// # Arguments
     /// * `matrix_of_mass_fractions` - Matrix of mass fractions (n_points × n_species)
-    /// 
+    ///
     /// # Returns
     /// Matrix of molar fractions with same dimensions
     pub fn from_mass_to_molar_fractions(
@@ -274,13 +274,13 @@ impl SimpleReactorTask {
     }
 
     /// Converts mass fractions to molar concentrations.
-    /// 
+    ///
     /// Performs the conversion: C_i = w_i / M_i
     /// where w_i is mass fraction, M_i is molecular weight, C_i is molar concentration.
-    /// 
+    ///
     /// # Arguments
     /// * `matrix_of_mass_fractions` - Matrix of mass fractions (n_points × n_species)
-    /// 
+    ///
     /// # Returns
     /// Matrix of molar concentrations with same dimensions
     pub fn from_mass_fractions_to_molar_conentration(
@@ -295,11 +295,10 @@ impl SimpleReactorTask {
             matrix_of_mass_fractions.ncols(),
         );
         for (i, row) in matrix_of_mass_fractions.row_iter().enumerate() {
-        
             let row_new = row
                 .iter()
                 .enumerate()
-                .map(|(i, x)| x / Mi[i] )
+                .map(|(i, x)| x / Mi[i])
                 .collect::<Vec<f64>>();
             let row_new = DVector::from_vec(row_new).transpose();
             matrix_of_molar_fractions.set_row(i, &row_new);
@@ -307,7 +306,7 @@ impl SimpleReactorTask {
         matrix_of_molar_fractions
     }
     /// Verifies atomic mass conservation throughout the reactor.
-    /// 
+    ///
     /// Checks that elemental composition is conserved by multiplying
     /// the elemental composition matrix with molar concentrations.
     /// Validates that sum of mass fractions equals 1.0 at each point.
@@ -339,8 +338,8 @@ impl SimpleReactorTask {
         self.solver.quality.sum_of_mass_fractions =
             vec_of_sums_of_mass_fractions_at_each_step.clone();
         let molar_concentrations = self.from_mass_to_molar_fractions(concentrations);
-    //    dbg!(&molar_concentrations.column(1).transpose().data.as_slice());
-        
+        //    dbg!(&molar_concentrations.column(1).transpose().data.as_slice());
+
         let initial_concentrations: DVector<f64> = molar_concentrations.row(0).transpose().into();
         let initial_vector_of_elemnts = matrix_of_elements * initial_concentrations;
         let final_concentrations: DVector<f64> = molar_concentrations
@@ -351,17 +350,18 @@ impl SimpleReactorTask {
         if (initial_vector_of_elemnts.clone() - final_vector_of_elemnts.clone()).norm() > 0.01 {
             warn!("ATTENTION! Initial and final vectors of elements are not the same");
         }
-       //(initial_vector_of_elemnts.clone().data.as_slice(), &final_vector_of_elemnts.as_slice());
-    
+        //(initial_vector_of_elemnts.clone().data.as_slice(), &final_vector_of_elemnts.as_slice());
+
         let mut atomic_mass_balance_error_vec: Vec<(usize, f64)> = Vec::new();
         for i in 0..molar_concentrations.nrows() {
-            let concentrations_at_step: DVector<f64> = molar_concentrations.row(i).transpose().into();
+            let concentrations_at_step: DVector<f64> =
+                molar_concentrations.row(i).transpose().into();
             let vector_of_elemnts = matrix_of_elements * concentrations_at_step;
 
             let mass_balance_error_for_step =
                 (initial_vector_of_elemnts.clone() - vector_of_elemnts).norm();
             if mass_balance_error_for_step > 0.01 {
-               atomic_mass_balance_error_vec.push((i, mass_balance_error_for_step));
+                atomic_mass_balance_error_vec.push((i, mass_balance_error_for_step));
                 warn!(
                     "ATTENTION! Mass balance error in step {} is {:.3}",
                     i, mass_balance_error_for_step
@@ -373,7 +373,7 @@ impl SimpleReactorTask {
     /////////////////////////////////////////POSTPROCESSING///////////////////////////////////////////
     // solver returns scaled variables - now we must return them from dimensionless to dimension form
     /// Converts dimensionless solver variables back to physical units.
-    /// 
+    ///
     /// Applies scaling transformations to return variables from dimensionless
     /// form to their physical dimensions:
     /// - Temperature: T = Teta * T_scale + dT
@@ -409,7 +409,7 @@ impl SimpleReactorTask {
     }
     ////////////////////////////////////////////////I/O/////////////////////////////////////////////////////
     /// Generates plots of the solution using the default plotting backend.
-    /// 
+    ///
     /// Creates visualization of all solution variables vs spatial coordinate.
     pub fn plot(&self) {
         let y = self.solver.solution.clone().unwrap();
@@ -419,7 +419,7 @@ impl SimpleReactorTask {
         plots(arg, values, x_mesh, y);
     }
     /// Generates plots using gnuplot backend.
-    /// 
+    ///
     /// Creates gnuplot-compatible output files for solution visualization.
     pub fn gnuplot(&self) {
         let y = self.solver.solution.clone().unwrap();
@@ -429,7 +429,7 @@ impl SimpleReactorTask {
         plots_gnulot(arg, values, x_mesh, y);
     }
     /// Displays plots directly in the terminal.
-    /// 
+    ///
     /// Creates ASCII-based plots for quick visualization without external tools.
     pub fn plot_in_terminal(&self) {
         let y = self.solver.solution.clone().unwrap();
@@ -439,7 +439,7 @@ impl SimpleReactorTask {
         plots_terminal(arg, values, x_mesh, y);
     }
     /// Saves solution data to a text file.
-    /// 
+    ///
     /// # Arguments
     /// * `filename` - Optional filename prefix. Defaults to "result" if None.
     pub fn save_to_file(&self, filename: Option<String>) {
@@ -460,7 +460,7 @@ impl SimpleReactorTask {
         );
     }
     /// Saves solution data to CSV format.
-    /// 
+    ///
     /// # Arguments
     /// * `filename` - Optional filename prefix. Defaults to "result_table" if None.
     pub fn save_to_csv(&self, filename: Option<String>) {
@@ -481,7 +481,7 @@ impl SimpleReactorTask {
     }
 
     /// Provides quick estimates and prints balance validation results.
-    /// 
+    ///
     /// For single-reaction systems, estimates adiabatic temperature rise.
     /// Always calls pretty_print_balances() to display validation results.
     pub fn estimate_values(&self) {
@@ -504,7 +504,7 @@ impl SimpleReactorTask {
     }
 
     /// Displays balance validation results in a formatted table.
-    /// 
+    ///
     /// Shows energy balance errors, mass fraction deviations, and
     /// atomic balance violations in a readable tabular format.
     fn pretty_print_balances(&self) {
@@ -514,26 +514,35 @@ impl SimpleReactorTask {
         let energy_balane_error_rel = quality.energy_balane_error_rel;
         let sum_of_mass_fractions_len = quality.sum_of_mass_fractions.len();
         let mass_balance_error_vec = quality.atomic_mass_balance_error.len();
-        
+
         let mut table = Table::new();
         table.add_row(row!["Parameter", "Value"]);
         table.add_row(row!["Abs.error of energy balance", energy_balane_error_abs]);
-        table.add_row(row!["Rel.error of energy balance, %", energy_balane_error_rel]);
-        table.add_row(row!["Sum of mass fractions deviated from 1 at points", sum_of_mass_fractions_len]);
-        table.add_row(row!["Atomic balance violated in points", mass_balance_error_vec]);
+        table.add_row(row![
+            "Rel.error of energy balance, %",
+            energy_balane_error_rel
+        ]);
+        table.add_row(row![
+            "Sum of mass fractions deviated from 1 at points",
+            sum_of_mass_fractions_len
+        ]);
+        table.add_row(row![
+            "Atomic balance violated in points",
+            mass_balance_error_vec
+        ]);
         table.printstd();
     }
 }
 
 /// Performs numerical integration using the trapezoidal rule.
-/// 
+///
 /// Integrates function values y over non-uniform grid x using the composite
 /// trapezoidal rule: ∫f(x)dx ≈ Σ[(x_{i+1} - x_i) * (y_i + y_{i+1})/2]
-/// 
+///
 /// # Arguments
 /// * `y` - Function values at grid points
 /// * `x` - Grid points (must be same length as y)
-/// 
+///
 /// # Returns
 /// Result containing the integral value or error message
 fn trapezoidal(y: &Vec<f64>, x: &Vec<f64>) -> Result<f64, String> {
@@ -562,13 +571,13 @@ fn trapezoidal(y: &Vec<f64>, x: &Vec<f64>) -> Result<f64, String> {
 }
 #[allow(dead_code)]
 /// Alternative implementation of trapezoidal integration.
-/// 
+///
 /// Simpler loop-based implementation for comparison and testing.
-/// 
+///
 /// # Arguments
 /// * `heat_values` - Function values at mesh points
 /// * `x_mesh` - Spatial mesh points
-/// 
+///
 /// # Returns
 /// Result containing the integral value or error message
 fn trapezoidal2(heat_values: &Vec<f64>, x_mesh: &Vec<f64>) -> Result<f64, String> {
@@ -591,14 +600,14 @@ fn trapezoidal2(heat_values: &Vec<f64>, x_mesh: &Vec<f64>) -> Result<f64, String
 }
 
 /// Performs numerical integration using adaptive Simpson's rule.
-/// 
+///
 /// Uses Simpson's rule for uniform spacing, falls back to trapezoidal
 /// for non-uniform grids. More accurate than trapezoidal for smooth functions.
-/// 
+///
 /// # Arguments
 /// * `y` - Function values at grid points
 /// * `x` - Grid points (must be same length as y)
-/// 
+///
 /// # Returns
 /// Result containing the integral value or error message
 pub fn simpsons(y: &Vec<f64>, x: &Vec<f64>) -> Result<f64, String> {
