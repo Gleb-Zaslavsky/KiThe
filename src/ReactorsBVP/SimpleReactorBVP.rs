@@ -113,7 +113,7 @@ impl std::error::Error for ReactorError {}
         define: z = x/l
         d(D*ro* dCi/dz   )/dz - m*l* dT/dz + l^2*Gi =0
         define: Ji = D*ro dC/dz
-         d(Ji)/dz - m*l* dT/dz + l^2*Gi =0
+         d(Ji)/dz - m*l* dС/dz + l^2*Gi =0
         got equations:
         dCi/dz = Ji/D*ro;
         dJi/dz - (m*l)/ro*D *Ji + (l^2)*Gi =0

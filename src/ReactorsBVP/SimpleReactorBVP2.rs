@@ -1,8 +1,25 @@
+//! # Pretty Printing Module for Reactor BVP Tasks
+//!
+//! This module provides formatted output methods for displaying reactor task data,
+//! including operating conditions, boundary conditions, kinetic data, and equations.
+//! All output is formatted using prettytable for clear tabular presentation.
+
 use super::SimpleReactorBVP::SimpleReactorTask;
 
 impl SimpleReactorTask {
-    ////////////////////////PRETTY PRINTING/////////////////////////////
-
+    /// Displays a comprehensive summary of the reactor task including all parameters,
+    /// conditions, and kinetic data in formatted tables.
+    ///
+    /// # Output Sections
+    /// - Basic problem information
+    /// - Operating conditions (P, T, Cp, λ, m, L, M, Pe_q)
+    /// - Scaling parameters
+    /// - Boundary conditions
+    /// - Transport properties (diffusion coefficients, Peclet numbers)
+    /// - Thermal effects
+    /// - Substances and reactions
+    /// - Molar masses
+    /// - Symbolic rate constants
     pub fn pretty_print_task(&self) {
         use prettytable::{Table, row};
 
@@ -166,7 +183,15 @@ impl SimpleReactorTask {
         println!("\n=== END TASK SUMMARY ===\n");
     }
 
-    /// Display map_of_equations as a table with columns: "balance", "unknown var", "equation"
+    /// Displays the system of differential equations in tabular format.
+    ///
+    /// Shows the balance equations with their corresponding unknown variables
+    /// and symbolic expressions. Each row represents one equation in the BVP system.
+    ///
+    /// # Table Columns
+    /// - **Balance**: Type of balance equation (mass, energy)
+    /// - **Unknown Var**: Variable being solved for
+    /// - **Equation**: Symbolic mathematical expression
     pub fn pretty_print_equations(&self) {
         println!("____________________EQUATIONS_________________________");
         use prettytable::{Cell, Row, Table, row};
@@ -185,7 +210,14 @@ impl SimpleReactorTask {
         table.printstd();
     }
 
-    /// Display map_eq_rate as a table with columns: "reaction", "rate"
+    /// Displays reaction rate expressions in tabular format.
+    ///
+    /// Shows each chemical reaction with its corresponding rate expression,
+    /// including kinetic constants and concentration dependencies.
+    ///
+    /// # Table Columns
+    /// - **Reaction**: Chemical reaction equation
+    /// - **Rate**: Symbolic rate expression with kinetic parameters
     pub fn pretty_print_reaction_rates(&self) {
         println!("____________________REACTION RATES_________________________");
         use prettytable::{Cell, Row, Table, row};

@@ -30,10 +30,12 @@ When install as library:
     * search substances thermodynamics and heat-mass transfer data through all libraries with storing of data in a structure;
     * Calculaton of Gibbs free energy of a given mixure of substances (numerical result at given T, P, concentration) and symbolic Gibbs free energy of a given mixure of substances (symbolic result at given T, P, concentration).
     * automatic NIST parser for thermochemical data;
-* Combustion/Plug-flow steady-state 1D boundary value problem
+* Gaseos combustion/Plug-flow steady-state 1D boundary value problem.
+* IVP problem for multiple solid state kinetic models with constant or linear increasing temperature
+
  When install as executable:
   CLI instrument to solve some of the heat-mass transfer, combustion, chemical engeneering problems. Now available:
-  * BVP solver for gas phase steady-state combustion BVP problem   
+  * BVP solver for gas phase steady-state combustion/plug-flow with constant mass velocity BVP problem   
   * IVP problem for multiple solid state kinetic models with constant or linear increasing temperature
 
 ## Kinetics
