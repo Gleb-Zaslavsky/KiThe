@@ -98,13 +98,13 @@
 //! - `E`: activation energy
 //! - `R`: gas constant (8.314 J/mol/K)
 
+use RustedSciThe::Utils::plots::plots_terminal;
 use RustedSciThe::numerical::ODE_api2::{SolverParam, SolverType, UniversalODESolver};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::DVector;
 use std::collections::HashMap;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
-use RustedSciThe::Utils::plots:: plots_terminal;
 use tabled::{Table, Tabled};
 #[allow(non_upper_case_globals)]
 pub const two: Expr = Expr::Const(2.0);
@@ -838,16 +838,13 @@ impl KineticModelIVP {
     }
 
     pub fn plot_in_terminal(&self) {
-
-        let (t, a ) = self.solver.as_ref().unwrap().get_result();
+        let (t, a) = self.solver.as_ref().unwrap().get_result();
         plots_terminal(
             "t".to_string(),
             vec!["a".to_string()],
             t.unwrap(),
-            a.unwrap()
-
+            a.unwrap(),
         )
-
     }
     /// Saves the solution results to file.
     ///
@@ -880,7 +877,6 @@ impl KineticModelIVP {
 #[cfg(test)]
 mod tests {
     use super::*;
-   
 
     #[test]
     fn test_parameter_free_models() {

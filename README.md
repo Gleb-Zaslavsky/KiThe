@@ -4,7 +4,7 @@
 
 This is a package of structures, functions and databases useful for such areas as chemical thermodynamics, chemical kinetics, as well as modeling of chemical reactors, combustion, processes in shock tubes and rocket engines, propulsion. 
 
-PROJECT NEWS: BVP solver for conbustion/plug-flow steady state gas-phase reactor now called via CLI menu
+PROJECT NEWS: GUI: 1)main menu 2) menu for conbustion/plug-flow steady state gas-phase reactor 
 ## Content
 - [Kinetics](#Kinetics)
 - [Thermodynamics](#Thermodynamics)

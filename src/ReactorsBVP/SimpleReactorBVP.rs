@@ -22,8 +22,8 @@
 //! ## Mathematical Model
 //!
 //! The module solves dimensionless reactor equations:
-//! - **Mass balance**: dCi/dz = Ji/(D*ρ), dJi/dz = Pe_D*Ji + l²*Gi
-//! - **Energy balance**: dTeta/dz = q/λ, dq/dz = Pe_q*q + l²*Q/dT
+//! - **Mass balance**: dCi/dz = Ji/(D*ρ), dJi/dz = Pe_D*Ji - l²*Gi
+//! - **Energy balance**: dTeta/dz = q/λ, dq/dz = Pe_q*q - l²*Q/dT
 //!
 //! Where z = x/L (dimensionless coordinate), Teta = (T-T₀)/dT (dimensionless temperature)
 //! PAY ATTENTION TO THE DIMENSION OF INPUT PARAMETERS

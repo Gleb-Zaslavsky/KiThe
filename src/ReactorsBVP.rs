@@ -55,7 +55,7 @@
 //! ## Numerical Solution
 //!
 //! The system forms a boundary value problem with `2n+2` first-order ODEs for `n` substances.
-//! Solutions are obtained using Newton-Raphson methods from the [RustedSciThe](https://crates.io/crates/RustedSciThe) 
+//! Solutions are obtained using Newton-Raphson methods from the [RustedSciThe](https://crates.io/crates/RustedSciThe)
 //! package.
 
 pub mod SimpleReactorBVP;

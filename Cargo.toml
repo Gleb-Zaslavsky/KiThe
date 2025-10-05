@@ -1,6 +1,6 @@
 [package]
 name = "KiThe"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 author = "Gleb Zasllavsky"
 license = "MIT"
@@ -30,6 +30,10 @@ enum_dispatch = "0.3.13"
 tempfile = "3.20.0"
 reborrow = "0.5.5"
 nom = "8.0.0"
+eframe = "0.32.2"
+egui = "0.32.2"
+egui_plot = "0.33.0"
+rfd = "0.14"
 
 
 

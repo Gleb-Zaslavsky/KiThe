@@ -695,12 +695,139 @@ impl SimpleReactorTask {
         self.set_reactor_params_from_hashmap(result);
         Ok(())
     }
+
+    pub fn solve_from_parsed(&mut self, map: DocumentMap) -> Result<(), String> {
+        let mut parser = DocumentParser::new(String::new());
+        parser.result = Some(map.clone());
+        self.set_reactor_params_from_hashmap(map);
+        let _ = self.setup_bvp();
+        assert!(!self.solver.unknowns.is_empty());
+        assert!(!self.solver.eq_system.is_empty());
+
+        let mut nr = NRBVP::default();
+        let _ = nr.parse_settings(&mut parser);
+        let solver = &self.solver;
+        nr.eq_system = solver.eq_system.clone();
+        nr.values = solver.unknowns.clone();
+        let BC = solver.BorderConditions.clone();
+        let BC: HashMap<String, Vec<(usize, f64)>> =
+            BC.iter().map(|(k, v)| (k.clone(), vec![*v])).collect();
+        nr.BorderConditions = BC;
+        let (tolerance_config, bounds_config) =
+            self.parse_toleranse_and_bounds(&mut parser).unwrap();
+        let rel_tolerance = Some(tolerance_config.to_full_tolerance_map(&self.kindata.substances));
+        let bounds = Some(bounds_config.to_full_bounds_map(&self.kindata.substances));
+        nr.rel_tolerance = rel_tolerance;
+        nr.Bounds = bounds;
+        let (t0, t_end, n_steps, arg) = self.parse_basic_settings(parser.clone());
+        nr.t0 = t0;
+        nr.t_end = t_end;
+        nr.arg = arg.clone();
+        nr.n_steps = n_steps;
+        self.solver.arg_name = arg;
+        let initial_guess = self.set_initial_guess_from_map(parser.clone(), n_steps);
+        //  let ig = vec![1e-2; n_steps *self.solver.unknowns.len()];
+        // let initial_guess = DMatrix::from_vec(self.solver.unknowns.len(), n_steps, ig);
+        nr.initial_guess = initial_guess;
+        nr.before_solve_preprocessing();
+        nr.solve();
+        self.solver.x_mesh = Some(nr.x_mesh.clone());
+        let y_result = nr.get_result();
+        self.solver.solution = y_result;
+        self.set_postpocessing_from_hashmap(&mut parser);
+        Ok(())
+    }
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /// Creates a template configuration file for reactor BVP tasks.
 ///
 /// Generates a commented template file that users can fill with their specific values.
 /// The template includes all required sections with example values and explanatory comments.
+///
+pub const SIMPLE_BVP_TEMPLATE: &'static str = r#"
+        initial_guess
+        universal:1e-2
+        process_conditions
+        problem_name: Some(some_name)
+        problem_description: Some("some decription")
+        substances: A, B
+        t0: 0.0
+        t_end: 1.0
+        n_steps: 25
+        arg:x
+        Tm: 1500.0
+        L: 5e-4
+        dT: 600.0
+        T_scale: 600.0
+        P: 1e6
+        Cp: 1464.4
+        Lambda: 0.07
+        m: 0.0043
+        M: 0.0342
+        thermal_effects: [102000.0]
+        groups:true
+        boundary_condition
+        A: 0.999
+        B: 0.001
+        T: 800.0
+        diffusion_coefficients
+        A: 0.000009296
+        B: 0.000009296
+        group1
+        H: 4
+        N: 8
+        C: 8
+        O: 8
+        group2
+        H: 6
+        C: 1
+        O: 1
+        reactions
+        A=>10B: [130000.0, 0.0, 20920.0, 102000.0]
+        solver_settings
+        scheme: forward
+        method: Sparse
+        strategy: Damped
+        linear_sys_method: None
+        abs_tolerance: 1e-7
+        max_iterations: 100
+        loglevel: Some(info)
+        dont_save_logs: true
+        bounds
+        C: -10.0, 10.0
+        J:  -1e20, 1e20
+        Teta:-100.0, 100.0
+        q: -1e20, 1e20
+        rel_tolerance
+        C: 1e-7
+        J: 1e-7
+        Teta: 1e-7
+        q:  1e-7
+        strategy_params
+        max_jac: Some(3)
+        max_damp_iter: Some(10)
+        damp_factor: Some(0.5)
+        # Adaptive grid refinement settings (optional)
+        adaptive_strategy
+        # Refinement version
+        version: 1
+        # Maximum refinement iterations
+        max_refinements: 3
+                
+        #Grid refinement method and parameters
+        grid_refinement
+        // Available methods:
+        // doubleoints: []
+        // easy: [parameter]
+        // grcarsmooke: [param1, param2, param3]
+        // pearson: [param1, param2]
+        // twopnt: [param1, param2, param3]
+        grcarsmooke: [0.05, 0.05, 1.25]
+        postprocessing
+        gnuplot:true
+        save_to_csv:false
+        filename: meow
+        "#;
 pub fn create_template() {
     use std::fs::File;
     use std::io::Write;
@@ -983,7 +1110,28 @@ mod tests {
         let result: DocumentMap = parser.parse_document().unwrap().clone();
         println!("result {:?}", result);
     }
+    #[test]
+    fn check_substances() {
+        let mut parser = DocumentParser::new(task_content.to_string());
+        let result: DocumentMap = parser.parse_document().unwrap().clone();
+        let process_conditions = result.get("process_conditions").unwrap();
+        let substances = process_conditions
+            .get("substances")
+            .unwrap()
+            .clone()
+            .unwrap();
 
+        println!("substances {:?}", substances[0]);
+    }
+
+    #[test]
+    fn test_solve_from_parsed() {
+        let mut parser = DocumentParser::new(task_content.to_string());
+        let result: DocumentMap = parser.parse_document().unwrap().clone();
+        let mut reactor = SimpleReactorTask::new();
+        let _ = reactor.solve_from_parsed(result);
+        println!("solution {:?}", reactor.solver.solution);
+    }
     #[test]
     fn parsng_task_elementary() {
         let mut reactor = SimpleReactorTask::new();
