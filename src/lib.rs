@@ -10,3 +10,4 @@ pub mod Thermodynamics;
 pub mod Utils;
 pub mod cli;
 pub mod gui;
+pub mod simple_combustion_models;

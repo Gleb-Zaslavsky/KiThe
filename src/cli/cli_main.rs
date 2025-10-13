@@ -1,8 +1,8 @@
 use super::cli_bvp_reactor::reactor_menu;
 use super::cli_examples::examples_menu;
 use super::cli_solid_state_ivp::solid_state_ivp_menu;
-use std::io::{self, Write};
 use crate::gui::gui_main::gui_main;
+use std::io::{self, Write};
 pub fn run_interactive_menu() {
     loop {
         show_main_menu();
@@ -12,7 +12,7 @@ pub fn run_interactive_menu() {
             "1" => reactor_menu(),
             "2" => solid_state_ivp_menu(),
             "3" => examples_menu(),
-            "4"=> gui_main().unwrap(),
+            "4" => gui_main().unwrap(),
             "0" => {
                 println!("Goodbye!");
                 break;

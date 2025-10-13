@@ -1,39 +1,42 @@
 [package]
 name = "KiThe"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 author = "Gleb Zasllavsky"
 license = "MIT"
 keywords = [ "thermodynamics", "chemistry", "CFD", "chemical_kinetics"]
-description = "A collection of structures and functions useful for chemical kinetics, chemical thermodynamics, combustion, heat and mass transfer, shock tubes and so on and so far. Work in progress. Advices and contributions will be appreciated"
+description = "A numerical suite for chemical kinetics and thermodynamics, combustion, heat and mass transfer,chemical engeneering. Work in progress. Advices and contributions will be appreciated"
 repository = "https://github.com/Gleb-Zaslavsky/KiThe"
 
 [dependencies]
-regex = "1.11.1"
-serde = { version = "1.0.219", features = ["derive"] }
+regex = "1.11.3"
+serde = { version = "1.0.228", features = ["derive"] }
 tabled = "0.20.0"
 strum = "0.27.2"
 strum_macros = "0.27.2"
-serde_json = "1.0.143"
+serde_json = "1.0.145"
 loc = "0.5.0"
 RustedSciThe = "0.3.21"
-nalgebra = { version = "0.34.0", features = ["serde"] }
+nalgebra = { version = "0.34.1", features = ["serde"] }
 prettytable-rs = "0.10.0"
 simplelog = "0.12.2"
-log = "0.4.27"
+log = "0.4.28"
 approx = "0.5.1"
 reqwest = { version = "0.12.23", features = ["blocking"] }
 scraper = "0.24.0"
 url = "2.5.7"
-thiserror = "2.0.16"
+thiserror = "2.0.17"
 enum_dispatch = "0.3.13"
-tempfile = "3.20.0"
+tempfile = "3.23.0"
 reborrow = "0.5.5"
 nom = "8.0.0"
 eframe = "0.32.2"
 egui = "0.32.2"
 egui_plot = "0.33.0"
-rfd = "0.14"
+rfd = "0.15.4"
+plotters = "0.3"
+[build-dependencies]
+winres = "0.1"
 
 
 

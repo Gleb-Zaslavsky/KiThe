@@ -22,6 +22,8 @@ pub struct ThermoData {
     pub hashmap_of_thermo_data: HashMap<String, HashMap<String, Value>>,
     /// search result {substance: {lib: data}}
     pub AllSubstances: Vec<String>, // all substances in the library
+    pub thermo_libs: Vec<String>,
+    pub transport_libs: Vec<String>,
 }
 impl ThermoData {
     pub fn new() -> Self {
@@ -40,6 +42,27 @@ impl ThermoData {
             serde_json::from_str::<HashMap<String, HashMap<String, _>>>(&file_contents).unwrap();
         let AllLibraries: Vec<String> = LibThermoData.keys().map(|k| k.to_string()).collect();
 
+        let mut thermo_libs = Vec::new();
+        let mut transport_libs = Vec::new();
+        /*
+        Iterates through all library names
+        For each library, takes the first record from its data
+        Checks if the record contains a "Cp" key
+        If "Cp" exists, adds the library to thermo_libs
+        Otherwise, adds it to transport_libs
+        */
+        for lib_name in &AllLibraries {
+            if let Some(lib_data) = LibThermoData.get(lib_name) {
+                if let Some((_, record)) = lib_data.iter().next() {
+                    if record.get("Cp").is_some() {
+                        thermo_libs.push(lib_name.clone());
+                    } else {
+                        transport_libs.push(lib_name.clone());
+                    }
+                }
+            }
+        }
+
         Self {
             VecOfSubsAdresses: lib_sub_pairs_vec.clone(),
             LibThermoData: LibThermoData.clone(),
@@ -47,6 +70,8 @@ impl ThermoData {
             AllSubstances: Vec::new(),
             subs_to_search: Vec::new(),
             hashmap_of_thermo_data: HashMap::new(),
+            thermo_libs,
+            transport_libs,
         }
     }
     //////////////////////////////////////////////DATA MANIPULATION//////////////////////////////////////////////////////////
@@ -397,5 +422,56 @@ mod tests {
         // println!("content \n \n {:#?}", file_content);
         assert!(file_content.contains("Existing content\n"));
         assert!(file_content.contains("SUBSTANCES DATA"));
+    }
+
+    #[test]
+    fn test_iterate_all_libraries() {
+        let thermo_data = ThermoData::new();
+
+        for library in &thermo_data.AllLibraries {
+            println!("Library: {}", library);
+
+            if let Some(lib_data) = thermo_data.LibThermoData.get(library) {
+                if let Some((substance, data)) = lib_data.iter().next() {
+                    println!("  Sample substance: {}", substance);
+                    println!("  Data: {}", data);
+                }
+            }
+            println!();
+        }
+    }
+
+    #[test]
+    fn test_library_classification() {
+        let thermo_data = ThermoData::new();
+
+        println!("Thermo libraries: {:?}", thermo_data.thermo_libs);
+        println!("Transport libraries: {:?}", thermo_data.transport_libs);
+        println!("All libraries: {:?}", thermo_data.AllLibraries);
+        assert!(!thermo_data.thermo_libs.is_empty() || !thermo_data.transport_libs.is_empty());
+
+        for lib in &thermo_data.thermo_libs {
+            if let Some(lib_data) = thermo_data.LibThermoData.get(lib) {
+                if let Some((_, record)) = lib_data.iter().next() {
+                    assert!(
+                        record.get("Cp").is_some(),
+                        "Thermo lib {} should have Cp key",
+                        lib
+                    );
+                }
+            }
+        }
+
+        for lib in &thermo_data.transport_libs {
+            if let Some(lib_data) = thermo_data.LibThermoData.get(lib) {
+                if let Some((_, record)) = lib_data.iter().next() {
+                    assert!(
+                        record.get("Cp").is_none(),
+                        "Transport lib {} should not have Cp key",
+                        lib
+                    );
+                }
+            }
+        }
     }
 }

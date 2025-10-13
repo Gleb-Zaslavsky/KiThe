@@ -214,6 +214,11 @@ impl ReactionData {
         }
         K_sym
     }
+
+    /// Convert ReactionData to serde_json::Value
+    pub fn to_serde_value(&self) -> Value {
+        serde_json::to_value(self).unwrap()
+    }
 }
 
 ///parses each reaction data into a ReactionData struct, validates the reaction type, and stores the parsed data in a hash map (reaction_data_hash) with a unique code (react_code) as the key.

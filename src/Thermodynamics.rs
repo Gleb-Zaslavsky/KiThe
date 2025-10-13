@@ -148,6 +148,7 @@ pub mod User_PhaseOrSolution;
 ///            user_subs.print_search_summary();
 /// ```
 pub mod User_substances;
+pub mod User_substances2;
 /// tests
 pub mod User_substances_tests;
 /// main functionality to open thermodynamics and heat-mass transfer libraries

@@ -827,6 +827,7 @@ pub const SIMPLE_BVP_TEMPLATE: &'static str = r#"
         gnuplot:true
         save_to_csv:false
         filename: meow
+        gui_plot: true
         "#;
 pub fn create_template() {
     use std::fs::File;

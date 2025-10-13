@@ -37,10 +37,10 @@
 use crate::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
 use crate::ReactorsBVP::task_parser_reactor_BVP::SIMPLE_BVP_TEMPLATE;
 use crate::cli::reactor_help::REACTOR_ENG_HELPER;
+use crate::gui::gui_plot::PlotWindow;
 use RustedSciThe::Utils::task_parser::{DocumentMap, DocumentParser, Value};
 use eframe::egui;
 use std::collections::HashMap;
-
 /*
 this is value enum from RustedSciThe::Utils::task_parser
 pub enum Value {
@@ -379,6 +379,7 @@ pub struct CombustionApp {
     pub current_file_path: Option<std::path::PathBuf>,
     pub show_help_window: bool,
     pub current_help_info: String,
+    pub plot_window: Option<PlotWindow>,
 }
 
 impl CombustionApp {
@@ -498,12 +499,34 @@ impl CombustionApp {
     ///
     /// Solver errors are handled internally by the respective solver implementations.
     /// This method focuses on dispatch logic rather than error propagation.
-    fn run_calculation(&self) {
+    fn run_calculation(&mut self) {
         match self.selected_problem {
             ProblemsEnum::BVPSimple => {
                 println!("Starting BVP Simple calculation...");
                 let mut reactor = SimpleReactorTask::new();
                 let _ = reactor.solve_from_parsed(self.document.clone());
+                let postproc = &self.document.get("postprocessing").cloned().unwrap();
+                let gui_plot = if let Some(gui_plot_) = postproc.get("gui_plot") {
+                    gui_plot_.clone().unwrap()[0]
+                        .as_boolean()
+                        .expect("Failed to get gui_plot as bool")
+                } else {
+                    true
+                };
+
+                if gui_plot {
+                    let y = reactor.solver.solution.clone().unwrap();
+                    let x_mesh = reactor.solver.x_mesh.clone().unwrap();
+                    let arg = "x".to_owned();
+                    let values = reactor.solver.unknowns.clone();
+
+                    let t_result = x_mesh;
+                    let y_result =
+                        nalgebra::DMatrix::from_column_slice(y.nrows(), y.ncols(), y.as_slice());
+
+                    self.plot_window = Some(PlotWindow::new(arg, values, t_result, y_result));
+                }
+
                 return;
             }
             ProblemsEnum::None => {
@@ -553,6 +576,7 @@ impl CombustionApp {
             current_file_path: None,
             show_help_window: false,
             current_help_info: String::new(),
+            plot_window: None,
         }
     }
 
@@ -853,6 +877,15 @@ impl CombustionApp {
                         }
                     });
                 });
+        }
+
+        // Show plot window if available
+        if let Some(plot_window) = &mut self.plot_window {
+            plot_window.show(ctx);
+            // Clean up when plot window is closed
+            if !plot_window.visible {
+                self.plot_window = None;
+            }
         }
     }
 }

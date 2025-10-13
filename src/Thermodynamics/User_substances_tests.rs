@@ -543,8 +543,9 @@ mod tests {
 #[cfg(test)]
 mod tests2 {
 
-    use crate::Thermodynamics::User_substances::{
-        DataType, LibraryPriority, Phases, SubsData, WhatIsFound,
+    use crate::Thermodynamics::{
+        DBhandlers::CEAdata,
+        User_substances::{DataType, LibraryPriority, Phases, SubsData, WhatIsFound},
     };
     use approx::assert_relative_eq;
     use core::panic;
@@ -1086,7 +1087,8 @@ mod tests2 {
         // Calculate element composition and molar mass
         let result = user_subs.calculate_elem_composition_and_molar_mass(None);
         assert!(result.is_ok());
-
+        assert!(user_subs.elem_composition_matrix.is_some());
+        assert!(!user_subs.hasmap_of_molar_mass.is_empty());
         // Check molar masses
         let glucose_mass = user_subs.hasmap_of_molar_mass.get("C6H12O6").unwrap();
         let ethanol_mass = user_subs.hasmap_of_molar_mass.get("C2H5OH").unwrap();
@@ -1102,5 +1104,181 @@ mod tests2 {
         // Check matrix dimensions
         assert_eq!(matrix.nrows(), 3); // 3 substances
         assert!(matrix.ncols() >= 4); // At least 4 elements (C, H, O, N)
+    }
+
+    #[test]
+    fn test_calculate_transport_map_of_properties() {
+        let mut user_subs = SubsData::new();
+        let substances = vec!["H2O".to_string(), "CO".to_string()];
+        user_subs.substances = substances.clone();
+
+        // Set phases
+        user_subs
+            .map_of_phases
+            .insert("H2O".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("CO".to_string(), Some(Phases::Gas));
+
+        // Set library priorities for both thermo and transport
+        user_subs.set_multiple_library_priorities(
+            vec!["NASA_gas".to_string()],
+            LibraryPriority::Priority,
+        );
+        user_subs.set_multiple_library_priorities(
+            vec!["Aramco_transport".to_string()],
+            LibraryPriority::Priority,
+        );
+
+        // Search substances
+        user_subs.search_substances();
+
+        // Calculate molar masses (required prerequisite)
+        user_subs
+            .calculate_elem_composition_and_molar_mass(None)
+            .unwrap();
+        assert!(user_subs.elem_composition_matrix.is_some());
+        assert!(!user_subs.hasmap_of_molar_mass.is_empty());
+        println!("Molar masses: {:?}", user_subs.hasmap_of_molar_mass);
+        // Set pressure (required for transport calculations)
+        user_subs.set_P(1e5, None);
+
+        // Extract thermal coefficients
+        user_subs.extract_all_thermal_coeffs(400.0).unwrap();
+
+        // Calculate thermal properties (required prerequisite for Cp values)
+        user_subs.calculate_therm_map_of_properties(400.0).unwrap();
+
+        // Extract transport coefficients
+        user_subs.extract_all_transport_coeffs(400.0).unwrap();
+
+        // Test the main function
+        let result = user_subs.calculate_transport_map_of_properties(400.0);
+        assert!(result.is_ok());
+
+        // Verify transport properties were calculated and stored
+        for substance in &substances {
+            if let Some(transport_props) =
+                user_subs.transport_map_of_properties_values.get(substance)
+            {
+                if let Some(Some(lambda)) = transport_props.get(&DataType::Lambda) {
+                    println!("{} Lambda: {}", substance, lambda);
+                    assert!(*lambda > 0.0, "Lambda should be positive for {}", substance);
+                }
+                if let Some(Some(visc)) = transport_props.get(&DataType::Visc) {
+                    println!("{} Viscosity: {}", substance, visc);
+                    assert!(
+                        *visc > 0.0,
+                        "Viscosity should be positive for {}",
+                        substance
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_calculate_transport_map_of_properties_CEA() {
+        use crate::Thermodynamics::DBhandlers::transport_api::TransportEnum::CEA;
+        use crate::Thermodynamics::User_substances::CalculatorType;
+
+        // Create a test instance with substances having known compositions
+        let mut user_subs = SubsData::new();
+        let substances = vec!["H2O".to_string(), "CO".to_string()];
+        user_subs.substances = substances.clone();
+
+        // Set phases
+        user_subs
+            .map_of_phases
+            .insert("H2O".to_string(), Some(Phases::Gas));
+        user_subs
+            .map_of_phases
+            .insert("CO".to_string(), Some(Phases::Gas));
+
+        // Set library priorities for both thermo and transport
+        user_subs.set_multiple_library_priorities(
+            vec!["NASA_gas".to_string()],
+            LibraryPriority::Priority,
+        );
+        user_subs
+            .set_multiple_library_priorities(vec!["CEA".to_string()], LibraryPriority::Priority);
+
+        // Search substances
+        user_subs.search_substances();
+
+        // Calculate molar masses (required prerequisite)
+        user_subs
+            .calculate_elem_composition_and_molar_mass(None)
+            .unwrap();
+        assert!(user_subs.elem_composition_matrix.is_some());
+        assert!(!user_subs.hasmap_of_molar_mass.is_empty());
+        println!("Molar masses: {:?}", user_subs.hasmap_of_molar_mass);
+        // Set pressure (required for transport calculations)
+        user_subs.set_P(1e5, None);
+        //   println!("instance before clone: {:#?}", user_subs);
+        let search_results = &user_subs.search_results;
+        let H2O_results = search_results.get("H2O");
+        assert!(H2O_results.is_some());
+        let H2O_results = H2O_results.unwrap();
+        assert!(H2O_results.get(&WhatIsFound::Thermo).is_some());
+        assert!(H2O_results.get(&WhatIsFound::Transport).is_some());
+        let H2O_thermo = H2O_results.get(&WhatIsFound::Thermo).unwrap();
+        let H2O_transport = H2O_results.get(&WhatIsFound::Transport).unwrap();
+        assert!(H2O_thermo.is_some());
+        assert!(H2O_transport.is_some());
+        let _H2O_thermo = H2O_thermo.as_ref().unwrap();
+        let H2O_transport = H2O_transport.as_ref().unwrap();
+        let _data = H2O_transport.data.clone();
+        let calculator = H2O_transport.calculator.as_ref().unwrap();
+        match calculator {
+            CalculatorType::Transport(TransportEnum) => {
+                match TransportEnum {
+                    CEA(CEAdata) => {
+                        let cloned = CEAdata.clone();
+                        println!("\n Transport calculator is CEA as expected {:?}", cloned);
+                        // Expected case
+                    }
+                    _ => panic!("Unexpected transport calculator type"),
+                }
+            }
+            &CalculatorType::Thermo(_) => {
+                panic!("Calculator type mismatch");
+            }
+        }
+        let CO_results = search_results.get("CO");
+        assert!(CO_results.is_some());
+
+        // Extract thermal coefficients
+        user_subs.extract_all_thermal_coeffs(400.0).unwrap();
+
+        // Calculate thermal properties (required prerequisite for Cp values)
+        user_subs.calculate_therm_map_of_properties(400.0).unwrap();
+
+        // Extract transport coefficients
+        user_subs.extract_all_transport_coeffs(400.0).unwrap();
+
+        // Test the main function
+        let result = user_subs.calculate_transport_map_of_properties(400.0);
+        assert!(result.is_ok());
+
+        // Verify transport properties were calculated and stored
+        for substance in &substances {
+            if let Some(transport_props) =
+                user_subs.transport_map_of_properties_values.get(substance)
+            {
+                if let Some(Some(lambda)) = transport_props.get(&DataType::Lambda) {
+                    println!("{} Lambda: {}", substance, lambda);
+                    assert!(*lambda > 0.0, "Lambda should be positive for {}", substance);
+                }
+                if let Some(Some(visc)) = transport_props.get(&DataType::Visc) {
+                    println!("{} Viscosity: {}", substance, visc);
+                    assert!(
+                        *visc > 0.0,
+                        "Viscosity should be positive for {}",
+                        substance
+                    );
+                }
+            }
+        }
     }
 }

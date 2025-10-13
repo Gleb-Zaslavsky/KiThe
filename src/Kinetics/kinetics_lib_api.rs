@@ -39,7 +39,7 @@ use std::fs::File;
 use std::io::Read;
 
 use serde_json::Value;
-
+#[derive(Debug, Clone)]
 pub struct KineticData {
     pub HashMapOfReactantsAndProducts: HashMap<String, HashMap<String, HashSet<String>>>, // {'reaction ID':{'reagent'/"product": HashSet[substance]}}
     pub lib_name: String,

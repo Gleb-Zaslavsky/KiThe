@@ -1,9 +1,12 @@
 use crate::gui::combustion;
 use crate::gui::gui_main::egui::IconData;
-use crate::gui::gui_main::egui::Image;
-use crate::gui::kinetics;
+use crate::gui::kinetics_gui;
+use crate::gui::thermochemistry_gui;
+use crate::gui::transport_gui;
+use eframe::CreationContext;
 use eframe::egui;
-use prettytable::color;
+use egui::ColorImage;
+use egui::TextureHandle;
 pub fn gui_main() -> Result<(), eframe::Error> {
     // Try to load icon from assets, fallback to programmatic icon
     let icon = match std::fs::read("src/assets/icon.png") {
@@ -21,11 +24,17 @@ pub fn gui_main() -> Result<(), eframe::Error> {
             .with_icon(icon),
         ..Default::default()
     };
-
+    /*
     eframe::run_native(
         "Chemical Analysis Suite",
         options,
-        Box::new(|_cc| Ok(Box::new(MainApp::default()))),
+        Box::new(|cc| Ok(Box::new(MainApp::new(cc)))),
+    )
+    */
+    eframe::run_native(
+        "Chemical Analysis Suite",
+        options,
+        Box::new(|cc: &eframe::CreationContext<'_>| Ok(Box::new(MainApp::new(cc)))),
     )
 }
 
@@ -56,11 +65,65 @@ fn create_programmatic_icon() -> IconData {
 #[derive(Default)]
 struct MainApp {
     kinetics_open: bool,
-    kinetics_app: Option<kinetics::KineticsApp>,
+    kinetics_app: Option<kinetics_gui::KineticsApp>,
     combustion_open: bool,
     combustion_app: Option<combustion::CombustionApp>,
+    thermochemistry_open: bool,
+    thermochemistry_app: Option<thermochemistry_gui::ThermochemistryApp>,
+    transport_open: bool,
+    transport_app: Option<transport_gui::TransportApp>,
+    logo_texture: Option<egui::TextureHandle>,
 }
+impl MainApp {
+    pub fn new(cc: &CreationContext<'_>) -> Self {
+        let ctx = &cc.egui_ctx;
 
+        Self::setup_visuals(ctx);
+        Self::setup_fonts(ctx);
+        let logo_texture = Self::load_logo_texture(ctx);
+
+        Self {
+            kinetics_open: false,
+            kinetics_app: None,
+            combustion_open: false,
+            combustion_app: None,
+            thermochemistry_open: false,
+            thermochemistry_app: None,
+            transport_open: false,
+            transport_app: None,
+            logo_texture,
+        }
+    }
+
+    fn setup_visuals(ctx: &egui::Context) {
+        use egui::Visuals;
+        ctx.set_visuals(Visuals::dark()); // or .light()
+    }
+
+    fn setup_fonts(ctx: &egui::Context) {
+        use egui::FontDefinitions;
+        let mut fonts = FontDefinitions::default();
+        // You can load custom fonts here if desired.
+        ctx.set_fonts(fonts);
+    }
+
+    fn load_logo_texture(ctx: &egui::Context) -> Option<TextureHandle> {
+        if let Ok(logo_bytes) = std::fs::read("src/assets/logo.png") {
+            if let Ok(color_image) = eframe::icon_data::from_png_bytes(&logo_bytes) {
+                let egui_image = ColorImage::from_rgba_unmultiplied(
+                    [color_image.width as usize, color_image.height as usize],
+                    &color_image.rgba,
+                );
+                return Some(ctx.load_texture(
+                    "kithe_logo",
+                    egui_image,
+                    egui::TextureOptions::default(),
+                ));
+            }
+        }
+        None
+    }
+}
 impl eframe::App for MainApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Set button text color and size to be more visible
@@ -86,22 +149,28 @@ impl eframe::App for MainApp {
                     ui.vertical(|ui| {
                         // First row of buttons
                         ui.horizontal(|ui| {
-                            if ui.add_sized([200.0, 80.0], egui::Button::new("🧪 Kinetics NOT READY!")).clicked() {
+                            if ui.add_sized([200.0, 80.0], egui::Button::new("🧪 Kinetics!")).clicked() {
                                 self.kinetics_open = true;
                                 if self.kinetics_app.is_none() {
-                                    self.kinetics_app = Some(kinetics::KineticsApp::new());
+                                    self.kinetics_app = Some(kinetics_gui::KineticsApp::new());
                                 }
                             }
                             ui.add_space(20.0);
-                            if ui.add_sized([200.0, 80.0], egui::Button::new("🌡️ Thermodynamics NOT READY!")).clicked() {
-                                println!("Thermodynamics module clicked");
+                            if ui.add_sized([200.0, 80.0], egui::Button::new("🌡️ Thermodynamical properties!")).clicked() {
+                                self.thermochemistry_open = true;
+                                if self.thermochemistry_app.is_none() {
+                                    self.thermochemistry_app = Some(thermochemistry_gui::ThermochemistryApp::new());
+                                }
                             }
                         });
                         ui.add_space(20.0);
                         // Second row of buttons
                         ui.horizontal(|ui| {
-                            if ui.add_sized([200.0, 80.0], egui::Button::new("⚖️ Mass Transfer NOT READY!")).clicked() {
-                                println!("Mass Transfer module clicked");
+                            if ui.add_sized([200.0, 80.0], egui::Button::new("🚚 Transport properties!")).clicked() {
+                                self.transport_open = true;
+                                if self.transport_app.is_none() {
+                                    self.transport_app = Some(transport_gui::TransportApp::new());
+                                }
                             }
                             ui.add_space(20.0);
                             if ui.add_sized([200.0, 80.0], egui::Button::new("🔥 Gas-phase combustuion/steady state plug flow")).clicked() {
@@ -128,19 +197,21 @@ impl eframe::App for MainApp {
                 // Footer information
                 ui.separator();
                 ui.add_space(20.0);
-                // Try to load and display logo
-                if let Ok(logo_bytes) = std::fs::read("src/assets/logo.png") {
-                    if let Ok(color_image) = eframe::icon_data::from_png_bytes(&logo_bytes) {
-                        let egui_image = egui::ColorImage::from_rgba_unmultiplied(
-                            [color_image.width as usize, color_image.height as usize],
-                            &color_image.rgba
-                        );
-                        let texture = ctx.load_texture("logo", egui_image, egui::TextureOptions::default());
-                        ui.add(egui::Image::new(&texture).max_width(200.0));
-                        ui.add_space(10.0);
-                    } else {
-                        ui.label("Logo failed to load");
+                // Load and display logo (cached)
+                if self.logo_texture.is_none() {
+                    if let Ok(logo_bytes) = std::fs::read("src/assets/logo.png") {
+                        if let Ok(color_image) = eframe::icon_data::from_png_bytes(&logo_bytes) {
+                            let egui_image = egui::ColorImage::from_rgba_unmultiplied(
+                                [color_image.width as usize, color_image.height as usize],
+                                &color_image.rgba
+                            );
+                            self.logo_texture = Some(ctx.load_texture("logo", egui_image, egui::TextureOptions::default()));
+                        }
                     }
+                }
+                if let Some(texture) = &self.logo_texture {
+                    ui.add(egui::Image::new(texture).max_width(200.0));
+                    ui.add_space(10.0);
                 } else {
                     ui.label("Logo not found");
                 }
@@ -159,6 +230,20 @@ impl eframe::App for MainApp {
         if self.combustion_open {
             if let Some(combustion_app) = &mut self.combustion_app {
                 combustion_app.show(ctx, &mut self.combustion_open);
+            }
+        }
+
+        // Show thermochemistry window if opened
+        if self.thermochemistry_open {
+            if let Some(thermochemistry_app) = &mut self.thermochemistry_app {
+                thermochemistry_app.show(ctx, &mut self.thermochemistry_open);
+            }
+        }
+
+        // Show transport window if opened
+        if self.transport_open {
+            if let Some(transport_app) = &mut self.transport_app {
+                transport_app.show(ctx, &mut self.transport_open);
             }
         }
     }

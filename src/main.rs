@@ -11,13 +11,12 @@ pub mod Utils;
 #[allow(non_snake_case)]
 pub mod cli;
 pub mod gui;
-use ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
+
 use cli::cli_main::run_interactive_menu;
 use gui::gui_main::gui_main;
-use std::env;
-use std::path::PathBuf;
 
+pub mod simple_combustion_models;
 pub fn main() {
-     run_interactive_menu();
-   // gui_main().unwrap();
+    run_interactive_menu();
+    // gui_main().unwrap();
 }

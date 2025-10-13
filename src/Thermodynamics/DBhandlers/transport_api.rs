@@ -123,7 +123,7 @@ impl From<super::CEAdata::CEAError> for TransportError {
     }
 }
 // Common unit types
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LambdaUnit {
     WPerMK,
     MWPerMK,
@@ -131,7 +131,7 @@ pub enum LambdaUnit {
     MKWPerSMK,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ViscosityUnit {
     KgPerMS,
     PaS,

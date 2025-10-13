@@ -1,7 +1,9 @@
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
 use nalgebra::{DMatrix, DVector};
-
+use plotters::prelude::*;
+use std::path::Path;
+#[derive(Debug)]
 pub struct PlotWindow {
     pub visible: bool,
     pub arg: String,
@@ -55,14 +57,78 @@ impl PlotWindow {
                                     .map(|(&x, &y)| [x, y])
                                     .collect();
 
-                                let line = Line::new(name.clone(), points);
+                                let line = Line::new(name.clone(), points).name(name.clone());
                                 plot_ui.line(line);
                             });
 
-                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            if ui.button("💾 Save plot").clicked() {
+                                if let Err(err) = Self::save_plot_to_png(
+                                    name,
+                                    &self.arg,
+                                    &x_data,
+                                    self.y_result.column(col).as_slice(),
+                                ) {
+                                    eprintln!("Failed to save plot {}: {}", name, err);
+                                } else {
+                                    ui.label(format!("Saved as {}.png", name));
+                                }
+                            }
+                        });
+
+                        ui.add_space(15.0);
+                        ui.separator();
                     }
                 }
             });
+    }
+
+    fn save_plot_to_png(
+        var_name: &str,
+        arg: &str,
+        x: &[f64],
+        y: &[f64],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Create output directory if not exists
+        std::fs::create_dir_all("plots")?;
+
+        let filename = format!("plots/{}.png", var_name.replace('/', "_"));
+        let path = Path::new(&filename);
+
+        let root = BitMapBackend::new(&path, (800, 600)).into_drawing_area();
+        root.fill(&WHITE)?;
+
+        let x_min = *x.first().unwrap_or(&0.0);
+        let x_max = *x.last().unwrap_or(&1.0);
+        let (y_min, y_max) = y
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &val| {
+                (min.min(val), max.max(val))
+            });
+
+        let mut chart = ChartBuilder::on(&root)
+            .caption(format!("{} vs {}", var_name, arg), ("sans-serif", 24))
+            .margin(15)
+            .x_label_area_size(40)
+            .y_label_area_size(60)
+            .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
+
+        chart.configure_mesh().x_desc(arg).y_desc(var_name).draw()?;
+
+        chart.draw_series(LineSeries::new(
+            x.iter().zip(y.iter()).map(|(&xv, &yv)| (xv, yv)),
+            &RED,
+        ))?;
+
+        chart
+            .configure_series_labels()
+            .border_style(&BLACK)
+            .draw()?;
+        root.present()?;
+
+        println!("Saved plot to {:?}", path);
+        Ok(())
     }
 }
 

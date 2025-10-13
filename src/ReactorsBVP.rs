@@ -22,6 +22,13 @@
 //! - Heat capacity, thermal conductivity, thermal effects, and gas density are constants
 //!   calculated at characteristic temperature `Tm`
 //! - Only elementary kinetic expressions are considered (no fall-off, third-body reactions)
+//! - reactor is one-dimensional with coordinate `x`
+//! - Steady-state conditions (front velocity `m` is constant)
+//! - reactions occur in the gas phase only
+//! - reactor is adiabatic (no heat loss to surroundings)
+//! - ideal gas behavior
+//! - no radiation effects
+//! - all reactions are irreversable
 //!
 //! ### Governing Equations
 //!

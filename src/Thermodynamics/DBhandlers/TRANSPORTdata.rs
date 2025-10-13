@@ -300,6 +300,7 @@ pub struct TransportData {
     pub M: f64,
     pub P: f64,
     pub ro: Option<f64>,
+    pub ro_sym: Option<Expr>,
     /// molar mass units choice
     pub M_unit: Option<String>,
     M_unit_multiplier: f64,
@@ -342,6 +343,7 @@ impl TransportData {
             M: 0.0,
             P: 0.0,
             ro: None,
+            ro_sym: None,
             M_unit: None,
             M_unit_multiplier: 1.0,
             P_unit: None,
@@ -460,6 +462,17 @@ impl TransportData {
         let ro = (self.P * self.P_unit_multiplier) * (self.M * self.M_unit_multiplier) / (R * T);
         self.ro = Some(ro);
     }
+
+    pub fn ideal_gas_sym(&mut self) {
+        let P = self.P * self.P_unit_multiplier; // from other unit to Pa = N/m2
+        let M = self.M * self.M_unit_multiplier; // from other unit to kg/mol
+        let um = self.ro_unit_multiplier;
+        let ro_sym = Expr::Const(P * M * um / R) / Expr::Var("T".to_owned());
+        self.ro_unit = Some("kg/m3".to_string());
+        self.ro_unit_multiplier = 1.0;
+        self.ro_sym = Some(ro_sym);
+    }
+
     pub fn calculate_Lambda(
         &mut self,
         C: f64,
@@ -803,6 +816,7 @@ impl Clone for TransportData {
             M: self.M,
             P: self.P,
             ro: self.ro,
+            ro_sym: self.ro_sym.clone(),
             M_unit: self.M_unit.clone(),
             M_unit_multiplier: self.M_unit_multiplier,
             P_unit: self.P_unit.clone(),
@@ -959,7 +973,53 @@ mod tests {
         //  let visc = CEA.calculate_Visc(500.0);
         //  println!("Lambda, mW/m/K: {:?}, Visc: {:?}", lambda, visc);
     }
+    #[test]
+    fn test_with_real_data_sym_ideal_gas() {
+        let thermo_data = ThermoData::new();
+        let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
+        let CO_data = sublib.get("CO").unwrap();
+        println!("CO_data: {}", CO_data);
+        let mut tr = TransportData::new();
+        tr.from_serde(CO_data.clone()).unwrap();
+        tr.set_M_unit(Some("g/mol".to_owned())).unwrap();
+        tr.set_P_unit(Some("atm".to_owned())).unwrap();
+        tr.set_V_unit(Some("mkPa*s".to_owned())).unwrap();
+        tr.set_lambda_unit(Some("mW/m/K".to_owned())).unwrap();
+        let T = 473.15; // K 
+        tr.P = 1.0;
+        tr.M = 28.0; // g/mol
+        let _ = tr.calculate_Visc(T);
+        assert_relative_eq!(tr.V, 25.2, epsilon = 5.0);
+        println!("Viscosity: {:?} mkPa*s", tr.V);
 
+        let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
+        let CO_data = sublib.get("CO").unwrap();
+        let mut NASA = NASAdata::new();
+        let _ = NASA.from_serde(CO_data.clone());
+        let _ = NASA.extract_coefficients(T);
+        let _ = NASA.calculate_Cp_dH_dS(T);
+        let Cp = NASA.Cp;
+        println!("Cp: {}", Cp);
+        //  let ro = (tr.P * 101325.0) * (tr.M / 1000.0) / (R * T);
+        let L = tr.calculate_Lambda(Cp, None, T).unwrap();
+        tr.create_closure_Lambda(Cp, None).unwrap();
+        let Lambda_closure = &mut tr.Lambda_fun;
+        let Lambda_from_closure = Lambda_closure(T);
+
+        assert_eq!(Lambda_from_closure, L);
+        tr.ideal_gas_sym();
+        tr.calculate_Lambda_sym(Expr::Const(Cp), tr.ro_sym.clone().unwrap())
+            .unwrap();
+        let L_sym = tr.Lambda_sym.unwrap();
+        let L_from_sym = L_sym.lambdify1D()(T);
+
+        assert_relative_eq!(L_from_sym, L.clone(), epsilon = 1e-5);
+
+        // let lambda = tr.calculate_Lambda(C, ro, T, M, P);
+        //  println!("Lamnda {}", lambda);
+        //  let visc = CEA.calculate_Visc(500.0);
+        //  println!("Lambda, mW/m/K: {:?}, Visc: {:?}", lambda, visc);
+    }
     #[test]
     fn test_with_real_data_taylor_sym() {
         use std::time::Instant;

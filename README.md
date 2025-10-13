@@ -4,7 +4,7 @@
 
 This is a package of structures, functions and databases useful for such areas as chemical thermodynamics, chemical kinetics, as well as modeling of chemical reactors, combustion, processes in shock tubes and rocket engines, propulsion. 
 
-PROJECT NEWS: GUI: 1)main menu 2) menu for conbustion/plug-flow steady state gas-phase reactor 
+PROJECT NEWS: pretty GUI! 
 ## Content
 - [Kinetics](#Kinetics)
 - [Thermodynamics](#Thermodynamics)
@@ -37,6 +37,12 @@ When install as library:
   CLI instrument to solve some of the heat-mass transfer, combustion, chemical engeneering problems. Now available:
   * BVP solver for gas phase steady-state combustion/plug-flow with constant mass velocity BVP problem   
   * IVP problem for multiple solid state kinetic models with constant or linear increasing temperature
+  pretty GUI menues:
+    * Main menu
+    * Menu for gas phase steady-state combustion/plug-flow with constant mass velocity BVP problem;
+    * Chemical kinetics menu: searching reactions in kinetics libraries, kinetic paramters display;
+    * Thermodynamics menu: Cp, dH, dS and Cp = Cp(T) polynoms for many substances;
+    * Transport properies: Diffusion, viscosity, thermal condusctivity for many substances;
 
 ## Kinetics
 - parse reaction equations into a list of substances 
