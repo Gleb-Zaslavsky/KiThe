@@ -163,7 +163,7 @@ impl SimpleReactorTask {
         for solution_for_timestep in self.solver.solution.as_ref().unwrap().row_iter() {
             let solution_for_timestep = solution_for_timestep.iter().cloned().collect::<Vec<f64>>();
             let heat_release_for_timestep = heat_release.eval_expression(
-                unknowns.iter().map(|x| x.as_str()).collect(),
+                unknowns_.clone().as_slice(),
                 &solution_for_timestep,
             );
             heat_releas_val.push(heat_release_for_timestep);
