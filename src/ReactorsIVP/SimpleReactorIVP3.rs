@@ -1,8 +1,8 @@
-//! # Reactor BVP Post-Processing and Analysis Module
+//! # Reactor IVP Post-Processing and Analysis Module
 //!
 //! ## Aim and General Description
 //! This module provides comprehensive post-processing, validation, and analysis capabilities for
-//! 1D steady-state plug-flow/combustion reactor boundary value problems (BVP). It handles the
+//! 1D steady-state plug-flow/combustion reactor boundary value problems (IVP). It handles the
 //! conversion of dimensionless solver results back to physical units, performs rigorous energy
 //! and mass balance checks, and provides various output formats for visualization and data export.
 //!
@@ -86,7 +86,7 @@
 //! Module includes extensive tests covering edge cases, error conditions, and numerical accuracy
 //! validation against analytical solutions.
 
-use super::SimpleReactorBVP::SimpleReactorTask;
+use super::SimpleReactorIVP::SimpleReactorTask;
 use RustedSciThe::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
 use RustedSciThe::Utils::plots::{plots, plots_gnulot, plots_terminal};
 use log::{info, warn};
@@ -151,7 +151,7 @@ impl SimpleReactorTask {
         let heat_release = self.heat_release.clone();
         // compare heat release profiles calculated by 2 methods
         // via lambdify
-        let unknowns_:Vec<&str> = unknowns.iter().map(|x| x.as_str()).collect();
+        let unknowns_:Vec<&str> =unknowns.iter().map(|x| x.as_str()).collect();
         let heat_release_fun = heat_release.lambdify_borrowed_thread_safe(unknowns_.as_slice());
         let mut heat_releas_val_via_lambdify = Vec::new();
         for solution_for_timestep in self.solver.solution.as_ref().unwrap().row_iter() {

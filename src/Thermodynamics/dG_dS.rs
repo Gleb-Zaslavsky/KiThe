@@ -96,7 +96,7 @@ pub fn calculate_Gibbs_sym_one_phase(
             Expr::Const(0.0)
         };
 
-        let dG_sym = dG_sym.symplify() + gas_correrction.symplify();
+        let dG_sym = dG_sym.simplify() + gas_correrction.simplify();
         map_to_insert.insert(substance.clone(), dG_sym.clone());
     }
     map_to_insert
@@ -307,7 +307,7 @@ pub fn calculate_S_sym_for_one_phase(
             Expr::Const(0.0)
         };
 
-        let dS_sym = ds_sym.symplify() - gas_correrction.symplify();
+        let dS_sym = ds_sym.simplify() - gas_correrction.simplify();
         map_to_insert.insert(substance.clone(), dS_sym.clone());
     }
     map_to_insert

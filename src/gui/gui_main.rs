@@ -1,6 +1,8 @@
+use crate::gui::all_libs_gui;
 use crate::gui::combustion;
 use crate::gui::gui_main::egui::IconData;
 use crate::gui::kinetics_gui;
+use crate::gui::settings_gui;
 use crate::gui::thermochemistry_gui;
 use crate::gui::transport_gui;
 use eframe::CreationContext;
@@ -72,6 +74,10 @@ struct MainApp {
     thermochemistry_app: Option<thermochemistry_gui::ThermochemistryApp>,
     transport_open: bool,
     transport_app: Option<transport_gui::TransportApp>,
+    settings_open: bool,
+    settings_app: Option<settings_gui::SettingsGui>,
+    all_libs_open: bool,
+    all_libs_app: Option<all_libs_gui::AllLibsGui>,
     logo_texture: Option<egui::TextureHandle>,
 }
 impl MainApp {
@@ -91,6 +97,10 @@ impl MainApp {
             thermochemistry_app: None,
             transport_open: false,
             transport_app: None,
+            settings_open: false,
+            settings_app: None,
+            all_libs_open: false,
+            all_libs_app: None,
             logo_texture,
         }
     }
@@ -183,12 +193,18 @@ impl eframe::App for MainApp {
                         ui.add_space(20.0);
                         // Third row of buttons
                         ui.horizontal(|ui| {
-                            if ui.add_sized([200.0, 80.0], egui::Button::new("📊 Data Analysis")).clicked() {
-                                println!("Data Analysis module clicked");
+                            if ui.add_sized([200.0, 80.0], egui::Button::new("📚 Library Review")).clicked() {
+                                self.all_libs_open = true;
+                                if self.all_libs_app.is_none() {
+                                    self.all_libs_app = Some(all_libs_gui::AllLibsGui::new());
+                                }
                             }
                             ui.add_space(20.0);
                             if ui.add_sized([200.0, 80.0], egui::Button::new("⚙️ Settings")).clicked() {
-                                println!("Settings module clicked");
+                                self.settings_open = true;
+                                if self.settings_app.is_none() {
+                                    self.settings_app = Some(settings_gui::SettingsGui::new());
+                                }
                             }
                         });
                     });
@@ -244,6 +260,20 @@ impl eframe::App for MainApp {
         if self.transport_open {
             if let Some(transport_app) = &mut self.transport_app {
                 transport_app.show(ctx, &mut self.transport_open);
+            }
+        }
+
+        // Show settings window if opened
+        if self.settings_open {
+            if let Some(settings_app) = &mut self.settings_app {
+                settings_app.show(ctx, &mut self.settings_open);
+            }
+        }
+
+        // Show all libs window if opened
+        if self.all_libs_open {
+            if let Some(all_libs_app) = &mut self.all_libs_app {
+                all_libs_app.show(ctx, &mut self.all_libs_open);
             }
         }
     }

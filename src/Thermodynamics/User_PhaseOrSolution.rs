@@ -481,8 +481,8 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
                         .zip(Lambda.iter())
                         .map(|(aij, Lambda_j)| aij.clone() * Lambda_j.clone())
                         .fold(Expr::Const(0.0), |acc, x| acc + x)
-                        .symplify();
-                    let eq_i = sum_by_elemnts + (G_i.clone() / (R_sym * Tm)).symplify();
+                        .simplify();
+                    let eq_i = sum_by_elemnts + (G_i.clone() / (R_sym * Tm)).simplify();
                     vec_of_eqs.push(eq_i);
                 }
             }
@@ -778,9 +778,9 @@ impl ThermodynamicsCalculatorTrait for SubsData {
                 .zip(Lambda.iter())
                 .map(|(aij, Lambda_j)| aij.clone() * Lambda_j.clone())
                 .fold(Expr::Const(0.0), |acc, x| acc + x)
-                .symplify();
-            let eq_i = sum_by_elemnts + (G_i.clone() / (R_sym * Tm)).symplify();
-            vec_of_eqs.push(eq_i.symplify());
+                .simplify();
+            let eq_i = sum_by_elemnts + (G_i.clone() / (R_sym * Tm)).simplify();
+            vec_of_eqs.push(eq_i.simplify());
         }
         Ok(vec_of_eqs)
     }

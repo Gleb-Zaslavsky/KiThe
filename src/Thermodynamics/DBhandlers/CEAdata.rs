@@ -567,7 +567,7 @@ impl CEAdata {
         let c = self.coeff_Lambda.clone();
         let um = self.L_unit_multiplier;
         let (e, f, k, g) = (c[0], c[1], c[2], c[3]);
-        let L_sym = (Expr::Const(um) * calculate_L_sym(e, f, k, g)).symplify();
+        let L_sym = (Expr::Const(um) * calculate_L_sym(e, f, k, g)).simplify();
         self.Lambda_sym = Some(L_sym);
         Ok(())
     }
@@ -589,7 +589,7 @@ impl CEAdata {
         let c = self.coeff_Visc.clone();
         let um = self.V_unit_multiplier;
         let (e, f, k, g) = (c[0], c[1], c[2], c[3]);
-        let V_sym = (Expr::Const(um) * calculate_V_sym(e, f, k, g)).symplify();
+        let V_sym = (Expr::Const(um) * calculate_V_sym(e, f, k, g)).simplify();
         self.V_sym = Some(V_sym);
         Ok(())
     }

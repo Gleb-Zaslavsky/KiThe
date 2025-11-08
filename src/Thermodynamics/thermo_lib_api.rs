@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 
 use std::fs::OpenOptions;
 
+use crate::library_manager::with_library_manager;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 // /Basis functionality to search in library of thermodymical and heat mass transfer data
@@ -27,14 +28,16 @@ pub struct ThermoData {
 }
 impl ThermoData {
     pub fn new() -> Self {
-        let mut file = File::open("all_keys_substance.json").unwrap();
+        let mut file =
+            with_library_manager(|manager| File::open(manager.all_keys_substance_path())).unwrap();
         let mut file_contents = String::new();
         file.read_to_string(&mut file_contents).unwrap();
         // (lib:sustance)
         let lib_sub_pairs_vec: Vec<(String, String)> =
             serde_json::from_str(&file_contents).unwrap();
 
-        let mut file = File::open("substance_base_v2.json").unwrap();
+        let mut file =
+            with_library_manager(|manager| File::open(manager.substance_base_path())).unwrap();
         let mut file_contents = String::new();
         file.read_to_string(&mut file_contents).unwrap();
         // lib:{ substance :{ data }}

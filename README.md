@@ -36,7 +36,8 @@ When install as library:
  When install as executable:
   CLI instrument to solve some of the heat-mass transfer, combustion, chemical engeneering problems. Now available:
   * BVP solver for gas phase steady-state combustion/plug-flow with constant mass velocity BVP problem   
-  * IVP problem for multiple solid state kinetic models with constant or linear increasing temperature
+  * IVP problem for multiple solid state kinetic models with constant or linear increasing temperature.
+  
   pretty GUI menues:
     * Main menu
     * Menu for gas phase steady-state combustion/plug-flow with constant mass velocity BVP problem;

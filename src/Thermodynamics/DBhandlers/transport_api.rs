@@ -339,6 +339,25 @@ mod tests {
         assert!(visc_cea > 0.0);
     }
     #[test]
+    fn test_CEA2() {
+        let mut transport_calc = create_transport_calculator_by_name("CEA");
+        let thermo_data = ThermoData::new();
+        let sublib = thermo_data.LibThermoData.get("CEA").unwrap();
+        let substance_data = sublib.get("CO").unwrap();
+        let _ = transport_calc
+            .from_serde(substance_data.clone())
+            .map_err(|e| format!("Failed to load data: {}", e));
+
+        let _ = transport_calc
+            .extract_coefficients(400.9)
+            .map_err(|e| format!("Failed to extract coefficients: {}", e));
+        let lambda_cea = transport_calc.calculate_lambda(None, None, 500.0).unwrap();
+        let visc_cea = transport_calc.calculate_viscosity(500.0).unwrap();
+        println!("lambda_cea: {}", lambda_cea);
+        println!("visc_cea: {}", visc_cea);
+    }
+
+    #[test]
     fn test_factory_method_Collision() {
         // Test Collision calculator creation
         let thermo_data = ThermoData::new();

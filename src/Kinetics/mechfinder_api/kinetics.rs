@@ -169,7 +169,7 @@ impl FalloffStruct {
                     let T_1 = Expr::Const(troe[2]);
                     let F_c = (Expr::Const(1.0) - A.clone()) * (-T.clone() / T_3).exp()
                         + A * (-T.clone() / T_1).exp();
-                    F_c.symplify()
+                    F_c.simplify()
                 }
                 //troe.len()==3
                 else if troe.len() == 4 {
@@ -179,7 +179,7 @@ impl FalloffStruct {
                     let T_2 = Expr::Const(troe[3]);
                     let F_c = (Expr::Const(1.0) - A) * (-T.clone() / T_3).exp()
                         + T.clone() * ((-T.clone() / T_1).exp() + (-T.clone() / T_2).exp());
-                    F_c.symplify()
+                    F_c.simplify()
                 }
                 //troe.len()==4
                 else {
@@ -194,11 +194,11 @@ impl FalloffStruct {
                 let F = Expr::Const(10.0)
                     .pow((F_c.clone()).log10() / (Expr::Const(1.0) + f_1.pow(Expr::Const(2.0))));
                 let k = K_inf * (P_r.clone() / (Expr::Const(1.0) + P_r.clone())) * F;
-                return k.symplify();
+                return k.simplify();
             } else {
                 // there is no troe field
                 let k = K_inf * (P_r.clone() / (Expr::Const(1.0) + P_r));
-                return k.symplify();
+                return k.simplify();
             }; //troe
         }; //k
 
@@ -259,7 +259,7 @@ impl ThreeBodyStruct {
             return Eff;
         }
 
-        let K_sym = (Eff * k).symplify();
+        let K_sym = (Eff * k).simplify();
         return K_sym;
     }
 }
@@ -375,7 +375,7 @@ impl PressureStruct {
                 calculate_k_expr(arr_params, T)
             }
         }
-        .symplify()
+        .simplify()
     }
 }
 fn calculate_k(arr_params: &[f64], temp: &f64) -> f64 {

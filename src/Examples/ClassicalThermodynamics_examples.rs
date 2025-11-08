@@ -145,8 +145,8 @@ pub fn SubsData_examples(thermotask: usize) {
                 let dG_sym = map_of_gibbs_sym[substance].clone();
                 let dG_sym = dG_sym.set_variable("P", 101325.0);
 
-                let dG_from_sym = dG_sym.lambdify_owned(vec!["T", "w1", "w2"]);
-                let dG_from_sym = dG_from_sym(vec![400.0, 0.5, 0.5]);
+                let dG_from_sym = dG_sym.lambdify_borrowed_thread_safe(&["T", "w1", "w2"]);
+                let dG_from_sym = dG_from_sym(&[400.0, 0.5, 0.5]);
                 assert_relative_eq!(dG_value, dG_from_sym, epsilon = 1e-8);
             }
 
@@ -222,8 +222,8 @@ pub fn SubsData_examples(thermotask: usize) {
                 assert_relative_eq!(dG_value, dG_from_fun, epsilon = 1e-8);
 
                 let dG_sym = map_of_gibbs_sym[substance].clone();
-                let dG_from_sym = dG_sym.lambdify_owned(vec!["T", "w1", "w2"]);
-                let dG_from_sym = dG_from_sym(vec![400.0, 0.5, 0.5]);
+                let dG_from_sym = dG_sym.lambdify_borrowed_thread_safe(&["T", "w1", "w2"]);
+                let dG_from_sym = dG_from_sym(&[400.0, 0.5, 0.5]);
                 assert_relative_eq!(dG_value, dG_from_sym, epsilon = 1e-8);
             }
 
@@ -376,8 +376,8 @@ pub fn SubsData_examples(thermotask: usize) {
             for (i, eq) in eq_s.iter().enumerate() {
                 let subs = &td.vec_of_subs[i];
                 println!("eq_{}: {}, {:?}", subs, eq, &sym_vars);
-                let eq_sym_fun = eq.clone().lambdify_owned(sym_vars.clone());
-                let eq_sym_fun_value = eq_sym_fun(vec![0.5, 0.5, 0.5, 0.5, 1.0]);
+                let eq_sym_fun = eq.clone().lambdify_borrowed_thread_safe(sym_vars.as_slice());
+                let eq_sym_fun_value = eq_sym_fun(&[0.5, 0.5, 0.5, 0.5, 1.0]);
 
                 assert_relative_eq!(eq_sym_fun_value, eq_mu_fun_value[i], epsilon = 1e-6);
             }

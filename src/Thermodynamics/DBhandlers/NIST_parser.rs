@@ -116,7 +116,7 @@ pub enum SearchType {
 }
 
 impl Phase {
-   pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Phase::Gas => "gas",
             Phase::Solid => "solid",
@@ -555,7 +555,7 @@ impl NistInput {
             "No temperature range found for the given temperature",
         ))
     }
-/////////////////////////////////CALCUALTE PROPERTIES//////////////////////////////////////////////////
+    /////////////////////////////////CALCUALTE PROPERTIES//////////////////////////////////////////////////
     pub fn create_sym_cp_dh_ds(&self) -> Result<(Expr, Expr, Expr), std::io::Error> {
         let um = Expr::Const(self.unit_multiplier);
         if let Some(coeffs) = self.coeffs.clone() {
@@ -570,7 +570,7 @@ impl NistInput {
                 "\n \n Cp: {:?} \n \n dh: {:?} \n \n ds: {:?} \n \n",
                 Cp, dh, ds
             );
-            return Ok((Cp.symplify(), dh.symplify(), ds.symplify()));
+            return Ok((Cp.simplify(), dh.simplify(), ds.simplify()));
         }
 
         Err(std::io::Error::new(
@@ -673,7 +673,6 @@ fn calculate_s_sym(a: f64, b: f64, c: f64, d: f64, e: f64, _f: f64, g: f64, _h: 
         - Expr::Const(e) / (e2 * t.pow(e2))
         + Expr::Const(g)
 }
-
 
 /*
 TODO!

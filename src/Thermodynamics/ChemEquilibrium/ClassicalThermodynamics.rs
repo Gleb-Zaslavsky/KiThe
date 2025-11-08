@@ -432,7 +432,7 @@ impl Thermodynamics {
         let P = self.P;
         for (_phase_or_solution_name, sym_fun) in self.dG_sym.iter_mut() {
             for (_, sym_fun) in sym_fun.iter_mut() {
-                *sym_fun = sym_fun.set_variable("P", P).symplify()
+                *sym_fun = sym_fun.set_variable("P", P).simplify()
             }
         }
     }
@@ -441,12 +441,12 @@ impl Thermodynamics {
         let T = self.T;
         for (_phase_or_solution_name, sym_fun) in self.dG_sym.iter_mut() {
             for (_, sym_fun) in sym_fun.iter_mut() {
-                *sym_fun = sym_fun.set_variable("T", T).symplify()
+                *sym_fun = sym_fun.set_variable("T", T).simplify()
             }
         }
         if self.solver.eq_mu.len() > 0 {
             for mu in self.solver.eq_mu.iter_mut() {
-                *mu = mu.set_variable("T", T).symplify()
+                *mu = mu.set_variable("T", T).simplify()
             }
         }
     }

@@ -382,7 +382,7 @@ mod tests {
             assert!(!nasa.coeffs_map.is_empty());
 
             let data_for_interva0 = nasa.coeffs_map.get(&(0 as usize)).unwrap();
-            // creating interval 
+            // creating interval
             let T_ceter1 = data_for_interva0.T.1;
             let data_for_interva1 = nasa.coeffs_map.get(&(1 as usize)).unwrap();
             let T_ceter2 = data_for_interva1.T.0;
@@ -390,18 +390,17 @@ mod tests {
             let T_min = T_ceter1 - 500.0;
             let T_max = T_ceter1 + 500.0;
             nasa.set_T_interval(T_min, T_max);
-            let res =  nasa.fitting_coeffs_for_T_interval();
-            
-            assert!(res.is_ok());
+            let res = nasa.fitting_coeffs_for_T_interval();
 
+            assert!(res.is_ok());
         }
     }
 
-        #[test]
+    #[test]
     fn test_fitting_adjacent_real_data_for_several_subs2() {
         let thermo_data = ThermoData::new();
         let sublib = thermo_data.LibThermoData.get("NASA_gas").unwrap();
-        let subs = vec![ "NH3", "O2", "N2"];
+        let subs = vec!["NH3", "O2", "N2"];
         for sub in subs {
             let CO_data = sublib.get(sub).unwrap();
             let mut nasa = NASAdata::new();
@@ -417,7 +416,7 @@ mod tests {
             assert!(!nasa.coeffs_map.is_empty());
 
             let data_for_interva0 = nasa.coeffs_map.get(&(0 as usize)).unwrap();
-            // creating interval 
+            // creating interval
             let T_ceter1 = data_for_interva0.T.1;
             let data_for_interva1 = nasa.coeffs_map.get(&(1 as usize)).unwrap();
             let T_ceter2 = data_for_interva1.T.0;
@@ -425,10 +424,9 @@ mod tests {
             let T_min = T_ceter1 - 500.0;
             let T_max = T_ceter1 + 500.0;
             nasa.set_T_interval(T_min, T_max);
-            let res =  nasa.fitting_coeffs_for_T_interval();
-            
-            assert!(res.is_ok());
+            let res = nasa.fitting_coeffs_for_T_interval();
 
+            assert!(res.is_ok());
         }
     }
     #[test]

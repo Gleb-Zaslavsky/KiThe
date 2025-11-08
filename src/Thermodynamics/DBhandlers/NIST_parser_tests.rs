@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use crate::Thermodynamics::DBhandlers::NIST_parser::{NistParser, Phase, SearchType, NistError, NistInput};
+    use crate::Thermodynamics::DBhandlers::NIST_parser::{
+        NistError, NistInput, NistParser, Phase, SearchType,
+    };
     // use std::collections::HashMap;
     /*
        // Mock HTTP client for testing

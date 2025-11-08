@@ -38,6 +38,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 
+use crate::library_manager::with_library_manager;
 use serde_json::Value;
 #[derive(Debug, Clone)]
 pub struct KineticData {
@@ -70,7 +71,8 @@ impl KineticData {
     /// Load the reaction library from a JSON file by the name of the reaction library
     pub fn open_json_files(&mut self, big_mech: &str) -> () {
         self.lib_name = big_mech.to_owned();
-        let mut file = File::open("Reactbase.json").unwrap();
+        let mut file =
+            with_library_manager(|manager| File::open(manager.reactbase_path())).unwrap();
         let mut file_contents = String::new();
         file.read_to_string(&mut file_contents).unwrap();
         // библиотека:{ номер реакции :{ данные реакции }}
@@ -80,7 +82,8 @@ impl KineticData {
         let library_of_kinetic_parameters = reactlibrary.get(big_mech).unwrap();
         self.LibKineticData = library_of_kinetic_parameters.to_owned();
         //
-        let mut file = File::open("dict_reaction.json").unwrap();
+        let mut file =
+            with_library_manager(|manager| File::open(manager.dict_reaction_path())).unwrap();
         let mut file_contents = String::new();
         file.read_to_string(&mut file_contents).unwrap();
         // библиотека:{ номер реакции :{ "reagents"/"products":{}: }}

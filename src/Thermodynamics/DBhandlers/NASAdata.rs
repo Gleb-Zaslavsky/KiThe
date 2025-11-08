@@ -468,11 +468,11 @@ impl NASAdata {
         let (a, b, c, d, e, f, g) = self.coeffs;
         let unit = Expr::Const(self.unit_multiplier);
         let C_sym = unit.clone() * Cp_sym(a, b, c, d, e);
-        self.Cp_sym = C_sym.symplify();
+        self.Cp_sym = C_sym.simplify();
         let dh_sym = unit.clone() * dh_sym(a, b, c, d, e, f);
-        self.dh_sym = dh_sym.symplify();
+        self.dh_sym = dh_sym.simplify();
         let ds_sym = unit * ds_sym(a, b, c, d, e, g);
-        self.ds_sym = ds_sym.symplify();
+        self.ds_sym = ds_sym.simplify();
     }
     // Taylor series expension for Cp, dH, dS
     pub fn Taylor_series_Cp_dH_dS(&mut self, T0: f64, n: usize) -> (Expr, Expr, Expr) {
@@ -545,12 +545,12 @@ impl NASAdata {
     }
 
     /////////////////////////////////TEMPERATURE RANGE////////////////////////////////////////////////////////////
-    
+
     /// Finds the coefficient interval that contains the given temperature
-    /// 
+    ///
     /// # Arguments
     /// * `t` - Temperature in Kelvin
-    /// 
+    ///
     /// # Returns
     /// * `Ok((interval_index, coeffs))` - Index and coefficients for the temperature range
     /// * `Err(NASAError::InvalidTemperatureRange)` - If temperature is outside all ranges
@@ -567,20 +567,20 @@ impl NASAdata {
     }
 
     /// Compares fitted function against original functions from two temperature ranges
-    /// 
+    ///
     /// Generates quality metrics by evaluating both original and fitted functions
     /// across the temperature interval and computing various error norms.
-    /// 
+    ///
     /// # Arguments
     /// * `func_for_1_range` - Original function for lower temperature range
     /// * `func_for_2_range` - Original function for upper temperature range  
     /// * `T_center` - Temperature boundary between the two ranges
     /// * `fit_function` - Fitted function to compare against originals
     /// * `coeffs_map` - Fitted coefficients to substitute into fit_function
-    /// 
+    ///
     /// # Returns
     /// * `FittingReport` - Contains L1/L2/max norms and significant deviation points
-    /// 
+    ///
     /// # Panics
     /// * If max_norm exceeds norm_threshold (indicates poor fitting quality)
     pub fn direct_compare(
@@ -626,15 +626,14 @@ impl NASAdata {
                 }
                 max_norm = max_norm.max((diff / y).abs());
                 assert!(
-                !(max_norm > self.norm_threshold),
-                "max norm too higher  {} than therhold {}, diff = {}, y = {}",
-                max_norm,
-                self.norm_threshold,
-                diff,
-                y
-            );
+                    !(max_norm > self.norm_threshold),
+                    "max norm too higher  {} than therhold {}, diff = {}, y = {}",
+                    max_norm,
+                    self.norm_threshold,
+                    diff,
+                    y
+                );
             }
-            
 
             l1_norm = l1_norm / (2.0 * n as f64);
             l2_norm = l2_norm.sqrt() / (2.0 * n as f64);
@@ -680,17 +679,17 @@ impl NASAdata {
     }
 
     /// Sequential fitting method for adjacent temperature intervals
-    /// 
+    ///
     /// Fits NASA-7 coefficients by sequentially optimizing Cp, then dH, then dS.
     /// Uses the fitted Cp coefficients as constraints for dH and dS fitting.
     /// Includes quality assessment and generates fitting reports.
-    /// 
+    ///
     /// # Arguments
     /// * `coeffs_min` - Coefficients for lower temperature range
     /// * `coeffs_max` - Coefficients for upper temperature range
     /// * `T_min` - Lower bound of fitting temperature range
     /// * `T_max` - Upper bound of fitting temperature range
-    /// 
+    ///
     /// # Returns
     /// * `Ok(SewTwoFunctions)` - Fitting object with results
     /// * `Err(NASAError)` - If temperature ranges are not adjacent or fitting fails
@@ -701,7 +700,7 @@ impl NASAdata {
         T_min: f64,
         T_max: f64,
     ) -> Result<SewTwoFunctions, NASAError> {
-                // Generate fitting reports
+        // Generate fitting reports
         let mut report_map: HashMap<String, FittingReport> = HashMap::new();
         let (_, T_center) = (coeffs_min.T.0, coeffs_min.T.1);
         let (T_center_check, _) = (coeffs_max.T.0, coeffs_max.T.1);
@@ -724,9 +723,14 @@ impl NASAdata {
         );
         let Cp_func_to_fit =
             Expr::parse_expression("1.987* (a + b * t + c * t^2 + d * t^3 + e * t^4)");
-        let mut sew =
-            SewTwoFunctions::new(func1.clone(),
-             func2.clone(), T_min, T_center, T_max, self.fit_point_number);
+        let mut sew = SewTwoFunctions::new(
+            func1.clone(),
+            func2.clone(),
+            T_min,
+            T_center,
+            T_max,
+            self.fit_point_number,
+        );
         sew.create_fitting_data();
         let initial_guess = vec![
             (coeffs_min.coeff.0 + coeffs_max.coeff.0) / 2.0,
@@ -757,9 +761,9 @@ impl NASAdata {
         let r_ssquared = sew.get_r_ssquared();
         println!("r_squared for Cp: {}", r_ssquared.unwrap());
         assert!(1.0 - r_ssquared.unwrap() < 1e-2);
-    
+
         let map_of_solutions_5_coeffs = sew.get_map_of_solutions().unwrap();
-        
+
         let c_fitting_report = self.direct_compare(
             func1,
             func2,
@@ -767,7 +771,7 @@ impl NASAdata {
             Cp_func_to_fit,
             map_of_solutions_5_coeffs.clone(),
         );
-         
+
         report_map.insert("c fitting report".to_string(), c_fitting_report);
         ///////////////////////////dh fitting///////////////////////////////
         let a = *map_of_solutions_5_coeffs.get("a").unwrap();
@@ -815,7 +819,7 @@ impl NASAdata {
         let mut map_of_solutions_6_coeffs = map_of_solutions_5_coeffs.clone();
         map_of_solutions_6_coeffs.extend(f_map);
 
-        /* 
+        /*
         let h_fitting_report = self.direct_compare(
             h_func1,
             h_func2,
@@ -871,7 +875,6 @@ impl NASAdata {
         map_of_solutions_7_coeffs.extend(g_map);
         self.coeffs = (a, b, c, d, e, f, g);
 
-        
         let s_fitting_report = self.direct_compare(
             s_func1,
             s_func2,
@@ -880,27 +883,27 @@ impl NASAdata {
             map_of_solutions_7_coeffs,
         );
         report_map.insert("s fitting report".to_string(), s_fitting_report);
-        
+
         Self::print_quality_table(&report_map);
 
         Ok(sew)
     }
 
     /// Weighted sum fitting method for simultaneous optimization
-    /// 
+    ///
     /// Fits NASA-7 coefficients by optimizing a weighted combination:
     /// Y = Cp + 1e-3*dH + 1e-1*dS
-    /// 
+    ///
     /// This approach optimizes all thermodynamic properties simultaneously rather than
     /// sequentially, potentially providing better overall consistency. The weights
     /// account for the different scales of the properties (dH is typically large).
-    /// 
+    ///
     /// # Arguments
     /// * `coeffs_min` - Coefficients for lower temperature range
     /// * `coeffs_max` - Coefficients for upper temperature range
     /// * `T_min` - Lower bound of fitting temperature range
     /// * `T_max` - Upper bound of fitting temperature range
-    /// 
+    ///
     /// # Returns
     /// * `Ok(HashMap<String, FittingReport>)` - Quality report for combined fitting
     /// * `Err(NASAError)` - If temperature ranges are not adjacent or fitting fails
@@ -942,7 +945,7 @@ impl NASAdata {
             coeffs_min.coeff.4,
             coeffs_min.coeff.6,
         );
-        
+
         let cp_func2 = Cp_sym(
             coeffs_max.coeff.0,
             coeffs_max.coeff.1,
@@ -968,21 +971,27 @@ impl NASAdata {
         );
 
         // Combined weighted function
-        let combined_func1 = cp_func1.clone() + Expr::Const(1e-3) * dh_func1.clone() + Expr::Const(1e-1) * ds_func1.clone();
-        let combined_func2 = cp_func2.clone() + Expr::Const(1e-3) * dh_func2.clone() + Expr::Const(1e-1) * ds_func2.clone();
-        
-       // let combined_func_to_fit = Expr::parse_expression(
-      //      "1.987* (a + b * t + c * t^2 + d * t^3 + e * t^4) + 1e-3 * 1.987 *t* (a + b * t/2 + (c/3) * t^2 + (d/4) * t^3 + (e/5) * t^4 + f/t) + 1e-1 * 1.987 * (a* ln( t ) + b * t + c * t^2 / 2 + d * t^3 / 3.0 + e * t^4 / 4.0 + g)"
-     //   ).simplify_();
-          let Cp_func_to_fit =
+        let combined_func1 = cp_func1.clone()
+            + Expr::Const(1e-3) * dh_func1.clone()
+            + Expr::Const(1e-1) * ds_func1.clone();
+        let combined_func2 = cp_func2.clone()
+            + Expr::Const(1e-3) * dh_func2.clone()
+            + Expr::Const(1e-1) * ds_func2.clone();
+
+        // let combined_func_to_fit = Expr::parse_expression(
+        //      "1.987* (a + b * t + c * t^2 + d * t^3 + e * t^4) + 1e-3 * 1.987 *t* (a + b * t/2 + (c/3) * t^2 + (d/4) * t^3 + (e/5) * t^4 + f/t) + 1e-1 * 1.987 * (a* ln( t ) + b * t + c * t^2 / 2 + d * t^3 / 3.0 + e * t^4 / 4.0 + g)"
+        //   ).simplify_();
+        let Cp_func_to_fit =
             Expr::parse_expression("1.987* (a + b * t + c * t^2 + d * t^3 + e * t^4)");
-           let dh_func_to_fit = Expr::parse_expression(
+        let dh_func_to_fit = Expr::parse_expression(
             "1.987 *t* (a + b * t/2 + (c/3) * t^2 + (d/4) * t^3 + (e/5) * t^4 + f/t)",
-        ); 
-                let ds_func_to_fit = Expr::parse_expression(
+        );
+        let ds_func_to_fit = Expr::parse_expression(
             "1.987 * (a* ln( t ) + b * t + c * t^2 / 2 + d * t^3 / 3.0 + e * t^4 / 4.0 + g)",
         );
-        let combined_func_to_fit = Cp_func_to_fit.clone() + Expr::Const(1e-3) * dh_func_to_fit.clone() + Expr::Const(1.0) * ds_func_to_fit.clone();
+        let combined_func_to_fit = Cp_func_to_fit.clone()
+            + Expr::Const(1e-3) * dh_func_to_fit.clone()
+            + Expr::Const(1.0) * ds_func_to_fit.clone();
         let mut sew = SewTwoFunctions::new(
             combined_func1.clone(),
             combined_func2.clone(),
@@ -1002,7 +1011,7 @@ impl NASAdata {
             (coeffs_min.coeff.5 + coeffs_max.coeff.5) / 2.0,
             (coeffs_min.coeff.6 + coeffs_max.coeff.6) / 2.0,
         ];
-        
+
         sew.fit(
             combined_func_to_fit.clone(),
             Some(vec![
@@ -1025,7 +1034,7 @@ impl NASAdata {
 
         let r_squared = sew.get_r_ssquared();
         println!("r_squared for combined fitting: {}", r_squared.unwrap());
-        
+
         let map_of_solutions = sew.get_map_of_solutions().unwrap();
         let a = *map_of_solutions.get("a").unwrap();
         let b = *map_of_solutions.get("b").unwrap();
@@ -1034,7 +1043,7 @@ impl NASAdata {
         let e = *map_of_solutions.get("e").unwrap();
         let f = *map_of_solutions.get("f").unwrap();
         let g = *map_of_solutions.get("g").unwrap();
-        
+
         self.coeffs = (a, b, c, d, e, f, g);
 
         // Generate fitting report for combined function
@@ -1045,29 +1054,32 @@ impl NASAdata {
             combined_func_to_fit,
             map_of_solutions,
         );
-        report_map.insert("Combined fitting report".to_string(), combined_fitting_report);
-        
+        report_map.insert(
+            "Combined fitting report".to_string(),
+            combined_fitting_report,
+        );
+
         Self::print_quality_table(&report_map);
-        
+
         Ok(report_map)
     }
 
     /// Improved fitting method starting with entropy optimization
-    /// 
+    ///
     /// Fits NASA-7 coefficients by first optimizing all coefficients using entropy (dS),
     /// then fitting enthalpy coefficient f, and finally validating heat capacity.
     /// Generates comprehensive quality reports with pretty table output.
-    /// 
+    ///
     /// # Arguments
     /// * `coeffs_min` - Coefficients for lower temperature range
     /// * `coeffs_max` - Coefficients for upper temperature range
     /// * `T_min` - Lower bound of fitting temperature range
     /// * `T_max` - Upper bound of fitting temperature range
-    /// 
+    ///
     /// # Returns
     /// * `Ok(HashMap<String, FittingReport>)` - Quality reports for each property
     /// * `Err(NASAError)` - If temperature ranges are not adjacent or fitting fails
-    /// 
+    ///
     /// # Panics
     /// * If fitting quality is below acceptable thresholds (R² < 0.95)
     pub fn fitting_adjacent2(
@@ -1237,10 +1249,10 @@ impl NASAdata {
         Ok(report_map)
     }
     /// Prints a formatted table of fitting quality metrics
-    /// 
+    ///
     /// Displays L1 norm, L2 norm, max norm, number of significant deviation points,
     /// and temperature range where significant deviations occur for each fitted property.
-    /// 
+    ///
     /// # Arguments
     /// * `report_map` - HashMap containing fitting reports for different properties
     pub fn print_quality_table(report_map: &HashMap<String, FittingReport>) {
@@ -1273,19 +1285,19 @@ impl NASAdata {
         table.printstd();
     }
     /// Main interface for temperature interval coefficient fitting with fallback
-    /// 
+    ///
     /// Determines the appropriate fitting strategy based on temperature interval:
     /// - Same interval: Uses existing coefficients
     /// - Adjacent intervals: Attempts fitting_adjacent2, falls back to fitting_adjacent on panic
     /// - Non-adjacent intervals: Returns error
-    /// 
+    ///
     /// The fallback mechanism catches panics from assertion failures in fitting_adjacent2
     /// and automatically retries with the more robust fitting_adjacent method.
-    /// 
+    ///
     /// # Returns
     /// * `Ok(())` - Coefficients successfully fitted or selected
     /// * `Err(NASAError::InvalidTemperatureRange)` - If no T_interval set or intervals invalid
-    /// 
+    ///
     /// # Requires
     /// * `T_interval` must be set via `set_T_interval()` before calling
     /// * Coefficient map must be populated via `parse_coefficients()`
@@ -1301,13 +1313,13 @@ impl NASAdata {
                 let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                     self.fitting_adjacent2(coeffs_min.clone(), coeffs_max.clone(), T_min, T_max)
                 }));
-                
+
                 match result {
-                    Ok(Ok(_)) => {}, // fitting_adjacent2 succeeded
+                    Ok(Ok(_)) => {} // fitting_adjacent2 succeeded
                     _ => {
                         // fitting_adjacent2 panicked or failed, use fitting_adjacent as fallback
                         println!("fitting_adjacent2 failed, falling back to fitting_adjacent");
-                       self.fitting_adjacent3(coeffs_min, coeffs_max, T_min, T_max)?;
+                        self.fitting_adjacent3(coeffs_min, coeffs_max, T_min, T_max)?;
                     }
                 }
             } else {

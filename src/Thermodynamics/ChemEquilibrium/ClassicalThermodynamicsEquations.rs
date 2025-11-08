@@ -86,8 +86,8 @@ impl Thermodynamics {
                     .fold(Expr::Const(0.0), |acc, x| acc + x);
 
                 let condition_i =
-                    b_i_sum.symplify() - initial_vector_of_element_sym[i].clone().symplify();
-                vector_of_conditions.push(condition_i.symplify());
+                    b_i_sum.simplify() - initial_vector_of_element_sym[i].clone().simplify();
+                vector_of_conditions.push(condition_i.simplify());
             }
             self.solver.elements_conditions_sym = vector_of_conditions;
         }
@@ -182,7 +182,7 @@ impl Thermodynamics {
                 let sum_of_mole_numbers = vec_of_mole_numbers
                     .iter()
                     .fold(Expr::Const(0.0), |acc, x| acc + x.clone());
-                let eq = sum_of_mole_numbers.symplify() - Np;
+                let eq = sum_of_mole_numbers.simplify() - Np;
                 vec_of_sum_of_mole_numbers.push(eq);
             }
         }

@@ -102,8 +102,8 @@ mod tests {
         for (i, gas) in subs.iter().enumerate() {
             let g_sym = g_sym.get(gas).unwrap().clone();
             println!("II. g_sym for gas: {},\n:  {}", &gas, &g_sym);
-            let g_sym_fun = g_sym.lambdify_owned(vec![&format!("N{}", i), "Np"]);
-            let g_sym_value = g_sym_fun(vec![0.5, 1.0]);
+            let g_sym_fun = g_sym.lambdify_borrowed_thread_safe(&[&format!("N{}", i), "Np"]);
+            let g_sym_value = g_sym_fun(&[0.5, 1.0]);
 
             let g = g.get(gas).unwrap().clone();
             assert_relative_eq!(g_sym_value, g, epsilon = 1e-6);
@@ -115,8 +115,8 @@ mod tests {
             let vars: Vec<&str> = sym_vars.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
             println!("vars {:?}", vars);
             println!("III. g_sym for gas: {},\n:  {}", &gas, &g_sym);
-            let g_sym_fun = g_sym.lambdify_owned(vars);
-            let g_sym_value = g_sym_fun(vec![0.5, 1.0]);
+            let g_sym_fun = g_sym.lambdify_borrowed_thread_safe(vars.as_slice());
+            let g_sym_value = g_sym_fun(&[0.5, 1.0]);
 
             let g = g.get(gas).unwrap().clone();
             assert_relative_eq!(g_sym_value, g, epsilon = 1e-6);
@@ -139,8 +139,8 @@ mod tests {
                 .to_string()
                 .clone();
             println!("IV. g_sym for gas: {},\n:  {}", &gas, &g_sym);
-            let g_sym_fun = g_sym.lambdify_owned(vec![&moles_num, &Np]);
-            let g_sym_value = g_sym_fun(vec![0.5, 1.0]);
+            let g_sym_fun = g_sym.lambdify_borrowed_thread_safe(&[&moles_num, &Np]);
+            let g_sym_value = g_sym_fun(&[0.5, 1.0]);
 
             let g = g.get(gas).unwrap().clone();
             assert_relative_eq!(g_sym_value, g, epsilon = 1e-6);
@@ -306,8 +306,8 @@ mod tests {
         for (i, eq) in eq_s.iter().enumerate() {
             let subs = &td.vec_of_subs[i];
             println!("eq_{}: {}, {:?}", subs, eq, &sym_vars);
-            let eq_sym_fun = eq.clone().lambdify_owned(sym_vars.clone());
-            let eq_sym_fun_value = eq_sym_fun(vec![0.5, 0.5, 0.5, 0.5, 1.0]);
+            let eq_sym_fun = eq.clone().lambdify_borrowed_thread_safe(sym_vars.as_slice());
+            let eq_sym_fun_value = eq_sym_fun(&[0.5, 0.5, 0.5, 0.5, 1.0]);
 
             assert_relative_eq!(eq_sym_fun_value, eq_mu_fun_value[i], epsilon = 1e-6);
         }

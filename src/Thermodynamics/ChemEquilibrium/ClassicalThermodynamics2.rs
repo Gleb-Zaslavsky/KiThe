@@ -219,7 +219,7 @@ impl Thermodynamics {
         let P = self.P;
         for (_phase_or_solution_name, sym_fun) in self.dG_sym.iter_mut() {
             for (_, sym_fun) in sym_fun.iter_mut() {
-                *sym_fun = sym_fun.set_variable("P", P).symplify()
+                *sym_fun = sym_fun.set_variable("P", P).simplify()
             }
         }
     }
@@ -894,8 +894,8 @@ mod tests {
             assert_relative_eq!(dG_value, dG_from_fun, epsilon = 1e-8);
 
             let dG_sym = map_of_gibbs_sym[substance].clone();
-            let dG_from_sym = dG_sym.lambdify_owned(vec!["T", "w1", "w2"]);
-            let dG_from_sym = dG_from_sym(vec![400.0, 0.5, 0.5]);
+            let dG_from_sym = dG_sym.lambdify_borrowed_thread_safe(&["T", "w1", "w2"]);
+            let dG_from_sym = dG_from_sym(&[400.0, 0.5, 0.5]);
             assert_relative_eq!(dG_value, dG_from_sym, epsilon = 1e-8);
         }
 

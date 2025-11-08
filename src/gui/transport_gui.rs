@@ -230,7 +230,7 @@ impl TransportApp {
                                     ViscosityUnit::MKPaS => "μPa·s",
                                 };
                                 self.search_results = format!(
-                                    "Transport properties for '{}' at T = {} K:\n\nThermal conductivity = {:.3} {}\nViscosity = {:.3} {}",
+                                    "Transport properties for '{}' at T = {} K:\n\nThermal conductivity = {:.5} {}\nViscosity = {:.8} {}",
                                     substance_name,
                                     t,
                                     lambda,
@@ -286,9 +286,6 @@ impl TransportApp {
                 .calculate_lambda(None, None, temperature)
                 .map_err(|e| format!("Failed to calculate thermal conductivity: {}", e))?;
         } else {
-
-
-            
         };
         let viscosity = transport_calc
             .calculate_viscosity(temperature)
