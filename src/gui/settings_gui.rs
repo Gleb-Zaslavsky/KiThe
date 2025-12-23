@@ -148,6 +148,8 @@ impl SettingsGui {
             "Reactbase_v2.json",
             "dict_reaction.json",
             "dict_reaction_v2.json",
+            "problems",
+            "my_problems",
         ];
 
         ui.label("Quick select:");

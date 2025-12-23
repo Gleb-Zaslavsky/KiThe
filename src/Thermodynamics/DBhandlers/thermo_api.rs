@@ -51,9 +51,11 @@ use std::fmt;
 pub enum ThermoError {
     NoCoefficientsFound { temperature: f64, range: String },
     InvalidTemperatureRange,
-
     UnsupportedUnit(String),
     SerdeError(serde_json::Error),
+    SymbolicError(String),
+    CalculationError(String),
+    FittingError(String),
 }
 
 impl fmt::Display for ThermoError {
@@ -79,6 +81,15 @@ impl fmt::Display for ThermoError {
                     unit
                 )
             }
+            ThermoError::SymbolicError(msg) => {
+                write!(f, "Symbolic error: {}", msg)
+            }
+            ThermoError::CalculationError(msg) => {
+                write!(f, "Calculation error: {}", msg)
+            }
+            ThermoError::FittingError(msg) => {
+                write!(f, "Fitting error: {}", msg)
+            }
         }
     }
 }
@@ -96,6 +107,8 @@ impl From<super::NISTdata::NISTError> for ThermoError {
             }
             super::NISTdata::NISTError::SerdeError(msg) => ThermoError::SerdeError(msg),
             super::NISTdata::NISTError::UnsupportedUnit(unit) => ThermoError::UnsupportedUnit(unit),
+            super::NISTdata::NISTError::SymbolicError(msg) => ThermoError::SymbolicError(msg),
+            super::NISTdata::NISTError::FittingError(msg) => ThermoError::FittingError(msg),
             //    super::NISTdata::NISTError::SerdeError(err) => ThermoError::SerdeError(err),
         }
     }
@@ -112,6 +125,8 @@ impl From<super::NASAdata::NASAError> for ThermoError {
             }
             super::NASAdata::NASAError::SerdeError(msg) => ThermoError::SerdeError(msg),
             super::NASAdata::NASAError::UnsupportedUnit(unit) => ThermoError::UnsupportedUnit(unit),
+            super::NASAdata::NASAError::SymbolicError(msg) => ThermoError::SymbolicError(msg),
+            super::NASAdata::NASAError::FittingError(msg) => ThermoError::FittingError(msg),
         }
     }
 }
@@ -127,6 +142,7 @@ pub trait ThermoCalculator {
     fn set_unit(&mut self, unit: Option<EnergyUnit>) -> Result<(), ThermoError>;
     fn from_serde(&mut self, serde: Value) -> Result<(), ThermoError>;
     fn extract_model_coefficients(&mut self, t: f64) -> Result<(), ThermoError>;
+    fn parse_coefficients(&mut self) -> Result<(), ThermoError>;
     fn calculate_Cp_dH_dS(&mut self, t: f64) -> Result<(), ThermoError>;
     fn create_closures_Cp_dH_dS(&mut self) -> Result<(), ThermoError>;
     fn create_sym_Cp_dH_dS(&mut self) -> Result<(), ThermoError>;
@@ -156,6 +172,13 @@ pub trait ThermoCalculator {
     fn get_dh_sym(&self) -> Result<Expr, ThermoError>;
     fn get_ds_sym(&self) -> Result<Expr, ThermoError>;
     fn get_composition(&self) -> Result<Option<HashMap<String, f64>>, ThermoError>;
+    fn fitting_coeffs_for_T_interval(&mut self) -> Result<(), ThermoError>;
+    fn integr_mean(&mut self) -> Result<(), ThermoError>;
+    fn set_T_interval(&mut self, T_min: f64, T_max: f64) -> Result<(), ThermoError>;
+    fn calculate_Cp_dH_dS_with_T_range(&mut self, T: f64) -> Result<(), ThermoError>;
+    fn create_closures_Cp_dH_dS_with_T_range(&mut self, T: f64) -> Result<(), ThermoError>;
+    fn create_sym_Cp_dH_dS_with_T_range(&mut self, T: f64) -> Result<(), ThermoError>;
+    fn is_coeffs_valid_for_T(&self, T: f64) -> Result<bool, ThermoError>;
 }
 #[derive(Clone, Debug)]
 #[enum_dispatch(ThermoCalculator)]

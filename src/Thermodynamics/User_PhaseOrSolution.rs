@@ -1,34 +1,96 @@
+//! # Multi-Phase Thermodynamics Module
+//!
+//! This module provides thermodynamic calculations for systems with multiple phases or solutions.
+//! It handles complex systems where substances can exist in different phases (gas, liquid, solid)
+//! or different solutions simultaneously.
+//!
+//! ## Key Structures
+//!
+//! - [`PhaseOrSolution`]: Manages multiple phases, each with their own substance data
+//! - [`CustomSubstance`]: Enum that unifies single-phase and multi-phase systems
+//!
+//! ## Phase Key Convention
+//!
+//! - **Multi-phase systems**: Use `Some("phase_name")` as keys (e.g., `Some("gas")`, `Some("liquid")`)
+//! - **Single-phase systems**: Use `None` as the key to represent the single phase
+//!
+//! ## Example Usage
+//!
+//! ```rust
+//! use std::collections::HashMap;
+//! 
+//! // Multi-phase system with gas and liquid phases
+//! let mut system = PhaseOrSolution::new();
+//! // system.subs_data.insert(Some("gas".to_string()), gas_data);
+//! // system.subs_data.insert(Some("liquid".to_string()), liquid_data);
+//! 
+//! // Calculate Gibbs energy for all phases
+//! // system.calculate_Gibbs_sym(298.15)?;
+//! ```
+
+use std::fmt;
+
+use crate::Thermodynamics::User_PhaseOrSolution2::OnePhase;
 use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData};
-use crate::Thermodynamics::dG_dS::{
-    calc_dG_for_one_phase, calculate_Gibbs_fun_one_phase, calculate_Gibbs_sym_one_phase,
-    calculate_S_for_one_phase, calculate_S_fun_for_one_phase, calculate_S_sym_for_one_phase,
-};
+use crate::Thermodynamics::User_substances_error::{SubsDataError, SubsDataResult};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use enum_dispatch::enum_dispatch;
 use nalgebra::{DMatrix, DVector};
 
 use std::collections::{HashMap, HashSet};
 use std::f64;
-const R: f64 = 8.314;
-const R_sym: Expr = Expr::Const(R);
-/// One phase or multiple phases or solutions
+pub const R: f64 = 8.314;
+#[allow(non_upper_case_globals)]
+pub const R_sym: Expr = Expr::Const(R);
+/// Unified interface for single-phase and multi-phase thermodynamic systems.
+/// 
+/// Uses `None` key for single-phase systems and `Some(phase_name)` for multi-phase.
+/// Provides consistent API regardless of system complexity.
 #[derive(Debug, Clone)]
 #[enum_dispatch(ThermodynamicsCalculatorTrait)]
 pub enum CustomSubstance {
-    OnePhase(SubsData),
+    OnePhase(OnePhase),
     PhaseOrSolution(PhaseOrSolution),
 }
-/// container of substances names in one phase or in multiple phases
+
+/// Maps substances to their respective phases while maintaining order.
+/// Essential for tracking which substances belong to which phases in multi-phase systems.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubstancePhaseMapping {
+    pub all_substances: Vec<String>,
+    pub substance_to_phase: Vec<Option<String>>,
+}
+
+impl SubstancePhaseMapping {
+    /// Creates a new substance-phase mapping.
+    /// Substances and phases vectors must have the same length.
+    pub fn new(substances: Vec<String>, phases: Vec<Option<String>>) -> Self {
+        assert_eq!(substances.len(), phases.len());
+        Self {
+            all_substances: substances,
+            substance_to_phase: phases,
+        }
+    }
+
+    /// Gets the phase for a substance at the given index.
+    pub fn get_phase_for_substance(&self, index: usize) -> Option<&Option<String>> {
+        self.substance_to_phase.get(index)
+    }
+}
+
+/// Container for substance names in single or multiple phases.
+/// Provides unified interface for accessing substances regardless of phase structure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubstancesContainer {
-    ///names of substances in one phase
+    /// Names of substances in a single phase system
     SinglePhase(Vec<String>),
-    /// map of phases and their substances
+    /// Map of phase names to their substances in multi-phase systems
     MultiPhase(HashMap<String, Vec<String>>),
 }
 
 impl SubstancesContainer {
-    // Helper method to get all substances as a flat vector
+    /// Returns all substances as a flat, sorted, deduplicated vector.
+    /// Useful for getting complete substance list regardless of phase structure.
     pub fn get_all_substances(&self) -> Vec<String> {
         let subs = match self {
             SubstancesContainer::SinglePhase(substances) => substances.clone(),
@@ -48,10 +110,12 @@ impl SubstancesContainer {
 }
 
 impl CustomSubstance {
-    pub fn extract_SubstancesContainer(&mut self) -> Result<SubstancesContainer, String> {
+    /// Extracts substances container from the system.
+    /// Returns SinglePhase for both OnePhase and flattened PhaseOrSolution.
+    pub fn extract_SubstancesContainer(&mut self) -> SubsDataResult<SubstancesContainer> {
         match self {
             CustomSubstance::OnePhase(subs_data) => Ok(SubstancesContainer::SinglePhase(
-                subs_data.substances.clone(),
+                subs_data.subs_data.substances.clone(),
             )),
             CustomSubstance::PhaseOrSolution(phase_or_solution) => {
                 let mut all_substances = Vec::new();
@@ -66,7 +130,8 @@ impl CustomSubstance {
         }
     } // get all substances in all phases
 
-    /// takes a map of non-zero number of moles and creates a full map of number of moles
+    /// Creates complete mole number maps from sparse input.
+    /// Fills missing substances with 0.0 and provides multiple formats for calculations.
     pub fn create_full_map_of_mole_numbers(
         &self,
         non_zero_number_of_moles: HashMap<
@@ -74,77 +139,251 @@ impl CustomSubstance {
             (Option<f64>, Option<HashMap<String, f64>>),
         >,
         //  physiscal_nature_of_phase_or_solution: Option<HashMap<String, Phases>>,
-    ) -> Result<
-        (
-            HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
-            HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
-            HashMap<String, f64>,
-        ),
-        String,
-    > {
+    ) -> SubsDataResult<(
+        HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
+        HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
+        HashMap<String, f64>,
+    )> {
         match self {
-            CustomSubstance::OnePhase(subs_data) => {
-                subs_data.create_full_map_of_mole_numbers(non_zero_number_of_moles)
+            CustomSubstance::OnePhase(one_phase) => {
+                one_phase.create_full_map_of_mole_numbers(non_zero_number_of_moles)
             }
             CustomSubstance::PhaseOrSolution(phase_or_solution) => {
                 phase_or_solution.create_full_map_of_mole_numbers(non_zero_number_of_moles)
             }
         }
     }
+    
+    /// Gets mutable reference to Gibbs symbolic expressions.
+    /// Returns normalized format with None key for single-phase systems.
+    pub fn get_dG_sym_mut(&mut self) -> HashMap<Option<String>, HashMap<String, Expr>> {
+        match self {
+            CustomSubstance::OnePhase(one_phase) => {
+                let mut result = HashMap::new();
+                result.insert(None, one_phase.dG_sym.clone());
+                result
+            }
+            CustomSubstance::PhaseOrSolution(phase_or_solution) => phase_or_solution.dG_sym.clone(),
+        }
+    }
+
+    /// Gets reference to Gibbs symbolic expressions.
+    /// Returns normalized format with None key for single-phase systems.
+    pub fn get_dG_sym(&self) -> HashMap<Option<String>, HashMap<String, Expr>> {
+        match self {
+            CustomSubstance::OnePhase(one_phase) => {
+                let mut result = HashMap::new();
+                result.insert(None, one_phase.dG_sym.clone());
+                result
+            }
+            CustomSubstance::PhaseOrSolution(phase_or_solution) => phase_or_solution.dG_sym.clone(),
+        }
+    }
+    
+
+ 
+    /// Gets Gibbs free energy values.
+    /// Returns normalized format with None key for single-phase systems.
+    pub fn get_dG(&self) -> HashMap<Option<String>, HashMap<String, f64>> {
+        match self {
+            CustomSubstance::OnePhase(one_phase) => {
+                let mut result = HashMap::new();
+                result.insert(None, one_phase.dG.clone());
+                result
+            }
+            CustomSubstance::PhaseOrSolution(phase_or_solution) => phase_or_solution.dG.clone(),
+        }
+    }
 }
 
-///  structure contains map: phase name - substances data in this phase
-#[derive(Debug, Clone)]
+/// Multi-phase thermodynamic system managing multiple phases or solutions.
+/// 
+/// Each phase is identified by an `Option<String>` key where `Some(name)` represents
+/// named phases like "gas", "liquid", "solid", etc.
+/// 
+/// # Example
+/// ```rust
+/// let mut system = PhaseOrSolution::new();
+/// // Add gas phase data
+/// // system.subs_data.insert(Some("gas".to_string()), gas_substances);
+/// ```
 pub struct PhaseOrSolution {
     pub subs_data: HashMap<Option<String>, SubsData>,
+    pub substance_phase_mapping: Option<SubstancePhaseMapping>,
+    pub symbolic_vars: HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)>,
+    pub vec_of_n_vars: Vec<Expr>,
+    pub Np_vec: Vec<Expr>,
+    pub map_of_var_each_substance: HashMap<Option<String>, HashMap<String, Expr>>,
+    /// hashmap of Gibbs free energy of a given mixure of substances (numerical result at given T, P, concentration)
+    pub dG: HashMap<Option<String>, HashMap<String, f64>>,
+    /// hashmap of Gibbs free energy of a given mixure of substances (function at given T, P, concentration)
+    pub dG_fun: HashMap<
+        Option<String>,
+        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
+    >,
+    /// hashmap of Gibbs free energy of a given mixure of substances (symbolic result at given T, P, concentration)
+    pub dG_sym: HashMap<Option<String>, HashMap<String, Expr>>,
+
+    /// hashmap of entropy of a given mixure of substances (numerical result at given T, P, concentration)
+    pub dS: HashMap<Option<String>, HashMap<String, f64>>,
+    /// hashmap {phase or solution name:{ substance name: entropy function(T, vector moles of substances, totsl number of moles in phase or solution)} }
+    pub dS_fun: HashMap<
+        Option<String>,
+        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
+    >,
+    /// hashmap of entropy of a given mixure of substances (symbolic result at given T, P, concentration)
+    pub dS_sym: HashMap<Option<String>, HashMap<String, Expr>>,
 }
 
 impl PhaseOrSolution {
+    /// Creates a new empty multi-phase system.
     pub fn new() -> Self {
         Self {
             subs_data: HashMap::new(),
+            substance_phase_mapping: None,
+            symbolic_vars: HashMap::new(),
+            vec_of_n_vars: Vec::new(),
+            Np_vec: Vec::new(),
+            map_of_var_each_substance: HashMap::new(),
+            dG: HashMap::new(),
+            dG_fun: HashMap::new(),
+            dG_sym: HashMap::new(),
+            dS: HashMap::new(),
+            dS_fun: HashMap::new(),
+            dS_sym: HashMap::new(),
         }
+    }
+
+    /// Sets the substance-phase mapping for the system.
+    /// Used to track which substances belong to which phases.
+    pub fn set_substance_phase_mapping(&mut self, mapping: SubstancePhaseMapping) {
+        self.substance_phase_mapping = Some(mapping);
+    }
+
+    /// Applies a fallible function to all phases and collects results.
+    /// Stops on first error and returns it.
+    fn apply_to_all_phases<R>(&mut self, f: impl Fn(&mut SubsData) -> SubsDataResult<R>) -> SubsDataResult<HashMap<Option<String>, R>> {
+        let mut result = HashMap::with_capacity(self.subs_data.len());
+        for (phase_name, subsdata) in self.subs_data.iter_mut() {
+            let phase_result = f(subsdata)?;
+            result.insert(phase_name.clone(), phase_result);
+        }
+        Ok(result)
+    }
+
+    /// Applies an infallible function to all phases and collects results.
+    /// More efficient than the fallible version for operations that cannot fail.
+    fn apply_to_all_phases_infallible<R>(&mut self, f: impl Fn(&mut SubsData) -> R) -> HashMap<Option<String>, R> {
+        self.subs_data.iter_mut()
+            .map(|(phase_name, subsdata)| (phase_name.clone(), f(subsdata)))
+            .collect()
+    }
+}
+
+impl Clone for PhaseOrSolution {
+    fn clone(&self) -> Self {
+        let mut new_dG_fun = HashMap::new();
+        for (phase_or_solution, map_dG_fun) in &self.dG_fun {
+            let mut inner_map = HashMap::new();
+            for (substance, _) in map_dG_fun {
+                let placeholder: Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static> =
+                    Box::new(|_: f64, _: Option<Vec<f64>>, _: Option<f64>| 0.0);
+                inner_map.insert(substance.clone(), placeholder);
+            }
+            new_dG_fun.insert(phase_or_solution.clone(), inner_map);
+        }
+
+        let mut new_dS_fun = HashMap::new();
+        for (phase_or_solution, map_dS_fun) in &self.dS_fun {
+            let mut inner_map = HashMap::new();
+            for (substance, _) in map_dS_fun {
+                let placeholder: Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static> =
+                    Box::new(|_: f64, _: Option<Vec<f64>>, _: Option<f64>| 0.0);
+                inner_map.insert(substance.clone(), placeholder);
+            }
+            new_dS_fun.insert(phase_or_solution.clone(), inner_map);
+        }
+
+        Self {
+            subs_data: self.subs_data.clone(),
+            substance_phase_mapping: self.substance_phase_mapping.clone(),
+            symbolic_vars: self.symbolic_vars.clone(),
+            vec_of_n_vars: self.vec_of_n_vars.clone(),
+            Np_vec: self.Np_vec.clone(),
+            map_of_var_each_substance: self.map_of_var_each_substance.clone(),
+            dG: self.dG.clone(),
+            dG_fun: new_dG_fun,
+            dG_sym: self.dG_sym.clone(),
+            dS: self.dS.clone(),
+            dS_fun: new_dS_fun,
+            dS_sym: self.dS_sym.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for PhaseOrSolution {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PhaseOrSolution")
+            .field("subs_data", &self.subs_data)
+            .field("substance_phase_mapping", &self.substance_phase_mapping)
+            .field("symbolic_vars", &self.symbolic_vars)
+            .field("vec_of_n_vars", &self.vec_of_n_vars)
+            .field("Np_vec", &self.Np_vec)
+            .field("map_of_var_each_substance", &self.map_of_var_each_substance)
+            .field("dG", &self.dG)
+            .field("dG_sym", &self.dG_sym)
+            .field("dS", &self.dS)
+            .field("dS_sym", &self.dS_sym)
+            .finish()
     }
 }
 #[enum_dispatch]
 pub trait ThermodynamicsCalculatorTrait {
+    fn extract_all_thermal_coeffs(&mut self, temperature: f64) -> SubsDataResult<()>;
+    /// extract from libraries all thermal polynomials coefficents
+    fn calculate_therm_map_of_properties(&mut self, temperature: f64) -> SubsDataResult<()>;
+    fn calculate_therm_map_of_sym(&mut self) -> SubsDataResult<()>;
+
+    fn extract_coeffs_if_current_coeffs_not_valid(
+        &mut self,
+        temperature: f64,
+    ) -> SubsDataResult<Vec<String>>;
     /// calculating Gibbs free energy of a given mixure of substances (numerical result at given T, P, concentration)
     fn calcutate_Gibbs_free_energy(
         &mut self,
         T: f64,
         P: f64,
         n: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
-    ) -> Result<HashMap<Option<String>, HashMap<String, f64>>, String>;
+    ) -> SubsDataResult<HashMap<Option<String>, HashMap<String, f64>>>;
     /// calculating Gibbs free energy of a given mixure of substances (symbolic result at given T, P, concentration)
-    fn calculate_Gibbs_sym(
-        &mut self,
-        T: f64,
-        n: HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)>,
-    ) -> Result<HashMap<Option<String>, HashMap<String, Expr>>, String>;
+    fn calculate_Gibbs_sym(&mut self, T: f64) -> SubsDataResult<()>;
     ///  calculating Gibbs free energy of a given mixure of substances (returns a function that calculates Gibbs free energy at given T, P, concentration)
-    fn calculate_Gibbs_fun(
+    fn calculate_Gibbs_fun(&mut self, T: f64, P: f64);
+
+    fn calculate_Gibbs_fun_unmut(
         &mut self,
         T: f64,
         P: f64,
     ) -> HashMap<
         Option<String>,
-        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
+        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
     >;
+     fn set_P_to_sym_in_G_sym(&mut self, P:f64) ;
+
+     fn set_T_to_sym_in_G_sym(&mut self, T:f64) ;
+    //////////////////////////////////////////S - entropy///////////////////////////////////////
     ///  calculating entropy of a given mixure of substances (numerical result at given T, P, concentration)
     fn calculate_S(
         &mut self,
         T: f64,
         P: f64,
         n: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
-    ) -> Result<HashMap<Option<String>, HashMap<String, f64>>, String>;
+    ) -> SubsDataResult<()>;
     ///  calculating entropy of a given mixure of substances (symbolic result at given T, P, concentration)
-    fn calculate_S_sym(
-        &mut self,
-        T: f64,
-        n: HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)>,
-    ) -> Result<HashMap<Option<String>, HashMap<String, Expr>>, String>;
+    fn calculate_S_sym(&mut self, T: f64) -> SubsDataResult<()>;
     ///  calculating entropy of a given mixure of substances (returns a function that calculates entropy at given T, P, concentration)
-    fn calculate_S_fun(
+    fn calculate_S_fun(&mut self, T: f64, P: f64);
+    fn calculate_S_fun_unmut(
         &mut self,
         T: f64,
         P: f64,
@@ -159,47 +398,88 @@ pub trait ThermodynamicsCalculatorTrait {
         pressure_unit: Option<String>,
         molar_masses: HashMap<String, f64>,
         mass_unit: Option<String>,
-    ) -> Result<(), String>;
+    ) -> SubsDataResult<()>;
     /// if not found in the library, go to NIST
-    fn if_not_found_go_NIST(&mut self) -> Result<(), String>;
+    fn if_not_found_go_NIST(&mut self) -> SubsDataResult<()>;
     /// returns a SubstancesContainer
-    fn extract_SubstancesContainer(&mut self) -> Result<SubstancesContainer, String>;
+    fn extract_SubstancesContainer(&mut self) -> SubsDataResult<SubstancesContainer>;
     /// returns all substances in all phases
     fn get_all_substances(&mut self) -> Vec<String>;
     /// calculating element composition matrix and hashmap of molar masses
     fn calculate_elem_composition_and_molar_mass(
         &mut self,
         groups: Option<HashMap<String, HashMap<String, usize>>>,
-    ) -> Result<(DMatrix<f64>, HashMap<String, f64>, Vec<String>), String>;
+    ) -> SubsDataResult<(DMatrix<f64>, HashMap<String, f64>, Vec<String>)>;
     fn indexed_moles_variables(
         &mut self,
-    ) -> Result<
-        (
-            HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)>,
-            Vec<Expr>,
-            Vec<Expr>,
-            HashMap<Option<String>, HashMap<String, Expr>>,
-        ),
-        String,
-    >;
+    ) -> SubsDataResult<(
+        HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)>,
+        Vec<Expr>,
+        Vec<Expr>,
+        HashMap<Option<String>, HashMap<String, Expr>>,
+    )>;
+
+    /////////////////////////////equations for G->min///////////////////////////////////////
     fn calculate_Lagrange_equations_sym(
         &mut self,
         A: DMatrix<f64>,
-        G: HashMap<Option<String>, HashMap<String, Expr>>,
+
         Tm: f64,
-    ) -> Result<Vec<Expr>, String>;
+    ) -> SubsDataResult<Vec<Expr>>;
     fn calculate_Lagrange_equations_fun(
         &mut self,
         A: DMatrix<f64>,
+        dG_fun: HashMap<
+            Option<String>,
+            HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
+        >,
+        Tm: f64,
+    ) -> SubsDataResult<
+        Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
+    >;
+    fn calculate_Lagrange_equations_fun2(
+        &mut self,
+        A: DMatrix<f64>,
+              T: f64,
+        P: f64,
+        Tm: f64,
+    ) -> SubsDataResult<
+        Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
+    >;
+    //////////////////////////////equations for Keq/////////////////////////////////////////
+    /*
+    fn calculate_K_eq_sym(
+        &mut self,
+        stolich_matrix: DMatrix<f64>,
+
+        map_of_indexed_vars: HashMap<String, (Expr, Vec<Expr>)>,
+        G: HashMap<Option<String>, HashMap<String, Expr>>,
+    );
+    fn calculate_K_eq_fun(
+        &mut self,
+        stolich_matrix: DMatrix<f64>,
         G_fun: HashMap<
             Option<String>,
             HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
         >,
-        Tm: f64,
-    ) -> Result<
-        Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
-        String,
-    >;
+    );
+    fn calculate_K_eq_equation_sym(
+        &mut self,
+        stolich_matrix: DMatrix<f64>,
+        subs: Vec<String>,
+        map_of_var_each_substance: HashMap<Option<(String, Expr)>, HashMap<String, Expr>>,
+        G: HashMap<Option<String>, HashMap<String, Expr>>,
+    );
+    fn calculate_K_eq_equation_fun(
+        &mut self,
+        stolich_matrix: DMatrix<f64>,
+        G_fun: HashMap<
+            Option<String>,
+            HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
+        >,
+    );
+    */
+    ////////////////////////////////////////////////////////////////////////////////////////
     fn create_full_map_of_mole_numbers(
         &self,
         non_zero_number_of_moles: HashMap<
@@ -207,101 +487,172 @@ pub trait ThermodynamicsCalculatorTrait {
             (Option<f64>, Option<HashMap<String, f64>>),
         >,
         //  physiscal_nature_of_phase_or_solution: Option<HashMap<String, Phases>>,
-    ) -> Result<
-        (
-            HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
-            HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
-            HashMap<String, f64>,
-        ),
-        String,
-    >;
+    ) -> SubsDataResult<(
+        HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
+        HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
+        HashMap<String, f64>,
+    )>;
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /// Implementation of the ThermodynamicsCalculatorTrait for PhaseOrSolution (multiole phases case)
 impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
+    fn extract_all_thermal_coeffs(&mut self, temperature: f64) -> SubsDataResult<()> {
+        self.apply_to_all_phases(|subsdata| subsdata.extract_all_thermal_coeffs(temperature))?;
+        Ok(())
+    }
+    
+    fn calculate_therm_map_of_properties(&mut self, temperature: f64) -> SubsDataResult<()> {
+        self.apply_to_all_phases(|subsdata| subsdata.calculate_therm_map_of_properties(temperature))?;
+        Ok(())
+    }
+    
+    fn calculate_therm_map_of_sym(&mut self) -> SubsDataResult<()> {
+        self.apply_to_all_phases(|subsdata| subsdata.calculate_therm_map_of_sym())?;
+        Ok(())
+    }
+    fn extract_coeffs_if_current_coeffs_not_valid(
+        &mut self,
+        temperature: f64,
+    ) -> SubsDataResult<Vec<String>> {
+        let mut results = Vec::new();
+        for (_, subsdata) in self.subs_data.iter_mut() {
+            let result =
+                subsdata.extract_coeffs_if_current_coeffs_not_valid_for_all_subs(temperature)?;
+            results.extend(result);
+        }
+        Ok(results)
+    }
     fn calcutate_Gibbs_free_energy(
         &mut self,
         T: f64,
         P: f64,
         n: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
-    ) -> Result<HashMap<Option<String>, HashMap<String, f64>>, String> {
+    ) -> SubsDataResult<HashMap<Option<String>, HashMap<String, f64>>> {
         let mut map_to_insert = HashMap::new();
         for (phase_name, subsdata) in self.subs_data.iter_mut() {
-            let n_Np = n.get(&phase_name).unwrap().clone();
+            let n_Np = n
+                .get(&phase_name)
+                .ok_or_else(|| SubsDataError::MissingData {
+                    field: "phase data".to_string(),
+                    substance: phase_name.clone().unwrap_or("None".to_string()),
+                })?
+                .clone();
             let Np = n_Np.0;
             let n = n_Np.1;
-            let map_to_insert_phase = calc_dG_for_one_phase(P, subsdata, T, n.clone(), Np);
+            let map_to_insert_phase = subsdata.calc_dG_for_one_phase(P, T, n.clone(), Np);
             map_to_insert.insert(phase_name.clone(), map_to_insert_phase);
         }
-        let dG = map_to_insert;
-        Ok(dG)
+        self.dG = map_to_insert.clone();
+        Ok(map_to_insert)
     }
-    fn calculate_Gibbs_sym(
-        &mut self,
-        T: f64,
-        n: HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)>,
-    ) -> Result<HashMap<Option<String>, HashMap<String, Expr>>, String> {
+    fn calculate_Gibbs_sym(&mut self, T: f64) -> SubsDataResult<()> {
+        let n = self.symbolic_vars.clone();
         let mut map_to_insert = HashMap::new();
         for (phase_name, subsdata) in self.subs_data.iter_mut() {
-            let n_Np = n.get(&phase_name).unwrap().clone();
+            let n_Np = n
+                .get(&phase_name)
+                .ok_or_else(|| SubsDataError::MissingData {
+                    field: "phase data".to_string(),
+                    substance: phase_name.clone().unwrap_or("None".to_string()),
+                })?
+                .clone();
             let Np = n_Np.0;
             let n = n_Np.1;
             let map_to_insert_phase =
-                calculate_Gibbs_sym_one_phase(subsdata, T, n.clone(), Np.clone());
+                subsdata.calculate_Gibbs_sym_one_phase(T, n.clone(), Np.clone());
             map_to_insert.insert(phase_name.clone(), map_to_insert_phase);
         }
-        Ok(map_to_insert)
+        self.dG_sym = map_to_insert;
+        Ok(())
     }
-    fn calculate_Gibbs_fun(
+
+     fn set_P_to_sym_in_G_sym(&mut self, P:f64) {
+         let dG_sym = &mut self.dG_sym;
+        for (_phase_or_solution_name, sym_fun) in dG_sym.iter_mut() {
+            for (_, sym_fun) in sym_fun.iter_mut() {
+                *sym_fun = sym_fun.set_variable("P", P).simplify()
+            }
+        }
+    }
+
+     fn set_T_to_sym_in_G_sym(&mut self, T:f64) {
+              let dG_sym = &mut self.dG_sym;
+        for (_phase_or_solution_name, sym_fun) in dG_sym.iter_mut() {
+            for (_, sym_fun) in sym_fun.iter_mut() {
+                *sym_fun = sym_fun.set_variable("T", T).simplify()
+            }
+        }
+    }
+
+    fn calculate_Gibbs_fun(&mut self, T: f64, P: f64) {
+        self.dG_fun = self.apply_to_all_phases_infallible(|subsdata| {
+            subsdata.calculate_Gibbs_fun_one_phase(P, T)
+        });
+    }
+
+    fn calculate_Gibbs_fun_unmut(
         &mut self,
         T: f64,
         P: f64,
     ) -> HashMap<
         Option<String>,
-        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
+        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
     > {
-        let mut map_to_insert = HashMap::new();
-        for (phase_name, subsdata) in self.subs_data.iter_mut() {
-            let map_to_insert_phase = calculate_Gibbs_fun_one_phase(subsdata, P, T);
-            map_to_insert.insert(phase_name.clone(), map_to_insert_phase);
-        }
-        map_to_insert
+        self.apply_to_all_phases_infallible(|subsdata| {
+            subsdata.calculate_Gibbs_fun_one_phase(P, T)
+        })
     }
     fn calculate_S(
         &mut self,
         T: f64,
         P: f64,
-
         n: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
-    ) -> Result<HashMap<Option<String>, HashMap<String, f64>>, String> {
+    ) -> SubsDataResult<()> {
         let mut map_to_insert = HashMap::new();
         for (phase_name, subsdata) in self.subs_data.iter_mut() {
-            let n_Np = n.get(&phase_name).unwrap().clone();
+            let n_Np = n
+                .get(&phase_name)
+                .ok_or_else(|| SubsDataError::MissingData {
+                    field: "phase data".to_string(),
+                    substance: phase_name.clone().unwrap_or("None".to_string()),
+                })?
+                .clone();
             let Np = n_Np.0;
             let n = n_Np.1;
-            let map_to_insert_phase = calculate_S_for_one_phase(P, subsdata, T, n.clone(), Np);
+            let map_to_insert_phase = subsdata.calculate_S_for_one_phase(P, T, n.clone(), Np);
             map_to_insert.insert(phase_name.clone(), map_to_insert_phase);
         }
-        let dG = map_to_insert;
-        Ok(dG)
+        self.dS = map_to_insert.clone();
+        Ok(())
     }
-    fn calculate_S_sym(
-        &mut self,
-        T: f64,
-        n: HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)>,
-    ) -> Result<HashMap<Option<String>, HashMap<String, Expr>>, String> {
+    fn calculate_S_sym(&mut self, T: f64) -> SubsDataResult<()> {
+        let n = self.symbolic_vars.clone();
         let mut map_to_insert = HashMap::new();
         for (phase_name, subsdata) in self.subs_data.iter_mut() {
-            let n_Np = n.get(&phase_name).unwrap().clone();
+            let n_Np = n
+                .get(&phase_name)
+                .ok_or_else(|| SubsDataError::MissingData {
+                    field: "phase data".to_string(),
+                    substance: phase_name.clone().unwrap_or("None".to_string()),
+                })?
+                .clone();
             let Np = n_Np.0;
             let n = n_Np.1;
             let map_to_insert_phase =
-                calculate_S_sym_for_one_phase(subsdata, T, n.clone(), Np.clone());
+                subsdata.calculate_S_sym_for_one_phase(T, n.clone(), Np.clone());
             map_to_insert.insert(phase_name.clone(), map_to_insert_phase);
         }
-        Ok(map_to_insert)
+        self.dS_sym = map_to_insert.clone();
+        Ok(())
     }
-    fn calculate_S_fun(
+
+    fn calculate_S_fun(&mut self, T: f64, P: f64) {
+        self.dS_fun = self.apply_to_all_phases_infallible(|subsdata| {
+            subsdata.calculate_S_fun_for_one_phase(P, T)
+        });
+    }
+    
+    fn calculate_S_fun_unmut(
         &mut self,
         T: f64,
         P: f64,
@@ -309,12 +660,9 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         Option<String>,
         HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
     > {
-        let mut map_to_insert = HashMap::new();
-        for (phase_name, subsdata) in self.subs_data.iter_mut() {
-            let map_to_insert_phase = calculate_S_fun_for_one_phase(subsdata, P, T);
-            map_to_insert.insert(phase_name.clone(), map_to_insert_phase);
-        }
-        map_to_insert
+        self.apply_to_all_phases_infallible(|subsdata| {
+            subsdata.calculate_S_fun_for_one_phase(P, T)
+        })
     }
     fn configure_system_properties(
         &mut self,
@@ -322,25 +670,30 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         pressure_unit: Option<String>,
         molar_masses: HashMap<String, f64>,
         mass_unit: Option<String>,
-    ) -> Result<(), String> {
-        // Set pressure and molar masses for each phase
-        for (_, subs_data) in &mut self.subs_data {
+    ) -> SubsDataResult<()> {
+        self.apply_to_all_phases(|subs_data| {
             subs_data.set_P(pressure, pressure_unit.clone());
             subs_data.set_M(molar_masses.clone(), mass_unit.clone());
-        }
+            Ok(())
+        })?;
         Ok(())
     }
-    fn if_not_found_go_NIST(&mut self) -> Result<(), String> {
-        for (_, subs_data) in &mut self.subs_data {
-            subs_data.if_not_found_go_NIST()?;
-        }
+    
+    fn if_not_found_go_NIST(&mut self) -> SubsDataResult<()> {
+        self.apply_to_all_phases(|subs_data| subs_data.if_not_found_go_NIST())?;
         Ok(())
     }
-    fn extract_SubstancesContainer(&mut self) -> Result<SubstancesContainer, String> {
+    fn extract_SubstancesContainer(&mut self) -> SubsDataResult<SubstancesContainer> {
         let mut map_of_subs = HashMap::new();
         for (phase_name, subs_data) in &self.subs_data {
             let substances = subs_data.substances.clone();
-            map_of_subs.insert(phase_name.clone().unwrap(), substances);
+            let phase_key = phase_name
+                .clone()
+                .ok_or_else(|| SubsDataError::MissingData {
+                    field: "phase name".to_string(),
+                    substance: "unknown".to_string(),
+                })?;
+            map_of_subs.insert(phase_key, substances);
         }
         Ok(SubstancesContainer::MultiPhase(map_of_subs))
     }
@@ -357,7 +710,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
     fn calculate_elem_composition_and_molar_mass(
         &mut self,
         groups: Option<HashMap<String, HashMap<String, usize>>>,
-    ) -> Result<(DMatrix<f64>, HashMap<String, f64>, Vec<String>), String> {
+    ) -> SubsDataResult<(DMatrix<f64>, HashMap<String, f64>, Vec<String>)> {
         let mut hashmap_of_compositions: HashMap<String, HashMap<String, f64>> = HashMap::new();
         let mut hashset_of_elems_: HashSet<String> = HashSet::new();
         let mut hasmap_of_molar_mass_: HashMap<String, f64> = HashMap::new();
@@ -365,7 +718,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
             let substances = &subsdata.substances.to_owned();
             let (hasmap_of_molar_mass, vec_of_compositions, hashset_of_elems) =
                 SubsData::calculate_elem_composition_and_molar_mass_local(subsdata, groups.clone())
-                    .unwrap();
+                    .map_err(|e| SubsDataError::MatrixOperationFailed(e.to_string()))?;
             // forming hashmap of compositions of substancess
             let map: HashMap<String, HashMap<String, f64>> = substances
                 .iter()
@@ -411,7 +764,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
             Vec<Expr>,
             HashMap<Option<String>, HashMap<String, Expr>>,
         ),
-        String,
+        SubsDataError,
     > {
         let mut vec_of_n_vars: Vec<Expr> = Vec::new();
         let mut Np_vec = Vec::new();
@@ -434,6 +787,10 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
             }
             map_of_indexed_vars.insert(phase_name.clone(), (Some(Np), Some(v)));
         }
+        self.symbolic_vars = map_of_indexed_vars.clone();
+        self.vec_of_n_vars = self.vec_of_n_vars.clone();
+        self.Np_vec = Np_vec.clone();
+        self.map_of_var_each_substance = map_of_var_each_substance.clone();
         Ok((
             map_of_indexed_vars,
             vec_of_n_vars,
@@ -441,12 +798,14 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
             map_of_var_each_substance,
         ))
     }
+    /////////////////////////////equations for G->min///////////////////////////////////////
     fn calculate_Lagrange_equations_sym(
         &mut self,
-        A: DMatrix<f64>, // hasmap {phase or solution, {substance, expression}}
-        G: HashMap<Option<String>, HashMap<String, Expr>>,
+        A: DMatrix<f64>,
+
         Tm: f64,
-    ) -> Result<Vec<Expr>, String> {
+    ) -> SubsDataResult<Vec<Expr>> {
+        let G = self.dG_sym.clone();
         let A = A.clone().transpose(); // now rows are elements and columns are substances
         let n_elements = A.nrows();
 
@@ -457,10 +816,14 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         let G_len: usize = G.values().map(|inner_map| inner_map.len()).sum();
         if n_substances != G_len {
             println!("A {} \n  G = {:?} \n, Lambda = {:?}", A, G, Lambda);
-            return Err(format!(
-                "The number of substances ({}) does not match the number of mole variables ({})",
-                n_substances, G_len
-            ));
+            return Err(SubsDataError::CalculationFailed {
+                substance: "multiple".to_string(),
+                operation: "Lagrange equations".to_string(),
+                reason: format!(
+                    "The number of substances ({}) does not match the number of mole variables ({})",
+                    n_substances, G_len
+                ),
+            });
         }
         let substances = self.get_all_substances();
         let mut vec_of_eqs: Vec<Expr> = Vec::new();
@@ -483,7 +846,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
                         .fold(Expr::Const(0.0), |acc, x| acc + x)
                         .simplify();
                     let eq_i = sum_by_elemnts + (G_i.clone() / (R_sym * Tm)).simplify();
-                    vec_of_eqs.push(eq_i);
+                    vec_of_eqs.push(eq_i.simplify());
                 }
             }
         }
@@ -494,15 +857,15 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         &mut self,
         A: DMatrix<f64>,
         G_fun: HashMap<
-            Option<String>, //T, number of moles of each substance, total number of moles in phase
-            HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
+            Option<String>,
+            HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
         >,
+
         Tm: f64,
-    ) -> Result<
+    ) -> SubsDataResult<
         Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
-        String,
     > {
-        let substances = self.get_all_substances();
+        let substances = self.clone().get_all_substances();
         let f = move |T: f64, n: Option<Vec<f64>>, Np: Option<f64>, Lambda: Vec<f64>| -> Vec<f64> {
             let A = A.transpose(); // now rows are elements and columns are substances
 
@@ -529,6 +892,122 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         };
         Ok(Box::new(f))
     }
+
+        fn calculate_Lagrange_equations_fun2(
+        &mut self,
+        A: DMatrix<f64>,
+        T: f64,
+        P: f64,
+        Tm: f64,
+    ) -> SubsDataResult<
+        Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
+    >{
+
+            let dG_fun = self.calculate_Gibbs_fun_unmut(T, P);
+             let Lagrange_equations: Box< dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static> = self
+            .calculate_Lagrange_equations_fun(A, dG_fun, Tm)
+            .unwrap();
+        Ok(Lagrange_equations)
+    }
+    //////////////////////////////equations for Keq///////////////////////////////////////
+    /*
+    fn calculate_K_eq_sym(
+        &mut self,
+        stolich_matrix: DMatrix<f64>,
+
+        map_of_var_each_substance: HashMap<Option<String>, HashMap<String, Expr>>,
+    ) {
+        let r = stolich_matrix.ncols();
+        let s = stolich_matrix.nrows();
+        let all_substances = self.get_all_substances();
+        assert_eq!(all_substances.len(), s);
+        let T = Expr::Var("T".to_string());
+
+        for (phase, subdata) in self.subs_data{
+            let substance = subdata.substances;
+            let subs_data = subdata.calculate_Gibbs_sym_one_phase(298.0, None, None);
+
+        }
+
+        let mut K_vec: Vec<Expr> = Vec::with_capacity(r);
+        for j in 0..r {
+            let mut dG_reaction_j = Expr::Const(0.0);
+            for (i, subs_i) in all_substances.iter().enumerate() {
+
+                let dG_i = subs_data.get(subs_i).unwrap().clone();
+                let nu_ij = stolich_matrix[(i, j)];
+                dG_reaction_j += Expr::Const(nu_ij) * dG_i;
+            }
+            let ln_K = -dG_reaction_j / (R_sym * T.clone());
+            K_vec.push(ln_K);
+        }
+    }
+
+    fn calculate_K_eq_fun(
+        &mut self,
+        stolich_matrix: DMatrix<f64>,
+
+        G_fun: HashMap<
+            Option<String>,
+            HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
+        >,
+    ) {
+    }
+    fn calculate_K_eq_equation_sym(
+        &mut self,
+        stolich_matrix: DMatrix<f64>,
+        subs: Vec<String>,
+        map_of_var_each_substance: HashMap<Option<String>, HashMap<String, Expr>>,
+        G: HashMap<Option<String>, HashMap<String, Expr>>,
+    ) {
+        let m = subs.len();
+        let r = stolich_matrix.ncols();
+        let mut f = vec![0.0; r];
+
+        // for each reaction k
+        for k in 0..r {
+            let mut sum_ln_n = 0.0;
+            let mut dg0 = 0.0;
+
+            for i in 0..m {
+                sum_ln_n += stolich_matrix[(i, k)] * n[i].ln();
+                dg0 += reactions[(i, k)] * gibbs[i](temperature);
+            }
+
+            let mut sum_ln_n_phase = Expr::Const(0.0);
+            let mut sum_phi = 0.0;
+            for (phase_name, subs_data) in &self.subs_data {
+                let phase_name = phase_name.unwrap();
+                let (Npj, vec_of_nij) = map_of_indexed_vars.get(&phase_name).unwrap();
+                let dNk = delta_n.get(&phase_name)[r];
+                if dNk != 0.0 {
+                    let G_vec = subs_data.calculate_Gibbs_sym_one_phase(T, None, None);
+                    sum_ln_n_phase += Expr::Const(dNk) * Np.ln();
+                }
+            }
+            for j in 0..phases.len() {
+                let dnk = delta_n[k][j];
+                if dnk != 0.0 {
+                    sum_ln_n_phase += dnk * n_phase[j].ln();
+                }
+            }
+
+            let ln_k = -dg0 / (r_gas * temperature);
+
+            f[k] = sum_ln_n - sum_ln_n_phase + sum_phi - ln_k;
+        }
+    }
+    fn calculate_K_eq_equation_fun(
+        &mut self,
+        stolich_matrix: DMatrix<f64>,
+        G_fun: HashMap<
+            Option<String>,
+            HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
+        >,
+    ) {
+    }
+    */
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////
     /// This function, create_full_map_of_mole_numbers, takes a hashmap of non-zero mole numbers and returns a tuple of three hashmaps.
     /// The first hashmap is the original input with missing substances inserted with a value of 0.0.
     /// The second hashmap contains the same information as the first, but with the inner hashmap values converted to a vector of floats.
@@ -540,14 +1019,11 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
             (Option<f64>, Option<HashMap<String, f64>>),
         >,
         //  physiscal_nature_of_phase_or_solution: Option<HashMap<String, Phases>>,
-    ) -> Result<
-        (
-            HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
-            HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
-            HashMap<String, f64>,
-        ),
-        String,
-    > {
+    ) -> SubsDataResult<(
+        HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
+        HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
+        HashMap<String, f64>,
+    )> {
         //  hashmap  HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>, we iterate through it and when some string from vector Vec<String> is not
         // found as the key in the inner map it is inserted in the inner map with value 0.0
         let mut full_map_of_mole_numbers = non_zero_number_of_moles.clone();
@@ -564,7 +1040,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
                 //  println!("phase: {}", phase.clone().is_none());
                 //  println!("subdata: {:?}", subs_cloned);
                 let subsdata = subs_cloned.get(phase).unwrap();
-                let subs = subsdata.clone().get_all_substances();
+                let subs = subsdata.clone().substances;
                 // For each required key, insert with 0.0 if not present
                 for key in &subs {
                     inner_map.entry(key.clone()).or_insert(0.0);
@@ -589,294 +1065,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         ))
     }
 }
-/// Implementation of the ThermodynamicsCalculatorTrait for SubsData (single phase case)
-impl ThermodynamicsCalculatorTrait for SubsData {
-    fn calcutate_Gibbs_free_energy(
-        &mut self,
-        T: f64,
-        P: f64,
-        n: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
-    ) -> Result<HashMap<Option<String>, HashMap<String, f64>>, String> {
-        let mut map_to_insert = HashMap::new();
-        let n_Np = n.get(&None).unwrap().clone();
-        let Np = n_Np.0;
-        let n = n_Np.1;
-        let map_to_insert_phase = calc_dG_for_one_phase(P, self, T, n, Np);
-        map_to_insert.insert(None, map_to_insert_phase);
-        let dG = map_to_insert;
-        Ok(dG)
-    }
-    fn calculate_Gibbs_sym(
-        &mut self,
-        T: f64,
-        n: HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)>,
-    ) -> Result<HashMap<Option<String>, HashMap<String, Expr>>, String> {
-        let mut map_to_insert = HashMap::new();
-        let n_Np = n.get(&None).unwrap().clone();
-        let Np = n_Np.0;
-        let n = n_Np.1;
-        let map_to_insert_phase = calculate_Gibbs_sym_one_phase(self, T, n, Np);
-        map_to_insert.insert(None, map_to_insert_phase);
-        Ok(map_to_insert)
-    }
-    fn calculate_Gibbs_fun(
-        &mut self,
-        T: f64,
-        P: f64,
-    ) -> HashMap<
-        Option<String>,
-        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
-    > {
-        let mut map_to_insert = HashMap::new();
-        let map_to_insert_phase = calculate_Gibbs_fun_one_phase(self, P, T);
-        map_to_insert.insert(None, map_to_insert_phase);
-        map_to_insert
-    }
-    fn calculate_S(
-        &mut self,
-        T: f64,
-        P: f64,
-        n: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
-    ) -> Result<HashMap<Option<String>, HashMap<String, f64>>, String> {
-        let n_Np = n.get(&None).unwrap().clone();
-        let Np = n_Np.0;
-        let n = n_Np.1;
-        let mut map_to_insert = HashMap::new();
-        let map_to_insert_phase = calculate_S_for_one_phase(P, self, T, n, Np);
-        map_to_insert.insert(None, map_to_insert_phase);
-        let dG = map_to_insert;
-        Ok(dG)
-    }
-    fn calculate_S_sym(
-        &mut self,
-        T: f64,
-        n: HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)>,
-    ) -> Result<HashMap<Option<String>, HashMap<String, Expr>>, String> {
-        let mut map_to_insert = HashMap::new();
-        let n_Np = n.get(&None).unwrap().clone();
-        let Np = n_Np.0;
-        let n = n_Np.1;
-        let map_to_insert_phase = calculate_S_sym_for_one_phase(self, T, n, Np);
-        map_to_insert.insert(None, map_to_insert_phase);
-        Ok(map_to_insert)
-    }
-    fn calculate_S_fun(
-        &mut self,
-        T: f64,
-        P: f64,
-    ) -> HashMap<
-        Option<String>,
-        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
-    > {
-        let mut map_to_insert = HashMap::new();
-        let map_to_insert_phase = calculate_S_fun_for_one_phase(self, P, T);
-        map_to_insert.insert(None, map_to_insert_phase);
-        map_to_insert
-    }
-    fn configure_system_properties(
-        &mut self,
-        pressure: f64,
-        pressure_unit: Option<String>,
-        molar_masses: HashMap<String, f64>,
-        mass_unit: Option<String>,
-    ) -> Result<(), String> {
-        // Set pressure and molar masses for each phase
-        self.set_P(pressure, pressure_unit.clone());
-        self.set_M(molar_masses.clone(), mass_unit.clone());
-        Ok(())
-    }
-    fn if_not_found_go_NIST(&mut self) -> Result<(), String> {
-        self.if_not_found_go_NIST()?;
-        Ok(())
-    }
-    fn extract_SubstancesContainer(&mut self) -> Result<SubstancesContainer, String> {
-        let substances = self.substances.clone();
-        Ok(SubstancesContainer::SinglePhase(substances))
-    }
-    fn get_all_substances(&mut self) -> Vec<String> {
-        self.substances.clone()
-    }
-    fn calculate_elem_composition_and_molar_mass(
-        &mut self,
-        groups: Option<HashMap<String, HashMap<String, usize>>>,
-    ) -> Result<(DMatrix<f64>, HashMap<String, f64>, Vec<String>), String> {
-        self.calculate_elem_composition_and_molar_mass(groups)?;
-        let elem_composition_matrix = self.elem_composition_matrix.clone().unwrap();
 
-        let unique_elements = self.unique_elements.clone();
-        let hashmap_of_molar_masses = self.hasmap_of_molar_mass.clone();
-        Ok((
-            elem_composition_matrix,
-            hashmap_of_molar_masses,
-            unique_elements,
-        ))
-    }
-    fn indexed_moles_variables(
-        &mut self,
-    ) -> Result<
-        (
-            HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)>,
-            Vec<Expr>,
-            Vec<Expr>,
-            HashMap<Option<String>, HashMap<String, Expr>>,
-        ),
-        String,
-    > {
-        // create a vector of indexed variables for the number of substances
-        let n = Expr::IndexedVars(self.substances.len(), "N").0;
-        // only one variable for the total number of moles
-        let Np = Expr::Var("Np".to_string());
-        let mut map_of_var_each_substance: HashMap<Option<String>, HashMap<String, Expr>> =
-            HashMap::new();
-        map_of_var_each_substance.insert(None, HashMap::new());
-        for i in 0..self.substances.len() {
-            let var = Expr::Var(format!("N{}", i));
-            map_of_var_each_substance
-                .get_mut(&None)
-                .unwrap()
-                .insert(self.substances[i].clone(), var);
-        }
-        let mut map_of_indexed_vars: HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)> =
-            HashMap::new();
-        map_of_indexed_vars.insert(None, (Some(Np.clone()), Some(n.clone())));
-        Ok((map_of_indexed_vars, n, vec![Np], map_of_var_each_substance))
-    }
-    fn calculate_Lagrange_equations_sym(
-        &mut self,
-        A: DMatrix<f64>,
-        G: HashMap<Option<String>, HashMap<String, Expr>>,
-        Tm: f64,
-    ) -> Result<Vec<Expr>, String> {
-        let A = A.clone().transpose(); // now rows are elements and columns are substances
-        let n_elements = A.nrows();
-        // create a vector of Lagrange multipliers for each element
-        let Lambda = Expr::IndexedVars(n_elements, "Lambda").0;
-        let n_substances = A.ncols();
-        let G = G.get(&None).unwrap().clone();
-        if n_substances != G.len() {
-            return Err(format!(
-                "The number of substances ({}) does not match the number of mole variables ({})",
-                n_substances,
-                G.len()
-            ));
-        }
-        let subs = self.substances.clone();
-        let mut vec_of_eqs: Vec<Expr> = Vec::new();
-        for i in 0..n_substances {
-            let Tm = Expr::Const(Tm);
-            let subst_i = subs[i].clone();
-            let G_i = G.get(&subst_i).unwrap().clone();
-            // get vector of numbers of elements corresponding to the i-th substance
-            let col_of_subs_i = A
-                .column(i)
-                .iter()
-                .map(|&v| Expr::Const(v))
-                .collect::<Vec<Expr>>();
-            // sum over all elements of the i-th substance multiplied by the corresponding Lagrange multiplier
-            let sum_by_elemnts: Expr = col_of_subs_i
-                .iter()
-                .zip(Lambda.iter())
-                .map(|(aij, Lambda_j)| aij.clone() * Lambda_j.clone())
-                .fold(Expr::Const(0.0), |acc, x| acc + x)
-                .simplify();
-            let eq_i = sum_by_elemnts + (G_i.clone() / (R_sym * Tm)).simplify();
-            vec_of_eqs.push(eq_i.simplify());
-        }
-        Ok(vec_of_eqs)
-    }
-
-    fn calculate_Lagrange_equations_fun(
-        &mut self,
-        A: DMatrix<f64>,
-        G_fun: HashMap<
-            Option<String>,
-            HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
-        >,
-        Tm: f64,
-    ) -> Result<
-        Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
-        String,
-    > {
-        let subs = self.substances.clone();
-        let fun =
-            move |T: f64, n: Option<Vec<f64>>, Np: Option<f64>, Lambda: Vec<f64>| -> Vec<f64> {
-                let A = A.transpose(); // now rows are elements and columns are substances
-
-                let n_substances = A.ncols();
-                let G = G_fun.get(&None).unwrap();
-                if n_substances != G.len() {
-                    panic!("The number of substances does not match the number of mole variables");
-                }
-
-                let mut vec_of_eqs: Vec<f64> = Vec::new();
-                for i in 0..n_substances {
-                    let subst_i = subs[i].clone();
-                    let G_i = G.get(&subst_i).unwrap();
-                    // get vector of numbers of elements corresponding to the i-th substance
-                    let col_of_subs_i = A.column(i).iter().map(|&v| v).collect::<Vec<f64>>();
-                    // sum over all elements of the i-th substance multiplied by the corresponding Lagrange multiplier
-                    let sum_by_elemnts: f64 = col_of_subs_i
-                        .iter()
-                        .zip(Lambda.iter())
-                        .map(|(aij, Lambda_j)| aij * Lambda_j)
-                        .fold(0.0, |acc, x| acc + x);
-                    let eq_i = sum_by_elemnts + G_i(T, n.clone(), Np.clone()) / (R * Tm);
-                    vec_of_eqs.push(eq_i);
-                }
-                vec_of_eqs
-            };
-        Ok(Box::new(fun))
-    }
-
-    fn create_full_map_of_mole_numbers(
-        &self,
-        non_zero_number_of_moles: HashMap<
-            Option<String>,
-            (Option<f64>, Option<HashMap<String, f64>>),
-        >,
-        // physiscal_nature_of_phase_or_solution: Option<HashMap<String, Phases>>,
-    ) -> Result<
-        (
-            HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
-            HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
-            HashMap<String, f64>,
-        ),
-        String,
-    > {
-        let mut full_map_of_mole_numbers = non_zero_number_of_moles.clone();
-        let mut map_of_mole_num_vecs: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)> =
-            HashMap::new();
-
-        let mut initial_map_of_mole_numbers: HashMap<String, f64> = HashMap::new();
-        let subs = self.substances.clone();
-
-        for (_, value) in full_map_of_mole_numbers.iter_mut() {
-            if let (Np, Some(inner_map)) = (value.0.clone(), &mut value.1) {
-                // For each required key, insert with 0.0 if not present
-                for key in &subs {
-                    inner_map.entry(key.clone()).or_insert(0.0);
-                }
-                let inner_map = inner_map.clone();
-                let vec_of_mole_nums = inner_map.values().cloned().collect::<Vec<f64>>();
-                map_of_mole_num_vecs.insert(None, (Np, Some(vec_of_mole_nums)));
-
-                // making initial map of mole numbers
-                for (keys, values) in inner_map.iter().clone() {
-                    *initial_map_of_mole_numbers
-                        .entry(keys.clone())
-                        .or_insert(0.0) += values;
-                }
-            }
-        }
-        //  println!("full_map_of_mole_numbers,: {:#?},\n map_of_mole_num_vecs {:?}, \n initial_map_of_mole_numbers {:?} ",full_map_of_mole_numbers, map_of_mole_num_vecs, initial_map_of_mole_numbers); panic!();
-
-        Ok((
-            full_map_of_mole_numbers,
-            map_of_mole_num_vecs,
-            initial_map_of_mole_numbers,
-        ))
-    }
-}
 ////////////////////FACTORY METHODS////////////////////
 pub struct SubstanceSystemFactory;
 //use crate::Thermodynamics::ChemEquilibrium::ClassicalThermodynamics::Thermodynamics;
@@ -922,16 +1111,18 @@ impl SubstanceSystemFactory {
                 }
 
                 // Search for substance data
-                subs_data.search_substances();
+                let _ = subs_data.search_substances();
                 // if not found go to NIST
                 if search_in_NIST {
-                    subs_data.if_not_found_go_NIST()?;
+                    let _ = subs_data.if_not_found_go_NIST();
                 }
 
                 // Extract thermal coefficients at standard temperature
                 //  let _ = subs_data.extract_all_thermal_coeffs(298.15);
-
-                Ok(CustomSubstance::OnePhase(subs_data))
+                let _ = subs_data.parse_all_thermal_coeffs();
+                let mut op = OnePhase::new();
+                op.subs_data = subs_data;
+                Ok(CustomSubstance::OnePhase(op))
             }
             SubstancesContainer::MultiPhase(phase_substances) => {
                 // Create a multi-phase system
@@ -978,10 +1169,10 @@ impl SubstanceSystemFactory {
                             .set_explicis_searh_instructions(explicit_search_instructions.clone());
                     };
                     // Search for substance data
-                    phase_data.search_substances();
+                    let _ = phase_data.search_substances();
                     // if not found go to NIST
                     if search_in_NIST {
-                        phase_data.if_not_found_go_NIST()?;
+                        let _ = phase_data.if_not_found_go_NIST();
                     }
                     // Extract thermal coefficients at standard temperature
                     //  let _ = phase_data.extract_all_thermal_coeffs(298.15);
@@ -989,7 +1180,7 @@ impl SubstanceSystemFactory {
                     // Add to phase collection
 
                     //  println!("creating phase or solution with phase_name: {} and phase_data {:?}", phase_name, phase_data.clone());
-
+                    let _ = phase_data.parse_all_thermal_coeffs();
                     phase_or_solution
                         .subs_data
                         .insert(Some(phase_name), phase_data);

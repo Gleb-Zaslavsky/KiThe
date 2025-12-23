@@ -22,11 +22,13 @@ impl Thermodynamics {
 
         let sd = &self.subdata;
         match sd {
-            CustomSubstance::OnePhase(sd) => {
+            CustomSubstance::OnePhase(onepase) => {
+                let sd = &onepase.subs_data;
                 // Add the header row
                 table.add_row(row!["substance", "Cp", "dH", "dS", "dG",]);
                 // Add the data rows
-                for (substance, data) in self.dG.get(&None).unwrap() {
+                let binding = self.subdata.get_dG();
+                for (substance, data) in binding.get(&None).unwrap() {
                     let map_property_values =
                         sd.therm_map_of_properties_values.get(substance).unwrap();
                     let Cp = map_property_values.get(&DataType::Cp).unwrap().unwrap();
@@ -44,14 +46,9 @@ impl Thermodynamics {
                 );
                 let mut table2 = Table::new();
                 table2.add_row(row!["substance", "dG_sym",]);
+                let binding = self.subdata.get_dG_sym();
                 for substance in &subs_container {
-                    let dG_sym = self
-                        .dG_sym
-                        .get(&None)
-                        .unwrap()
-                        .get(substance)
-                        .unwrap()
-                        .clone();
+                    let dG_sym = binding.get(&None).unwrap().get(substance).unwrap().clone();
                     table2.add_row(row![substance, dG_sym,]);
                 }
                 table2.printstd();
@@ -66,7 +63,8 @@ impl Thermodynamics {
                         // Add the header row
                         table.add_row(row![phase_name]);
                         table.add_row(row!["substance", "Cp", "dH", "dS", "dG",]);
-                        for (substance, data) in self.dG.get(&Some(phase_name.clone())).unwrap() {
+                        let binding = self.subdata.get_dG();
+                        for (substance, data) in binding.get(&Some(phase_name.clone())).unwrap() {
                             let map_property_values =
                                 sd.therm_map_of_properties_values.get(substance).unwrap();
                             let Cp = map_property_values.get(&DataType::Cp).unwrap().unwrap();
@@ -83,9 +81,9 @@ impl Thermodynamics {
                         );
                         let mut table2 = Table::new();
                         table2.add_row(row!["substance", "dG_sym",]);
+                        let binding = self.subdata.get_dG_sym();
                         for substance in &subs_container {
-                            let dG_sym = self
-                                .dG_sym
+                            let dG_sym = binding
                                 .get(&Some(phase_name.clone()))
                                 .unwrap()
                                 .get(substance)
@@ -153,7 +151,7 @@ impl Thermodynamics {
         for (i, sub) in subs.iter().enumerate() {
             let mut row = vec![Cell::new(sub)];
             let eq_i = self.solver.eq_mu[i].clone();
-            row.push(Cell::new(&format!("{}", eq_i)));
+            row.push(Cell::new(&format!("{}", eq_i.pretty_print())));
             elem_table.add_row(Row::new(row));
         }
         elem_table.printstd();
@@ -217,11 +215,35 @@ impl Thermodynamics {
         elem_table.printstd();
         println!("_____________________________________________________________");
     }
+
+    pub fn pretty_print_bounds(&self) {
+        if let Some(unknowns) = self.solver.bounds.clone() {
+            println!("___________________UNKNOWNS BOUND________________________");
+            let mut elem_table = Table::new();
+            if unknowns.len() == 0 {
+                return;
+            }
+            // let substances = &self.vec_of_subs;
+            for (i, (unlnown_i, (low, up))) in unknowns.iter().enumerate() {
+                let row = vec![
+                    Cell::new(&i.to_string()),
+                    //Cell::new(substances[i].as_str()),
+                    Cell::new(unlnown_i),
+                    Cell::new(format!("{}", low).as_str()),
+                    Cell::new(format!("{}", up).as_str()),
+                ];
+                elem_table.add_row(Row::new(row));
+            }
+            elem_table.printstd();
+            println!("_____________________________________________________________");
+        }
+    }
     /// Print all Lagrange equations, composition equations and sum of mole numbers as a table
     pub fn pretty_print_full_system(&self) {
         self.pretty_print_Lagrange_equations().unwrap();
         self.pretty_print_composition_equations().unwrap();
         self.pretty_print_sum_mole_numbers().unwrap();
         self.pretty_print_unknowns();
+        self.pretty_print_bounds();
     }
 }

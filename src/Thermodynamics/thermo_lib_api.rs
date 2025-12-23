@@ -1,6 +1,6 @@
 use prettytable::{Table, row};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
 
@@ -265,14 +265,103 @@ impl ThermoData {
             _ => lib_name.to_string(),
         }
     }
+    ///////////////////////////////////////////////////////////////////////////
+    pub fn compare_2_libs(
+        &self,
+    ) -> (
+        Vec<(Option<String>, Option<String>)>,
+        Vec<(Option<String>, Option<String>)>,
+    ) {
+        let vec_lib_subs = &self.VecOfSubsAdresses;
+        let LibThermoData = &self.LibThermoData;
+        let mut present_in_lib_sub_pairs_but_not_in_big_lib: Vec<(Option<String>, Option<String>)> =
+            Vec::new();
+        for (library, substance) in vec_lib_subs {
+            match LibThermoData.get(library) {
+                Some(lib_data) => {
+                    if !lib_data.contains_key(substance) {
+                        present_in_lib_sub_pairs_but_not_in_big_lib
+                            .push((Some(library.clone()), Some(substance.clone())));
+                    }
+                }
+                None => {
+                    present_in_lib_sub_pairs_but_not_in_big_lib.push((Some(library.clone()), None));
+                }
+            }
+        }
+        let mut present_in_big_lib_but_not_in_lib_sub_pairs: Vec<(Option<String>, Option<String>)> =
+            Vec::new();
+        for (library, lib_data) in LibThermoData {
+            for substance in lib_data.keys() {
+                if !vec_lib_subs.contains(&(library.clone(), substance.clone())) {
+                    present_in_big_lib_but_not_in_lib_sub_pairs
+                        .push((Some(library.clone()), Some(substance.clone())));
+                }
+            }
+        }
+        // Display results in tables
+        let mut table1 = Table::new();
+        table1.add_row(row!["Library", "Substance"]);
+        for (lib, sub) in &present_in_lib_sub_pairs_but_not_in_big_lib {
+            table1.add_row(row![
+                lib.as_ref().unwrap_or(&"N/A".to_string()),
+                sub.as_ref().unwrap_or(&"N/A".to_string())
+            ]);
+        }
+        println!("Present in lib_sub_pairs but not in big_lib:");
+        table1.printstd();
+
+        let mut table2 = Table::new();
+        table2.add_row(row!["Library", "Substance"]);
+        for (lib, sub) in &present_in_big_lib_but_not_in_lib_sub_pairs {
+            table2.add_row(row![
+                lib.as_ref().unwrap_or(&"N/A".to_string()),
+                sub.as_ref().unwrap_or(&"N/A".to_string())
+            ]);
+        }
+        println!("\nPresent in big_lib but not in lib_sub_pairs:");
+        table2.printstd();
+        (
+            present_in_lib_sub_pairs_but_not_in_big_lib.clone(),
+            present_in_big_lib_but_not_in_lib_sub_pairs.clone(),
+        )
+    }
+
+    pub fn compare_2_libs2(&self) -> (HashSet<String>, HashSet<String>) {
+        let vec_lib_subs = &self.VecOfSubsAdresses;
+        let LibThermoData = &self.LibThermoData;
+        let libs: Vec<String> = vec_lib_subs
+            .iter()
+            .map(|(lib, _subs)| lib.clone())
+            .collect();
+        let libs: HashSet<String> = libs.into_iter().collect();
+        let libs2: Vec<_> = LibThermoData.keys().collect();
+        let libs2: HashSet<String> = libs2.into_iter().cloned().collect();
+        (libs, libs2)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Read;
-    use tempfile::NamedTempFile;
 
+    use tempfile::NamedTempFile;
+    #[test]
+    fn test_search_libs() {
+        let thermo_data = ThermoData::new();
+        let (
+            present_in_lib_sub_pairs_but_not_in_big_lib,
+            present_in_big_lib_but_not_in_lib_sub_pairs,
+        ) = thermo_data.compare_2_libs();
+        println!(
+            "present_in_lib_sub_pairs_but_not_in_big_lib: {:?}",
+            present_in_big_lib_but_not_in_lib_sub_pairs
+        );
+        let (lib, lib2) = thermo_data.compare_2_libs2();
+        println!("lib: {:?}", lib);
+        println!("lib2: {:?}", lib2);
+    }
     #[test]
     fn test_create_substance_document_new_file() {
         let mut thermo_data = ThermoData::new();

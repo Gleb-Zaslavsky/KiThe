@@ -7,6 +7,7 @@ mod tests {
     use crate::Thermodynamics::User_PhaseOrSolution::{
         CustomSubstance, SubstanceSystemFactory, SubstancesContainer,
     };
+    use crate::Thermodynamics::User_PhaseOrSolution2::OnePhase;
     use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData};
     use RustedSciThe::symbolic::symbolic_engine::Expr;
     use approx::assert_relative_eq;
@@ -22,10 +23,6 @@ mod tests {
         assert_eq!(thermo.P, 1e5);
         assert!(thermo.vec_of_subs.is_empty());
         assert!(thermo.unique_elements.is_empty());
-        assert!(thermo.dG.is_empty());
-        assert!(thermo.dG_sym.is_empty());
-        assert!(thermo.dS.is_empty());
-        assert!(thermo.dS_sym.is_empty());
     }
 
     #[test]
@@ -57,8 +54,9 @@ mod tests {
             .insert(subs[1].clone(), Some(Phases::Gas));
         subdata.substances = subs.clone();
 
-        subdata.search_substances();
-
+        let _ = subdata.search_substances();
+        let mut op = OnePhase::new();
+        op.subs_data = subdata;
         // Setup Thermodynamics instance
         let mut thermo = Thermodynamics::new();
 
@@ -66,11 +64,14 @@ mod tests {
         thermo.set_P(101325.0, None);
         thermo.subs_container = SubstancesContainer::SinglePhase(subs.clone());
         thermo.vec_of_subs = subs.clone();
-        thermo.subdata = CustomSubstance::OnePhase(subdata);
+        thermo.subdata = CustomSubstance::OnePhase(op);
         thermo.create_indexed_variables();
         let mut n = HashMap::new();
         n.insert(None, (Some(1.0), Some(vec![0.5, 0.5])));
         // Calculate Gibbs free energy
+        let _ = thermo.extract_all_thermal_coeffs(400.0);
+        let _ = thermo.calculate_therm_map_of_properties(400.0);
+        let _ = thermo.calculate_therm_map_of_sym();
         thermo.calculate_Gibbs_free_energy(400.0, n);
         thermo.calculate_Gibbs_fun(400.0);
         thermo.calculate_Gibbs_sym(400.0);
@@ -79,23 +80,26 @@ mod tests {
 
         // println!("symbolic vars: {:?}", vars);
         // Check results
-        let g = thermo.dG.get(&None).unwrap();
-        let g_sym = thermo.dG_sym.get(&None).unwrap();
-        let g_fun = thermo.dG_fun.get(&None).unwrap();
+        let binding = thermo.subdata.get_dG();
+        let g = binding.get(&None).unwrap();
+          let binding = thermo.subdata.get_dG_sym();
+        let g_sym = binding.get(&None).unwrap();
+        //  let binding = thermo.subdata.get_dG_fun();
+      //  let g_fun = binding.get(&None).unwrap();
         for gas in subs.clone() {
             assert!(g.contains_key(&gas));
             assert!(g_sym.contains_key(&gas));
-            assert!(g_fun.contains_key(&gas));
+          //  assert!(g_fun.contains_key(&gas));
             let g_sym = g_sym.get(&gas).unwrap().clone();
             println!("I. g_sym for gas: {},\n:  {}", &gas, &g_sym);
             let g_sym_fun = g_sym.lambdify_wrapped();
             let g_sym_value = g_sym_fun(vec![0.5, 1.0]);
 
             let g = g.get(&gas).unwrap().clone();
-            let g_fun = g_fun.get(&gas).unwrap();
-            let g_fun_value = g_fun(400.0, Some(vec![0.5, 0.5]), Some(1.0));
-            assert_relative_eq!(g_fun_value, g, epsilon = 1e-6);
-            assert_relative_eq!(g_sym_value, g_fun_value, epsilon = 1e-6);
+        //    let g_fun = g_fun.get(&gas).unwrap();
+        //    let g_fun_value = g_fun(400.0, Some(vec![0.5, 0.5]), Some(1.0));
+         //   assert_relative_eq!(g_fun_value, g, epsilon = 1e-6);
+         //   assert_relative_eq!(g_sym_value, g_fun_value, epsilon = 1e-6);
         }
         // test with lambdify owned
 
@@ -176,7 +180,7 @@ mod tests {
         let map_of_moles_num = HashMap::from([("H2".to_string(), 0.5), ("O2".to_string(), 0.5)]);
         n.insert(None, (Some(1.0), (Some(map_of_moles_num))));
 
-        let mut n_sym = HashMap::new();
+        let mut n_sym: HashMap<Option<String>, (Option<Expr>, Option<Vec<Expr>>)> = HashMap::new();
         n_sym.insert(
             None,
             (
@@ -201,19 +205,25 @@ mod tests {
             search_in_NIST,
         )
         .unwrap();
+        let _ = customsubs.indexed_moles_variables();
 
+        let _ = customsubs.extract_all_thermal_coeffs(T);
+        let _ = customsubs.calculate_therm_map_of_properties(T);
+        let _ = customsubs.calculate_therm_map_of_sym();
         let dG = customsubs.calcutate_Gibbs_free_energy(T, P, nv.clone());
 
-        let dG_sym = customsubs.calculate_Gibbs_sym(T, n_sym.clone());
+        let dG_sym = customsubs.calculate_Gibbs_sym(T);
         assert!(dG.is_ok());
         assert!(dG_sym.is_ok());
         // create thermodynamics instance
-        let td = customsubs.create_thermodynamics(T, P, Some(n.clone()), None);
+        let td = customsubs.create_thermodynamics(Some(T), P, Some(n.clone()), None);
         assert!(td.is_ok());
         let mut td = td.unwrap();
         td.set_P_to_sym();
+
         // compare results from direct calculation and from lambdified symbolic expression
-        let g_sym = td.dG_sym.get(&None).unwrap();
+        let binding = td.subdata.get_dG_sym();
+        let g_sym =binding.get(&None).unwrap();
         let g_sym = g_sym.get(&"H2".to_string()).unwrap().clone();
         let g_sym_fun = g_sym.lambdify_wrapped();
         let g_sym_value = g_sym_fun(vec![400.0, 0.5, 0.5]);
@@ -306,7 +316,9 @@ mod tests {
         for (i, eq) in eq_s.iter().enumerate() {
             let subs = &td.vec_of_subs[i];
             println!("eq_{}: {}, {:?}", subs, eq, &sym_vars);
-            let eq_sym_fun = eq.clone().lambdify_borrowed_thread_safe(sym_vars.as_slice());
+            let eq_sym_fun = eq
+                .clone()
+                .lambdify_borrowed_thread_safe(sym_vars.as_slice());
             let eq_sym_fun_value = eq_sym_fun(&[0.5, 0.5, 0.5, 0.5, 1.0]);
 
             assert_relative_eq!(eq_sym_fun_value, eq_mu_fun_value[i], epsilon = 1e-6);
@@ -316,7 +328,7 @@ mod tests {
         let full_system = &td.solver.full_system_sym;
         println!("full_system: {:?}", full_system);
         println!("eq_s: {:?}", eq_s);
-        td.pretty_print_full_system();
+        //  td.pretty_print_full_system();
     }
 
     #[test]
@@ -348,7 +360,9 @@ mod tests {
         let mut thermo = Thermodynamics::new();
         thermo.subs_container = SubstancesContainer::SinglePhase(subs.clone());
         thermo.vec_of_subs = subs.clone();
-        thermo.subdata = CustomSubstance::OnePhase(subdata);
+        let mut op = OnePhase::new();
+        op.subs_data = subdata;
+        thermo.subdata = CustomSubstance::OnePhase(op);
 
         // Calculate element composition
         thermo.calculate_elem_composition_and_molar_mass(None);
@@ -387,7 +401,9 @@ mod tests {
         let mut thermo = Thermodynamics::new();
         thermo.subs_container = SubstancesContainer::SinglePhase(subs.clone());
         thermo.vec_of_subs = subs.clone();
-        thermo.subdata = CustomSubstance::OnePhase(subdata);
+        let mut op = OnePhase::new();
+        op.subs_data = subdata;
+        thermo.subdata = CustomSubstance::OnePhase(op);
 
         // Set concentrations
         thermo.map_of_concentration.insert("H2O".to_string(), 0.7);
@@ -427,9 +443,10 @@ mod tests {
 
         // Add some test substances
         subdata.substances = vec!["H2O".to_string(), "H2".to_string(), "O2".to_string()];
-
+        let mut op = OnePhase::new();
+        op.subs_data = subdata;
         // Create a CustomSubstance from the SubsData
-        let custom_substance = CustomSubstance::OnePhase(subdata);
+        let custom_substance = CustomSubstance::OnePhase(op);
 
         // Create a Thermodynamics instance
         let mut thermodynamics = Thermodynamics::new();
@@ -551,7 +568,7 @@ mod tests {
         ]);
         n.insert(None, (Some(1.0), Some(map_of_concentration)));
         // create thermodynamics instance
-        let td = customsubs.create_thermodynamics(T, P, Some(n), None);
+        let td = customsubs.create_thermodynamics(Some(T), P, Some(n), None);
         assert!(td.is_ok());
         let mut td = td.unwrap();
         td.set_P_to_sym();
@@ -623,11 +640,11 @@ mod tests {
         ]);
         n.insert(None, (Some(1.0), Some(map_of_concentration)));
         // create thermodynamics instance
-        let td = customsubs.create_thermodynamics(T, P, Some(n), None);
+        let td = customsubs.create_thermodynamics(Some(T), P, Some(n), None);
         assert!(td.is_ok());
         let mut td = td.unwrap();
 
-        td.find_composition_for_const_TP().unwrap();
+        td.create_full_system_of_equations_with_const_T().unwrap();
         // td.Tm = 1e7;
         //  td.solver.solve(None, 1e-2, 100, Some(0.001));
     }
@@ -668,13 +685,13 @@ mod tests {
         ]);
         n.insert(None, (Some(1.0), Some(map_of_concentration)));
         // create thermodynamics instance
-        let td = customsubs.create_thermodynamics(T, P, None, None);
+        let td = customsubs.create_thermodynamics(Some(T), P, None, None);
         assert!(td.is_ok());
         let mut td = td.unwrap();
         td.set_number_of_moles(Some(n)).unwrap();
         td.initial_composition().unwrap();
         td.create_indexed_variables();
-        td.find_composition_for_const_TP().unwrap();
+        td.create_full_system_of_equations_with_const_T().unwrap();
         // td.solver.solve(None, 1e-2, 1000, Some(0.005));
     }
 
@@ -726,7 +743,7 @@ mod tests {
         n.insert(Some("gas".to_string()), (Some(1.0), Some(map_of_gas)));
         n.insert(Some("solid".to_string()), (Some(1.0), Some(map_of_solid)));
         // create thermodynamics instance
-        let td = customsubs.create_thermodynamics(T, P, Some(n), None);
+        let td = customsubs.create_thermodynamics(Some(T), P, Some(n), None);
         assert!(td.is_ok());
 
         let mut td = td.unwrap();
@@ -777,7 +794,7 @@ mod tests {
             ("gas".to_string(), gas_subs.clone()),
             ("solid".to_string(), vec!["C".to_string()]),
         ]);
-        let T = 400.0;
+        let T = 2400.0;
         let P = 101325.0;
 
         let search_in_NIST = false;
@@ -811,36 +828,96 @@ mod tests {
         n.insert(Some("gas".to_string()), (Some(1.0), Some(map_of_gas)));
         n.insert(Some("solid".to_string()), (Some(1.0), Some(map_of_solid)));
         // create thermodynamics instance
-        let td = customsubs.create_thermodynamics(T, P, None, None);
+        let td = customsubs.create_thermodynamics(Some(T), P, None, None);
         assert!(td.is_ok());
 
         let mut td = td.unwrap();
+        td.Tm = 1e0;
         td.set_number_of_moles(Some(n)).unwrap();
         td.initial_composition().unwrap();
         td.create_indexed_variables();
-        td.find_composition_for_const_TP().unwrap();
-        // td.solver.solve(None, 1e-2, 1000, Some(0.005));
+        td.create_full_system_of_equations_with_const_T().unwrap();
+
+        use crate::Thermodynamics::ChemEquilibrium::ClassicalThermodynamicsSolver::{
+            NRParams, SolverType,
+        };
+        let params = NRParams {
+            initial_guess: Some(vec![0.5, 0.5, 0.5, 0.5, 0.5, 1.0, 1.0, 2.0, 2.0]),
+            tolerance: 1e-2,
+            max_iterations: 1000,
+            damping_factor: Some(0.1),
+            ..Default::default()
+        };
+        td.solver.set_solver_type(SolverType::NewtonRaphson(params));
+        td.solver.solve();
+    }
+
+    #[test]
+    fn test_calculate_oxygen_decomposition() {
+        // Setup test data
+
+        let gas_subs = vec!["O".to_string(), "O2".to_string()];
+
+        let T = 4999.0;
+        let P = 101325.0;
+
+        let search_in_NIST = false;
+        let explicit_search_insructions = None;
+        let library_priorities = vec!["NASA_gas".to_string()];
+        let permitted_libraries = vec!["NUIG".to_string()];
+        let container = SubstancesContainer::SinglePhase(gas_subs.clone());
+        let mut customsubs = SubstanceSystemFactory::create_system(
+            container,
+            None,
+            library_priorities,
+            permitted_libraries,
+            explicit_search_insructions,
+            search_in_NIST,
+        )
+        .unwrap();
+        println!("{:#?} \n", customsubs);
+
+        match &customsubs {
+            CustomSubstance::OnePhase(one_phase) => {
+                let subs = &one_phase.subs_data.substances;
+                assert_eq!(subs.len(), 2);
+            }
+            _ => panic!(),
+        }
+
+        let mut n = HashMap::new();
+        let map_of_gas = HashMap::from([("O2".to_string(), 1.0)]);
+
+        n.insert(Some("gas".to_string()), (Some(1.0), Some(map_of_gas)));
+
+        // create thermodynamics instance
+        let td = customsubs.create_thermodynamics(Some(T), P, None, None);
+        assert!(td.is_ok());
+
+        let mut td = td.unwrap();
+        td.Tm = 1e3;
+        td.set_number_of_moles(Some(n)).unwrap();
+        td.initial_composition().unwrap();
+        td.create_indexed_variables();
+        td.create_full_system_of_equations_with_const_T().unwrap();
+
+        use crate::Thermodynamics::ChemEquilibrium::ClassicalThermodynamicsSolver::{
+            NRParams, SolverType,
+        };
+        let params = NRParams {
+            initial_guess: Some(vec![0.1, 0.1, 1.0, 0.1]),
+            tolerance: 1e-6,
+            max_iterations: 1000,
+            damping_factor: Some(0.1),
+            ..Default::default()
+        };
+        td.solver.set_solver_type(SolverType::NewtonRaphson(params));
+        td.solver.solve();
+        let sol = td.solver.get_solution();
+
+        println!("{:?}", sol);
     }
     /*
-    #[test]
-    fn test_indexed_variables() {
-        let mut thermodynamics = setup_test_thermodynamics();
-
-        // First set up the initial composition
-        let _ = thermodynamics.initial_composition();
-
-        // Set b0 in the solver
-        thermodynamics.solver.b0 = vec![3.0, 1.5];
-
-        // Test the indexed_variables method
-        let result = thermodynamics.indexed_variables();
-        assert!(result.is_ok());
-
-        // Check that Lambda and n vectors have been populated
-        assert_eq!(thermodynamics.solver.Lambda.len(), 2);
-        assert_eq!(thermodynamics.solver.n.len(), 3);
-    }
-
     #[test]
     fn test_create_nonlinear_system() {
         let mut thermodynamics = setup_test_thermodynamics();

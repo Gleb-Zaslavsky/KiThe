@@ -23,6 +23,7 @@ use crate::Thermodynamics::DBhandlers::thermo_api::{
     EnergyUnit, ThermoCalculator, create_thermal_by_name,
 };
 use crate::Thermodynamics::thermo_lib_api::ThermoData;
+use crate::gui::NIST_gui::NISTApp;
 use crate::gui::gui_plot::PlotWindow;
 /*
     Example usage within the GUI context:
@@ -76,6 +77,8 @@ pub struct ThermochemistryApp {
     t0: String,
     tend: String,
     plot_window: Option<PlotWindow>,
+    show_nist_window: bool,
+    nist_app: Option<NISTApp>,
 }
 
 impl Default for ThermochemistryApp {
@@ -110,6 +113,8 @@ impl Default for ThermochemistryApp {
             t0: "298.15".to_string(),
             tend: "1000.0".to_string(),
             plot_window: None,
+            show_nist_window: false,
+            nist_app: None,
         }
     }
 }
@@ -564,6 +569,13 @@ impl ThermochemistryApp {
                                 self.search_results +=
                                     "\n\nExport functionality not yet implemented";
                             }
+
+                            if ui.button("Search in NIST").clicked() {
+                                self.show_nist_window = true;
+                                if self.nist_app.is_none() {
+                                    self.nist_app = Some(NISTApp::new());
+                                }
+                            }
                         });
                     });
                 });
@@ -578,6 +590,13 @@ impl ThermochemistryApp {
                     plot_window.show(ctx);
                     if !plot_window.visible {
                         self.plot_window = None;
+                    }
+                }
+
+                // Show NIST window if requested
+                if self.show_nist_window {
+                    if let Some(nist_app) = &mut self.nist_app {
+                        nist_app.show(ctx, &mut self.show_nist_window);
                     }
                 }
             });

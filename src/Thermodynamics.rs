@@ -5,6 +5,8 @@ pub mod ChemEquilibrium;
 pub mod DBhandlers;
 ///
 pub mod User_PhaseOrSolution;
+pub mod User_PhaseOrSolution2;
+mod User_PhaseOrSolution_tests;
 /// heat-mass transfer data agregator
 /// # Examples 1
 /// ```
@@ -149,8 +151,14 @@ pub mod User_PhaseOrSolution;
 /// ```
 pub mod User_substances;
 pub mod User_substances2;
+/// Error handling for User_substances modules
+pub mod User_substances_error;
+/// Error handling tests
+pub mod User_substances_error_tests;
 /// tests
 pub mod User_substances_tests;
+mod User_substances_tests2;
+
 /// main functionality to open thermodynamics and heat-mass transfer libraries
 pub mod thermo_lib_api;
 /// calculations of thermodynamic properties, creating closures and symbolic expressions

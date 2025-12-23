@@ -56,9 +56,8 @@
 //! - Quality assessment with L1, L2, and max norms for fitting validation
 //! - Pretty table reporting for fitting quality metrics
 
-use ::RustedSciThe::numerical::optimization::sym_fitting::Fitting;
-use RustedSciThe::numerical::optimization::fitting_features::SewTwoFunctions;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
+
 use prettytable::{Cell, Row, Table};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
@@ -67,7 +66,7 @@ use std::collections::HashMap;
 
 use std::error::Error;
 use std::fmt;
-use std::panic;
+
 use std::str::FromStr;
 #[allow(non_upper_case_globals)]
 const R: f64 = 1.987; // кал/(K·моль)
@@ -80,6 +79,8 @@ pub enum NASAError {
     InvalidTemperatureRange,
     SerdeError(serde_json::Error),
     UnsupportedUnit(String),
+    SymbolicError(String),
+    FittingError(String),
 }
 
 impl fmt::Display for NASAError {
@@ -104,6 +105,12 @@ impl fmt::Display for NASAError {
                     "Unsupported unit: {}. Only 'J' and 'cal' are supported",
                     unit
                 )
+            }
+            NASAError::SymbolicError(msg) => {
+                write!(f, "Symbolic computation error: {}", msg)
+            }
+            NASAError::FittingError(msg) => {
+                write!(f, "Fitting error: {}", msg)
             }
         }
     }
@@ -146,7 +153,7 @@ pub fn Cp_sym(a: f64, b: f64, c: f64, d: f64, e: f64) -> Expr {
         + d * t.clone().pow(Expr::Const(3.0))
         + e * t.clone().pow(Expr::Const(4.0)))
 }
-fn dh_sym(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Expr {
+pub fn dh_sym(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Expr {
     let t = Expr::Var("T".to_owned());
     let (a, b, c, d, e, f) = (
         Expr::Const(a),
@@ -156,14 +163,14 @@ fn dh_sym(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Expr {
         Expr::Const(e),
         Expr::Const(f),
     );
-    Rsym * t.clone()
-        * (a + b * t.clone() / Expr::Const(2.0)
-            + c * t.clone().pow(Expr::Const(2.0)) / Expr::Const(3.0)
-            + d * t.clone().pow(Expr::Const(3.0)) / Expr::Const(4.0)
-            + e * t.clone().pow(Expr::Const(4.0)) / Expr::Const(5.0)
-            + f / t)
+    Rsym * (a * t.clone()
+        + b * t.clone().pow(Expr::Const(2.0)) / Expr::Const(2.0)
+        + c * t.clone().pow(Expr::Const(3.0)) / Expr::Const(3.0)
+        + d * t.clone().pow(Expr::Const(4.0)) / Expr::Const(4.0)
+        + e * t.clone().pow(Expr::Const(5.0)) / Expr::Const(5.0)
+        + f)
 }
-fn ds_sym(a: f64, b: f64, c: f64, d: f64, e: f64, g: f64) -> Expr {
+pub fn ds_sym(a: f64, b: f64, c: f64, d: f64, e: f64, g: f64) -> Expr {
     let t = Expr::Var("T".to_owned());
     let (a, b, c, d, e, g) = (
         Expr::Const(a),
@@ -261,6 +268,8 @@ pub struct NASAdata {
     pub norm_threshold: f64,
     pub T_interval: Option<(f64, f64)>,
     pub fit_point_number: usize,
+    // check what coefficients inerval belongs current temperature
+    pub current_T_range: Option<(f64, f64)>,
 }
 
 impl NASAdata {
@@ -290,6 +299,7 @@ impl NASAdata {
             T_interval: None,
             fit_point_number: 1000,
             norm_threshold: 0.1,
+            current_T_range: None,
         }
     }
     /// set energy unitsЖ J or calories
@@ -318,7 +328,7 @@ impl NASAdata {
         Ok(())
     }
 
-    pub fn parse_coefficients(&mut self) -> Result<HashMap<usize, Coeffs>, NASAError> {
+    pub fn parse_coefficients(&mut self) -> Result<(), NASAError> {
         let c_data = self.input.Cp.as_slice();
         let mut coeffs_map = HashMap::new();
 
@@ -401,15 +411,16 @@ impl NASAdata {
             _ => return Err(NASAError::InvalidTemperatureRange),
         }
         self.coeffs_map = coeffs_map.clone();
-        Ok(coeffs_map)
+        Ok(())
     }
 
     fn find_coefficients_for_temperature(
-        &self,
+        &mut self,
         t: f64,
     ) -> Result<(f64, f64, f64, f64, f64, f64, f64), NASAError> {
         for coeffs in self.coeffs_map.values() {
             if coeffs.T.0 <= t && t <= coeffs.T.1 {
+                self.current_T_range = Some(coeffs.T.clone());
                 return Ok(coeffs.coeff);
             }
         }
@@ -530,7 +541,7 @@ impl NASAdata {
         }
         table.add_row(Row::new(header_row));
 
-        let coeffs_names = vec!["A", "B", "C", "D", "E", "F", "G"];
+        let coeffs_names = ["A", "B", "C", "D", "E", "F", "G"];
         for (i, coeff_name) in coeffs_names.iter().enumerate() {
             let mut row = vec![Cell::new(coeff_name)];
 
@@ -545,7 +556,110 @@ impl NASAdata {
     }
 
     /////////////////////////////////TEMPERATURE RANGE////////////////////////////////////////////////////////////
+    fn is_this_T_from_current_T_range(&self, t: f64) -> bool {
+        if let Some((T_min, T_max)) = self.current_T_range {
+            T_min <= t && t <= T_max
+        } else {
+            false
+        }
+    }
 
+    pub fn with_T_range<F>(&mut self, T: f64, function: F) -> Result<(), NASAError>
+    where
+        F: FnOnce(),
+    {
+        let is_this_T_from_current_T_range = self.is_this_T_from_current_T_range(T);
+        if is_this_T_from_current_T_range {
+            function();
+            Ok(())
+        } else {
+            self.interval_for_this_T(T)?;
+            // if no - change coefficients
+            self.extract_coefficients(T)?;
+            function();
+            Ok(())
+        }
+    }
+
+    pub fn with_T_range_mut<F, R>(&mut self, T: f64, function: F) -> Result<R, NASAError>
+    where
+        F: FnOnce() -> R,
+    {
+        let is_this_T_from_current_T_range = self.is_this_T_from_current_T_range(T);
+        if is_this_T_from_current_T_range {
+            Ok(function())
+        } else {
+            self.interval_for_this_T(T)?;
+            self.extract_coefficients(T)?;
+            Ok(function())
+        }
+    }
+
+    /// Creates closure functions for Cp, dH, dS with automatic temperature range handling
+    ///
+    /// Automatically selects appropriate NASA coefficients for the given temperature
+    /// and creates closure functions. If temperature is outside current range,
+    /// updates coefficients before creating closures.
+    ///
+    /// # Arguments
+    /// * `T` - Temperature in Kelvin
+    ///
+    /// # Returns
+    /// * `Ok(())` - Closures successfully created
+    /// * `Err(NASAError)` - If temperature is outside all available ranges
+    pub fn create_closures_Cp_dH_dS_with_T_range(&mut self, T: f64) -> Result<(), NASAError> {
+        let is_this_T_from_current_T_range = self.is_this_T_from_current_T_range(T);
+        if !is_this_T_from_current_T_range {
+            self.interval_for_this_T(T)?;
+            self.extract_coefficients(T)?;
+        }
+        self.create_closures_Cp_dH_dS();
+        Ok(())
+    }
+
+    /// Calculates Cp, dH, dS values with automatic temperature range handling
+    ///
+    /// Automatically selects appropriate NASA coefficients for the given temperature
+    /// and calculates thermodynamic properties. If temperature is outside current range,
+    /// updates coefficients before calculation.
+    ///
+    /// # Arguments
+    /// * `T` - Temperature in Kelvin
+    ///
+    /// # Returns
+    /// * `Ok(())` - Values successfully calculated and stored in Cp, dh, ds fields
+    /// * `Err(NASAError)` - If temperature is outside all available ranges
+    pub fn calculate_Cp_dH_dS_with_T_range(&mut self, T: f64) -> Result<(), NASAError> {
+        let is_this_T_from_current_T_range = self.is_this_T_from_current_T_range(T);
+        if !is_this_T_from_current_T_range {
+            self.interval_for_this_T(T)?;
+            self.extract_coefficients(T)?;
+        }
+        self.calculate_Cp_dH_dS(T);
+        Ok(())
+    }
+
+    /// Creates symbolic expressions for Cp, dH, dS with automatic temperature range handling
+    ///
+    /// Automatically selects appropriate NASA coefficients for the given temperature
+    /// and creates symbolic expressions. If temperature is outside current range,
+    /// updates coefficients before creating expressions.
+    ///
+    /// # Arguments
+    /// * `T` - Temperature in Kelvin
+    ///
+    /// # Returns
+    /// * `Ok(())` - Symbolic expressions successfully created
+    /// * `Err(NASAError)` - If temperature is outside all available ranges
+    pub fn create_sym_Cp_dH_dS_with_T_range(&mut self, T: f64) -> Result<(), NASAError> {
+        let is_this_T_from_current_T_range = self.is_this_T_from_current_T_range(T);
+        if !is_this_T_from_current_T_range {
+            self.interval_for_this_T(T)?;
+            self.extract_coefficients(T)?;
+        }
+        self.create_sym_Cp_dH_dS();
+        Ok(())
+    }
     /// Finds the coefficient interval that contains the given temperature
     ///
     /// # Arguments
@@ -554,11 +668,12 @@ impl NASAdata {
     /// # Returns
     /// * `Ok((interval_index, coeffs))` - Index and coefficients for the temperature range
     /// * `Err(NASAError::InvalidTemperatureRange)` - If temperature is outside all ranges
-    pub fn interval_for_this_T(&self, t: f64) -> Result<(usize, Coeffs), NASAError> {
+    pub fn interval_for_this_T(&mut self, t: f64) -> Result<(usize, Coeffs), NASAError> {
         let intervals = self.coeffs_map.clone();
 
         for (interval_idx, coeffs) in intervals {
             if coeffs.T.0 <= t && t <= coeffs.T.1 {
+                self.current_T_range = Some(coeffs.T);
                 return Ok((interval_idx, coeffs.clone()));
             }
         }
@@ -566,724 +681,6 @@ impl NASAdata {
         Err(NASAError::InvalidTemperatureRange)
     }
 
-    /// Compares fitted function against original functions from two temperature ranges
-    ///
-    /// Generates quality metrics by evaluating both original and fitted functions
-    /// across the temperature interval and computing various error norms.
-    ///
-    /// # Arguments
-    /// * `func_for_1_range` - Original function for lower temperature range
-    /// * `func_for_2_range` - Original function for upper temperature range  
-    /// * `T_center` - Temperature boundary between the two ranges
-    /// * `fit_function` - Fitted function to compare against originals
-    /// * `coeffs_map` - Fitted coefficients to substitute into fit_function
-    ///
-    /// # Returns
-    /// * `FittingReport` - Contains L1/L2/max norms and significant deviation points
-    ///
-    /// # Panics
-    /// * If max_norm exceeds norm_threshold (indicates poor fitting quality)
-    pub fn direct_compare(
-        &self,
-        func_for_1_range: Expr,
-        func_for_2_range: Expr,
-        T_center: f64,
-        fit_function: Expr,
-        coeffs_map: HashMap<String, f64>,
-    ) -> FittingReport {
-        if let Some((T_min, T_max)) = self.T_interval {
-            let n = self.fit_point_number / 2;
-            let step = (T_max - T_min) / (2.0 * n as f64 - 1.0);
-            let T_vec: Vec<f64> = (0..2 * n).map(|i| T_min + i as f64 * step).collect();
-            // Generate original data from two ranges
-            let mut y_data = func_for_1_range.lambdify1D_from_linspace(T_min, T_center, n);
-            let y_data2 = func_for_2_range.lambdify1D_from_linspace(T_center, T_max, n);
-            y_data.extend(y_data2);
-
-            // Generate fitted data
-            let fitted_data = fit_function.set_variable_from_map(&coeffs_map);
-            let y_data_fitted = fitted_data.lambdify1D_from_linspace(T_min, T_max, 2 * n);
-
-            // Calculate norms
-            let mut l1_norm = 0.0;
-            let mut l2_norm = 0.0;
-            let mut max_norm: f64 = 0.0;
-            let mut map_of_residuals: HashMap<usize, (f64, f64)> = HashMap::new();
-            assert_eq!(
-                y_data.len(),
-                y_data_fitted.len(),
-                "Vectors must have the same length"
-            );
-            assert_eq!(y_data.len(), 2 * n, "Vectors must have the same length");
-            for (i, (y, y_fit)) in y_data.iter().zip(y_data_fitted.iter()).enumerate() {
-                let diff = (y - y_fit).abs();
-
-                l1_norm += diff;
-                l2_norm += diff * diff;
-                let rel_diff = diff / y;
-                if rel_diff.abs() > 10e-2 {
-                    map_of_residuals.insert(i, (T_vec[i], rel_diff));
-                }
-                max_norm = max_norm.max((diff / y).abs());
-                assert!(
-                    !(max_norm > self.norm_threshold),
-                    "max norm too higher  {} than therhold {}, diff = {}, y = {}",
-                    max_norm,
-                    self.norm_threshold,
-                    diff,
-                    y
-                );
-            }
-
-            l1_norm = l1_norm / (2.0 * n as f64);
-            l2_norm = l2_norm.sqrt() / (2.0 * n as f64);
-            let number_of_significant_points = map_of_residuals.len();
-            let mut T_range: Option<(f64, f64)> = None;
-            if map_of_residuals.len() > 0 {
-                let max_T = *map_of_residuals
-                    .iter()
-                    .map(|(_, (T, _))| T)
-                    .max_by(|a, b| a.partial_cmp(b).unwrap())
-                    .unwrap();
-                let min_T = *map_of_residuals
-                    .iter()
-                    .map(|(_, (T, _))| T)
-                    .min_by(|a, b| a.partial_cmp(b).unwrap())
-                    .unwrap();
-                T_range = Some((min_T, max_T));
-                println!(
-                    "fitted curve significantly deviated from directly calculated in {} points from {} to {} K",
-                    number_of_significant_points, min_T, max_T
-                );
-            }
-
-            println!(
-                "L1 norm: {}, L2 norm: {}, Max norm: {}",
-                l1_norm, l2_norm, max_norm
-            );
-
-            FittingReport {
-                l2_norm: l2_norm,
-                max_norm: max_norm,
-                number_of_significant_points: number_of_significant_points,
-                T_range: T_range,
-            }
-        } else {
-            FittingReport {
-                l2_norm: 0.0,
-                max_norm: 0.0,
-                number_of_significant_points: 0,
-                T_range: None,
-            }
-        }
-    }
-
-    /// Sequential fitting method for adjacent temperature intervals
-    ///
-    /// Fits NASA-7 coefficients by sequentially optimizing Cp, then dH, then dS.
-    /// Uses the fitted Cp coefficients as constraints for dH and dS fitting.
-    /// Includes quality assessment and generates fitting reports.
-    ///
-    /// # Arguments
-    /// * `coeffs_min` - Coefficients for lower temperature range
-    /// * `coeffs_max` - Coefficients for upper temperature range
-    /// * `T_min` - Lower bound of fitting temperature range
-    /// * `T_max` - Upper bound of fitting temperature range
-    ///
-    /// # Returns
-    /// * `Ok(SewTwoFunctions)` - Fitting object with results
-    /// * `Err(NASAError)` - If temperature ranges are not adjacent or fitting fails
-    pub fn fitting_adjacent(
-        &mut self,
-        coeffs_min: Coeffs,
-        coeffs_max: Coeffs,
-        T_min: f64,
-        T_max: f64,
-    ) -> Result<SewTwoFunctions, NASAError> {
-        // Generate fitting reports
-        let mut report_map: HashMap<String, FittingReport> = HashMap::new();
-        let (_, T_center) = (coeffs_min.T.0, coeffs_min.T.1);
-        let (T_center_check, _) = (coeffs_max.T.0, coeffs_max.T.1);
-        if T_center != T_center_check {
-            return Err(NASAError::InvalidTemperatureRange);
-        }
-        let func1 = Cp_sym(
-            coeffs_min.coeff.0,
-            coeffs_min.coeff.1,
-            coeffs_min.coeff.2,
-            coeffs_min.coeff.3,
-            coeffs_min.coeff.4,
-        );
-        let func2 = Cp_sym(
-            coeffs_max.coeff.0,
-            coeffs_max.coeff.1,
-            coeffs_max.coeff.2,
-            coeffs_max.coeff.3,
-            coeffs_max.coeff.4,
-        );
-        let Cp_func_to_fit =
-            Expr::parse_expression("1.987* (a + b * t + c * t^2 + d * t^3 + e * t^4)");
-        let mut sew = SewTwoFunctions::new(
-            func1.clone(),
-            func2.clone(),
-            T_min,
-            T_center,
-            T_max,
-            self.fit_point_number,
-        );
-        sew.create_fitting_data();
-        let initial_guess = vec![
-            (coeffs_min.coeff.0 + coeffs_max.coeff.0) / 2.0,
-            (coeffs_min.coeff.1 + coeffs_max.coeff.1) / 2.0,
-            (coeffs_min.coeff.2 + coeffs_max.coeff.2) / 2.0,
-            (coeffs_min.coeff.3 + coeffs_max.coeff.3) / 2.0,
-            (coeffs_min.coeff.4 + coeffs_max.coeff.4) / 2.0,
-        ];
-
-        sew.fit(
-            Cp_func_to_fit.clone(),
-            Some(vec![
-                "a".to_string(),
-                "b".to_string(),
-                "c".to_string(),
-                "d".to_string(),
-                "e".to_string(),
-            ]),
-            "t".to_string(),
-            initial_guess,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-
-        let r_ssquared = sew.get_r_ssquared();
-        println!("r_squared for Cp: {}", r_ssquared.unwrap());
-        assert!(1.0 - r_ssquared.unwrap() < 1e-2);
-
-        let map_of_solutions_5_coeffs = sew.get_map_of_solutions().unwrap();
-
-        let c_fitting_report = self.direct_compare(
-            func1,
-            func2,
-            T_center,
-            Cp_func_to_fit,
-            map_of_solutions_5_coeffs.clone(),
-        );
-
-        report_map.insert("c fitting report".to_string(), c_fitting_report);
-        ///////////////////////////dh fitting///////////////////////////////
-        let a = *map_of_solutions_5_coeffs.get("a").unwrap();
-        let b = *map_of_solutions_5_coeffs.get("b").unwrap();
-        let c = *map_of_solutions_5_coeffs.get("c").unwrap();
-        let d = *map_of_solutions_5_coeffs.get("d").unwrap();
-        let e = *map_of_solutions_5_coeffs.get("e").unwrap();
-
-        // fitting for coefficient f
-        let f = coeffs_min.coeff.5;
-        let h_func1 = dh_sym(a, b, c, d, e, f);
-        let f = coeffs_max.coeff.5;
-        let h_func2 = dh_sym(a, b, c, d, e, f);
-        let dh_func_to_fit = Expr::parse_expression(
-            "1.987 *t* (a + b * t/2 + (c/3) * t^2 + (d/4) * t^3 + (e/5) * t^4 + f/t)",
-        );
-        let dh_func_to_fit = dh_func_to_fit
-            .clone()
-            .set_variable_from_map(&map_of_solutions_5_coeffs);
-        let mut sew = SewTwoFunctions::new(
-            h_func1.clone(),
-            h_func2.clone(),
-            T_min,
-            T_center,
-            T_max,
-            self.fit_point_number,
-        );
-        sew.create_fitting_data();
-        sew.fit(
-            dh_func_to_fit.clone(),
-            Some(vec!["f".to_string()]),
-            "t".to_string(),
-            vec![1.0],
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        let r_squared = sew.get_r_ssquared();
-        println!("r_squared for h: {}", r_squared.unwrap());
-        assert!(1.0 - r_squared.unwrap() < 5e-2);
-        let f_map = sew.get_map_of_solutions().unwrap();
-        let f = *f_map.get("f").unwrap();
-        let mut map_of_solutions_6_coeffs = map_of_solutions_5_coeffs.clone();
-        map_of_solutions_6_coeffs.extend(f_map);
-
-        /*
-        let h_fitting_report = self.direct_compare(
-            h_func1,
-            h_func2,
-            T_center,
-            dh_func_to_fit,
-            map_of_solutions_6_coeffs.clone(),
-        );
-        report_map.insert("h fitting report".to_string(), h_fitting_report);
-        */
-        //////////////////////////dS fitting///////////////////////////
-        let g = coeffs_min.coeff.6;
-        let s_func1 = ds_sym(a, b, c, d, e, g);
-        let g = coeffs_max.coeff.6;
-        let s_func2 = ds_sym(a, b, c, d, e, g);
-        let ds_func_to_fit = Expr::parse_expression(
-            "1.987 * (a* ln( t ) + b * t + c * t^2 / 2 + d * t^3 / 3.0 + e * t^4 / 4.0 + g)",
-        );
-
-        let ds_func_to_fit = ds_func_to_fit
-            .clone()
-            .set_variable_from_map(&map_of_solutions_5_coeffs);
-        let mut sew = SewTwoFunctions::new(
-            s_func1.clone(),
-            s_func2.clone(),
-            T_min,
-            T_center,
-            T_max,
-            self.fit_point_number,
-        );
-        sew.create_fitting_data();
-        sew.fit(
-            ds_func_to_fit.clone(),
-            Some(vec!["g".to_string()]),
-            "t".to_string(),
-            vec![(coeffs_min.coeff.6 + coeffs_max.coeff.6) / 2.0],
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        let r_squared = sew.get_r_ssquared();
-        println!("r_squared for s: {}", r_squared.unwrap());
-
-        let g_map = sew.get_map_of_solutions().unwrap();
-        let g = *g_map.get("g").unwrap();
-        let g = if 1.0 - r_squared.unwrap() < 5e-2 {
-            g
-        } else {
-            (coeffs_min.coeff.6 + coeffs_max.coeff.6) / 2.0
-        };
-        let mut map_of_solutions_7_coeffs = map_of_solutions_6_coeffs.clone();
-        map_of_solutions_7_coeffs.extend(g_map);
-        self.coeffs = (a, b, c, d, e, f, g);
-
-        let s_fitting_report = self.direct_compare(
-            s_func1,
-            s_func2,
-            T_center,
-            ds_func_to_fit,
-            map_of_solutions_7_coeffs,
-        );
-        report_map.insert("s fitting report".to_string(), s_fitting_report);
-
-        Self::print_quality_table(&report_map);
-
-        Ok(sew)
-    }
-
-    /// Weighted sum fitting method for simultaneous optimization
-    ///
-    /// Fits NASA-7 coefficients by optimizing a weighted combination:
-    /// Y = Cp + 1e-3*dH + 1e-1*dS
-    ///
-    /// This approach optimizes all thermodynamic properties simultaneously rather than
-    /// sequentially, potentially providing better overall consistency. The weights
-    /// account for the different scales of the properties (dH is typically large).
-    ///
-    /// # Arguments
-    /// * `coeffs_min` - Coefficients for lower temperature range
-    /// * `coeffs_max` - Coefficients for upper temperature range
-    /// * `T_min` - Lower bound of fitting temperature range
-    /// * `T_max` - Upper bound of fitting temperature range
-    ///
-    /// # Returns
-    /// * `Ok(HashMap<String, FittingReport>)` - Quality report for combined fitting
-    /// * `Err(NASAError)` - If temperature ranges are not adjacent or fitting fails
-    pub fn fitting_adjacent3(
-        &mut self,
-        coeffs_min: Coeffs,
-        coeffs_max: Coeffs,
-        T_min: f64,
-        T_max: f64,
-    ) -> Result<HashMap<String, FittingReport>, NASAError> {
-        let mut report_map: HashMap<String, FittingReport> = HashMap::new();
-        let (_, T_center) = (coeffs_min.T.0, coeffs_min.T.1);
-        let (T_center_check, _) = (coeffs_max.T.0, coeffs_max.T.1);
-        if T_center != T_center_check {
-            return Err(NASAError::InvalidTemperatureRange);
-        }
-
-        // Create combined function Y = Cp + a*dH + b*dS
-        let cp_func1 = Cp_sym(
-            coeffs_min.coeff.0,
-            coeffs_min.coeff.1,
-            coeffs_min.coeff.2,
-            coeffs_min.coeff.3,
-            coeffs_min.coeff.4,
-        );
-        let dh_func1 = dh_sym(
-            coeffs_min.coeff.0,
-            coeffs_min.coeff.1,
-            coeffs_min.coeff.2,
-            coeffs_min.coeff.3,
-            coeffs_min.coeff.4,
-            coeffs_min.coeff.5,
-        );
-        let ds_func1 = ds_sym(
-            coeffs_min.coeff.0,
-            coeffs_min.coeff.1,
-            coeffs_min.coeff.2,
-            coeffs_min.coeff.3,
-            coeffs_min.coeff.4,
-            coeffs_min.coeff.6,
-        );
-
-        let cp_func2 = Cp_sym(
-            coeffs_max.coeff.0,
-            coeffs_max.coeff.1,
-            coeffs_max.coeff.2,
-            coeffs_max.coeff.3,
-            coeffs_max.coeff.4,
-        );
-        let dh_func2 = dh_sym(
-            coeffs_max.coeff.0,
-            coeffs_max.coeff.1,
-            coeffs_max.coeff.2,
-            coeffs_max.coeff.3,
-            coeffs_max.coeff.4,
-            coeffs_max.coeff.5,
-        );
-        let ds_func2 = ds_sym(
-            coeffs_max.coeff.0,
-            coeffs_max.coeff.1,
-            coeffs_max.coeff.2,
-            coeffs_max.coeff.3,
-            coeffs_max.coeff.4,
-            coeffs_max.coeff.6,
-        );
-
-        // Combined weighted function
-        let combined_func1 = cp_func1.clone()
-            + Expr::Const(1e-3) * dh_func1.clone()
-            + Expr::Const(1e-1) * ds_func1.clone();
-        let combined_func2 = cp_func2.clone()
-            + Expr::Const(1e-3) * dh_func2.clone()
-            + Expr::Const(1e-1) * ds_func2.clone();
-
-        // let combined_func_to_fit = Expr::parse_expression(
-        //      "1.987* (a + b * t + c * t^2 + d * t^3 + e * t^4) + 1e-3 * 1.987 *t* (a + b * t/2 + (c/3) * t^2 + (d/4) * t^3 + (e/5) * t^4 + f/t) + 1e-1 * 1.987 * (a* ln( t ) + b * t + c * t^2 / 2 + d * t^3 / 3.0 + e * t^4 / 4.0 + g)"
-        //   ).simplify_();
-        let Cp_func_to_fit =
-            Expr::parse_expression("1.987* (a + b * t + c * t^2 + d * t^3 + e * t^4)");
-        let dh_func_to_fit = Expr::parse_expression(
-            "1.987 *t* (a + b * t/2 + (c/3) * t^2 + (d/4) * t^3 + (e/5) * t^4 + f/t)",
-        );
-        let ds_func_to_fit = Expr::parse_expression(
-            "1.987 * (a* ln( t ) + b * t + c * t^2 / 2 + d * t^3 / 3.0 + e * t^4 / 4.0 + g)",
-        );
-        let combined_func_to_fit = Cp_func_to_fit.clone()
-            + Expr::Const(1e-3) * dh_func_to_fit.clone()
-            + Expr::Const(1.0) * ds_func_to_fit.clone();
-        let mut sew = SewTwoFunctions::new(
-            combined_func1.clone(),
-            combined_func2.clone(),
-            T_min,
-            T_center,
-            T_max,
-            self.fit_point_number,
-        );
-
-        sew.create_fitting_data();
-        let initial_guess = vec![
-            (coeffs_min.coeff.0 + coeffs_max.coeff.0) / 2.0,
-            (coeffs_min.coeff.1 + coeffs_max.coeff.1) / 2.0,
-            (coeffs_min.coeff.2 + coeffs_max.coeff.2) / 2.0,
-            (coeffs_min.coeff.3 + coeffs_max.coeff.3) / 2.0,
-            (coeffs_min.coeff.4 + coeffs_max.coeff.4) / 2.0,
-            (coeffs_min.coeff.5 + coeffs_max.coeff.5) / 2.0,
-            (coeffs_min.coeff.6 + coeffs_max.coeff.6) / 2.0,
-        ];
-
-        sew.fit(
-            combined_func_to_fit.clone(),
-            Some(vec![
-                "a".to_string(),
-                "b".to_string(),
-                "c".to_string(),
-                "d".to_string(),
-                "e".to_string(),
-                "f".to_string(),
-                "g".to_string(),
-            ]),
-            "t".to_string(),
-            initial_guess,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-
-        let r_squared = sew.get_r_ssquared();
-        println!("r_squared for combined fitting: {}", r_squared.unwrap());
-
-        let map_of_solutions = sew.get_map_of_solutions().unwrap();
-        let a = *map_of_solutions.get("a").unwrap();
-        let b = *map_of_solutions.get("b").unwrap();
-        let c = *map_of_solutions.get("c").unwrap();
-        let d = *map_of_solutions.get("d").unwrap();
-        let e = *map_of_solutions.get("e").unwrap();
-        let f = *map_of_solutions.get("f").unwrap();
-        let g = *map_of_solutions.get("g").unwrap();
-
-        self.coeffs = (a, b, c, d, e, f, g);
-
-        // Generate fitting report for combined function
-        let combined_fitting_report = self.direct_compare(
-            combined_func1,
-            combined_func2,
-            T_center,
-            combined_func_to_fit,
-            map_of_solutions,
-        );
-        report_map.insert(
-            "Combined fitting report".to_string(),
-            combined_fitting_report,
-        );
-
-        Self::print_quality_table(&report_map);
-
-        Ok(report_map)
-    }
-
-    /// Improved fitting method starting with entropy optimization
-    ///
-    /// Fits NASA-7 coefficients by first optimizing all coefficients using entropy (dS),
-    /// then fitting enthalpy coefficient f, and finally validating heat capacity.
-    /// Generates comprehensive quality reports with pretty table output.
-    ///
-    /// # Arguments
-    /// * `coeffs_min` - Coefficients for lower temperature range
-    /// * `coeffs_max` - Coefficients for upper temperature range
-    /// * `T_min` - Lower bound of fitting temperature range
-    /// * `T_max` - Upper bound of fitting temperature range
-    ///
-    /// # Returns
-    /// * `Ok(HashMap<String, FittingReport>)` - Quality reports for each property
-    /// * `Err(NASAError)` - If temperature ranges are not adjacent or fitting fails
-    ///
-    /// # Panics
-    /// * If fitting quality is below acceptable thresholds (R² < 0.95)
-    pub fn fitting_adjacent2(
-        &mut self,
-        coeffs_min: Coeffs,
-        coeffs_max: Coeffs,
-        T_min: f64,
-        T_max: f64,
-    ) -> Result<HashMap<String, FittingReport>, NASAError> {
-        let mut report_map: HashMap<String, FittingReport> = HashMap::new();
-        let (_, T_center) = (coeffs_min.T.0, coeffs_min.T.1);
-        let (T_center_check, _) = (coeffs_max.T.0, coeffs_max.T.1);
-        if T_center != T_center_check {
-            return Err(NASAError::InvalidTemperatureRange);
-        }
-        /////////////////////////////fitting ds//////////////////////////////////
-        let a = coeffs_min.coeff.0;
-        let b = coeffs_min.coeff.1;
-        let c = coeffs_min.coeff.2;
-        let d = coeffs_min.coeff.3;
-        let e = coeffs_min.coeff.4;
-        let g = coeffs_min.coeff.6;
-        let s_func1 = ds_sym(a, b, c, d, e, g);
-        let a = coeffs_max.coeff.0;
-        let b = coeffs_max.coeff.1;
-        let c = coeffs_max.coeff.2;
-        let d = coeffs_max.coeff.3;
-        let e = coeffs_max.coeff.4;
-        let g = coeffs_max.coeff.6;
-        let s_func2 = ds_sym(a, b, c, d, e, g);
-        let ds_func_to_fit = Expr::parse_expression(
-            "1.987 * (a* ln( t ) + b * t + c * t^2 / 2 + d * t^3 / 3.0 + e * t^4 / 4.0 + g)",
-        );
-
-        let mut sew = SewTwoFunctions::new(
-            s_func1.clone(),
-            s_func2.clone(),
-            T_min,
-            T_center,
-            T_max,
-            self.fit_point_number,
-        );
-
-        sew.create_fitting_data();
-        let initial_guess = vec![
-            (coeffs_min.coeff.0 + coeffs_max.coeff.0) / 2.0,
-            (coeffs_min.coeff.1 + coeffs_max.coeff.1) / 2.0,
-            (coeffs_min.coeff.2 + coeffs_max.coeff.2) / 2.0,
-            (coeffs_min.coeff.3 + coeffs_max.coeff.3) / 2.0,
-            (coeffs_min.coeff.4 + coeffs_max.coeff.4) / 2.0,
-            (coeffs_min.coeff.6 + coeffs_max.coeff.6) / 2.0,
-        ];
-        sew.fit(
-            ds_func_to_fit.clone(),
-            Some(vec![
-                "a".to_string(),
-                "b".to_string(),
-                "c".to_string(),
-                "d".to_string(),
-                "e".to_string(),
-                "g".to_string(),
-            ]),
-            "t".to_string(),
-            initial_guess,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-
-        let r_squared = sew.get_r_ssquared();
-        println!("r_squared for s: {}", r_squared.unwrap());
-        assert!(1.0 - r_squared.unwrap() < 5.0e-2);
-        let map_of_solutions_6_coeffs = sew.get_map_of_solutions().unwrap();
-        let a = *map_of_solutions_6_coeffs.get("a").unwrap();
-        let b = *map_of_solutions_6_coeffs.get("b").unwrap();
-        let c = *map_of_solutions_6_coeffs.get("c").unwrap();
-        let d = *map_of_solutions_6_coeffs.get("d").unwrap();
-        let e = *map_of_solutions_6_coeffs.get("e").unwrap();
-        let g = *map_of_solutions_6_coeffs.get("g").unwrap();
-        let s_fitting_report = self.direct_compare(
-            s_func1,
-            s_func2,
-            T_center,
-            ds_func_to_fit,
-            map_of_solutions_6_coeffs.clone(),
-        );
-        report_map.insert("S fitting report".to_string(), s_fitting_report);
-        /////////////////// fitting h ///////////////////////
-        let f = coeffs_min.coeff.5;
-        let h_func1 = dh_sym(a, b, c, d, e, f);
-        let f = coeffs_max.coeff.5;
-        let h_func2 = dh_sym(a, b, c, d, e, f);
-        let dh_func_to_fit = Expr::parse_expression(
-            "1.987 *t* (a + b * t/2 + (c/3) * t^2 + (d/4) * t^3 + (e/5) * t^4 + f/t)",
-        );
-        let dh_func_to_fit = dh_func_to_fit
-            .clone()
-            .set_variable_from_map(&map_of_solutions_6_coeffs);
-        let mut sew = SewTwoFunctions::new(
-            h_func1.clone(),
-            h_func2.clone(),
-            T_min,
-            T_center,
-            T_max,
-            self.fit_point_number,
-        );
-        sew.create_fitting_data();
-        sew.fit(
-            dh_func_to_fit.clone(),
-            Some(vec!["f".to_string()]),
-            "t".to_string(),
-            vec![1.0],
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        let r_squared = sew.get_r_ssquared();
-        println!("r_squared for h: {}", r_squared.unwrap());
-        assert!(1.0 - r_squared.unwrap() < 5.0e-2);
-        let f_map = sew.get_map_of_solutions().unwrap();
-        let mut map_of_7_coeffs = map_of_solutions_6_coeffs.clone();
-        map_of_7_coeffs.extend(f_map.clone());
-        let f = *f_map.get("f").unwrap();
-        self.coeffs = (a, b, c, d, e, f, g);
-
-        let h_fitting_report = self.direct_compare(
-            h_func1,
-            h_func2,
-            T_center,
-            dh_func_to_fit,
-            map_of_7_coeffs.clone(),
-        );
-        report_map.insert("h fitting report".to_string(), h_fitting_report);
-        ////////////////////////////ensure that fitting is correct///////////////
-        let Cp_range1 = Cp_sym(
-            coeffs_min.coeff.0,
-            coeffs_min.coeff.1,
-            coeffs_min.coeff.2,
-            coeffs_min.coeff.3,
-            coeffs_min.coeff.4,
-        );
-        let Cp_range2 = Cp_sym(
-            coeffs_max.coeff.0,
-            coeffs_max.coeff.1,
-            coeffs_max.coeff.2,
-            coeffs_max.coeff.3,
-            coeffs_max.coeff.4,
-        );
-        let Cp_func_to_fit =
-            Expr::parse_expression("1.987* (a + b * t + c * t^2 + d * t^3 + e * t^4)");
-        let c_fitting_report = self.direct_compare(
-            Cp_range1,
-            Cp_range2,
-            T_center,
-            Cp_func_to_fit,
-            map_of_solutions_6_coeffs,
-        );
-        report_map.insert("c fitting report".to_string(), c_fitting_report);
-
-        // Print fitting quality report table
-        Self::print_quality_table(&report_map);
-
-        Ok(report_map)
-    }
-    /// Prints a formatted table of fitting quality metrics
-    ///
-    /// Displays L1 norm, L2 norm, max norm, number of significant deviation points,
-    /// and temperature range where significant deviations occur for each fitted property.
-    ///
-    /// # Arguments
-    /// * `report_map` - HashMap containing fitting reports for different properties
-    pub fn print_quality_table(report_map: &HashMap<String, FittingReport>) {
-        // Print fitting quality report table
-        let mut table = Table::new();
-        table.add_row(Row::new(vec![
-            Cell::new("Property"),
-            Cell::new("L2 Norm"),
-            Cell::new("Max Norm"),
-            Cell::new("Points"),
-            Cell::new("T Range (K)"),
-        ]));
-
-        for (property, report) in report_map {
-            let t_range_str = match report.T_range {
-                Some((min, max)) => format!("{:.1}-{:.1}", min, max),
-                None => "N/A".to_string(),
-            };
-
-            table.add_row(Row::new(vec![
-                Cell::new(property),
-                Cell::new(&format!("{:.2e}", report.l2_norm)),
-                Cell::new(&format!("{:.2e}", report.max_norm)),
-                Cell::new(&report.number_of_significant_points.to_string()),
-                Cell::new(&t_range_str),
-            ]));
-        }
-
-        println!("\nFitting Quality Report:");
-        table.printstd();
-    }
     /// Main interface for temperature interval coefficient fitting with fallback
     ///
     /// Determines the appropriate fitting strategy based on temperature interval:
@@ -1310,35 +707,117 @@ impl NASAdata {
                 self.coeffs = coeffs_min.coeff.clone();
             } else if (i_t_max as isize - i_t_min as isize).abs() == 1 {
                 // Boundaries are in adjacent intervals, perform fitting
-                let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                    self.fitting_adjacent2(coeffs_min.clone(), coeffs_max.clone(), T_min, T_max)
-                }));
+
+                let result =
+                    self.fitting_adjacent2(coeffs_min.clone(), coeffs_max.clone(), T_min, T_max);
 
                 match result {
-                    Ok(Ok(_)) => {} // fitting_adjacent2 succeeded
+                    Ok(_) => {
+                        self.current_T_range = self.T_interval;
+                    } // fitting_adjacent2 succeeded
                     _ => {
                         // fitting_adjacent2 panicked or failed, use fitting_adjacent as fallback
                         println!("fitting_adjacent2 failed, falling back to fitting_adjacent");
-                        self.fitting_adjacent3(coeffs_min, coeffs_max, T_min, T_max)?;
+                        self.fit_cp_dh_ds(coeffs_min.clone(), coeffs_max.clone(), T_min, T_max)?;
+                        self.current_T_range = self.T_interval;
+                    }
+                }
+            } else if (i_t_max as isize - i_t_min as isize).abs() > 1 {
+                // Non-adjacent intervals, collect all coefficients in range
+                let mut coeffs_in_range = Vec::new();
+                for (_, coeffs) in &self.coeffs_map {
+                    if coeffs.T.1 > T_min && coeffs.T.0 < T_max {
+                        coeffs_in_range.push(coeffs.clone());
+                    }
+                }
+                let result = self.fitting_non_adjacent(coeffs_in_range.clone(), T_min, T_max);
+                match result {
+                    Ok(_) => {
+                        self.current_T_range = self.T_interval;
+                    } // fitting_non_adjacent succeeded
+                    _ => {
+                        self.fitting_cp_dh_ds_non_adjacent(coeffs_in_range, T_min, T_max)?;
+                        self.current_T_range = self.T_interval;
                     }
                 }
             } else {
+                // this is unreachable
                 return Err(NASAError::InvalidTemperatureRange);
             }
-
             Ok(())
         } else {
             Err(NASAError::InvalidTemperatureRange)
         }
     }
+    /// Calculates temperature-averaged mean values of thermodynamic properties
+    ///
+    /// Computes the mean values of heat capacity (Cp), enthalpy (dH), and entropy (dS)
+    /// over the specified temperature interval using symbolic integration:
+    ///
+    /// mean_value = (1/(T_max - T_min)) * ∫[T_min to T_max] property(T) dT
+    ///
+    /// The method uses the symbolic expressions stored in `Cp_sym`, `dh_sym`, and `ds_sym`
+    /// to perform definite integration over the temperature range, then divides by the
+    /// temperature interval to obtain mean values.
+    ///
+    /// # Returns
+    /// * `Ok(())` - Mean values successfully calculated and stored in Cp, dh, ds fields
+    /// * `Err(NASAError::InvalidTemperatureRange)` - If T_interval is not set or invalid
+    /// * `Err(NASAError::SymbolicError)` - If symbolic integration fails
+    ///
+    /// # Requires
+    /// * `T_interval` must be set via `set_T_interval()` before calling
+    /// * Symbolic expressions must be created via `create_sym_Cp_dH_dS()` before calling
+    /// * T_min < T_max for valid temperature range
+    ///
+    /// # Example
+    /// ```rust, ignore
+    /// nasa.set_T_interval(400.0, 800.0);
+    /// nasa.create_sym_Cp_dH_dS();
+    /// nasa.integr_mean()?;
+    /// let mean_cp = nasa.Cp;  // Average heat capacity over 400-800K
+    /// ```
+    pub fn integr_mean(&mut self) -> Result<(), NASAError> {
+        let (T_min, T_max) = self.T_interval.ok_or(NASAError::InvalidTemperatureRange)?;
+
+        if T_min >= T_max {
+            return Err(NASAError::InvalidTemperatureRange);
+        }
+
+        let T_range = T_max - T_min;
+        let inv_T_range = 1.0 / T_range;
+
+        // Integrate entropy
+        let ds_sym = self.ds_sym.clone();
+        let ds_integral = ds_sym
+            .definite_integrate("T", T_min, T_max)
+            .map_err(|e| NASAError::SymbolicError(format!("Failed to integrate entropy: {}", e)))?;
+        let ds_mean = inv_T_range * ds_integral;
+
+        // Integrate enthalpy
+        let dh_sym = self.dh_sym.clone().simplify();
+        let dh_integral = dh_sym.definite_integrate("T", T_min, T_max).map_err(|e| {
+            NASAError::SymbolicError(format!("Failed to integrate enthalpy: {}", e))
+        })?;
+        let dh_mean = inv_T_range * dh_integral;
+
+        // Integrate heat capacity
+        let Cp_sym = self.Cp_sym.clone();
+        let Cp_integral = Cp_sym.definite_integrate("T", T_min, T_max).map_err(|e| {
+            NASAError::SymbolicError(format!("Failed to integrate heat capacity: {}", e))
+        })?;
+        let Cp_mean = inv_T_range * Cp_integral;
+
+        // Store mean values
+        self.Cp = Cp_mean;
+        self.dh = dh_mean;
+        self.ds = ds_mean;
+
+        Ok(())
+    }
 }
-#[derive(Debug, Clone)]
-pub struct FittingReport {
-    l2_norm: f64,
-    max_norm: f64,
-    number_of_significant_points: usize,
-    T_range: Option<(f64, f64)>,
-}
+//////////////////////////////////////////////////////////////////////////////////////////
+
 impl fmt::Debug for NASAdata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NASAdata")
@@ -1396,6 +875,7 @@ impl Clone for NASAdata {
             T_interval: self.T_interval.clone(),
             fit_point_number: self.fit_point_number,
             norm_threshold: self.norm_threshold.clone(),
+            current_T_range: self.current_T_range.clone(),
         }
     }
 }
@@ -1407,6 +887,10 @@ impl ThermoCalculator for NASAdata {
     }
     fn extract_model_coefficients(&mut self, t: f64) -> Result<(), ThermoError> {
         self.extract_coefficients(t)?;
+        Ok(())
+    }
+    fn parse_coefficients(&mut self) -> Result<(), ThermoError> {
+        self.parse_coefficients()?;
         Ok(())
     }
     fn set_unit(&mut self, unit: Option<EnergyUnit>) -> Result<(), ThermoError> {
@@ -1497,5 +981,33 @@ impl ThermoCalculator for NASAdata {
     }
     fn get_composition(&self) -> Result<Option<HashMap<String, f64>>, ThermoError> {
         Ok(self.input.composition.clone())
+    }
+    fn fitting_coeffs_for_T_interval(&mut self) -> Result<(), ThermoError> {
+        self.fitting_coeffs_for_T_interval()?;
+        Ok(())
+    }
+    fn integr_mean(&mut self) -> Result<(), ThermoError> {
+        self.integr_mean()?;
+        Ok(())
+    }
+    fn set_T_interval(&mut self, T_min: f64, T_max: f64) -> Result<(), ThermoError> {
+        self.set_T_interval(T_min, T_max);
+        Ok(())
+    }
+    fn calculate_Cp_dH_dS_with_T_range(&mut self, T: f64) -> Result<(), ThermoError> {
+        self.calculate_Cp_dH_dS_with_T_range(T)?;
+        Ok(())
+    }
+    fn create_closures_Cp_dH_dS_with_T_range(&mut self, T: f64) -> Result<(), ThermoError> {
+        self.create_closures_Cp_dH_dS_with_T_range(T)?;
+        Ok(())
+    }
+    fn create_sym_Cp_dH_dS_with_T_range(&mut self, T: f64) -> Result<(), ThermoError> {
+        self.create_sym_Cp_dH_dS_with_T_range(T)?;
+        Ok(())
+    }
+    fn is_coeffs_valid_for_T(&self, T: f64) -> Result<bool, ThermoError> {
+        let flag = self.is_this_T_from_current_T_range(T);
+        Ok(flag)
     }
 }

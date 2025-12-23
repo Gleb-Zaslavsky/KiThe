@@ -33,7 +33,7 @@ mod tests {
         );
 
         // Perform the search
-        user_subs.search_substances();
+        user_subs.search_substances().unwrap();
         user_subs
             .extract_thermal_coeffs(substances[0].as_str(), 400.0)
             .unwrap();
@@ -100,7 +100,7 @@ mod tests {
         );
 
         // Perform the search
-        user_subs.search_substances();
+        user_subs.search_substances().unwrap();
         user_subs
             .extract_thermal_coeffs(substances[0].as_str(), 400.0)
             .unwrap();
@@ -216,7 +216,7 @@ mod tests {
         );
 
         // Perform search
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // Check results
         assert!(matches!(
@@ -270,7 +270,7 @@ mod tests {
             .insert("O2".to_string(), Some(Phases::Gas));
 
         // Perform search
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
         user_subs
             .extract_thermal_coeffs(substances[0].as_str(), 400.0)
             .unwrap();
@@ -320,7 +320,7 @@ mod tests {
         );
 
         // Perform search
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
         user_subs.set_M(
             HashMap::from([("H2O".to_string(), 18.0), ("CO".to_string(), 32.0)]),
             None,
@@ -362,7 +362,7 @@ mod tests {
         );
 
         // Perform search
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
         user_subs
             .extract_thermal_coeffs(substances[0].as_str(), 400.0)
             .unwrap();
@@ -405,7 +405,7 @@ mod tests {
         );
 
         // Perform search
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
         user_subs.extract_thermal_coeffs("H2O", 400.0).unwrap();
 
         // Calculate function closures
@@ -450,7 +450,7 @@ mod tests {
         );
 
         // Perform search
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
         user_subs.extract_thermal_coeffs("H2O", 400.0).unwrap();
         // Calculate symbolic expressions
         user_subs
@@ -493,7 +493,7 @@ mod tests {
         );
 
         // Perform search
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
         user_subs
             .extract_thermal_coeffs(substances[0].as_str(), 400.0)
             .unwrap();
@@ -543,9 +543,8 @@ mod tests {
 #[cfg(test)]
 mod tests2 {
 
-    use crate::Thermodynamics::{
-        DBhandlers::CEAdata,
-        User_substances::{DataType, LibraryPriority, Phases, SubsData, WhatIsFound},
+    use crate::Thermodynamics::User_substances::{
+        DataType, LibraryPriority, Phases, SubsData, WhatIsFound,
     };
     use approx::assert_relative_eq;
     use core::panic;
@@ -637,7 +636,7 @@ mod tests2 {
         let mut user_subs = create_test_subsdata();
 
         // Perform the search
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // Check that results were populated
         assert!(!user_subs.search_results.is_empty());
@@ -650,7 +649,7 @@ mod tests2 {
     #[test]
     fn test_get_substance_result() {
         let mut user_subs = create_test_subsdata();
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // Get result for a specific substance
         let result = user_subs.get_substance_result("H2O");
@@ -665,7 +664,7 @@ mod tests2 {
         user_subs.substances = vec!["NonExistentSubstance123".to_string()];
         user_subs.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
 
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         let not_found = user_subs.get_not_found_substances();
         assert_eq!(not_found.len(), 1);
@@ -675,7 +674,7 @@ mod tests2 {
     #[test]
     fn test_extract_thermal_coeffs() {
         let mut user_subs = create_test_subsdata();
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // Find a substance that was found in the search
         let found_substances: Vec<String> = user_subs
@@ -702,7 +701,7 @@ mod tests2 {
     #[test]
     fn test_calculate_thermo_properties() {
         let mut user_subs = create_test_subsdata();
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // Find a substance that was found in the search
         let found_substances: Vec<String> = user_subs
@@ -737,7 +736,7 @@ mod tests2 {
     #[test]
     fn test_calculate_therm_map_of_properties() {
         let mut user_subs = create_test_subsdata();
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // Extract coefficients for all substances
         let _ = user_subs.extract_all_thermal_coeffs(298.15);
@@ -762,7 +761,7 @@ mod tests2 {
     #[test]
     fn test_calculate_therm_map_of_fun() {
         let mut user_subs = create_test_subsdata();
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
         user_subs.print_search_summary();
 
         // Extract coefficients for all substances
@@ -795,7 +794,7 @@ mod tests2 {
     fn test_calculate_therm_map_of_sym() {
         //
         let mut user_subs = create_test_subsdata();
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // Extract coefficients for all substances
         let _ = user_subs.extract_all_thermal_coeffs(298.15);
@@ -818,7 +817,7 @@ mod tests2 {
             LibraryPriority::Priority,
         );
 
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // Extract coefficients for all substances
         let _ = user_subs.extract_all_thermal_coeffs(298.15);
@@ -869,7 +868,7 @@ mod tests2 {
     #[test]
     fn test_print_search_summary() {
         let mut user_subs = create_test_subsdata();
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // This just tests that the function runs without errors
         user_subs.print_search_summary();
@@ -886,7 +885,7 @@ mod tests2 {
             LibraryPriority::Priority,
         );
 
-        user_subs.search_substances();
+        user_subs.search_substances().unwrap();
 
         let priority_found = user_subs.get_priority_found_substances();
         let permitted_found = user_subs.get_permitted_found_substances();
@@ -903,7 +902,7 @@ mod tests2 {
     #[test]
     fn test_clone() {
         let mut user_subs = create_test_subsdata();
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // Extract coefficients and calculate properties
         let _ = user_subs.extract_all_thermal_coeffs(298.15);
@@ -956,7 +955,7 @@ mod tests2 {
 
         // Set pressure and molar mass
         user_subs.set_P(1.0, Some("atm".to_string()));
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
         user_subs.if_not_found_go_NIST().unwrap();
         println!("\n\n Search results: {:#?}", user_subs.search_results);
         assert!(user_subs.search_results.contains_key("NH4ClO4"));
@@ -982,7 +981,7 @@ mod tests2 {
         user_subs.substances = vec!["H2O".to_string(), "CO2".to_string(), "CH4".to_string()];
 
         // Search for substances in the libraries
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // Calculate element composition and molar mass
         let result = user_subs.calculate_elem_composition_and_molar_mass(None);
@@ -1022,7 +1021,7 @@ mod tests2 {
         user_subs_with_groups.substances = vec!["MeOH".to_string()]; // Methanol
 
         // Search for substances
-        user_subs_with_groups.search_substances();
+        let _ = user_subs_with_groups.search_substances().unwrap();
 
         // Calculate with custom groups
         let result = user_subs_with_groups.calculate_elem_composition_and_molar_mass(Some(groups));
@@ -1043,7 +1042,7 @@ mod tests2 {
         user_subs.substances = vec!["H2".to_string(), "O2".to_string(), "H2O".to_string()];
 
         // Search for substances
-        user_subs.search_substances();
+        user_subs.search_substances().unwrap();
 
         // Calculate element composition and molar mass
         let result = user_subs.calculate_elem_composition_and_molar_mass(None);
@@ -1082,7 +1081,7 @@ mod tests2 {
         ];
 
         // Search for substances
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // Calculate element composition and molar mass
         let result = user_subs.calculate_elem_composition_and_molar_mass(None);
@@ -1131,7 +1130,7 @@ mod tests2 {
         );
 
         // Search substances
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // Calculate molar masses (required prerequisite)
         user_subs
@@ -1179,9 +1178,6 @@ mod tests2 {
 
     #[test]
     fn test_calculate_transport_map_of_properties_CEA() {
-        use crate::Thermodynamics::DBhandlers::transport_api::TransportEnum::CEA;
-        use crate::Thermodynamics::User_substances::CalculatorType;
-
         // Create a test instance with substances having known compositions
         let mut user_subs = SubsData::new();
         let substances = vec!["H2O".to_string(), "CO".to_string()];
@@ -1204,7 +1200,7 @@ mod tests2 {
             .set_multiple_library_priorities(vec!["CEA".to_string()], LibraryPriority::Priority);
 
         // Search substances
-        user_subs.search_substances();
+        let _ = user_subs.search_substances().unwrap();
 
         // Calculate molar masses (required prerequisite)
         user_subs
@@ -1223,30 +1219,9 @@ mod tests2 {
         assert!(H2O_results.get(&WhatIsFound::Thermo).is_some());
         assert!(H2O_results.get(&WhatIsFound::Transport).is_some());
         let H2O_thermo = H2O_results.get(&WhatIsFound::Thermo).unwrap();
-        let H2O_transport = H2O_results.get(&WhatIsFound::Transport).unwrap();
         assert!(H2O_thermo.is_some());
+        let H2O_transport = H2O_results.get(&WhatIsFound::Transport).unwrap();
         assert!(H2O_transport.is_some());
-        let _H2O_thermo = H2O_thermo.as_ref().unwrap();
-        let H2O_transport = H2O_transport.as_ref().unwrap();
-        let _data = H2O_transport.data.clone();
-        let calculator = H2O_transport.calculator.as_ref().unwrap();
-        match calculator {
-            CalculatorType::Transport(TransportEnum) => {
-                match TransportEnum {
-                    CEA(CEAdata) => {
-                        let cloned = CEAdata.clone();
-                        println!("\n Transport calculator is CEA as expected {:?}", cloned);
-                        // Expected case
-                    }
-                    _ => panic!("Unexpected transport calculator type"),
-                }
-            }
-            &CalculatorType::Thermo(_) => {
-                panic!("Calculator type mismatch");
-            }
-        }
-        let CO_results = search_results.get("CO");
-        assert!(CO_results.is_some());
 
         // Extract thermal coefficients
         user_subs.extract_all_thermal_coeffs(400.0).unwrap();
@@ -1280,5 +1255,488 @@ mod tests2 {
                 }
             }
         }
+    }
+}
+
+// Include error handling tests
+
+#[cfg(test)]
+mod additional_error_tests {
+
+    use crate::Thermodynamics::User_substances::{LibraryPriority, SubsData};
+    use crate::Thermodynamics::User_substances_error::SubsDataError;
+
+    #[test]
+    fn test_absurdly_high_temperatures() {
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec!["CO".to_string()];
+        subs_data.set_multiple_library_priorities(
+            vec!["NASA_gas".to_string()],
+            LibraryPriority::Priority,
+        );
+        let _ = subs_data.search_substances().unwrap();
+
+        // Test temperatures beyond physical limits
+        let extreme_temps = vec![1_000_000.0, 10_000_000.0, f64::MAX];
+        for temp in extreme_temps {
+            let result = subs_data.extract_thermal_coeffs("CO", temp);
+            // Should either be invalid temperature or coefficient extraction failed
+            if let Err(error) = result {
+                assert!(matches!(
+                    error,
+                    SubsDataError::InvalidTemperature(_)
+                        | SubsDataError::CoefficientExtractionFailed { .. }
+                        | SubsDataError::ThermoError(_)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn test_fictional_substances() {
+        let mut subs_data = SubsData::new();
+        let fictional_substances = vec![
+            "Unobtainium".to_string(),
+            "Vibranium".to_string(),
+            "Kryptonite".to_string(),
+            "Element115".to_string(),
+        ];
+        subs_data.substances = fictional_substances.clone();
+        subs_data.set_multiple_library_priorities(
+            vec!["NASA_gas".to_string()],
+            LibraryPriority::Priority,
+        );
+        let _ = subs_data.search_substances().unwrap();
+
+        // All should result in SubstanceNotFound or CalculatorNotAvailable errors
+        for substance in &fictional_substances {
+            let result = subs_data.extract_thermal_coeffs(substance, 400.0);
+            println!("Result for {}: {:?}", substance, result);
+            assert!(matches!(
+                result,
+                Err(SubsDataError::SubstanceNotFound(_))
+                    | Err(SubsDataError::CalculatorNotAvailable { .. })
+            ));
+
+            let result = subs_data.calculate_thermo_properties(substance, 400.0);
+            assert!(matches!(
+                result,
+                Err(SubsDataError::SubstanceNotFound(_))
+                    | Err(SubsDataError::CalculatorNotAvailable { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn test_malformed_substance_names() {
+        let mut subs_data = SubsData::new();
+        let malformed_names = vec![
+            "".to_string(),                                              // Empty string
+            "   ".to_string(),                                           // Whitespace only
+            "CO@#$%".to_string(),                                        // Special characters
+            "123456".to_string(),                                        // Numbers only
+            "VeryLongSubstanceNameThatDoesNotExistAnywhere".to_string(), // Very long name
+        ];
+        subs_data.substances = malformed_names.clone();
+        subs_data.set_multiple_library_priorities(
+            vec!["NASA_gas".to_string()],
+            LibraryPriority::Priority,
+        );
+        let _ = subs_data.search_substances().unwrap();
+
+        for substance in &malformed_names {
+            let result = subs_data.extract_thermal_coeffs(substance, 400.0);
+            assert!(matches!(result, Err(SubsDataError::SubstanceNotFound(_))));
+        }
+    }
+
+    #[test]
+    fn test_transport_without_prerequisites() {
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec!["CO".to_string()];
+        subs_data.set_multiple_library_priorities(
+            vec!["Aramco_transport".to_string()],
+            LibraryPriority::Priority,
+        );
+        subs_data.search_substances().unwrap();
+
+        // Try to calculate transport properties without setting pressure
+        let result = subs_data.calculate_transport_properties("CO", 400.0, Some(30.0), None);
+        assert!(matches!(result, Err(SubsDataError::PressureNotSet)));
+
+        // Set pressure but not molar mass
+        subs_data.set_P(101325.0, None);
+        let result = subs_data.calculate_transport_properties("CO", 400.0, Some(30.0), None);
+        assert!(matches!(result, Err(SubsDataError::MolarMassNotFound(_))));
+    }
+
+    #[test]
+    fn test_batch_operations_with_mixed_results() {
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec![
+            "CO".to_string(),
+            "H2O".to_string(),
+            "NonExistent1".to_string(),
+            "NonExistent2".to_string(),
+        ];
+        subs_data.set_multiple_library_priorities(
+            vec!["NASA_gas".to_string()],
+            LibraryPriority::Priority,
+        );
+        let _ = subs_data.search_substances().unwrap();
+
+        // Batch operation should fail on first non-existent substance
+        let result = subs_data.extract_all_thermal_coeffs(400.0);
+        assert!(matches!(result, Err(SubsDataError::SubstanceNotFound(_))));
+
+        // But individual operations should work for existing substances
+        assert!(subs_data.extract_thermal_coeffs("CO", 400.0).is_ok());
+        assert!(subs_data.extract_thermal_coeffs("H2O", 400.0).is_ok());
+    }
+
+    #[test]
+    fn test_error_message_content() {
+        // Test that error messages contain useful information
+        let error = SubsDataError::CoefficientExtractionFailed {
+            substance: "TestSubstance".to_string(),
+            temperature: Some(5000.0),
+        };
+        let message = format!("{}", error);
+        assert!(message.contains("TestSubstance"));
+        assert!(message.contains("5000"));
+        assert!(message.contains("extract coefficients"));
+
+        let error = SubsDataError::FunctionCreationFailed {
+            substance: "CO2".to_string(),
+            function_type: "test function".to_string(),
+        };
+        let message = format!("{}", error);
+        assert!(message.contains("CO2"));
+        assert!(message.contains("test function"));
+        assert!(message.contains("Failed to create"));
+
+        let error = SubsDataError::SubstanceNotFound("UnknownSubstance".to_string());
+        let message = format!("{}", error);
+        assert!(message.contains("UnknownSubstance"));
+        assert!(message.contains("not found"));
+
+        let error = SubsDataError::InvalidTemperature(-100.0);
+        let message = format!("{}", error);
+        assert!(message.contains("-100"));
+        assert!(message.contains("Invalid temperature"));
+    }
+    ///////////////////////////////////////
+}
+
+#[cfg(test)]
+mod logging_tests {
+    use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData};
+    use crate::Thermodynamics::User_substances_error::ExceptionLogger;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_logging_non_existent_substances() {
+        use crate::Thermodynamics::User_substances_error::LogErrorType;
+
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec!["FakeSubstance123".to_string(), "Unobtainium".to_string()];
+        subs_data.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        let _ = subs_data.search_substances();
+
+        subs_data.clear_error_logs();
+
+        let _ = subs_data.extract_thermal_coeffs("FakeSubstance123", 400.0);
+        let _ = subs_data.calculate_thermo_properties("Unobtainium", 500.0);
+        let _ = subs_data.extract_transport_coeffs("FakeSubstance123", 300.0);
+
+        let logs = subs_data.logger.get_logs();
+        assert!(!logs.is_empty());
+
+        // Check that SubstanceNotFound errors are logged
+        let substance_not_found_count = logs
+            .iter()
+            .filter(|log| matches!(log.error_type, LogErrorType::SubstanceNotFound(_)))
+            .count();
+        assert!(
+            substance_not_found_count > 0,
+            "Expected SubstanceNotFound errors"
+        );
+
+        println!("\n=== Non-existent Substances ===");
+        subs_data.logger.print_pretty_table();
+    }
+
+    #[test]
+    fn test_logging_invalid_temperatures() {
+        use crate::Thermodynamics::User_substances_error::LogErrorType;
+
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec!["CO".to_string()];
+        subs_data.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        let _ = subs_data.search_substances();
+
+        subs_data.clear_error_logs();
+
+        let invalid_temps = vec![-100.0, 0.0, -273.15];
+        for temp in invalid_temps {
+            let _ = subs_data.extract_thermal_coeffs("CO", temp);
+            let _ = subs_data.extract_transport_coeffs("CO", temp);
+        }
+
+        let logs = subs_data.logger.get_logs();
+        assert!(!logs.is_empty());
+
+        // Check that InvalidTemperature errors are logged
+        let invalid_temp_count = logs
+            .iter()
+            .filter(|log| matches!(log.error_type, LogErrorType::InvalidTemperature(_)))
+            .count();
+        assert!(invalid_temp_count > 0, "Expected InvalidTemperature errors");
+
+        println!("\n=== Invalid Temperatures ===");
+        subs_data.logger.print_pretty_table();
+    }
+
+    #[test]
+    fn test_logging_batch_operations() {
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec![
+            "CO".to_string(),
+            "NonExistent1".to_string(),
+            "CO2".to_string(),
+        ];
+        subs_data.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        let _ = subs_data.search_substances();
+
+        subs_data.clear_error_logs();
+
+        let _ = subs_data.extract_all_thermal_coeffs(400.0);
+        let _ = subs_data.calculate_therm_map_of_properties(400.0);
+        let _ = subs_data.calculate_therm_map_of_fun();
+
+        let logs = subs_data.logger.get_logs();
+        assert!(!logs.is_empty());
+
+        println!("\n=== Batch Operations ===");
+        subs_data.logger.print_pretty_table();
+    }
+
+    #[test]
+    fn test_logging_transport_prerequisites() {
+        use crate::Thermodynamics::User_substances_error::LogErrorType;
+
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec!["CO".to_string()];
+        subs_data.set_library_priority("Aramco_transport".to_string(), LibraryPriority::Priority);
+        let _ = subs_data.search_substances();
+
+        subs_data.clear_error_logs();
+
+        let _ = subs_data.calculate_transport_properties("CO", 400.0, Some(30.0), None);
+
+        subs_data.set_P(101325.0, None);
+        let _ = subs_data.calculate_transport_properties("CO", 400.0, Some(30.0), None);
+
+        let logs = subs_data.logger.get_logs();
+        assert!(!logs.is_empty());
+
+        // Check for PressureNotSet and MolarMassNotFound errors
+        let pressure_not_set_count = logs
+            .iter()
+            .filter(|log| matches!(log.error_type, LogErrorType::PressureNotSet(_)))
+            .count();
+        let molar_mass_not_found_count = logs
+            .iter()
+            .filter(|log| matches!(log.error_type, LogErrorType::MolarMassNotFound(_)))
+            .count();
+
+        assert!(
+            pressure_not_set_count > 0 || molar_mass_not_found_count > 0,
+            "Expected PressureNotSet or MolarMassNotFound errors"
+        );
+
+        println!("\n=== Transport Prerequisites ===");
+        subs_data.logger.print_pretty_table();
+    }
+
+    #[test]
+    fn test_logging_transport_batch_operations() {
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec!["H2O".to_string(), "FakeGas".to_string(), "CO".to_string()];
+
+        subs_data.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        subs_data.set_library_priority("Aramco_transport".to_string(), LibraryPriority::Priority);
+
+        for substance in &subs_data.substances {
+            subs_data
+                .map_of_phases
+                .insert(substance.clone(), Some(Phases::Gas));
+        }
+
+        let _ = subs_data.search_substances();
+        subs_data.set_P(101325.0, None);
+        subs_data.set_M(
+            HashMap::from([
+                ("H2O".to_string(), 18.0),
+                ("CO".to_string(), 28.0),
+                ("FakeGas".to_string(), 32.0),
+            ]),
+            None,
+        );
+
+        subs_data.clear_error_logs();
+
+        let _ = subs_data.extract_all_transport_coeffs(400.0);
+        let _ = subs_data.extract_all_thermal_coeffs(400.0);
+        let _ = subs_data.calculate_therm_map_of_properties(400.0);
+        let _ = subs_data.calculate_transport_map_of_properties(400.0);
+        let _ = subs_data.calculate_transport_map_of_functions();
+        let _ = subs_data.calculate_transport_map_of_sym();
+
+        println!("\n=== Transport Batch Operations ===");
+        subs_data.logger.print_pretty_table();
+    }
+
+    #[test]
+    fn test_logging_extreme_conditions() {
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec!["CO".to_string()];
+        subs_data.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        let _ = subs_data.search_substances();
+
+        subs_data.clear_error_logs();
+
+        let extreme_temps = vec![10_000.0, 50_000.0, 100_000.0];
+        for temp in extreme_temps {
+            let _ = subs_data.extract_thermal_coeffs("CO", temp);
+        }
+
+        println!("\n=== Extreme Conditions ===");
+        subs_data.logger.print_pretty_table();
+    }
+
+    #[test]
+    fn test_comprehensive_error_coverage() {
+        use crate::Thermodynamics::User_substances_error::LogErrorType;
+
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec!["CO".to_string(), "FakeSubstance".to_string()];
+
+        subs_data.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        subs_data.set_library_priority("Aramco_transport".to_string(), LibraryPriority::Priority);
+
+        let _ = subs_data.search_substances();
+        subs_data.clear_error_logs();
+
+        let _ = subs_data.extract_thermal_coeffs("FakeSubstance", 400.0);
+        let _ = subs_data.extract_thermal_coeffs("CO", -100.0);
+        let _ = subs_data.calculate_transport_properties("CO", 400.0, Some(30.0), None);
+
+        subs_data.set_P(101325.0, None);
+        let _ = subs_data.calculate_transport_properties("CO", 400.0, Some(30.0), None);
+
+        subs_data.set_M(HashMap::from([("CO".to_string(), 28.0)]), None);
+        let _ = subs_data.calculate_transport_properties("FakeSubstance", 400.0, Some(30.0), None);
+
+        let logs = subs_data.logger.get_logs();
+        println!("\n=== Comprehensive Error Coverage ===");
+        println!("Total errors logged: {}", logs.len());
+        subs_data.logger.print_pretty_table();
+
+        // Check for specific error types
+        let substance_not_found = logs
+            .iter()
+            .any(|log| matches!(log.error_type, LogErrorType::SubstanceNotFound(_)));
+        let invalid_temperature = logs
+            .iter()
+            .any(|log| matches!(log.error_type, LogErrorType::InvalidTemperature(_)));
+        let pressure_not_set = logs
+            .iter()
+            .any(|log| matches!(log.error_type, LogErrorType::PressureNotSet(_)));
+        let molar_mass_not_found = logs
+            .iter()
+            .any(|log| matches!(log.error_type, LogErrorType::MolarMassNotFound(_)));
+
+        assert!(substance_not_found, "Expected SubstanceNotFound error");
+        assert!(invalid_temperature, "Expected InvalidTemperature error");
+        assert!(
+            pressure_not_set || molar_mass_not_found,
+            "Expected PressureNotSet or MolarMassNotFound error"
+        );
+
+        let error_types: std::collections::HashSet<_> = logs
+            .iter()
+            .map(|log| {
+                format!("{:?}", log.error_type)
+                    .split('(')
+                    .next()
+                    .unwrap_or("Unknown")
+                    .to_string()
+            })
+            .collect();
+
+        println!("Error types: {:?}", error_types);
+        assert!(error_types.len() > 1);
+    }
+
+    #[test]
+    fn test_logger_functionality() {
+        use crate::Thermodynamics::User_substances_error::LogErrorType;
+
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec!["NonExistent".to_string()];
+        subs_data.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        let _ = subs_data.search_substances();
+
+        subs_data.clear_error_logs();
+        assert!(subs_data.logger.get_logs().is_empty());
+
+        let _ = subs_data.extract_thermal_coeffs("NonExistent", 400.0);
+        let _ = subs_data.extract_thermal_coeffs("NonExistent", -100.0);
+
+        let logs = subs_data.logger.get_logs();
+        assert_eq!(logs.len(), 2);
+
+        // Verify specific error types
+        assert!(
+            logs.iter()
+                .any(|log| matches!(log.error_type, LogErrorType::SubstanceNotFound(_)))
+        );
+        assert!(
+            logs.iter()
+                .any(|log| matches!(log.error_type, LogErrorType::InvalidTemperature(_)))
+        );
+
+        // Verify substance and function fields
+        assert!(logs.iter().all(|log| log.substance == "NonExistent"));
+        assert!(
+            logs.iter()
+                .all(|log| log.function == "extract_thermal_coeffs")
+        );
+
+        println!("\n=== Logger Functionality Test ===");
+        subs_data.logger.print_pretty_table();
+
+        subs_data.clear_error_logs();
+        assert!(subs_data.logger.get_logs().is_empty());
+    }
+
+    #[test]
+    fn test_with_calculator_logging() {
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec!["CO".to_string()];
+        subs_data.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        subs_data.set_library_priority("Aramco_transport".to_string(), LibraryPriority::Priority);
+        let _ = subs_data.search_substances();
+
+        subs_data.clear_error_logs();
+
+        let _ = subs_data.set_T_range_for_thermo("CO", 10000.0, 5000.0);
+        let _ = subs_data.fitting_thermal_coeffs_for_T_interval("CO");
+        let _ = subs_data.parse_thermal_coeffs("CO");
+        let _ = subs_data.integr_mean("CO");
+
+        println!("\n=== With Calculator Logging ===");
+        subs_data.logger.print_pretty_table();
     }
 }

@@ -299,7 +299,7 @@ mod tests2 {
             "string_field".to_string(),
             Some(vec![Value::String("test".to_string())]),
         );
-        section1.insert("float_field".to_string(), Some(vec![Value::Float(3.14)]));
+        section1.insert("float_field".to_string(), Some(vec![Value::Float(3.0)]));
         section1.insert("int_field".to_string(), Some(vec![Value::Integer(42)]));
         section1.insert("bool_field".to_string(), Some(vec![Value::Boolean(true)]));
         section1.insert(
@@ -379,7 +379,7 @@ mod tests2 {
         // Test Float value
         if let Some(Some(values)) = section.get("float_field") {
             if let Value::Float(f) = &values[0] {
-                assert_eq!(*f, 3.14);
+                assert_eq!(*f, 3.0);
             } else {
                 panic!("Expected Float value");
             }

@@ -40,7 +40,7 @@ pub fn kin_examples(kintask: usize) {
             println!("{:?}", atomic_composition);
 
             let vec_of_formulae = vec!["H2O", "NaCl", "C6H8O6", "Ca(NO3)2"];
-            let expected_molar_masses = vec![18.01528, 58.44316, 176.12, 164.093];
+            let expected_molar_masses = [18.01528, 58.44316, 176.12, 164.093];
             let calculated_molar_masses =
                 calculate_molar_mass_of_vector_of_subs(vec_of_formulae, None);
 

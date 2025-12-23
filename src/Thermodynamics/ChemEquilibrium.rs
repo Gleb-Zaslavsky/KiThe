@@ -1,4 +1,14 @@
 pub mod ClassicalThermodynamics;
+pub mod ClassicalThermodynamics2;
+pub mod ClassicalThermodynamics3;
+/// dG and S functions
+pub mod ClassicalThermodynamicsCalculations;
+/// Constructing nonlinear equations
+pub mod ClassicalThermodynamicsEquations;
+/// pretty printing of equations and results of calculations
+pub mod ClassicalThermodynamicsOutput;
+/// Aggregation of equations and their solution
+pub mod ClassicalThermodynamicsSolver;
 ///module for chemical equilibrium and classical thermodynamics
 /// # Examples
 /// ```
@@ -65,15 +75,8 @@ pub mod ClassicalThermodynamics;
 ///    
 ///    }
 /// ```
-pub mod ClassicalThermodynamics2;
 mod ClassicalThermodynamics_tests;
 mod ClassicalThermodynamics_tests2;
-
-/// dG and S functions
-pub mod ClassicalThermodynamicsCalculations;
-/// Constructing nonlinear equations
-pub mod ClassicalThermodynamicsEquations;
-/// pretty printing of equations and results of calculations
-pub mod ClassicalThermodynamicsOutput;
-/// Aggregation of equations and their solution
-pub mod ClassicalThermodynamicsSolver;
+mod ClassicalThermodynamics_tests3;
+pub mod easy_equilibrium;
+pub mod easy_equilibrium2;

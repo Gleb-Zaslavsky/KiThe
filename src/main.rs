@@ -27,14 +27,13 @@ pub fn main() {
 TODO list
  - transport gui fix for Aramco transport
  - NISTparser - opportunity to load from library
- - gui for NIST parser
+
  - All substances comparing gui instrument
- - fix chemical equilibrium 
- - add simple combustion models
- - add simple combustion models gui
- - interfaces for temperature range Cp, dH, dS
+ - fix chemical equilibrium
+
+
  - integral mean properties
- - non adjacent temperature intervals 
+
 
 
 

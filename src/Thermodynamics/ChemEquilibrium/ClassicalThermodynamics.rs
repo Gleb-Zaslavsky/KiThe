@@ -1,19 +1,24 @@
+use super::ClassicalThermodynamicsSolver::{Solver, SolverInstance};
+use crate::Thermodynamics::ChemEquilibrium::ClassicalThermodynamicsSolver::SolverType;
 use crate::Thermodynamics::User_PhaseOrSolution::{
     CustomSubstance, SubstancesContainer, ThermodynamicsCalculatorTrait,
 };
+use crate::Thermodynamics::User_PhaseOrSolution2::OnePhase;
 
-use super::ClassicalThermodynamicsSolver::Solver;
-use crate::Thermodynamics::User_substances::SubsData;
+use crate::Thermodynamics::User_substances_error::SubsDataError;
+use RustedSciThe::numerical::Nonlinear_systems::NR::Method;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::{f64, vec};
+
 /////////////////////ERROR HANDLING////////////////////////////////////////////////////////
 
 use std::io;
 #[derive(Debug)]
 pub enum ThermodynamicsError {
+    SubsDataError(SubsDataError),
     MatrixDimensionMismatch(String),
     MissingData(String),
     CalculationError(String),
@@ -41,6 +46,9 @@ impl fmt::Display for ThermodynamicsError {
             ThermodynamicsError::SolverError(msg) => write!(f, "Solver error: {}", msg),
             ThermodynamicsError::IoError(err) => write!(f, "IO error: {}", err),
             ThermodynamicsError::ParseError(msg) => write!(f, "Parse error: {}", msg),
+            ThermodynamicsError::SubsDataError(error) => {
+                write!(f, "substance data error: {}", error)
+            }
         }
     }
 }
@@ -51,6 +59,12 @@ impl std::error::Error for ThermodynamicsError {}
 impl From<io::Error> for ThermodynamicsError {
     fn from(error: io::Error) -> Self {
         ThermodynamicsError::IoError(error)
+    }
+}
+
+impl From<SubsDataError> for ThermodynamicsError {
+    fn from(error: SubsDataError) -> Self {
+        ThermodynamicsError::SubsDataError(error)
     }
 }
 
@@ -68,7 +82,7 @@ pub trait ThermodynamicCalculations {
     /// A comprehensive thermodynamic analysis including Gibbs energy and entropy
     fn create_thermodynamics(
         &mut self,
-        temperature: f64,
+        temperature: Option<f64>,
         pressure: f64,
         non_zero_moles_number: Option<
             HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)>,
@@ -81,7 +95,7 @@ pub trait ThermodynamicCalculations {
 impl ThermodynamicCalculations for CustomSubstance {
     fn create_thermodynamics(
         &mut self,
-        temperature: f64,
+        temperature: Option<f64>,
         pressure: f64,
         // non-zero concentrations of substances in the mixture
         non_zero_moles_number: Option<
@@ -92,21 +106,22 @@ impl ThermodynamicCalculations for CustomSubstance {
     ) -> Result<Thermodynamics, ThermodynamicsError> {
         let mut thermodynamics = Thermodynamics::new();
         thermodynamics.subdata = self.clone();
-        let subs_container = self
-            .extract_SubstancesContainer()
-            .map_err(|e| ThermodynamicsError::MissingData(e))?;
+        let subs_container = self.extract_SubstancesContainer()?;
         thermodynamics.subs_container = subs_container;
         if let Some(non_zero_moles_number) = non_zero_moles_number {
-            let full_map_of_moles_number = &self
-                .create_full_map_of_mole_numbers(non_zero_moles_number)
-                .map_err(|e| ThermodynamicsError::CalculationError(e))?;
+            let full_map_of_moles_number =
+                &self.create_full_map_of_mole_numbers(non_zero_moles_number)?;
             thermodynamics.map_of_map_mole_numbers_and_phases = full_map_of_moles_number.0.clone();
             thermodynamics.map_of_vec_mole_numbers_and_phases = full_map_of_moles_number.1.clone();
             thermodynamics.map_of_concentration = full_map_of_moles_number.2.clone();
+            if let Some(temperature) = temperature {
+                thermodynamics.extract_all_thermal_coeffs(temperature)?;
+                thermodynamics.calculate_therm_map_of_properties(temperature)?;
 
-            thermodynamics
-                .calculate_Gibbs_free_energy(temperature, full_map_of_moles_number.1.clone());
-            thermodynamics.calculate_S(temperature, full_map_of_moles_number.1.clone());
+                thermodynamics
+                    .calculate_Gibbs_free_energy(temperature, full_map_of_moles_number.1.clone());
+                thermodynamics.calculate_S(temperature, full_map_of_moles_number.1.clone());
+            }
             let vec_of_substances = self.get_all_substances();
             check_task(
                 &thermodynamics.map_of_map_mole_numbers_and_phases,
@@ -128,15 +143,18 @@ impl ThermodynamicCalculations for CustomSubstance {
         }
         //   let vec_of_substances = subs_container.get_all_substances();
 
-        thermodynamics.T = temperature;
         thermodynamics.P = pressure;
+        if let Some(temperature) = temperature {
+            thermodynamics.T = temperature;
+            thermodynamics.extract_all_thermal_coeffs(temperature)?;
+            thermodynamics.calculate_therm_map_of_sym()?;
 
-        thermodynamics.calculate_Gibbs_sym(temperature);
-        thermodynamics.calculate_Gibbs_fun(temperature);
+            thermodynamics.calculate_Gibbs_sym(temperature);
+            thermodynamics.calculate_Gibbs_fun(temperature);
 
-        thermodynamics.calculate_S_sym(temperature);
-        thermodynamics.calculate_S_fun(temperature);
-
+            thermodynamics.calculate_S_sym(temperature);
+            thermodynamics.calculate_S_fun(temperature);
+        }
         thermodynamics.set_P_to_sym();
 
         Ok(thermodynamics)
@@ -208,39 +226,13 @@ pub struct Thermodynamics {
         Option<String>,
         HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
     >,
-    /// hashmap of entropy of a given mixure of substances (symbolic result at given T, P, concentration)
-    pub dS_sym: HashMap<Option<String>, HashMap<String, Expr>>,
-    /// hashmap of Gibbs free energy of a given mixure of substances (numerical result at given T, P, concentration)
-    pub dG: HashMap<Option<String>, HashMap<String, f64>>,
-    /// hashmap of Gibbs free energy of a given mixure of substances (function at given T, P, concentration)
-    pub dG_fun: HashMap<
-        Option<String>,
-        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
-    >,
-    /// hashmap of Gibbs free energy of a given mixure of substances (symbolic result at given T, P, concentration)
-    pub dG_sym: HashMap<Option<String>, HashMap<String, Expr>>,
+
     /// Structure for solver of nonlinear equations
     pub solver: Solver,
 }
 
 impl Clone for Thermodynamics {
     fn clone(&self) -> Self {
-        let mut new_dG = HashMap::new();
-
-        // We can't directly clone the functions, so we'll need to handle this field specially
-        // For now, we'll create an empty map structure that matches the original
-        for (phase_or_solution, map_dG_fun) in &self.dG_fun {
-            let mut inner_map = HashMap::new();
-            for (substance, _) in map_dG_fun {
-                let placeholder: Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static> =
-                    Box::new(|_: f64, _: Option<Vec<f64>>, _: Option<f64>| {
-                        // your function implementation here
-                        0.0
-                    });
-                inner_map.insert(substance.clone(), placeholder);
-            }
-            new_dG.insert(phase_or_solution.clone(), inner_map);
-        }
         let mut new_dS = HashMap::new();
 
         // We can't directly clone the functions, so we'll need to handle this field specially
@@ -273,8 +265,13 @@ impl Clone for Thermodynamics {
             eq_sum_mole_numbers: self.solver.eq_sum_mole_numbers.clone(),
             full_system_sym: self.solver.full_system_sym.clone(),
             all_unknowns: self.solver.all_unknowns.clone(),
+            initial_guess: self.solver.initial_guess.clone(),
             solution: self.solver.solution.clone(),
             map_of_solutions: self.solver.map_of_solutions.clone(),
+            bounds: self.solver.bounds.clone(),
+            solver_type: self.solver.solver_type.clone(),
+            solver_instance: SolverInstance::default(),
+            loglevel: self.solver.loglevel.clone(),
         };
         let mut cloned_instance = Thermodynamics {
             subs_container: self.subs_container.clone(),
@@ -295,10 +292,7 @@ impl Clone for Thermodynamics {
             subdata: self.subdata.clone(),
             dS: self.dS.clone(),
             dS_fun: new_dS,
-            dS_sym: self.dS_sym.clone(),
-            dG: self.dG.clone(),
-            dG_fun: new_dG,
-            dG_sym: self.dG_sym.clone(),
+
             solver: solver_cloned,
         };
         // Clone the functions
@@ -318,9 +312,6 @@ impl fmt::Debug for Thermodynamics {
             .field("T", &self.T)
             .field("P", &self.P)
             .field("subdata", &self.subdata)
-            .field("dmu", &self.dG)
-            //.field("dmu_fun", &self.dmu_fun.is_some())
-            .field("dmu_sym", &self.dG_sym)
             .finish()
     }
 }
@@ -342,13 +333,11 @@ impl Thermodynamics {
             elem_composition_matrix: None,
             unique_elements: Vec::new(),
             initial_vector_of_elements: Vec::new(),
-            subdata: CustomSubstance::OnePhase(SubsData::new()),
-            dG: HashMap::new(),
-            dG_fun: HashMap::new(),
-            dG_sym: HashMap::new(),
+            subdata: CustomSubstance::OnePhase(OnePhase::new()),
+
             dS: HashMap::new(),
             dS_fun: HashMap::new(),
-            dS_sym: HashMap::new(),
+
             solver: solver,
         }
     }
@@ -362,8 +351,9 @@ impl Thermodynamics {
     ///  a method to update substances based on subdata
     pub fn update_substances_from_subdata(&mut self) {
         match &self.subdata {
-            CustomSubstance::OnePhase(subdata) => {
-                self.subs_container = SubstancesContainer::SinglePhase(subdata.substances.clone());
+            CustomSubstance::OnePhase(one_pahse) => {
+                self.subs_container =
+                    SubstancesContainer::SinglePhase(one_pahse.subs_data.substances.clone());
             }
             CustomSubstance::PhaseOrSolution(phase_or_solution) => {
                 let mut phase_substances = HashMap::new();
@@ -417,8 +407,7 @@ impl Thermodynamics {
         if let Some(non_zero_moles_number) = non_zero_moles_number {
             let full_map_of_moles_number = &self
                 .subdata
-                .create_full_map_of_mole_numbers(non_zero_moles_number)
-                .map_err(|e| ThermodynamicsError::CalculationError(e))?;
+                .create_full_map_of_mole_numbers(non_zero_moles_number)?;
             self.map_of_map_mole_numbers_and_phases = full_map_of_moles_number.0.clone();
             self.map_of_vec_mole_numbers_and_phases = full_map_of_moles_number.1.clone();
             self.map_of_concentration = full_map_of_moles_number.2.clone();
@@ -430,20 +419,12 @@ impl Thermodynamics {
     /// convert symbolic variable P in G symbolic function to numerical value
     pub fn set_P_to_sym(&mut self) {
         let P = self.P;
-        for (_phase_or_solution_name, sym_fun) in self.dG_sym.iter_mut() {
-            for (_, sym_fun) in sym_fun.iter_mut() {
-                *sym_fun = sym_fun.set_variable("P", P).simplify()
-            }
-        }
+        self.subdata.set_P_to_sym_in_G_sym(P);
     }
     /// convert symbolic variable T in G symbolic function to numerical value
     pub fn set_T_to_sym(&mut self) {
         let T = self.T;
-        for (_phase_or_solution_name, sym_fun) in self.dG_sym.iter_mut() {
-            for (_, sym_fun) in sym_fun.iter_mut() {
-                *sym_fun = sym_fun.set_variable("T", T).simplify()
-            }
-        }
+         self.subdata.set_T_to_sym_in_G_sym(T);
         if self.solver.eq_mu.len() > 0 {
             for mu in self.solver.eq_mu.iter_mut() {
                 *mu = mu.set_variable("T", T).simplify()
@@ -541,7 +522,7 @@ impl Thermodynamics {
     ///  create_sum_of_mole_numbers_sym().unwrap();
     ///  form_full_system_sym().unwrap();
     ///  pretty_print_full_system();
-    pub fn find_composition_for_const_TP(&mut self) -> Result<(), std::io::Error> {
+    pub fn create_full_system_of_equations_with_const_T(&mut self) -> Result<(), std::io::Error> {
         self.set_P_to_sym();
         self.composition_equations().unwrap();
         self.composition_equation_sym().unwrap();
@@ -551,9 +532,82 @@ impl Thermodynamics {
         self.create_nonlinear_system_fun().unwrap();
         self.create_sum_of_mole_numbers_sym().unwrap();
         self.form_full_system_sym().unwrap();
+        self.create_variable_bounds();
         self.pretty_print_full_system();
 
         Ok(())
     }
+    /// here T is still a symbolic variable
+    pub fn create_full_system_of_equations(&mut self) -> Result<(), std::io::Error> {
+        self.set_P_to_sym();
+        self.composition_equations().unwrap();
+        self.composition_equation_sym().unwrap();
+
+        self.create_nonlinear_system_sym().unwrap();
+        self.create_nonlinear_system_fun().unwrap();
+        self.create_sum_of_mole_numbers_sym().unwrap();
+        self.form_full_system_sym().unwrap();
+        self.create_variable_bounds();
+        self.pretty_print_full_system();
+
+        Ok(())
+    }
+
+    pub fn set_solver_type(&mut self, solver_type: SolverType) {
+        self.solver.set_solver_type(solver_type);
+    }
+
+    pub fn generate_eqs(&mut self) {
+        self.solver.generate_eqs();
+    }
+    pub fn solve_for_T(&mut self, T: f64) -> HashMap<String, f64> {
+        let substances = self.vec_of_subs.clone();
+        self.solver.solve_for_T(T);
+        let result = self.solver.get_solution();
+        let N: Vec<String> = self.solver.n.iter().map(|ni| ni.to_string()).collect();
+        let mut map_of_moles: HashMap<String, f64> = HashMap::new();
+        for (i, subs_i) in substances.iter().enumerate() {
+            let Ni = N[i].clone();
+            let moles_of_Ni = *result.get(&Ni).unwrap();
+            map_of_moles.insert(subs_i.clone(), moles_of_Ni);
+        }
+        map_of_moles
+    }
+
+    pub fn solve_NR(
+        &mut self,
+        loglevel: Option<String>,
+        initial_guess: Option<Vec<f64>>,
+        tolerance: f64,
+        max_iterations: usize,
+        damping_factor: Option<f64>,
+
+        method: Option<Method>,
+    ) -> HashMap<String, f64> {
+        use super::ClassicalThermodynamicsSolver::{NRParams, SolverType};
+        let substances = self.vec_of_subs.clone();
+        let params = NRParams {
+            loglevel,
+            initial_guess,
+            tolerance,
+            max_iterations,
+            damping_factor,
+
+            method,
+        };
+        self.solver
+            .set_solver_type(SolverType::NewtonRaphson(params));
+        self.solver.solve();
+        let result = self.solver.get_solution();
+        let N: Vec<String> = self.solver.n.iter().map(|ni| ni.to_string()).collect();
+        let mut map_of_moles: HashMap<String, f64> = HashMap::new();
+        for (i, subs_i) in substances.iter().enumerate() {
+            let Ni = N[i].clone();
+            let moles_of_Ni = *result.get(&Ni).unwrap();
+            map_of_moles.insert(subs_i.clone(), moles_of_Ni);
+        }
+        map_of_moles
+    }
+
     // pub fn construct_nonlinear_syste(&mut self) -> Result<(), std::io::Error> {}
 }

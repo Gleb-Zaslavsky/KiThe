@@ -275,5 +275,9 @@ pub mod thermo_api;
 
 pub mod transport_api;
 //pub use transport_api::{TransportCalculator, TransportError, LambdaUnit, ViscosityUnit};
+pub mod Diffusion;
+pub mod NASAdata_fitting;
 mod NASAdata_tests;
 mod NIST_parser_tests;
+pub mod NISTdata_fitting;
+mod NISTdata_tests;

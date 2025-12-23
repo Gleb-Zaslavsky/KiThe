@@ -90,7 +90,7 @@ impl FalloffStruct {
                 } else {
                     Eff += C_i;
                 };
-                return Eff;
+                //  return Eff;
             }
         }
         let k: f64 = {
@@ -158,7 +158,7 @@ impl FalloffStruct {
                 } else {
                     Eff += C_i.clone();
                 };
-                return Eff;
+                // return Eff;
             }
         }
         let k: Expr = {
@@ -230,7 +230,8 @@ impl ThreeBodyStruct {
             } else {
                 Eff += C_i;
             };
-            return Eff;
+            //  return Eff;
+            // TODODO: handle case when substance is not in eff map
         }
         let K_const_: f64 = Eff * A * Temp.powf(*n) * f64::exp(-E / (Temp * R));
         return K_const_;
@@ -256,7 +257,7 @@ impl ThreeBodyStruct {
             } else {
                 Eff += C_i.clone();
             };
-            return Eff;
+            //   return Eff;
         }
 
         let K_sym = (Eff * k).simplify();

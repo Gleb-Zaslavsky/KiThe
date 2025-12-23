@@ -151,7 +151,7 @@ impl SimpleReactorTask {
         let heat_release = self.heat_release.clone();
         // compare heat release profiles calculated by 2 methods
         // via lambdify
-        let unknowns_:Vec<&str> =unknowns.iter().map(|x| x.as_str()).collect();
+        let unknowns_: Vec<&str> = unknowns.iter().map(|x| x.as_str()).collect();
         let heat_release_fun = heat_release.lambdify_borrowed_thread_safe(unknowns_.as_slice());
         let mut heat_releas_val_via_lambdify = Vec::new();
         for solution_for_timestep in self.solver.solution.as_ref().unwrap().row_iter() {
@@ -162,10 +162,8 @@ impl SimpleReactorTask {
         let mut heat_releas_val = Vec::new();
         for solution_for_timestep in self.solver.solution.as_ref().unwrap().row_iter() {
             let solution_for_timestep = solution_for_timestep.iter().cloned().collect::<Vec<f64>>();
-            let heat_release_for_timestep = heat_release.eval_expression(
-                unknowns_.clone().as_slice(),
-                &solution_for_timestep,
-            );
+            let heat_release_for_timestep =
+                heat_release.eval_expression(unknowns_.clone().as_slice(), &solution_for_timestep);
             heat_releas_val.push(heat_release_for_timestep);
         }
         let heat_rel_2_methods_difference = DVector::from_vec(heat_releas_val_via_lambdify.clone())

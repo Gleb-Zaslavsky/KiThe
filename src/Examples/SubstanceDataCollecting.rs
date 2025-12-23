@@ -22,7 +22,7 @@ pub fn collecting_thermo_data(thermotask: usize) {
             );
 
             // Perform the search
-            user_subs.search_substances();
+            let _ = user_subs.search_substances();
             user_subs.extract_thermal_coeffs("CO", 400.0).unwrap();
             user_subs.extract_thermal_coeffs("H2O", 400.0).unwrap();
 
@@ -69,7 +69,7 @@ pub fn collecting_thermo_data(thermotask: usize) {
             );
 
             // Perform search
-            user_subs.search_substances();
+            let _ = user_subs.search_substances();
             user_subs
                 .extract_thermal_coeffs(substances[0].as_str(), 400.0)
                 .unwrap();

@@ -49,11 +49,34 @@
 //! })?;
 //! ```
 
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+
+/// Enum representing the different types of libraries in the system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryType {
+    SubstanceBase,
+    AllKeysSubstance,
+    Reactbase,
+    DictReaction,
+}
+
+impl LibraryType {
+    /// Returns the pseudonym string for the library type.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LibraryType::SubstanceBase => "substance_base",
+            LibraryType::AllKeysSubstance => "all_keys_substance",
+            LibraryType::Reactbase => "reactbase",
+            LibraryType::DictReaction => "dict_reaction",
+        }
+    }
+}
 
 /// Configuration structure for JSON library file paths.
 ///
@@ -72,6 +95,7 @@ pub struct LibraryConfig {
     pub all_keys_substance: String,
     pub reactbase: String,
     pub dict_reaction: String,
+    pub problems_folder: String,
 }
 
 impl Default for LibraryConfig {
@@ -89,6 +113,7 @@ impl Default for LibraryConfig {
             all_keys_substance: "all_keys_substance.json".to_string(),
             reactbase: "Reactbase.json".to_string(),
             dict_reaction: "dict_reaction.json".to_string(),
+            problems_folder: "problems".to_string(),
         }
     }
 }
@@ -107,7 +132,11 @@ pub struct LibraryManager {
     config: LibraryConfig,
     config_file: String,
 }
-
+impl Default for LibraryManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl LibraryManager {
     /// Creates a new LibraryManager with default configuration file.
     ///
@@ -120,10 +149,15 @@ impl LibraryManager {
         let config_file = "library_config.json".to_string();
         let config = Self::load_config(&config_file).unwrap_or_default();
 
-        Self {
+        let manager = Self {
             config,
             config_file,
-        }
+        };
+
+        // Ensure problems folder exists
+        let _ = manager.ensure_problems_folder();
+
+        manager
     }
 
     /// Creates a new LibraryManager with a custom configuration file path.
@@ -219,6 +253,30 @@ impl LibraryManager {
     /// String slice containing the file path (e.g., "dict_reaction.json")
     pub fn dict_reaction_path(&self) -> &str {
         &self.config.dict_reaction
+    }
+
+    /// Returns the current path to the problems folder.
+    ///
+    /// # Returns
+    /// String slice containing the folder path (e.g., "problems")
+    pub fn problems_folder_path(&self) -> &str {
+        &self.config.problems_folder
+    }
+
+    /// Returns the actual filename for a given library type.
+    ///
+    /// # Arguments
+    /// * `library_type` - The type of library to get the filename for
+    ///
+    /// # Returns
+    /// String slice containing the actual filename
+    pub fn get_library_filename(&self, library_type: LibraryType) -> &str {
+        match library_type {
+            LibraryType::SubstanceBase => &self.config.substance_base,
+            LibraryType::AllKeysSubstance => &self.config.all_keys_substance,
+            LibraryType::Reactbase => &self.config.reactbase,
+            LibraryType::DictReaction => &self.config.dict_reaction,
+        }
     }
 
     /// Updates the substance base library file path.
@@ -323,7 +381,7 @@ impl LibraryManager {
     /// * `Err(Box<dyn std::error::Error>)` - If any file doesn't exist or save failed
     ///
     /// # Example
-    /// ```rust
+    /// ```rust, ignore
     /// let mut updates = HashMap::new();
     /// updates.insert("substance_base", "substance_base_v3.json");
     /// updates.insert("reactbase", "Reactbase_v2.json");
@@ -345,6 +403,12 @@ impl LibraryManager {
                 "all_keys_substance" => self.config.all_keys_substance = path.to_string(),
                 "reactbase" => self.config.reactbase = path.to_string(),
                 "dict_reaction" => self.config.dict_reaction = path.to_string(),
+                "problems_folder" => {
+                    if !Path::new(path).exists() {
+                        fs::create_dir_all(path)?;
+                    }
+                    self.config.problems_folder = path.to_string();
+                }
                 _ => return Err(format!("Unknown library key: {}", key).into()),
             }
         }
@@ -361,6 +425,37 @@ impl LibraryManager {
         &self.config
     }
 
+    /// Updates the problems folder path.
+    ///
+    /// Creates the folder if it doesn't exist. Automatically saves the configuration after successful update.
+    ///
+    /// # Arguments
+    /// * `path` - New folder path for the problems directory
+    ///
+    /// # Returns
+    /// * `Ok(())` - If folder was created/exists and update was successful
+    /// * `Err(Box<dyn std::error::Error>)` - If folder creation or save failed
+    pub fn set_problems_folder(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if !Path::new(path).exists() {
+            fs::create_dir_all(path)?;
+        }
+        self.config.problems_folder = path.to_string();
+        self.save_config()?;
+        Ok(())
+    }
+
+    /// Ensures the problems folder exists, creating it if necessary.
+    ///
+    /// # Returns
+    /// * `Ok(())` - If folder exists or was created successfully
+    /// * `Err(Box<dyn std::error::Error>)` - If folder creation failed
+    pub fn ensure_problems_folder(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if !Path::new(&self.config.problems_folder).exists() {
+            fs::create_dir_all(&self.config.problems_folder)?;
+        }
+        Ok(())
+    }
+
     /// Resets all library paths to their default values.
     ///
     /// Restores the configuration to default file names and saves the changes.
@@ -371,6 +466,127 @@ impl LibraryManager {
     pub fn reset_to_defaults(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.config = LibraryConfig::default();
         self.save_config()?;
+        Ok(())
+    }
+
+    /// Logs library update operations to a log file.
+    ///
+    /// This helper function records when data is saved to library files,
+    /// creating a persistent log of all library modifications.
+    ///
+    /// # Arguments
+    /// * `library_type` - The type of library being updated
+    /// * `content` - Description of what was saved
+    ///
+    /// # Returns
+    /// * `Ok(())` - If log entry was written successfully
+    /// * `Err(Box<dyn std::error::Error>)` - If log file write failed
+    pub fn log_library_update(
+        &self,
+        library_type: LibraryType,
+        content: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let log_file = "library_log.txt";
+        let timestamp: DateTime<Local> = Local::now();
+        let date_str = timestamp.format("%d.%m.%Y").to_string();
+
+        let actual_filename = match library_type {
+            LibraryType::SubstanceBase => &self.config.substance_base,
+            LibraryType::AllKeysSubstance => &self.config.all_keys_substance,
+            LibraryType::Reactbase => &self.config.reactbase,
+            LibraryType::DictReaction => &self.config.dict_reaction,
+        };
+
+        let log_entry = format!(
+            "{} in {} \"{}\"
+",
+            date_str, actual_filename, content
+        );
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)?;
+
+        file.write_all(log_entry.as_bytes())?;
+        Ok(())
+    }
+
+    /// Adds a new top-level key with empty value to a JSON library file.
+    ///
+    /// # Arguments
+    /// * `library_type` - The type of library to modify
+    /// * `key` - The top-level key to add
+    ///
+    /// # Returns
+    /// * `Ok(())` - If key was added successfully
+    /// * `Err(Box<dyn std::error::Error>)` - If file operation failed
+    pub fn add_library_key(
+        &self,
+        library_type: LibraryType,
+        key: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let filename = self.get_library_filename(library_type);
+
+        let mut json_data: serde_json::Value = if Path::new(filename).exists() {
+            let content = fs::read_to_string(filename)?;
+            serde_json::from_str(&content)?
+        } else {
+            serde_json::json!({})
+        };
+
+        if let Some(obj) = json_data.as_object_mut() {
+            obj.insert(key.to_string(), serde_json::json!({}));
+        }
+
+        let content = serde_json::to_string_pretty(&json_data)?;
+        fs::write(filename, content)?;
+
+        Ok(())
+    }
+
+    /// Adds a secondary key-value pair to an existing primary key in a JSON library file.
+    ///
+    /// # Arguments
+    /// * `library_type` - The type of library to modify
+    /// * `primary_key` - The top-level key to find
+    /// * `secondary_key` - The key to add inside the primary key
+    /// * `value` - The value to associate with the secondary key
+    ///
+    /// # Returns
+    /// * `Ok(())` - If key-value pair was added successfully
+    /// * `Err(Box<dyn std::error::Error>)` - If file operation failed or primary key not found
+    pub fn add_secondary_key(
+        &self,
+        library_type: LibraryType,
+        primary_key: &str,
+        secondary_key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let filename = self.get_library_filename(library_type);
+
+        let mut json_data: serde_json::Value = if Path::new(filename).exists() {
+            let content = fs::read_to_string(filename)?;
+            serde_json::from_str(&content)?
+        } else {
+            return Err(format!("Library file does not exist: {}", filename).into());
+        };
+
+        if let Some(obj) = json_data.as_object_mut() {
+            if let Some(primary_obj) = obj.get_mut(primary_key) {
+                if let Some(primary_map) = primary_obj.as_object_mut() {
+                    primary_map.insert(secondary_key.to_string(), value);
+                } else {
+                    return Err(format!("Primary key '{}' is not an object", primary_key).into());
+                }
+            } else {
+                return Err(format!("Primary key '{}' not found", primary_key).into());
+            }
+        }
+
+        let content = serde_json::to_string_pretty(&json_data)?;
+        fs::write(filename, content)?;
+
         Ok(())
     }
 }
@@ -478,6 +694,97 @@ where
     f(&mut *manager)
 }
 
+/// Convenience function to log library updates.
+///
+/// This function provides easy access to the logging functionality
+/// for library update operations.
+///
+/// # Arguments
+/// * `library_type` - The type of library being updated
+/// * `content` - Description of what was saved
+///
+/// # Returns
+/// * `Ok(())` - If log entry was written successfully
+/// * `Err(Box<dyn std::error::Error>)` - If log file write failed
+///
+/// # Example
+/// ```rust
+/// log_library_update(LibraryType::SubstanceBase, "Added CH4 thermodynamic data")?;
+/// ```
+pub fn log_library_update(
+    library_type: LibraryType,
+    content: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    with_library_manager(|manager| manager.log_library_update(library_type, content))
+}
+
+/// Returns the actual filename for a given library type.
+///
+/// # Arguments
+/// * `library_type` - The type of library to get the filename for
+///
+/// # Returns
+/// String containing the actual filename
+///
+/// # Example
+/// ```rust
+/// let filename = get_library_filename(LibraryType::SubstanceBase);
+/// // Returns "substance_base_v2.json"
+/// ```
+pub fn get_library_filename(library_type: LibraryType) -> String {
+    with_library_manager(|manager| manager.get_library_filename(library_type).to_string())
+}
+
+/// Adds a new top-level key with empty value to a JSON library file.
+///
+/// # Arguments
+/// * `library_type` - The type of library to modify
+/// * `key` - The top-level key to add
+///
+/// # Returns
+/// * `Ok(())` - If key was added successfully
+/// * `Err(Box<dyn std::error::Error>)` - If file operation failed
+///
+/// # Example
+/// ```rust
+/// add_library_key(LibraryType::SubstanceBase, "CH4")?;
+/// // Adds "CH4": {} to the substance base JSON file
+/// ```
+pub fn add_library_key(
+    library_type: LibraryType,
+    key: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    with_library_manager(|manager| manager.add_library_key(library_type, key))
+}
+
+/// Adds a secondary key-value pair to an existing primary key in a JSON library file.
+///
+/// # Arguments
+/// * `library_type` - The type of library to modify
+/// * `primary_key` - The top-level key to find
+/// * `secondary_key` - The key to add inside the primary key
+/// * `value` - The value to associate with the secondary key
+///
+/// # Returns
+/// * `Ok(())` - If key-value pair was added successfully
+/// * `Err(Box<dyn std::error::Error>)` - If file operation failed or primary key not found
+///
+/// # Example
+/// ```rust
+/// add_secondary_key(LibraryType::SubstanceBase, "CH4", "formula", serde_json::json!("CH4"))?;
+/// // Adds "formula": "CH4" inside the CH4 object
+/// ```
+pub fn add_secondary_key(
+    library_type: LibraryType,
+    primary_key: &str,
+    secondary_key: &str,
+    value: serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    with_library_manager(|manager| {
+        manager.add_secondary_key(library_type, primary_key, secondary_key, value)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,6 +833,7 @@ mod tests {
             all_keys_substance: temp_keys.path().to_str().unwrap().to_string(),
             reactbase: temp_react.path().to_str().unwrap().to_string(),
             dict_reaction: temp_dict.path().to_str().unwrap().to_string(),
+            problems_folder: "problems".to_string(),
         };
 
         let config_json = serde_json::to_string_pretty(&config).unwrap();

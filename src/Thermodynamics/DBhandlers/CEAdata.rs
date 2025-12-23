@@ -62,6 +62,8 @@ pub enum CEAError {
     InvalidUnit(String),
     /// Temperature value outside valid range for available data
     InvalidTemperature(f64),
+    ///
+    InvalidTemperatureRange,
     /// Required coefficients missing or improperly initialized
     MissingCoefficients(String),
     /// Error during data parsing (malformed input, insufficient data)
@@ -69,7 +71,9 @@ pub enum CEAError {
     /// JSON serialization/deserialization error
     SerdeError(serde_json::Error),
     /// Required data field missing from input
-    MissingData(&'static str),
+    MissingData(String),
+    ///
+    SymbolicError(String),
 }
 
 /// Structure holding coefficients and temperature range for a single interval
@@ -93,6 +97,8 @@ impl fmt::Display for CEAError {
             CEAError::ParseError(msg) => write!(f, "Failed to parse data: {}", msg),
             CEAError::SerdeError(e) => write!(f, "Serde error: {}", e),
             CEAError::MissingData(field) => write!(f, "Missing required data: {}", field),
+            CEAError::InvalidTemperatureRange => write!(f, "Invalid temperature range specified"),
+            CEAError::SymbolicError(msg) => write!(f, "Symbolic error: {}", msg),
         }
     }
 }
@@ -334,7 +340,7 @@ impl CEAdata {
         let model = &self.input.model;
 
         if LC.is_empty() {
-            return Err(CEAError::MissingData("LC is empty"));
+            return Err(CEAError::MissingData("LC is empty".to_string()));
         }
 
         let mut coeffs_map: HashMap<LV, HashMap<usize, Coeffs>> = HashMap::new();
@@ -402,7 +408,7 @@ impl CEAdata {
         let intervals = self
             .coeffs
             .get(&lv_type)
-            .ok_or_else(|| CEAError::MissingData("Property type not found"))?;
+            .ok_or_else(|| CEAError::MissingData("Property type not found".to_string()))?;
 
         intervals
             .get(&interval)
@@ -427,7 +433,7 @@ impl CEAdata {
         let intervals = self
             .coeffs
             .get(&lv_type)
-            .ok_or_else(|| CEAError::MissingData("Property type not found"))?;
+            .ok_or_else(|| CEAError::MissingData("Property type not found".to_string()))?;
 
         for (&interval_idx, coeffs) in intervals {
             if coeffs.T.0 <= t && t <= coeffs.T.1 {
@@ -774,8 +780,40 @@ impl CEAdata {
 
             Ok(())
         } else {
-            Err(CEAError::MissingData("T_interval not set"))
+            Err(CEAError::MissingData("T_interval not set".to_string()))
         }
+    }
+
+    pub fn integr_mean(&mut self) -> Result<(), CEAError> {
+        use RustedSciThe::symbolic::symbolic_integration::QuadMethod;
+        let (T_min, T_max) = self.T_interval.ok_or(CEAError::InvalidTemperatureRange)?;
+
+        if T_min >= T_max {
+            return Err(CEAError::InvalidTemperatureRange);
+        }
+
+        let T_range = T_max - T_min;
+        let inv_T_range = 1.0 / T_range;
+        let V_sym = self
+            .V_sym
+            .clone()
+            .ok_or(CEAError::SymbolicError("No symbolic viscosity".to_string()))?;
+        let Lambda_sym = self
+            .Lambda_sym
+            .clone()
+            .ok_or(CEAError::SymbolicError("No symbolic viscosity".to_string()))?;
+        let V_sym_integral = V_sym
+            .quad(QuadMethod::GaussLegendre, 3, T_min, T_max, None)
+            .map_err(|e| CEAError::SymbolicError(format!("Failed to integrate entropy: {}", e)))?;
+        let V_sym_integral = inv_T_range * V_sym_integral;
+        let Lambda_sym_integral = Lambda_sym
+            .quad(QuadMethod::GaussLegendre, 3, T_min, T_max, None)
+            .map_err(|e| CEAError::SymbolicError(format!("Failed to integrate entropy: {}", e)))?;
+        let Lambda_sym_integral = inv_T_range * Lambda_sym_integral;
+        self.V = V_sym_integral;
+        self.Lambda = Lambda_sym_integral;
+
+        Ok(())
     }
 }
 //////////////////////////////impl Clone and Debug///////////////////////////////////////
@@ -984,6 +1022,26 @@ impl TransportCalculator for CEAdata {
         &self,
     ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
         Ok(self.clone().V_fun)
+    }
+
+    fn fitting_coeffs_for_T_interval(
+        &mut self,
+    ) -> Result<(), super::transport_api::TransportError> {
+        self.fitting_coeffs_for_T_interval(LV::Viscosity)?;
+        self.fitting_coeffs_for_T_interval(LV::Lambda)?;
+        Ok(())
+    }
+    fn integr_mean(&mut self) -> Result<(), super::transport_api::TransportError> {
+        self.integr_mean()?;
+        Ok(())
+    }
+    fn set_T_interval(
+        &mut self,
+        T_min: f64,
+        T_max: f64,
+    ) -> Result<(), super::transport_api::TransportError> {
+        self.set_T_interval(T_min, T_max);
+        Ok(())
     }
 }
 
@@ -1270,10 +1328,10 @@ mod tests {
     #[test]
     fn test_fitting_coeffs_for_T_interval_no_interval_set() {
         let mut CEA = setup_cea_data();
-
+        let l = "T_interval not set".to_string();
         assert!(matches!(
             CEA.fitting_coeffs_for_T_interval(LV::Viscosity),
-            Err(CEAError::MissingData("T_interval not set"))
+            Err(CEAError::MissingData(l))
         ));
     }
 

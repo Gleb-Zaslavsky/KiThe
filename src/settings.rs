@@ -68,6 +68,10 @@ impl Settings {
         );
         library_versions.insert("Reactbase".to_string(), config.reactbase.clone());
         library_versions.insert("Dict Reaction".to_string(), config.dict_reaction.clone());
+        library_versions.insert(
+            "Problems Folder".to_string(),
+            config.problems_folder.clone(),
+        );
 
         Self { library_versions }
     }
@@ -115,7 +119,8 @@ impl Settings {
             "All Keys Substance" => manager.set_all_keys_substance(version),
             "Reactbase" => manager.set_reactbase(version),
             "Dict Reaction" => manager.set_dict_reaction(version),
-            _ => return Err(format!("Unknown library: {}", library_name).into()),
+            "Problems Folder" => manager.set_problems_folder(version),
+            _ => Err(format!("Unknown library: {}", library_name).into()),
         });
 
         match result {
@@ -172,6 +177,10 @@ impl Settings {
                     .insert("Reactbase".to_string(), config.reactbase.clone());
                 self.library_versions
                     .insert("Dict Reaction".to_string(), config.dict_reaction.clone());
+                self.library_versions.insert(
+                    "Problems Folder".to_string(),
+                    config.problems_folder.clone(),
+                );
                 Ok(())
             }
             Err(e) => Err(e.to_string()),
@@ -211,6 +220,7 @@ impl Settings {
                 "All Keys Substance" => "all_keys_substance",
                 "Reactbase" => "reactbase",
                 "Dict Reaction" => "dict_reaction",
+                "Problems Folder" => "problems_folder",
                 _ => return Err(format!("Unknown library: {}", display_name)),
             };
             internal_updates.insert(internal_key, *path);
@@ -248,6 +258,7 @@ mod tests {
             all_keys_substance: keys_file.path().to_str().unwrap().to_string(),
             reactbase: react_file.path().to_str().unwrap().to_string(),
             dict_reaction: dict_file.path().to_str().unwrap().to_string(),
+            problems_folder: "problems".to_string(),
         };
 
         let config_json = serde_json::to_string_pretty(&config).unwrap();
@@ -274,11 +285,12 @@ mod tests {
     fn test_settings_new() {
         crate::library_manager::set_test_manager(create_test_manager());
         let settings = Settings::new();
-        assert_eq!(settings.library_versions.len(), 4);
+        assert_eq!(settings.library_versions.len(), 5);
         assert!(settings.library_versions.contains_key("Substance Base"));
         assert!(settings.library_versions.contains_key("All Keys Substance"));
         assert!(settings.library_versions.contains_key("Reactbase"));
         assert!(settings.library_versions.contains_key("Dict Reaction"));
+        assert!(settings.library_versions.contains_key("Problems Folder"));
         crate::library_manager::clear_test_manager();
     }
 

@@ -39,19 +39,11 @@
 //! - Includes comprehensive error handling for network issues and parsing failures
 //! - Creates pretty-printed tables for data visualization
 
-use RustedSciThe::symbolic::symbolic_engine::Expr;
-use prettytable::{Cell, Row, Table};
 use reqwest::blocking::Client;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
-#[allow(non_upper_case_globals, non_snake_case)]
-const e2: Expr = Expr::Const(2.0);
-#[allow(non_upper_case_globals, non_snake_case)]
-const e3: Expr = Expr::Const(3.0);
-#[allow(non_upper_case_globals, non_snake_case)]
-const e4: Expr = Expr::Const(4.0);
 /// HTTP client trait for dependency injection
 pub trait HttpClient {
     fn get_text(&self, url: &str) -> Result<String, reqwest::Error>;
@@ -77,12 +69,6 @@ pub enum NistError {
     InvalidDataFormat,
 }
 
-#[derive(Debug, Clone)]
-pub struct Coeffs {
-    pub T: (f64, f64),
-    pub coeff: (f64, f64, f64, f64, f64, f64, f64),
-}
-
 /// struct for the substance data parsed from the NIST web page
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[allow(non_snake_case)]
@@ -90,14 +76,11 @@ pub struct NistInput {
     pub cp: Option<Vec<Vec<f64>>>,
     pub T: Option<Vec<Vec<f64>>>,
     pub dh: Option<f64>,
-    pub coeffs: Option<(f64, f64, f64, f64, f64, f64, f64, f64)>,
     pub ds: Option<f64>,
     pub molar_mass: Option<f64>,
-    pub unit: Option<String>,
-    pub unit_multiplier: f64,
 }
 /// Phase enum: solid, liquid, gas
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
 pub enum Phase {
     Gas,
@@ -105,7 +88,7 @@ pub enum Phase {
     Liquid,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
 pub enum SearchType {
     Cp,
@@ -168,7 +151,13 @@ impl<C: HttpClient> NistParser<C> {
         println!("\n \n Final URL found: {}", final_url);
         //   println!("\n \n HTML of phase: {}", html_of_phase);
 
-        let data = self.parse_data(&final_url, search_type, phase)?;
+        let mut data = self.parse_data(&final_url, search_type, phase)?;
+
+        // Set dh to 0.0 for simple substances if it's None
+        if data.dh.is_none() && self.is_simple_substance(substance) {
+            data.dh = Some(0.0);
+        }
+
         Ok(data)
     }
 
@@ -257,6 +246,22 @@ impl<C: HttpClient> NistParser<C> {
         Ok(url_of_substance.clone())
     }
 
+    /// Helper function to detect if a substance is a simple element
+    fn is_simple_substance(&self, substance: &str) -> bool {
+        let simple_substances = [
+            "H2", "He", "Li", "Be", "B", "C", "N2", "O2", "F2", "Ne", "Na", "Mg", "Al", "Si", "P",
+            "S", "Cl2", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+            "Ga", "Ge", "As", "Se", "Br2", "Kr", "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru",
+            "Rh", "Pd", "Ag", "Cd", "In", "Sn", "Sb", "Te", "I2", "Xe", "Cs", "Ba", "La", "Ce",
+            "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf",
+            "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At", "Rn",
+            "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm",
+            "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds", "Rg", "Cn", "Nh", "Fl",
+            "Mc", "Lv", "Ts", "Og",
+        ];
+        simple_substances.contains(&substance)
+    }
+
     ////////////////////////////////PARSING DATA//////////////////////////////////////////////////////////////
     fn parse_data(
         &self,
@@ -274,10 +279,7 @@ impl<C: HttpClient> NistParser<C> {
             T: None,
             dh: None,
             ds: None,
-            coeffs: None,
             molar_mass: None,
-            unit: None,
-            unit_multiplier: 1.0,
         };
 
         match search_type {
@@ -449,229 +451,80 @@ impl NistInput {
             T: None,
             dh: None,
             ds: None,
-            coeffs: None,
             molar_mass: None,
-            unit: None,
-            unit_multiplier: 1.0,
         }
-    }
-
-    pub fn set_unit(&mut self, unit: &str) {
-        match unit {
-            "J" => {
-                self.unit = Some("J".to_string());
-                self.unit_multiplier = 1.0;
-            }
-            "cal" => {
-                self.unit = Some("cal".to_string());
-                self.unit_multiplier = 1.0 / 4.184;
-            }
-            _ => panic!("Invalid unit: {}", unit),
-        }
-    }
-    /// Prints a pretty table of the parsed data to the console. The table shows the heat capacity coefficients for every temperature range, and the molar mass, standard enthalpy of formation, and standard entropy of the substance.
-
-    pub fn pretty_print(&self) {
-        let temps = self.T.clone().expect("no temperature parsed");
-        let coeffs = self.cp.clone().expect("no coefficients parsed");
-        let mut table = Table::new();
-        let mut header_row = vec![Cell::new("Coefficients")];
-        for T in temps.clone() {
-            let Tstr = format!("{:} - {:}   ", T[0], T[1]);
-            header_row.push(Cell::new(&Tstr));
-        }
-        table.add_row(Row::new(header_row));
-
-        let coeffs_names = vec!["A", "B", "C", "D", "E", "F", "G", "H"];
-        for (i, coeff_name) in coeffs_names.iter().enumerate() {
-            let mut row = vec![Cell::new(coeff_name)];
-
-            for coeff_for_every_T in coeffs.iter() {
-                let coeff = coeff_for_every_T[i].to_string();
-                row.push(Cell::new(&format!("{:}", coeff)));
-            }
-            table.add_row(Row::new(row));
-        }
-
-        table.printstd();
-
-        let mut table = Table::new();
-        let M = self.molar_mass.clone().expect("no molar mass parsed");
-        let dH = self.dh.clone().expect("no dH parsed");
-        let dS = self.ds.clone().expect("no dS parsed");
-        let header_row = vec![Cell::new("Molar mass"), Cell::new("dH"), Cell::new("dS")];
-        table.add_row(Row::new(header_row));
-        let row = vec![
-            Cell::new(&M.to_string()),
-            Cell::new(&dH.to_string()),
-            Cell::new(&dS.to_string()),
-        ];
-        table.add_row(Row::new(row));
-        table.printstd();
     }
 
     pub fn extract_coefficients(
         &mut self,
         T: f64,
-    ) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64), std::io::Error> {
-        for (i, T_pairs) in self.T.clone().unwrap().iter().enumerate() {
-            if T >= T_pairs[0] && T <= T_pairs[1] {
-                let coeffs = self.cp.clone().unwrap()[i].clone();
-
-                let (a, b, c, d, e, f, g, h) = (
-                    coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5], coeffs[6],
-                    coeffs[7],
-                );
-                self.coeffs = Some((a, b, c, d, e, f, g, h));
-                return Ok((a, b, c, d, e, f, g, h));
+    ) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64), NistError> {
+        if let (Some(T_ranges), Some(cp_coeffs)) = (&self.T, &self.cp) {
+            for (i, T_pairs) in T_ranges.iter().enumerate() {
+                if T >= T_pairs[0] && T <= T_pairs[1] {
+                    let coeffs = &cp_coeffs[i];
+                    if coeffs.len() >= 8 {
+                        return Ok((
+                            coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5],
+                            coeffs[6], coeffs[7],
+                        ));
+                    }
+                }
             }
         }
-
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "No temperature range found for the given temperature",
-        ))
+        Err(NistError::InvalidDataFormat)
     }
-    pub fn caclc_cp_dh_ds(&self, T: f64) -> Result<(f64, f64, f64), std::io::Error> {
-        let um = self.unit_multiplier;
-        if let Some(coeffs) = self.coeffs.clone() {
-            let T = T / 1000.0;
-            let (a, b, c, d, e, f, g, h) = (
-                coeffs.0, coeffs.1, coeffs.2, coeffs.3, coeffs.4, coeffs.5, coeffs.6, coeffs.7,
-            );
-            let Cp = um * calculate_cp(T, a, b, c, d, e);
-            let dh0 = self.dh.clone().unwrap();
-            //  let ds0 = self.ds.clone().unwrap();
-            let dh = um * (calculate_dh(T, a, b, c, d, e, f, g, h) + dh0);
-            let ds = um * calculate_s(T, a, b, c, d, e, f, g, h);
-            println!(
-                "\n \n Cp: {:?} \n \n dh: {:?} \n \n ds: {:?} \n \n",
-                Cp, dh, ds
-            );
-            return Ok((Cp, dh, ds));
+
+    pub fn caclc_cp_dh_ds(&mut self, T: f64) -> Result<(f64, f64, f64), NistError> {
+        let (a, b, c, d, e, f, g, h) = self.extract_coefficients(T)?;
+        let t = T / 1000.0; // Convert to kK for NIST equations
+
+        let cp = a + b * t + c * t.powi(2) + d * t.powi(3) + e / t.powi(2);
+
+        let dh0 = self.dh.unwrap_or(0.0); // Use 0.0 if dh is None (simple substances)
+        let dh = a * t + (b * t.powi(2)) / 2.0 + (c * t.powi(3)) / 3.0 + (d * t.powi(4)) / 4.0
+            - e / t
+            + f
+            - h
+            + dh0;
+
+        let ds = a * t.ln() + b * t + (c * t.powi(2)) / 2.0 + (d * t.powi(3)) / 3.0
+            - e / (2.0 * t.powi(2))
+            + g;
+
+        Ok((cp, dh, ds))
+    }
+
+    pub fn pretty_print(&self) {
+        println!("NIST Data:");
+        if let Some(molar_mass) = self.molar_mass {
+            println!("  Molar mass: {} g/mol", molar_mass);
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "No temperature range found for the given temperature",
-        ))
-    }
-    /////////////////////////////////CALCUALTE PROPERTIES//////////////////////////////////////////////////
-    pub fn create_sym_cp_dh_ds(&self) -> Result<(Expr, Expr, Expr), std::io::Error> {
-        let um = Expr::Const(self.unit_multiplier);
-        if let Some(coeffs) = self.coeffs.clone() {
-            let (a, b, c, d, e, f, g, h) = (
-                coeffs.0, coeffs.1, coeffs.2, coeffs.3, coeffs.4, coeffs.5, coeffs.6, coeffs.7,
-            );
-            let Cp = um.clone() * calculate_cp_sym(a, b, c, d, e);
-            let dh0 = self.dh.clone().unwrap();
-            let dh = um.clone() * (calculate_dh_sym(a, b, c, d, e, f, g, h) + Expr::Const(dh0));
-            let ds = um.clone() * calculate_s_sym(a, b, c, d, e, f, g, h);
-            println!(
-                "\n \n Cp: {:?} \n \n dh: {:?} \n \n ds: {:?} \n \n",
-                Cp, dh, ds
-            );
-            return Ok((Cp.simplify(), dh.simplify(), ds.simplify()));
+        if let Some(dh) = self.dh {
+            println!("  Formation enthalpy: {} kJ/mol", dh);
+        } else {
+            println!("  Formation enthalpy: 0.0 kJ/mol (simple substance)");
         }
-
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "No temperature range found for the given temperature",
-        ))
-    }
-
-    pub fn create_closure_cp_dh_ds(
-        &self,
-    ) -> Result<
-        (
-            Box<dyn Fn(f64) -> f64>,
-            Box<dyn Fn(f64) -> f64>,
-            Box<dyn Fn(f64) -> f64>,
-        ),
-        std::io::Error,
-    > {
-        let um = self.unit_multiplier;
-        if let Some(coeffs) = self.coeffs.clone() {
-            let (a, b, c, d, e, f, g, h) = (
-                coeffs.0, coeffs.1, coeffs.2, coeffs.3, coeffs.4, coeffs.5, coeffs.6, coeffs.7,
-            );
-            let Cp = Box::new(move |t| um * calculate_cp(t / 1000.0, a, b, c, d, e));
-            let dh0 = self.dh.clone().unwrap();
-            let dh =
-                Box::new(move |t| um * (calculate_dh(t / 1000.0, a, b, c, d, e, f, g, h) + dh0));
-            let ds = Box::new(move |t| um * calculate_s(t / 1000.0, a, b, c, d, e, f, g, h));
-            return Ok((Cp, dh, ds));
+        if let Some(ds) = self.ds {
+            println!("  Standard entropy: {} J/mol·K", ds);
         }
-
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "No temperature range found for the given temperature",
-        ))
+        if let (Some(T_ranges), Some(cp_coeffs)) = (&self.T, &self.cp) {
+            println!("  Heat capacity coefficients:");
+            for (i, (T_range, coeffs)) in T_ranges.iter().zip(cp_coeffs.iter()).enumerate() {
+                println!("    Range {}: {:.0}-{:.0} K", i + 1, T_range[0], T_range[1]);
+                println!(
+                    "      A={:.3e}, B={:.3e}, C={:.3e}, D={:.3e}",
+                    coeffs[0], coeffs[1], coeffs[2], coeffs[3]
+                );
+                if coeffs.len() > 4 {
+                    println!(
+                        "      E={:.3e}, F={:.3e}, G={:.3e}, H={:.3e}",
+                        coeffs[4], coeffs[5], coeffs[6], coeffs[7]
+                    );
+                }
+            }
+        }
     }
-}
-////////////////////////////////////////NIST FORMAT FUNCTIONS//////////////////////////////////////////////////////////////////////////
-pub fn calculate_cp(t: f64, a: f64, b: f64, c: f64, d: f64, e: f64) -> f64 {
-    a + b * t + c * t.powi(2) + d * t.powi(3) + e / t.powi(2)
-}
-
-pub fn calculate_dh(
-    t: f64,
-    a: f64,
-    b: f64,
-    c: f64,
-    d: f64,
-    e: f64,
-    f: f64,
-    _g: f64,
-    h: f64,
-) -> f64 {
-    a * t + (b * t.powi(2)) / 2.0 + (c * t.powi(3)) / 3.0 + (d * t.powi(4)) / 4.0 - e / t + f - h
-}
-
-pub fn calculate_s(
-    t: f64,
-    a: f64,
-    b: f64,
-    c: f64,
-    d: f64,
-    e: f64,
-    _f: f64,
-    g: f64,
-    _h: f64,
-) -> f64 {
-    a * t.ln() + b * t + (c * t.powi(2)) / 2.0 + (d * t.powi(3)) / 3.0 - e / (2.0 * t.powi(2)) + g
-}
-
-fn calculate_cp_sym(a: f64, b: f64, c: f64, d: f64, e: f64) -> Expr {
-    let T = Expr::Var("T".to_owned());
-    let t = T / Expr::Const(1000.0);
-    Expr::Const(a)
-        + Expr::Const(b) * t.clone()
-        + Expr::Const(c) * t.clone().pow(e2)
-        + Expr::Const(d) * t.clone().pow(e3)
-        + Expr::Const(e) / t.pow(e2)
-}
-
-fn calculate_dh_sym(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, _g: f64, h: f64) -> Expr {
-    let T = Expr::Var("T".to_owned());
-    let t = T / Expr::Const(1000.0);
-    Expr::Const(a) * t.clone()
-        + (Expr::Const(b) * t.clone().pow(e2)) / e2
-        + (Expr::Const(c) * t.clone().pow(e3)) / e3
-        + (Expr::Const(d) * t.clone().pow(e4)) / e4
-        - Expr::Const(e) / t.clone()
-        + Expr::Const(f)
-        - Expr::Const(h)
-}
-
-fn calculate_s_sym(a: f64, b: f64, c: f64, d: f64, e: f64, _f: f64, g: f64, _h: f64) -> Expr {
-    let T = Expr::Var("T".to_owned());
-    let t = T / Expr::Const(1000.0);
-    Expr::Const(a) * t.clone().ln()
-        + Expr::Const(b) * t.clone()
-        + (Expr::Const(c) * t.clone().pow(e2)) / e2
-        + (Expr::Const(d) * t.clone().pow(e3)) / e3
-        - Expr::Const(e) / (e2 * t.pow(e2))
-        + Expr::Const(g)
 }
 
 /*

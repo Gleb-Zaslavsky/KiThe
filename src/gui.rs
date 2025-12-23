@@ -1,8 +1,9 @@
-pub mod gui_main;
-
+#[allow(non_snake_case)]
+pub mod NIST_gui;
 pub mod all_libs_gui;
 pub mod combustion;
 mod combustion_test;
+pub mod gui_main;
 pub mod gui_plot;
 pub mod kinetics_gui;
 pub mod settings_gui;

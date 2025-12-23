@@ -112,6 +112,17 @@ mod tests {
             assert!(data.dh.is_some() || data.ds.is_some());
         }
     }
+    #[test]
+    fn test_simple_substance() {
+        let parser = NistParser::new();
+
+        // Test enthalpy data for water
+        let result = parser.get_data("O2", SearchType::All, Phase::Gas);
+        let dh = result.as_ref().unwrap().clone().dh.unwrap();
+        println!("dh: {}", dh);
+        assert_eq!(dh, 0.0);
+        assert!(result.is_ok());
+    }
 
     #[test]
     fn test_data_structure_initialization() {
@@ -120,10 +131,7 @@ mod tests {
             T: Some(vec![vec![298.0, 1000.0]]),
             dh: Some(42.0),
             ds: Some(100.0),
-            coeffs: None,
             molar_mass: Some(18.015),
-            unit: None,
-            unit_multiplier: 1.0,
         };
 
         assert_eq!(data.cp.as_ref().unwrap()[0][0], 1.0);
@@ -136,21 +144,14 @@ mod tests {
     fn test_ch4_gas() {
         let parser = NistParser::new();
         let substance = "CH4";
-        let T = 300.0;
-        let mut result = parser.get_data(substance, SearchType::All, Phase::Gas);
+        let result = parser.get_data(substance, SearchType::All, Phase::Gas);
         assert!(result.is_ok());
-        if let Ok(data) = result.as_mut() {
-            let _ = data.extract_coefficients(T);
-            let (Cp, dh, ds) = data
-                .caclc_cp_dh_ds(T)
-                .expect("Error calculating cp, dh, ds");
-            assert!(Cp > 0.0);
-            assert!(dh < 0.0); // Assuming formation enthalpy is negative
-            assert!(ds > 0.0);
-            println!(
-                "CH4 Gas: Cp J/mol*K: {}, dh kJ/mol: {}, ds J/mol*K: {}",
-                Cp, dh, ds
-            );
+        if let Ok(data) = result {
+            assert!(data.cp.is_some());
+            assert!(data.dh.is_some());
+            assert!(data.ds.is_some());
+            assert!(data.molar_mass.is_some());
+            println!("CH4 Gas data parsed successfully");
         }
     }
 
@@ -158,21 +159,14 @@ mod tests {
     fn test_nacl_solid() {
         let parser = NistParser::new();
         let substance = "NaCl";
-        let T = 300.0;
-        let mut result = parser.get_data(substance, SearchType::All, Phase::Solid);
+        let result = parser.get_data(substance, SearchType::All, Phase::Solid);
         assert!(result.is_ok());
-        if let Ok(data) = result.as_mut() {
-            let _ = data.extract_coefficients(T);
-            let (Cp, dh, ds) = data
-                .caclc_cp_dh_ds(T)
-                .expect("Error calculating cp, dh, ds");
-            assert!(Cp > 0.0);
-            assert!(dh < 0.0); // Assuming formation enthalpy is negative
-            assert!(ds > 0.0);
-            println!(
-                "NaCl Solid: Cp J/mol*K: {}, dh kJ/mol: {}, ds J/mol*K: {}",
-                Cp, dh, ds
-            );
+        if let Ok(data) = result {
+            assert!(data.cp.is_some());
+            assert!(data.dh.is_some());
+            assert!(data.ds.is_some());
+            assert!(data.molar_mass.is_some());
+            println!("NaCl Solid data parsed successfully");
         }
     }
 
@@ -180,80 +174,17 @@ mod tests {
     fn test_nacl_liquid() {
         let parser = NistParser::new();
         let substance = "NaCl";
-        let T = 1200.15;
-        let mut result = parser.get_data(substance, SearchType::All, Phase::Liquid);
+        let result = parser.get_data(substance, SearchType::All, Phase::Liquid);
         assert!(result.is_ok());
-
-        if let Ok(data) = result.as_mut() {
-            let _ = data.extract_coefficients(T);
-            let (Cp, dh, ds) = data
-                .caclc_cp_dh_ds(1200.15)
-                .expect("Error calculating cp, dh, ds");
-            assert!(Cp > 0.0);
-            assert!(dh < 0.0); // Assuming formation enthalpy is negative
-            assert!(ds > 0.0);
-            println!(
-                "NaCl Liquid: Cp J/mol*K: {}, dh kJ/mol: {}, ds J/mol*K: {}",
-                Cp, dh, ds
-            );
+        if let Ok(data) = result {
+            assert!(data.cp.is_some());
+            assert!(data.dh.is_some());
+            assert!(data.ds.is_some());
+            assert!(data.molar_mass.is_some());
+            println!("NaCl Liquid data parsed successfully");
         }
     }
 
-    #[test]
-    fn test_closures() {
-        let parser = NistParser::new();
-        let substance = "H2O";
-        let T = 300.0;
-        let mut result = parser.get_data(substance, SearchType::All, Phase::Liquid);
-        assert!(result.is_ok());
-        if let Ok(data) = result.as_mut() {
-            let _ = data.extract_coefficients(T);
-            let (Cp, dh, ds) = data
-                .caclc_cp_dh_ds(T)
-                .expect("Error calculating cp, dh, ds");
-            let (Cp_fun, dh_fun, ds_fun) = data
-                .create_closure_cp_dh_ds()
-                .expect("Error calculating cp, dh, ds");
-            let Cp_eval = Cp_fun(T);
-            let dh_eval = dh_fun(T);
-            let ds_eval = ds_fun(T);
-            println!(
-                " Cp J/mol*K: {}, {}, dh kJ/mol: {}, {} ds J/mol*K: {} {}",
-                Cp, Cp_eval, dh, dh_eval, ds, ds_eval
-            );
-            assert_eq!(Cp_eval, Cp);
-            assert_eq!(dh_eval, dh);
-            assert_eq!(ds_eval, ds);
-        }
-    }
-
-    #[test]
-    fn test_sym_functions() {
-        let parser = NistParser::new();
-        let substance = "H2O";
-        let T = 300.0;
-        let mut result = parser.get_data(substance, SearchType::All, Phase::Liquid);
-        assert!(result.is_ok());
-        if let Ok(data) = result.as_mut() {
-            let _ = data.extract_coefficients(T);
-            let (Cp, dh, ds) = data
-                .caclc_cp_dh_ds(T)
-                .expect("Error calculating cp, dh, ds");
-            let (Cp_sym, dh_sym, ds_sym) = data
-                .create_sym_cp_dh_ds()
-                .expect("Error calculating cp, dh, ds");
-            let Cp_eval = Cp_sym.lambdify1D()(T);
-            let dh_eval = dh_sym.lambdify1D()(T);
-            let ds_eval = ds_sym.lambdify1D()(T);
-            println!(
-                " Cp J/mol*K: {}, {}, dh kJ/mol: {}, {} ds J/mol*K: {} {}",
-                Cp, Cp_eval, dh, dh_eval, ds, ds_eval
-            );
-            assert_eq!(Cp_eval, Cp);
-            assert_eq!(dh_eval, dh);
-            assert_eq!(ds_eval, ds);
-        }
-    }
     /*
     #[test]
     fn test_mock_substance_fetch() {

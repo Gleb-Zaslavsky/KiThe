@@ -6,10 +6,10 @@ mod tests {
     use crate::Thermodynamics::ChemEquilibrium::ClassicalThermodynamics::{
         ThermodynamicCalculations, Thermodynamics,
     };
-
     use crate::Thermodynamics::User_PhaseOrSolution::{
         CustomSubstance, PhaseOrSolution, SubstanceSystemFactory, SubstancesContainer,
     };
+    use crate::Thermodynamics::User_PhaseOrSolution2::OnePhase;
     use approx::assert_relative_eq;
     use std::collections::HashMap;
 
@@ -62,15 +62,16 @@ mod tests {
         subs_data
             .map_of_phases
             .insert("CO2".to_string(), Some(Phases::Gas));
-
-        let custom_substance = CustomSubstance::OnePhase(subs_data);
+        let mut op = OnePhase::new();
+        op.subs_data = subs_data;
+        let custom_substance = CustomSubstance::OnePhase(op);
 
         // Test that the custom substance was created correctly
         match &custom_substance {
             CustomSubstance::OnePhase(data) => {
-                assert_eq!(data.substances.len(), 2);
-                assert!(data.substances.contains(&"CO".to_string()));
-                assert!(data.substances.contains(&"CO2".to_string()));
+                assert_eq!(data.subs_data.substances.len(), 2);
+                assert!(data.subs_data.substances.contains(&"CO".to_string()));
+                assert!(data.subs_data.substances.contains(&"CO2".to_string()));
             }
             _ => panic!("Expected OnePhase variant"),
         }
@@ -95,9 +96,9 @@ mod tests {
         let custom_substance = result.unwrap();
         match custom_substance {
             CustomSubstance::OnePhase(data) => {
-                assert_eq!(data.substances.len(), 2);
-                assert!(data.map_of_phases.contains_key("CO"));
-                assert!(data.map_of_phases.contains_key("CO2"));
+                assert_eq!(data.subs_data.substances.len(), 2);
+                assert!(data.subs_data.map_of_phases.contains_key("CO"));
+                assert!(data.subs_data.map_of_phases.contains_key("CO2"));
             }
             _ => panic!("Expected OnePhase variant"),
         }
@@ -178,25 +179,23 @@ mod tests {
             .insert("CO2".to_string(), Some(Phases::Gas));
 
         // Search for substance data
-        subs_data.search_substances();
-
-        let mut custom_substance = CustomSubstance::OnePhase(subs_data);
+        let _ = subs_data.search_substances();
+        let mut op = OnePhase::new();
+        op.subs_data = subs_data;
+        let mut custom_substance = CustomSubstance::OnePhase(op);
 
         // Test create_thermodynamics method
         let mut n: HashMap<Option<String>, (Option<f64>, Option<HashMap<String, f64>>)> =
             HashMap::new();
         let map_of_moles_num = HashMap::from([("CO".to_string(), 0.5), ("CO2".to_string(), 0.5)]);
         n.insert(None, (Some(1.0), (Some(map_of_moles_num))));
-        let result = custom_substance.create_thermodynamics(400.0, 101325.0, Some(n), None);
+        let result = custom_substance.create_thermodynamics(Some(400.0), 101325.0, Some(n), None);
 
         assert!(result.is_ok());
 
         let thermodynamics = result.unwrap();
         assert_eq!(thermodynamics.T, 400.0);
         assert_eq!(thermodynamics.P, 101325.0);
-        assert!(!thermodynamics.dG.is_empty());
-        assert!(!thermodynamics.dG_sym.is_empty());
-        assert!(!thermodynamics.dG_fun.is_empty());
     }
 
     #[test]
@@ -204,9 +203,6 @@ mod tests {
         let thermo = Thermodynamics::new();
         assert_eq!(thermo.T, 298.15);
         assert_eq!(thermo.P, 1e5);
-        assert!(thermo.dG.is_empty());
-        assert!(thermo.dG_sym.is_empty());
-        assert!(thermo.dG_fun.is_empty());
     }
 
     #[test]
@@ -230,7 +226,9 @@ mod tests {
 
         // Create a Thermodynamics instance with the test SubsData
         let mut thermo = Thermodynamics::new();
-        thermo.subdata = CustomSubstance::OnePhase(subs_data);
+        let mut op = OnePhase::new();
+        op.subs_data = subs_data;
+        thermo.subdata = CustomSubstance::OnePhase(op);
 
         // Update substances from subdata
         thermo.update_substances_from_subdata();
@@ -264,24 +262,19 @@ mod tests {
         assert!(result.is_ok());
 
         let mut custom_substance = result.unwrap();
-        let mut nv = HashMap::new();
+        let mut nv= HashMap::new();
         nv.insert(None, (Some(1.0), Some(vec![0.5, 0.5])));
 
         let mut n = HashMap::new();
         let map_of_moles_num = HashMap::from([("CO".to_string(), 0.5), ("CO2".to_string(), 0.5)]);
         n.insert(None, (Some(1.0), Some(map_of_moles_num)));
         // Create thermodynamics from the custom substance
-        let result = custom_substance.create_thermodynamics(400.0, 101325.0, Some(n.clone()), None);
+        let result =
+            custom_substance.create_thermodynamics(Some(400.0), 101325.0, Some(n.clone()), None);
 
         assert!(result.is_ok());
 
         let mut thermo = result.unwrap();
-
-        // Test that calculations were performed correctly
-        assert!(!thermo.dG.is_empty());
-        assert!(!thermo.dG_sym.is_empty());
-        assert!(!thermo.dS.is_empty());
-        assert!(!thermo.dS_sym.is_empty());
 
         // Test recalculation at a different temperature
         thermo.calculate_Gibbs_free_energy(500.0, nv);
@@ -310,7 +303,7 @@ mod tests {
         let mut custom_substance = result.unwrap();
 
         // Create thermodynamics
-        let result = custom_substance.create_thermodynamics(400.0, 101325.0, None, None);
+        let result = custom_substance.create_thermodynamics(Some(400.0), 101325.0, None, None);
 
         let thermo = result.unwrap();
 
@@ -322,9 +315,9 @@ mod tests {
         assert_eq!(thermo_clone.P, thermo.P);
 
         // Check that dG maps are the same
-        for (phase, substances) in &thermo.dG {
-            assert!(thermo_clone.dG.contains_key(phase));
-            let clone_substances = thermo_clone.dG.get(phase).unwrap();
+        for (phase, substances) in &thermo.subdata.get_dG() {
+            let bind = thermo_clone.subdata.get_dG();
+            let clone_substances = bind.get(phase).unwrap();
 
             for (substance, value) in substances {
                 assert!(clone_substances.contains_key(substance));
@@ -337,12 +330,13 @@ mod tests {
         }
 
         // Similarly for dG_sym
-        for (phase, substances) in &thermo.dG_sym {
-            assert!(thermo_clone.dG_sym.contains_key(phase));
-            let clone_substances = thermo_clone.dG_sym.get(phase).unwrap();
+        let sym = thermo.subdata.get_dG_sym();
+        for (phase, substances) in sym {
+            let bind = thermo_clone.subdata.get_dG_sym();
+            let clone_substances = bind.get(&phase).unwrap();
 
             for (substance, _) in substances {
-                assert!(clone_substances.contains_key(substance));
+                assert!(clone_substances.contains_key(&substance));
                 // We can't directly compare Expr objects, but we can check they exist
             }
         }

@@ -114,9 +114,10 @@ impl Thermodynamics {
         let A = self.elem_composition_matrix.clone().unwrap();
         // println!("A: {}, ncols: {}, nrows: {}", A, A.ncols(), A.nrows()) ;
         let Tm = self.Tm;
+
         let eq = self
             .subdata
-            .calculate_Lagrange_equations_sym(A, self.dG_sym.clone(), Tm)
+            .calculate_Lagrange_equations_sym(A, Tm)
             .or_else(|_| {
                 Err(ThermodynamicsError::CalculationError(format!(
                     "Failed to calculate Lagrange equations"
@@ -132,35 +133,13 @@ impl Thermodynamics {
         self.calculate_Gibbs_fun(T);
         let A = self.elem_composition_matrix.clone().unwrap();
 
-        let dG_fun = self.subdata.calculate_Gibbs_fun(T, self.P);
-        let eq = self
-            .create_nonlinear_system_fun_local(A, dG_fun, Tm)
-            .or_else(|_| {
-                Err(ThermodynamicsError::CalculationError(format!(
-                    "Failed to calculate Lagrange equations"
-                )))
-            })?;
-        self.solver.eq_mu_fun = eq;
-        Ok(())
-    }
-
-    fn create_nonlinear_system_fun_local(
-        &mut self,
-        A: DMatrix<f64>,
-        dG_fun: HashMap<
-            Option<String>,
-            HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
-        >,
-        Tm: f64,
-    ) -> Result<
-        Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
-        std::io::Error,
-    > {
+        self.subdata.calculate_Gibbs_fun(T, self.P);
+  
         let Lagrange_equations: Box<
             dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static,
         > = self
             .subdata
-            .calculate_Lagrange_equations_fun(A, dG_fun, Tm)
+            .calculate_Lagrange_equations_fun2(A, T, self.P, Tm)
             .unwrap();
         let eq = move |T: f64,
                        vec_of_concentrations: Option<Vec<f64>>,
@@ -170,8 +149,10 @@ impl Thermodynamics {
         };
         let f = Box::new(eq)
             as Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>;
-        Ok(f)
+        self.solver.eq_mu_fun = f;
+        Ok(())
     }
+
     /// creates symbolic equations representing the idea that sum  of mole numbers in this phase is equal to the total number of moles in this phase
     pub fn create_sum_of_mole_numbers_sym(&mut self) -> Result<Vec<Expr>, std::io::Error> {
         let sym_variables = self.symbolic_vars.clone();
@@ -215,8 +196,58 @@ impl Thermodynamics {
                 "The number of equations is not equal to the number of variables",
             ));
         }
-        self.solver.full_system_sym = eq;
+        let full_system_sym: Vec<Expr> = eq.iter().map(|x| x.clone().simplify()).collect();
+        self.solver.full_system_sym = full_system_sym;
         self.solver.all_unknowns = x;
         Ok(())
+    }
+
+    /// Creates bounds for all variables in the solver.
+    /// For mole numbers (n), the lower bound is 0.0.
+    /// Returns HashMap {variable_name: (lower_bound, upper_bound)}
+    pub fn create_variable_bounds(&mut self) {
+        let mut bounds: HashMap<String, (f64, f64)> = HashMap::new();
+        // rows are substances and columns are elements
+        let A = self.elem_composition_matrix.clone().unwrap();
+        // vector of elements in the initial composition
+        let b = self.initial_vector_of_elements.clone();
+        let mut initial_guess: Vec<f64> = Vec::new();
+        // Bounds for mole numbers (n) - must be non-negative
+        for (i, n_var) in self.solver.n.iter().enumerate() {
+            let estimation = Self::upper_estimation_of_subs_mole_number(i, &A, &b);
+            initial_guess.push(estimation / 2.0);
+            bounds.insert(n_var.to_string(), (0.0, estimation));
+        }
+
+        // Bounds for Lagrange multipliers (Lambda) - unbounded
+        for lambda_var in &self.solver.Lambda {
+            initial_guess.push(10.0);
+            bounds.insert(lambda_var.to_string(), (f64::NEG_INFINITY, f64::INFINITY));
+        }
+
+        // Bounds for total mole numbers per phase (Np) - must be non-negative
+        for np_var in &self.solver.Np {
+            initial_guess.push(1.0);
+            bounds.insert(np_var.to_string(), (0.0, f64::INFINITY));
+        }
+
+        self.solver.bounds = Some(bounds.clone());
+        self.solver.initial_guess = Some(initial_guess.clone());
+    }
+
+    fn upper_estimation_of_subs_mole_number(i: usize, A: &DMatrix<f64>, b: &Vec<f64>) -> f64 {
+        let elem_composition_of_subs_i = A.row(i).transpose();
+        assert_eq!(elem_composition_of_subs_i.len(), b.len());
+        let mut estimation_vec = Vec::new();
+        for (j, sum_of_elements_j) in b.iter().enumerate() {
+            //quantity element j in the substance
+            let E_ij = elem_composition_of_subs_i[j];
+            if E_ij > 0.0 {
+                estimation_vec.push(sum_of_elements_j / E_ij);
+            }
+        }
+        // 1.2 is safety parameter
+        let estimation = 1.2 * estimation_vec.iter().min_by(|a, b| a.total_cmp(b)).unwrap();
+        estimation.clone()
     }
 }

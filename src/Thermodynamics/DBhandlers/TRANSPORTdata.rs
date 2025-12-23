@@ -50,6 +50,8 @@ pub enum TransportError {
     InvalidMolarMass(f64),
     InvalidDensity(f64),
     CalculationError(String),
+    SymbolicError(String),
+    InvalidTemperatureRange,
 }
 
 impl fmt::Display for TransportError {
@@ -62,6 +64,10 @@ impl fmt::Display for TransportError {
             TransportError::InvalidMolarMass(m) => write!(f, "Invalid molar mass value: {}", m),
             TransportError::InvalidDensity(d) => write!(f, "Invalid density value: {}", d),
             TransportError::CalculationError(msg) => write!(f, "Calculation error: {}", msg),
+            TransportError::SymbolicError(msg) => write!(f, "Symbolic error: {}", msg),
+            TransportError::InvalidTemperatureRange => {
+                write!(f, "Invalid temperature range specified")
+            }
         }
     }
 }
@@ -102,7 +108,7 @@ fn omega_22_calc(T: f64, e_k: f64, mu: f64, sigma_k: f64) -> f64 {
 // collision integral for diffusion
 // Гиршфельдер. Молекулярная теория газов и жидкостей
 //Hirschfelder. The Molecular Theory of Gases and Liquids
-fn omega_11_calc(T: f64, e_k: f64, mu: f64, sigma_k: f64) -> f64 {
+pub fn omega_11_calc(T: f64, e_k: f64, mu: f64, sigma_k: f64) -> f64 {
     let a = 1.06036;
     let b = 0.15610;
     let c = 0.19300;
@@ -168,7 +174,7 @@ fn calculate_Lambda_(p: TransportInput, um: f64, M: f64, P: f64, C: f64, ro: f64
     }
 }
 
-fn omega_11_calc_sym(e_k: f64, mu: f64, sigma_k: f64) -> Expr {
+pub fn omega_11_calc_sym(e_k: f64, mu: f64, sigma_k: f64) -> Expr {
     let a = Expr::Const(1.06036);
     let b = Expr::Const(0.15610);
     let c = Expr::Const(0.19300);
@@ -295,6 +301,20 @@ pub struct TransportInput {
     /// Lennard-Jones well depth in Kelvin
     pub well_depth: f64,
 }
+
+impl Default for TransportInput {
+    fn default() -> Self {
+        TransportInput {
+            Altname: None,
+            Form: 0.0,
+            diam: 0.0,
+            dipole: 0.0,
+            polar: 0.0,
+            rot_relax: 0.0,
+            well_depth: 0.0,
+        }
+    }
+}
 pub struct TransportData {
     pub input: TransportInput,
     pub M: f64,
@@ -325,6 +345,8 @@ pub struct TransportData {
 
     pub Lambda_sym: Option<Expr>,
     pub V_sym: Option<Expr>,
+    /// User-defined temperature interval for multi-range calculations
+    pub T_interval: Option<(f64, f64)>,
 }
 
 impl TransportData {
@@ -361,6 +383,7 @@ impl TransportData {
             V_fun: Box::new(|x| x),
             Lambda_sym: None,
             V_sym: None,
+            T_interval: None,
         }
     } // end of new
     pub fn set_input(&mut self, input: TransportInput) {
@@ -579,8 +602,63 @@ impl TransportData {
             .ok_or_else(|| {
                 TransportError::CalculationError("Lambda_sym not calculated".to_string())
             })?
-            .taylor_series1D_("T", T0, n);
+            .taylor_series1D("T", T0, n);
         Ok(Lambda_series)
+    }
+    pub fn Taylor_series_visc(&mut self, T0: f64, n: usize) -> Result<Expr, TransportError> {
+        if T0 <= 0.0 {
+            return Err(TransportError::InvalidTemperature(T0));
+        }
+        self.create_closure_visc()?;
+        let visc_series = self
+            .V_sym
+            .clone()
+            .ok_or_else(|| TransportError::CalculationError("Visc_sym not calculated".to_string()))?
+            .taylor_series1D_("T", T0, n);
+        Ok(visc_series)
+    }
+
+    pub fn set_T_interval(&mut self, T_min: f64, T_max: f64) {
+        self.T_interval = Some((T_min, T_max));
+    }
+
+    pub fn integr_mean(&mut self) -> Result<(), TransportError> {
+        use RustedSciThe::symbolic::symbolic_integration::QuadMethod;
+        let (T_min, T_max) = self
+            .T_interval
+            .ok_or(TransportError::InvalidTemperatureRange)?;
+
+        if T_min >= T_max {
+            return Err(TransportError::InvalidTemperatureRange);
+        }
+
+        let T_range = T_max - T_min;
+        let inv_T_range = 1.0 / T_range;
+        let V_sym = self.V_sym.clone().ok_or(TransportError::SymbolicError(
+            "No symbolic viscosity".to_string(),
+        ))?;
+        let Lambda_sym = self
+            .Lambda_sym
+            .clone()
+            .ok_or(TransportError::SymbolicError(
+                "No symbolic viscosity".to_string(),
+            ))?;
+        let V_sym_integral = V_sym
+            .quad(QuadMethod::GaussLegendre, 3, T_min, T_max, None)
+            .map_err(|e| {
+                TransportError::SymbolicError(format!("Failed to integrate entropy: {}", e))
+            })?;
+        let V_sym_integral = inv_T_range * V_sym_integral;
+        let Lambda_sym_integral = Lambda_sym
+            .quad(QuadMethod::GaussLegendre, 3, T_min, T_max, None)
+            .map_err(|e| {
+                TransportError::SymbolicError(format!("Failed to integrate entropy: {}", e))
+            })?;
+        let Lambda_sym_integral = inv_T_range * Lambda_sym_integral;
+        self.V = V_sym_integral;
+        self.Lambda = Lambda_sym_integral;
+
+        Ok(())
     }
 }
 
@@ -806,6 +884,23 @@ impl super::transport_api::TransportCalculator for TransportData {
     ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
         Ok(self.clone().V_fun)
     }
+    fn fitting_coeffs_for_T_interval(
+        &mut self,
+    ) -> Result<(), super::transport_api::TransportError> {
+        Ok(())
+    }
+    fn integr_mean(&mut self) -> Result<(), super::transport_api::TransportError> {
+        self.integr_mean()?;
+        Ok(())
+    }
+    fn set_T_interval(
+        &mut self,
+        T_min: f64,
+        T_max: f64,
+    ) -> Result<(), super::transport_api::TransportError> {
+        self.set_T_interval(T_min, T_max);
+        Ok(())
+    }
 }
 
 impl Clone for TransportData {
@@ -833,6 +928,7 @@ impl Clone for TransportData {
             V_fun: Box::new(|x| x),      // Default closure
             Lambda_sym: self.Lambda_sym.clone(),
             V_sym: self.V_sym.clone(),
+            T_interval: self.T_interval.clone(),
         };
 
         // Recreate the closures if necessary
@@ -974,7 +1070,7 @@ mod tests {
         //  println!("Lambda, mW/m/K: {:?}, Visc: {:?}", lambda, visc);
     }
     #[test]
-    fn test_with_real_data_sym_ideal_gas() { 
+    fn test_with_real_data_sym_ideal_gas() {
         let thermo_data = ThermoData::new();
         let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
         let CO_data = sublib.get("CO").unwrap();
@@ -1021,8 +1117,8 @@ mod tests {
         //  println!("Lambda, mW/m/K: {:?}, Visc: {:?}", lambda, visc);
     }
 
-      #[test] 
-    fn test_with_real_data_taylor_sym0() { 
+    #[test]
+    fn test_with_real_data_taylor_sym0() {
         let thermo_data = ThermoData::new();
         let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
         let CO_data = sublib.get("CO").unwrap();
@@ -1051,11 +1147,11 @@ mod tests {
         let Cp = NASA.Cp;
         println!("Cp: {}", Cp);
         let ro = (tr.P * 101325.0) * (tr.M / 1000.0) / (R * T);
-       // let L = tr.calculate_Lambda(Cp, Some(ro), T).unwrap();
+        // let L = tr.calculate_Lambda(Cp, Some(ro), T).unwrap();
         tr.create_closure_Lambda(Cp, Some(ro)).unwrap();
 
-     
-        let sym_expr = tr.calculate_Lambda_sym(Expr::Var("Cp".to_string()), Expr::Var("ro".to_string()));
+        let sym_expr =
+            tr.calculate_Lambda_sym(Expr::Var("Cp".to_string()), Expr::Var("ro".to_string()));
         assert!(sym_expr.is_ok());
         let Lambda_sym = tr.Lambda_sym.clone();
         assert!(Lambda_sym.is_some());
@@ -1063,17 +1159,14 @@ mod tests {
         println!("Lambda_sym: {}", Lambda_sym);
         let vec_of_vars = Lambda_sym.all_arguments_are_variables();
         println!("vec_of_vars: {:?}", vec_of_vars);
-        assert!(vec_of_vars.len() ==3);
-      // let taylor_series_Lambda =  Lambda_sym.taylor_series1D_("T", 400.0, 2); 
-       // println!("Lambda_sym taylor: {}", taylor_series_Lambda);
-
-
-      
+        assert!(vec_of_vars.len() == 3);
+        // let taylor_series_Lambda =  Lambda_sym.taylor_series1D_("T", 400.0, 2);
+        // println!("Lambda_sym taylor: {}", taylor_series_Lambda);
     }
     #[test]
-    fn test_with_real_data_taylor_sym() { 
+    fn test_with_real_data_taylor_sym() {
         use std::time::Instant;
-        let now = Instant::now(); 
+        let now = Instant::now();
         let thermo_data = ThermoData::new();
         let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
         let CO_data = sublib.get("CO").unwrap();
@@ -1108,11 +1201,11 @@ mod tests {
         let Lambda_from_closure = Lambda_closure(T);
         println!("Lambda: {}", Lambda_from_closure);
         assert_eq!(Lambda_from_closure, L);
-                let taylor_series_Lambda = tr
+        let taylor_series_Lambda = tr
             .Taylor_series_Lambda(Cp_sym, Expr::Const(ro), 400.0, 2)
             .unwrap();
         println!("Taylor_series_Lambda: {}", taylor_series_Lambda);
-                let taylor_series_Lambda = taylor_series_Lambda.lambdify1D()(T);
+        let taylor_series_Lambda = taylor_series_Lambda.lambdify1D()(T);
         let elapsed = now.elapsed().as_secs_f64();
         println!("Elapsed: {:.2?}", elapsed);
         assert_relative_eq!(taylor_series_Lambda, L, epsilon = 1.0);

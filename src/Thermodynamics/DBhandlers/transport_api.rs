@@ -52,13 +52,16 @@ pub enum TransportError {
     SerdeError(serde_json::Error),
     InvalidUnit(String),
     InvalidTemperature(f64),
+    InvalidTemperatureRange,
     InvalidPressure(f64),
     InvalidMolarMass(f64),
     InvalidDensity(f64),
     CalculationError(String),
     MissingCoefficients(String),
-    MissingData(&'static str),
+    MissingData(String),
     ParseError(String),
+    SymbolicError(String),
+    FittingError(String),
 }
 
 impl fmt::Display for TransportError {
@@ -67,6 +70,7 @@ impl fmt::Display for TransportError {
             TransportError::SerdeError(e) => write!(f, "Serde error: {}", e),
             TransportError::InvalidUnit(unit) => write!(f, "Invalid unit: {}", unit),
             TransportError::InvalidTemperature(t) => write!(f, "Invalid temperature: {}", t),
+            TransportError::InvalidTemperatureRange => write!(f, "Invalid temperature range"),
             TransportError::InvalidPressure(p) => write!(f, "Invalid pressure: {}", p),
             TransportError::InvalidMolarMass(m) => write!(f, "Invalid molar mass: {}", m),
             TransportError::InvalidDensity(d) => write!(f, "Invalid density: {}", d),
@@ -74,6 +78,8 @@ impl fmt::Display for TransportError {
             TransportError::MissingCoefficients(msg) => write!(f, "Missing coefficients: {}", msg),
             TransportError::MissingData(field) => write!(f, "Missing required data: {}", field),
             TransportError::ParseError(field) => write!(f, "Missing required data: {}", field),
+            TransportError::SymbolicError(msg) => write!(f, "Symbolic error: {}", msg),
+            TransportError::FittingError(msg) => write!(f, "Fitting error: {}", msg),
         }
     }
 }
@@ -102,6 +108,12 @@ impl From<super::TRANSPORTdata::TransportError> for TransportError {
             super::TRANSPORTdata::TransportError::CalculationError(msg) => {
                 TransportError::CalculationError(msg)
             }
+            super::TRANSPORTdata::TransportError::SymbolicError(msg) => {
+                TransportError::SymbolicError(msg)
+            }
+            super::TRANSPORTdata::TransportError::InvalidTemperatureRange => {
+                TransportError::InvalidTemperatureRange
+            }
         }
     }
 }
@@ -119,6 +131,10 @@ impl From<super::CEAdata::CEAError> for TransportError {
             }
             super::CEAdata::CEAError::ParseError(m) => TransportError::ParseError(m),
             super::CEAdata::CEAError::MissingData(d) => TransportError::MissingData(d),
+            super::CEAdata::CEAError::InvalidTemperatureRange => {
+                TransportError::InvalidTemperatureRange
+            }
+            super::CEAdata::CEAError::SymbolicError(msg) => TransportError::SymbolicError(msg),
         }
     }
 }
@@ -187,6 +203,9 @@ pub trait TransportCalculator {
     fn get_viscosity_sym(&self) -> Result<Expr, TransportError>;
     fn get_lambda_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, TransportError>;
     fn get_viscosity_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, TransportError>;
+    fn fitting_coeffs_for_T_interval(&mut self) -> Result<(), TransportError>;
+    fn integr_mean(&mut self) -> Result<(), TransportError>;
+    fn set_T_interval(&mut self, T_min: f64, T_max: f64) -> Result<(), TransportError>;
 }
 
 // Helper functions for unit conversion
