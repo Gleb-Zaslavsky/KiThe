@@ -103,12 +103,31 @@ impl SubsData {
         map_to_insert
     }
 
+    pub fn calculate_dG0_sym_one_phase(&mut self) -> HashMap<String, Expr> {
+        let T = Expr::Var("T".to_owned());
+
+        let mut map_to_insert = HashMap::new();
+        for (_, substance) in self.substances.iter().enumerate() {
+            let map_sym = self
+                .clone()
+                .therm_map_of_sym
+                .get(&substance.clone())
+                .unwrap()
+                .clone();
+            let dh_sym = *map_sym.get(&DataType::dH_sym).unwrap().clone().unwrap();
+            let ds_sym = *map_sym.get(&DataType::dS_sym).unwrap().clone().unwrap();
+            let dG_sym = dh_sym - T.clone() * ds_sym;
+            let dG_sym = dG_sym.simplify();
+            map_to_insert.insert(substance.clone(), dG_sym.clone());
+        }
+        map_to_insert
+    }
     /// Function for calculating Gibbs free energy of a given mixure of substances ( at given T, P, concentration)
     pub fn calculate_Gibbs_fun_one_phase(
         &mut self,
         P: f64,
         T: f64,
-    ) -> HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>> {
+    ) -> HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>> {
         let phases_map = self.map_of_phases.clone();
 
         let mut map_to_insert = HashMap::new();
@@ -137,26 +156,42 @@ impl SubsData {
             let dG = Box::new(move |t: f64, n: Option<Vec<f64>>, Np: Option<f64>| {
                 dh(t) - t * ds(t) + gas_correction(t, n, Np)
             });
-            let dG: Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64> = dG;
+            let dG: Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static> = dG;
             map_to_insert.insert(substance.clone(), dG);
         }
         map_to_insert
     }
 
+    /// Function for calculating Gibbs free energy of a given mixure of substances ( at given T, P, concentration)
+    pub fn calculate_dG0_fun_one_phase(
+        &mut self,
+    ) -> HashMap<String, Box<dyn Fn(f64) -> f64 + Send + Sync>> {
+        let mut map_to_insert = HashMap::new();
+        let (_Cp, mut dh_vec, mut ds_vec) = self.calculate_therm_map_of_fun_local().unwrap();
+        for (i, substance) in self.substances.iter().enumerate() {
+            let dh = dh_vec[i].take().unwrap();
+            let ds = ds_vec[i].take().unwrap();
+
+            let dG = Box::new(move |t: f64| dh(t) - t * ds(t));
+            let dG: Box<dyn Fn(f64) -> f64 + Send + Sync> = dG;
+            map_to_insert.insert(substance.clone(), dG);
+        }
+        map_to_insert
+    }
     /// Creates closures for the thermodynamic properties of the substances
     pub fn calculate_therm_map_of_fun_local(
         &mut self,
     ) -> Result<
         (
-            Vec<Option<Box<dyn Fn(f64) -> f64 + 'static>>>,
-            Vec<Option<Box<dyn Fn(f64) -> f64 + 'static>>>,
-            Vec<Option<Box<dyn Fn(f64) -> f64 + 'static>>>,
+            Vec<Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>,
+            Vec<Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>,
+            Vec<Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>,
         ),
         String,
     > {
-        let mut vec_of_cp: Vec<Option<Box<dyn Fn(f64) -> f64 + 'static>>> = Vec::new();
-        let mut vec_of_dh: Vec<Option<Box<dyn Fn(f64) -> f64 + 'static>>> = Vec::new();
-        let mut vec_of_ds: Vec<Option<Box<dyn Fn(f64) -> f64 + 'static>>> = Vec::new();
+        let mut vec_of_cp: Vec<Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>> = Vec::new();
+        let mut vec_of_dh: Vec<Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>> = Vec::new();
+        let mut vec_of_ds: Vec<Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>> = Vec::new();
         for substance in &self.substances.clone() {
             match self
                 .search_results

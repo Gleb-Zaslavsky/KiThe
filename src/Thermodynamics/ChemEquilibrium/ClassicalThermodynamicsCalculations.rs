@@ -70,7 +70,7 @@ impl Thermodynamics {
         self.T = T;
         let P = self.P;
         let sd = &mut self.subdata;
-         sd.calculate_S(T, P, n).unwrap();
+        sd.calculate_S(T, P, n).unwrap();
     }
 
     ///Symbolic  function for calculating enthropy of a given mixure of substances ( symbolic result at given T, P, concentration)

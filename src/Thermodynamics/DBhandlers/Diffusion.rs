@@ -109,7 +109,7 @@ pub struct PairDiffusion {
     /// Unit conversion multiplier
     pub unit_multiplier: f64,
     /// Temperature-dependent diffusion coefficient function
-    pub D_closure: Box<dyn Fn(f64) -> f64 + 'static>,
+    pub D_closure: Box<dyn Fn(f64) -> f64 + Send + Sync>,
     /// Symbolic expression for diffusion coefficient D(T)
     pub D_symbolic: Expr,
 }

@@ -212,9 +212,9 @@ pub struct CEAdata {
     pub V: f64,
 
     /// Closure function for thermal conductivity calculations
-    pub Lambda_fun: Box<dyn Fn(f64) -> f64>,
+    pub Lambda_fun: Box<dyn Fn(f64) -> f64 + Send + Sync>,
     /// Closure function for viscosity calculations
-    pub V_fun: Box<dyn Fn(f64) -> f64>,
+    pub V_fun: Box<dyn Fn(f64) -> f64 + Send + Sync>,
 
     /// Symbolic expression for thermal conductivity
     pub Lambda_sym: Option<Expr>,
@@ -520,7 +520,9 @@ impl CEAdata {
     /// # Returns
     /// * `Ok(closure)` - Function that takes temperature and returns thermal conductivity
     /// * `Err(CEAError::MissingCoefficients)` - Coefficients not properly initialized
-    pub fn create_closure_Lambda(&mut self) -> Result<Box<dyn Fn(f64) -> f64>, CEAError> {
+    pub fn create_closure_Lambda(
+        &mut self,
+    ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, CEAError> {
         if self.coeff_Lambda.len() != 4 {
             return Err(CEAError::MissingCoefficients(
                 "Lambda coefficients not properly initialized".to_string(),
@@ -542,7 +544,9 @@ impl CEAdata {
     /// # Returns
     /// * `Ok(closure)` - Function that takes temperature and returns viscosity
     /// * `Err(CEAError::MissingCoefficients)` - Coefficients not properly initialized
-    pub fn create_closure_Visc(&mut self) -> Result<Box<dyn Fn(f64) -> f64>, CEAError> {
+    pub fn create_closure_Visc(
+        &mut self,
+    ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, CEAError> {
         if self.coeff_Visc.len() != 4 {
             return Err(CEAError::MissingCoefficients(
                 "Viscosity coefficients not properly initialized".to_string(),
@@ -932,14 +936,14 @@ impl TransportCalculator for CEAdata {
         &mut self,
         _C: Option<f64>,
         _ro: Option<f64>,
-    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+    ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, super::transport_api::TransportError> {
         let Lambda_fun = self.create_closure_Lambda()?;
         Ok(Lambda_fun)
     }
 
     fn create_viscosity_closure(
         &mut self,
-    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+    ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, super::transport_api::TransportError> {
         let visc = self.create_closure_Visc()?;
 
         Ok(visc)
@@ -1015,12 +1019,12 @@ impl TransportCalculator for CEAdata {
     }
     fn get_lambda_fun(
         &self,
-    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+    ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, super::transport_api::TransportError> {
         Ok(self.clone().Lambda_fun)
     }
     fn get_viscosity_fun(
         &self,
-    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+    ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, super::transport_api::TransportError> {
         Ok(self.clone().V_fun)
     }
 

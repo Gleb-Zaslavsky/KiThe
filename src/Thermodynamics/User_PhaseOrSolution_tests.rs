@@ -1,15 +1,16 @@
- #[cfg(test)]
+#[cfg(test)]
 mod tests {
+    use crate::Thermodynamics::User_PhaseOrSolution::ThermodynamicsCalculatorTrait;
     use crate::Thermodynamics::User_PhaseOrSolution::{
-        PhaseOrSolution, SubstanceSystemFactory, SubstancesContainer, SubstancePhaseMapping, CustomSubstance
+        CustomSubstance, PhaseOrSolution, SubstancePhaseMapping, SubstanceSystemFactory,
+        SubstancesContainer,
     };
-    use crate::Thermodynamics::User_PhaseOrSolution2::OnePhase;
-    use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData};
+
+    use crate::Thermodynamics::User_substances::SubsData;
     use RustedSciThe::symbolic::symbolic_engine::Expr;
-    use nalgebra::DMatrix;
     use approx::assert_relative_eq;
+    use nalgebra::DMatrix;
     use std::collections::HashMap;
- use crate::Thermodynamics::User_PhaseOrSolution::ThermodynamicsCalculatorTrait;
     #[test]
     fn test_substance_phase_mapping_basic() {
         let subs = vec!["A".to_string(), "B".to_string()];
@@ -17,7 +18,10 @@ mod tests {
         let mapping = SubstancePhaseMapping::new(subs.clone(), phases.clone());
         assert_eq!(mapping.all_substances, subs);
         assert_eq!(mapping.substance_to_phase, phases);
-        assert_eq!(mapping.get_phase_for_substance(0).unwrap(), &Some("p1".to_string()));
+        assert_eq!(
+            mapping.get_phase_for_substance(0).unwrap(),
+            &Some("p1".to_string())
+        );
     }
 
     #[test]
@@ -80,15 +84,11 @@ mod tests {
             HashMap::new();
         input.insert(
             Some("p1".to_string()),
-            (
-                Some(1.0),
-                Some(HashMap::from([("A".to_string(), 0.3)])),
-            ),
+            (Some(1.0), Some(HashMap::from([("A".to_string(), 0.3)]))),
         );
 
-        let (full_map, vec_map, summed) = pos
-            .create_full_map_of_mole_numbers(input.clone())
-            .unwrap();
+        let (full_map, vec_map, summed) =
+            pos.create_full_map_of_mole_numbers(input.clone()).unwrap();
 
         // Check missing keys inserted for p1 (B should be present with 0.0)
         let p1_inner = full_map.get(&Some("p1".to_string())).unwrap();
@@ -147,7 +147,9 @@ mod tests {
         // For 2 substances and 1 element, create A as 2x1
         let A = DMatrix::from_vec(2, 1, vec![1.0, 1.0]);
 
-        let eqs = pos.calculate_Lagrange_equations_sym(A.clone(), 300.0).unwrap();
+        let eqs = pos
+            .calculate_Lagrange_equations_sym(A.clone(), 300.0)
+            .unwrap();
         assert_eq!(eqs.len(), 2);
 
         // Now test functional version
@@ -155,16 +157,20 @@ mod tests {
         let mut gfun_phase = HashMap::new();
         gfun_phase.insert(
             "A".to_string(),
-            Box::new(|_T: f64, _n: Option<Vec<f64>>, _Np: Option<f64>| 1.0f64) as Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>,
+            Box::new(|_T: f64, _n: Option<Vec<f64>>, _Np: Option<f64>| 1.0f64)
+                as Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>,
         );
         gfun_phase.insert(
             "B".to_string(),
-            Box::new(|_T: f64, _n: Option<Vec<f64>>, _Np: Option<f64>| 2.0f64) as Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>,
+            Box::new(|_T: f64, _n: Option<Vec<f64>>, _Np: Option<f64>| 2.0f64)
+                as Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>,
         );
         let mut G_fun = HashMap::new();
         G_fun.insert(Some("mix".to_string()), gfun_phase);
 
-        let f = pos.calculate_Lagrange_equations_fun(A.clone(), G_fun, 300.0).unwrap();
+        let f = pos
+            .calculate_Lagrange_equations_fun(A.clone(), G_fun, 300.0)
+            .unwrap();
 
         // Call with arbitrary values: T, n, Np, Lambda (Lambda length equals number of elements = 1)
         let vals = f(300.0, None, None, vec![0.5]);
@@ -185,7 +191,10 @@ mod tests {
 
         let mut inner = HashMap::new();
         // construct simple symbolic expression including T and P
-        inner.insert("A".to_string(), Expr::Var("T".to_string()) + Expr::Var("P".to_string()));
+        inner.insert(
+            "A".to_string(),
+            Expr::Var("T".to_string()) + Expr::Var("P".to_string()),
+        );
         let mut outer = HashMap::new();
         outer.insert(Some("p".to_string()), inner);
         pos.dG_sym = outer;
@@ -199,10 +208,13 @@ mod tests {
         let expr = v.get("A").unwrap();
         // Expect expression to be simplified to a constant: 298.15 + 101325.0
         let expected = Expr::Const(298.15 + 101325.0);
-        assert_eq!(format!("{}", expr.simplify()), format!("{}", expected.simplify()));
+        assert_eq!(
+            format!("{}", expr.simplify()),
+            format!("{}", expected.simplify())
+        );
     }
 
-     #[test]
+    #[test]
     fn test_substance_system_factory_multi_phase() {
         let mut phase_substances = HashMap::new();
         phase_substances.insert("gas".to_string(), vec!["N2".to_string(), "O2".to_string()]);
@@ -326,7 +338,12 @@ mod tests {
             ("O2".to_string(), 31.998),
             ("H2O".to_string(), 18.015),
         ]);
-        let config_result = pos.configure_system_properties(101325.0, Some("Pa".to_string()), molar_masses, Some("g/mol".to_string()));
+        let config_result = pos.configure_system_properties(
+            101325.0,
+            Some("Pa".to_string()),
+            molar_masses,
+            Some("g/mol".to_string()),
+        );
         assert!(config_result.is_ok());
 
         // Test if_not_found_go_NIST
@@ -343,8 +360,14 @@ mod tests {
             ("N2".to_string(), 0.5),
             // O2 missing - should be filled with 0.0
         ]);
-        partial_n.insert(Some("gas".to_string()), (Some(0.6), Some(partial_gas_moles)));
-        partial_n.insert(Some("gas2".to_string()), (Some(0.4), Some(HashMap::from([("H2O".to_string(), 0.4)]))));
+        partial_n.insert(
+            Some("gas".to_string()),
+            (Some(0.6), Some(partial_gas_moles)),
+        );
+        partial_n.insert(
+            Some("gas2".to_string()),
+            (Some(0.4), Some(HashMap::from([("H2O".to_string(), 0.4)]))),
+        );
 
         let full_map_result = pos.create_full_map_of_mole_numbers(partial_n);
         assert!(full_map_result.is_ok());
@@ -384,18 +407,18 @@ mod tests {
         assert!(lagrange_sym_result.is_ok());
         let lagrange_eqs = lagrange_sym_result.unwrap();
         assert_eq!(lagrange_eqs.len(), 3); // 3 substances
-          
+
         // Test calculate_Lagrange_equations_fun
-          /* 
-        let lagrange_fun_result = pos.calculate_Lagrange_equations_fun(A.clone(), pos.dG_fun, 400.0);
-        assert!(lagrange_fun_result.is_ok());
-        let lagrange_fun = lagrange_fun_result.unwrap();
-*/
+        /*
+                let lagrange_fun_result = pos.calculate_Lagrange_equations_fun(A.clone(), pos.dG_fun, 400.0);
+                assert!(lagrange_fun_result.is_ok());
+                let lagrange_fun = lagrange_fun_result.unwrap();
+        */
         // Test the function with sample values
-     //   let test_lambda = vec![1.0, 2.0]; // Lambda values for N and O elements
-      //  let test_vals = lagrange_fun(400.0, None, None, test_lambda);
-       // assert_eq!(test_vals.len(), 3); // 3 substances
-  
+        //   let test_lambda = vec![1.0, 2.0]; // Lambda values for N and O elements
+        //  let test_vals = lagrange_fun(400.0, None, None, test_lambda);
+        // assert_eq!(test_vals.len(), 3); // 3 substances
+
         // Test calculate_Lagrange_equations_fun2
         let lagrange_fun2_result = pos.calculate_Lagrange_equations_fun2(A, 400.0, 101325.0, 400.0);
         assert!(lagrange_fun2_result.is_ok());
@@ -404,6 +427,5 @@ mod tests {
         // Test the function with sample values
         let test_vals2 = lagrange_fun2(400.0, None, None, vec![0.5, 1.5]);
         assert_eq!(test_vals2.len(), 3); // 3 substances
-      
     }
 }

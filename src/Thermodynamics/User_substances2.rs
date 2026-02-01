@@ -34,7 +34,7 @@ use crate::Thermodynamics::User_substances::{
 use crate::Thermodynamics::DBhandlers::Diffusion::MultiSubstanceDiffusion;
 use crate::Thermodynamics::User_substances_error::{SubsDataError, SubsDataResult};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
-use std::vec;
+
 //use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 use nalgebra::DMatrix;
@@ -485,7 +485,7 @@ impl SubsData {
     fn calculate_single_transport_functions(
         &mut self,
         substance: &str,
-    ) -> SubsDataResult<HashMap<DataType, Option<Box<dyn Fn(f64) -> f64>>>> {
+    ) -> SubsDataResult<HashMap<DataType, Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>> {
         let Cp = self
             .therm_map_of_properties_values
             .get(substance)

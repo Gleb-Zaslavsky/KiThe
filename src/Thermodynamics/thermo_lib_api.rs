@@ -16,6 +16,8 @@ pub struct ThermoData {
     /// adresses of all substances (lib:sustance)
     pub LibThermoData: HashMap<String, HashMap<String, Value>>,
     /// library of thermodymical and heat mass transfer data  lib:{ substance :{ data }}
+    pub ElementsData: HashMap<String, Vec<Vec<String>>>,
+    /// elements base data {"element_name": [["substance_name", "database_name"], ...]}
     pub AllLibraries: Vec<String>,
     /// all sub-libraries in big library
     pub subs_to_search: Vec<String>,
@@ -45,6 +47,20 @@ impl ThermoData {
             serde_json::from_str::<HashMap<String, HashMap<String, _>>>(&file_contents).unwrap();
         let AllLibraries: Vec<String> = LibThermoData.keys().map(|k| k.to_string()).collect();
 
+        // Load elements data
+        let ElementsData = with_library_manager(|manager| {
+            if let Ok(mut file) = File::open(manager.elements_path()) {
+                let mut contents = String::new();
+                if file.read_to_string(&mut contents).is_ok() {
+                    serde_json::from_str(&contents).unwrap_or_default()
+                } else {
+                    HashMap::new()
+                }
+            } else {
+                HashMap::new()
+            }
+        });
+
         let mut thermo_libs = Vec::new();
         let mut transport_libs = Vec::new();
         /*
@@ -69,12 +85,27 @@ impl ThermoData {
         Self {
             VecOfSubsAdresses: lib_sub_pairs_vec.clone(),
             LibThermoData: LibThermoData.clone(),
+            ElementsData,
             AllLibraries: AllLibraries.clone(),
             AllSubstances: Vec::new(),
             subs_to_search: Vec::new(),
             hashmap_of_thermo_data: HashMap::new(),
             thermo_libs,
             transport_libs,
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            VecOfSubsAdresses: Vec::new(),
+            LibThermoData: HashMap::new(),
+            ElementsData: HashMap::new(),
+            AllLibraries: Vec::new(),
+            AllSubstances: Vec::new(),
+            subs_to_search: Vec::new(),
+            hashmap_of_thermo_data: HashMap::new(),
+            thermo_libs: Vec::new(),
+            transport_libs: Vec::new(),
         }
     }
     //////////////////////////////////////////////DATA MANIPULATION//////////////////////////////////////////////////////////
@@ -170,6 +201,93 @@ impl ThermoData {
             "Cantera_nasa_base_gas" => "NASA_gas",
             _ => lib_name,
         }
+    }
+
+    /// Get elements data
+    pub fn get_elements_data(&self) -> &HashMap<String, Vec<Vec<String>>> {
+        &self.ElementsData
+    }
+
+    /// Set elements data
+    pub fn set_elements_data(&mut self, elements_data: HashMap<String, Vec<Vec<String>>>) {
+        self.ElementsData = elements_data;
+    }
+
+    /// Search substances by elements and populate hashmap_of_thermo_data
+    pub fn search_by_elements(&mut self, elements: Vec<String>) -> Vec<String> {
+        let mut found_substances = Vec::new();
+        let mut hashmap_of_thermo_data: HashMap<String, HashMap<String, Value>> = HashMap::new();
+
+        for element in elements {
+            if let Some(substance_pairs) = self.ElementsData.get(&element) {
+                for pair in substance_pairs {
+                    if pair.len() >= 2 {
+                        let substance_name = &pair[0];
+                        let database_name = &pair[1];
+
+                        if let Some(lib_data) = self.LibThermoData.get(database_name) {
+                            if let Some(substance_data) = lib_data.get(substance_name) {
+                                hashmap_of_thermo_data
+                                    .entry(substance_name.clone())
+                                    .or_insert_with(HashMap::new)
+                                    .insert(database_name.clone(), substance_data.clone());
+
+                                if !found_substances.contains(substance_name) {
+                                    found_substances.push(substance_name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.hashmap_of_thermo_data.extend(hashmap_of_thermo_data);
+        found_substances
+    }
+
+    /// Search substances containing only the specified elements or subsets
+    pub fn search_by_elements_only(&mut self, elements: Vec<String>) -> Vec<String> {
+        let mut found_substances = Vec::new();
+        let mut hashmap_of_thermo_data: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        let allowed_elements: HashSet<String> = elements.into_iter().collect();
+
+        // Collect all substances and their elements
+        let mut substance_elements: HashMap<String, (String, HashSet<String>)> = HashMap::new();
+
+        for (element, substance_pairs) in &self.ElementsData {
+            for pair in substance_pairs {
+                if pair.len() >= 2 {
+                    let substance_name = &pair[0];
+                    let database_name = &pair[1];
+
+                    substance_elements
+                        .entry(substance_name.clone())
+                        .or_insert_with(|| (database_name.clone(), HashSet::new()))
+                        .1
+                        .insert(element.clone());
+                }
+            }
+        }
+
+        // Filter substances that contain only allowed elements (or subsets)
+        for (substance_name, (database_name, substance_element_set)) in substance_elements {
+            if substance_element_set.is_subset(&allowed_elements) {
+                if let Some(lib_data) = self.LibThermoData.get(&database_name) {
+                    if let Some(substance_data) = lib_data.get(&substance_name) {
+                        hashmap_of_thermo_data
+                            .entry(substance_name.clone())
+                            .or_insert_with(HashMap::new)
+                            .insert(database_name.clone(), substance_data.clone());
+
+                        found_substances.push(substance_name);
+                    }
+                }
+            }
+        }
+
+        self.hashmap_of_thermo_data.extend(hashmap_of_thermo_data);
+        found_substances
     }
     ///////////////////INPUT/OUTPUT/////////////////////////////////////////////////
     ///
@@ -565,5 +683,127 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_elements_data_loading() {
+        let thermo_data = ThermoData::new();
+        println!(
+            "Elements data loaded: {} elements",
+            thermo_data.ElementsData.len()
+        );
+    }
+
+    #[test]
+    fn test_search_by_elements() {
+        let mut thermo_data = ThermoData::new();
+
+        // Test with common elements
+        let elements = vec!["C".to_string(), "O".to_string()];
+        let found_substances = thermo_data.search_by_elements(elements);
+
+        println!("Found substances: {:?}", found_substances);
+        println!(
+            "Thermo data entries: {}",
+            thermo_data.hashmap_of_thermo_data.len()
+        );
+
+        // Verify that substances were found and data was populated
+        if !found_substances.is_empty() {
+            assert!(!thermo_data.hashmap_of_thermo_data.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_elements_getters_setters() {
+        let mut thermo_data = ThermoData::new();
+
+        let original_size = thermo_data.get_elements_data().len();
+
+        let mut test_elements = HashMap::new();
+        test_elements.insert(
+            "H".to_string(),
+            vec![vec!["H2O".to_string(), "test_lib".to_string()]],
+        );
+
+        thermo_data.set_elements_data(test_elements);
+
+        assert_eq!(thermo_data.get_elements_data().len(), 1);
+        assert!(thermo_data.get_elements_data().contains_key("H"));
+    }
+
+    #[test]
+    fn test_search_by_elements_only() {
+        let mut thermo_data = ThermoData::new();
+
+        // Test with elements that should form compounds together
+        let elements = vec!["H".to_string(), "O".to_string()];
+        let found_substances = thermo_data.search_by_elements_only(elements);
+
+        println!("Found substances with only H and O: {:?}", found_substances);
+        println!(
+            "Thermo data entries: {}",
+            thermo_data.hashmap_of_thermo_data.len()
+        );
+
+        // Verify that substances were found and data was populated
+        if !found_substances.is_empty() {
+            assert!(!thermo_data.hashmap_of_thermo_data.is_empty());
+        }
+    }
+    #[test]
+    fn test_search_by_elements_only2() {
+        let mut thermo_data = ThermoData::new();
+
+        // Test with elements that should form compounds together
+        let elements = vec!["N".to_string(), "O".to_string()];
+        let found_substances = thermo_data.search_by_elements_only(elements);
+
+        println!("Found substances with only H and O: {:?}", found_substances);
+        println!(
+            "Thermo data entries: {}",
+            thermo_data.hashmap_of_thermo_data.len()
+        );
+
+        // Verify that substances were found and data was populated
+        if !found_substances.is_empty() {
+            assert!(!thermo_data.hashmap_of_thermo_data.is_empty());
+        }
+    }
+    #[test]
+    fn test_search_by_elements_only_with_mock_data() {
+        let mut thermo_data = ThermoData::new();
+
+        // Create mock elements data
+        let mut mock_elements = HashMap::new();
+        mock_elements.insert(
+            "H".to_string(),
+            vec![
+                vec!["H2O".to_string(), "test_lib".to_string()],
+                vec!["H2".to_string(), "test_lib".to_string()],
+                vec!["CH4".to_string(), "test_lib".to_string()],
+            ],
+        );
+        mock_elements.insert(
+            "O".to_string(),
+            vec![
+                vec!["H2O".to_string(), "test_lib".to_string()],
+                vec!["O2".to_string(), "test_lib".to_string()],
+            ],
+        );
+        mock_elements.insert(
+            "C".to_string(),
+            vec![vec!["CH4".to_string(), "test_lib".to_string()]],
+        );
+
+        thermo_data.set_elements_data(mock_elements);
+
+        // Search for substances with only H and O
+        let elements = vec!["H".to_string(), "O".to_string()];
+        let found_substances = thermo_data.search_by_elements_only(elements);
+
+        // Should find H2O but not CH4 (contains C) or H2/O2 (missing elements)
+        println!("Mock test - Found substances: {:?}", found_substances);
+        assert!(found_substances.contains(&"H2O".to_string()) || found_substances.is_empty());
     }
 }

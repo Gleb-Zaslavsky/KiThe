@@ -2,41 +2,49 @@ use crate::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
 use crate::ReactorsBVP::task_parser_reactor_BVP::create_template;
 use crate::cli::reactor_help::{REACTOR_ENG_HELPER, REACTOR_RU_HELPER};
 use RustedSciThe::Utils::task_parser::pretty_print_map;
-use std::io::{self, Write};
+use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use std::path::PathBuf;
 
 pub fn reactor_menu() {
+    let theme = ColorfulTheme::default();
     loop {
-        println!("\n=== Reactor BVP Problems ===");
-        println!("\x1b[33m1. Solve from file\x1b[0m");
-        println!("\x1b[33m2. Auto-discover problem files\x1b[0m");
-        println!("\x1b[33m3. Generate template\x1b[0m");
-        println!("\x1b[33m4. Read help (eng)\x1b[0m");
-        println!("\x1b[33m5. Read help (ru)\x1b[0m");
-        println!("\x1b[33m0. Back to main menu\x1b[0m");
-        print!("\x1b[36mEnter your choice: \x1b[0m");
-        io::stdout().flush().unwrap();
+        let items = vec![
+            "Solve from file",
+            "Auto-discover problem files",
+            "Generate template",
+            "Read help (eng)",
+            "Read help (ru)",
+            "Back to main menu",
+        ];
 
-        let choice = get_user_input();
-        match choice.trim() {
-            "1" => solve_from_file(),
-            "2" => auto_solve_problems(),
-            "3" => {
+        let selection = Select::with_theme(&theme)
+            .with_prompt("=== Reactor BVP Problems ===")
+            .items(&items)
+            .default(0)
+            .interact()
+            .unwrap();
+
+        match selection {
+            0 => solve_from_file(),
+            1 => auto_solve_problems(),
+            2 => {
                 create_template();
                 println!("Template generated successfully!");
             }
-            "4" => show_help_english(),
-            "5" => show_help_russian(),
-            "0" => break,
-            _ => println!("Invalid choice. Please try again."),
+            3 => show_help_english(),
+            4 => show_help_russian(),
+            5 => break,
+            _ => {}
         }
     }
 }
 
 fn solve_from_file() {
-    print!("\x1b[36mEnter file path: \x1b[0m");
-    io::stdout().flush().unwrap();
-    let file_path = get_user_input();
+    let theme = ColorfulTheme::default();
+    let file_path: String = Input::with_theme(&theme)
+        .with_prompt("Enter file path")
+        .interact_text()
+        .unwrap();
     let path = PathBuf::from(file_path.trim());
 
     if path.exists() {
@@ -75,15 +83,8 @@ fn auto_solve_problems() {
     }
 }
 
-fn get_user_input() -> String {
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .expect("Failed to read input");
-    input
-}
-
 pub fn solve_from_file_dialog(path: std::path::PathBuf) {
+    let theme = ColorfulTheme::default();
     let mut reactor = SimpleReactorTask::new();
     // Test parsing
     let mut parser = reactor
@@ -94,11 +95,13 @@ pub fn solve_from_file_dialog(path: std::path::PathBuf) {
             println!("Document parsed successfully");
             pretty_print_map(&result);
 
-            print!("\x1b[36mStart calculation? (y/n): \x1b[0m");
-            io::stdout().flush().unwrap();
-            let choice = get_user_input();
+            let start = Confirm::with_theme(&theme)
+                .with_prompt("Start calculation?")
+                .default(true)
+                .interact()
+                .unwrap();
 
-            if choice.trim().to_lowercase() == "y" || choice.trim().to_lowercase() == "yes" {
+            if start {
                 reactor.solve_from_map(parser);
             } else {
                 println!("Calculation cancelled. Returning to menu.");
@@ -113,14 +116,12 @@ pub fn solve_from_file_dialog(path: std::path::PathBuf) {
 
 fn show_help_english() {
     println!("\n=== Reactor BVP Help (English) ===");
-    println!("\nPress Enter to return to menu...");
     println!("{}", REACTOR_ENG_HELPER);
-    let _ = get_user_input();
+    let _ = std::io::stdin().read_line(&mut String::new());
 }
 
 fn show_help_russian() {
     println!("\n=== Справка по реакторам (Русский) ===");
-    println!("\nНажмите Enter для возврата в меню...");
     println!("{}", REACTOR_RU_HELPER);
-    let _ = get_user_input();
+    let _ = std::io::stdin().read_line(&mut String::new());
 }

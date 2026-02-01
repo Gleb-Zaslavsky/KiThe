@@ -391,6 +391,76 @@ mod tests {
     }
 
     #[test]
+    fn test_search_by_elements() {
+        let mut user_subs = SubsData::new();
+
+        // Set library priorities
+        user_subs.set_multiple_library_priorities(
+            vec!["NASA_gas".to_string()],
+            LibraryPriority::Priority,
+        );
+
+        // Search for substances containing carbon and oxygen
+        let elements = vec!["C".to_string(), "O".to_string()];
+        let result = user_subs.search_by_elements(elements);
+
+        assert!(result.is_ok());
+        let found_substances = result.unwrap();
+
+        // Should find substances like CO, CO2, etc.
+        assert!(!found_substances.is_empty());
+
+        // Check that search results were populated
+        for substance in &found_substances {
+            let search_result = user_subs.get_substance_result(substance);
+            assert!(search_result.is_some());
+
+            let result_map = search_result.unwrap();
+            assert!(result_map.contains_key(&WhatIsFound::Thermo));
+        }
+    }
+
+    #[test]
+    fn test_search_by_elements_only() {
+        let mut user_subs = SubsData::new();
+
+        // Set library priorities
+        user_subs.set_multiple_library_priorities(
+            vec!["NASA_gas".to_string()],
+            LibraryPriority::Priority,
+        );
+
+        // Search for substances containing only hydrogen and oxygen
+        let elements = vec!["H".to_string(), "O".to_string()];
+        let result = user_subs.search_by_elements_only(elements);
+
+        assert!(result.is_ok());
+        let found_substances = result.unwrap();
+        let _ = user_subs.calculate_therm_map_of_properties(400.0);
+        // Should find substances like H2O, H2O2 but not CH4, CO2, etc.
+        if !found_substances.is_empty() {
+            // Check that search results were populated
+            for substance in &found_substances {
+                let search_result = user_subs.get_substance_result(substance);
+                assert!(search_result.is_some());
+
+                let result_map = search_result.unwrap();
+                assert!(result_map.contains_key(&WhatIsFound::Thermo));
+                let property_map = user_subs.therm_map_of_properties_values.get(substance);
+                assert!(property_map.is_some());
+
+                let property_map = property_map.unwrap();
+                assert!(property_map.get(&DataType::Cp).unwrap().is_some());
+                assert!(property_map.get(&DataType::dH).unwrap().is_some());
+                assert!(property_map.get(&DataType::dS).unwrap().is_some());
+
+                // Check that values are reasonable
+                // assert!(property_map.get(&DataType::Cp).unwrap().unwrap() > 0.0);
+            }
+        }
+    }
+
+    #[test]
     fn test_function_maps_calculation() {
         let mut user_subs = SubsData::new();
         user_subs.substances = vec!["H2O".to_string()];

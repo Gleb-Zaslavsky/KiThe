@@ -54,8 +54,8 @@ use crate::ReactorsBVP::reactor_BVP_utils::InitialConfig;
 use crate::ReactorsBVP::reactor_BVP_utils::{BoundsConfig, ScalingConfig, ToleranceConfig};
 use crate::Utils::show_this_pic::show_image;
 use RustedSciThe::Utils::task_parser::{DocumentMap, DocumentParser};
-use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{NRBVP, SolverParams};
-use nalgebra::{DMatrix, DVector};
+use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP;
+use nalgebra::DMatrix;
 use std::collections::HashMap;
 impl SimpleReactorTask {
     /// Parses reactor parameters from a DocumentMap and populates the SimpleReactorTask structure.

@@ -18,12 +18,12 @@
 //!
 //! ```rust
 //! use std::collections::HashMap;
-//! 
+//!
 //! // Multi-phase system with gas and liquid phases
 //! let mut system = PhaseOrSolution::new();
 //! // system.subs_data.insert(Some("gas".to_string()), gas_data);
 //! // system.subs_data.insert(Some("liquid".to_string()), liquid_data);
-//! 
+//!
 //! // Calculate Gibbs energy for all phases
 //! // system.calculate_Gibbs_sym(298.15)?;
 //! ```
@@ -43,7 +43,7 @@ pub const R: f64 = 8.314;
 #[allow(non_upper_case_globals)]
 pub const R_sym: Expr = Expr::Const(R);
 /// Unified interface for single-phase and multi-phase thermodynamic systems.
-/// 
+///
 /// Uses `None` key for single-phase systems and `Some(phase_name)` for multi-phase.
 /// Provides consistent API regardless of system complexity.
 #[derive(Debug, Clone)]
@@ -153,7 +153,7 @@ impl CustomSubstance {
             }
         }
     }
-    
+
     /// Gets mutable reference to Gibbs symbolic expressions.
     /// Returns normalized format with None key for single-phase systems.
     pub fn get_dG_sym_mut(&mut self) -> HashMap<Option<String>, HashMap<String, Expr>> {
@@ -179,9 +179,7 @@ impl CustomSubstance {
             CustomSubstance::PhaseOrSolution(phase_or_solution) => phase_or_solution.dG_sym.clone(),
         }
     }
-    
 
- 
     /// Gets Gibbs free energy values.
     /// Returns normalized format with None key for single-phase systems.
     pub fn get_dG(&self) -> HashMap<Option<String>, HashMap<String, f64>> {
@@ -197,10 +195,10 @@ impl CustomSubstance {
 }
 
 /// Multi-phase thermodynamic system managing multiple phases or solutions.
-/// 
+///
 /// Each phase is identified by an `Option<String>` key where `Some(name)` represents
 /// named phases like "gas", "liquid", "solid", etc.
-/// 
+///
 /// # Example
 /// ```rust
 /// let mut system = PhaseOrSolution::new();
@@ -262,7 +260,10 @@ impl PhaseOrSolution {
 
     /// Applies a fallible function to all phases and collects results.
     /// Stops on first error and returns it.
-    fn apply_to_all_phases<R>(&mut self, f: impl Fn(&mut SubsData) -> SubsDataResult<R>) -> SubsDataResult<HashMap<Option<String>, R>> {
+    fn apply_to_all_phases<R>(
+        &mut self,
+        f: impl Fn(&mut SubsData) -> SubsDataResult<R>,
+    ) -> SubsDataResult<HashMap<Option<String>, R>> {
         let mut result = HashMap::with_capacity(self.subs_data.len());
         for (phase_name, subsdata) in self.subs_data.iter_mut() {
             let phase_result = f(subsdata)?;
@@ -273,10 +274,75 @@ impl PhaseOrSolution {
 
     /// Applies an infallible function to all phases and collects results.
     /// More efficient than the fallible version for operations that cannot fail.
-    fn apply_to_all_phases_infallible<R>(&mut self, f: impl Fn(&mut SubsData) -> R) -> HashMap<Option<String>, R> {
-        self.subs_data.iter_mut()
+    fn apply_to_all_phases_infallible<R>(
+        &mut self,
+        f: impl Fn(&mut SubsData) -> R,
+    ) -> HashMap<Option<String>, R> {
+        self.subs_data
+            .iter_mut()
             .map(|(phase_name, subsdata)| (phase_name.clone(), f(subsdata)))
             .collect()
+    }
+
+    fn calculate_Gibbs_fun_unmut(
+        &mut self,
+        T: f64,
+        P: f64,
+    ) -> HashMap<
+        Option<String>,
+        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
+    > {
+        self.apply_to_all_phases_infallible(|subsdata| subsdata.calculate_Gibbs_fun_one_phase(P, T))
+    }
+
+    pub fn calculate_S_fun_unmut(
+        &mut self,
+        T: f64,
+        P: f64,
+    ) -> HashMap<
+        Option<String>,
+        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
+    > {
+        self.apply_to_all_phases_infallible(|subsdata| subsdata.calculate_S_fun_for_one_phase(P, T))
+    }
+    pub fn calculate_Lagrange_equations_fun(
+        &mut self,
+        A: DMatrix<f64>,
+        G_fun: HashMap<
+            Option<String>,
+            HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
+        >,
+
+        Tm: f64,
+    ) -> SubsDataResult<
+        Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
+    > {
+        let substances = self.clone().get_all_substances();
+        let f = move |T: f64, n: Option<Vec<f64>>, Np: Option<f64>, Lambda: Vec<f64>| -> Vec<f64> {
+            let A = A.transpose(); // now rows are elements and columns are substances
+
+            // create a vector of Lagrange multipliers for each element
+            let n_substances = A.ncols();
+            let Lambda: DVector<f64> = DVector::from_vec(Lambda);
+
+            let mut vec_of_eqs: Vec<f64> = Vec::new();
+            for (_phasse_or_solution, G_phase) in G_fun.iter() {
+                for i in 0..n_substances {
+                    let substance_i = &substances[i];
+                    if let Some(G_i) = G_phase.get(substance_i) {
+                        let col_i: Vec<f64> = A.column(i).iter().map(|&v| v).collect();
+                        // get vector of numbers of elements corresponding to the i-th substance
+                        let col_of_subs_i: DVector<f64> = DVector::from(col_i);
+                        // sum over all elements of the i-th substance multiplied by the corresponding Lagrange multiplier
+                        let sum_by_elemnts: f64 = col_of_subs_i.dot(&Lambda);
+                        let eq_i = sum_by_elemnts + G_i(T, n.clone(), Np) / (R * Tm);
+                        vec_of_eqs.push(eq_i);
+                    } // if let Some(G_i)
+                } // for i
+            } // for 
+            vec_of_eqs
+        };
+        Ok(Box::new(f))
     }
 }
 
@@ -360,17 +426,9 @@ pub trait ThermodynamicsCalculatorTrait {
     ///  calculating Gibbs free energy of a given mixure of substances (returns a function that calculates Gibbs free energy at given T, P, concentration)
     fn calculate_Gibbs_fun(&mut self, T: f64, P: f64);
 
-    fn calculate_Gibbs_fun_unmut(
-        &mut self,
-        T: f64,
-        P: f64,
-    ) -> HashMap<
-        Option<String>,
-        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
-    >;
-     fn set_P_to_sym_in_G_sym(&mut self, P:f64) ;
+    fn set_P_to_sym_in_G_sym(&mut self, P: f64);
 
-     fn set_T_to_sym_in_G_sym(&mut self, T:f64) ;
+    fn set_T_to_sym_in_G_sym(&mut self, T: f64);
     //////////////////////////////////////////S - entropy///////////////////////////////////////
     ///  calculating entropy of a given mixure of substances (numerical result at given T, P, concentration)
     fn calculate_S(
@@ -383,14 +441,7 @@ pub trait ThermodynamicsCalculatorTrait {
     fn calculate_S_sym(&mut self, T: f64) -> SubsDataResult<()>;
     ///  calculating entropy of a given mixure of substances (returns a function that calculates entropy at given T, P, concentration)
     fn calculate_S_fun(&mut self, T: f64, P: f64);
-    fn calculate_S_fun_unmut(
-        &mut self,
-        T: f64,
-        P: f64,
-    ) -> HashMap<
-        Option<String>,
-        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
-    >;
+
     ///  set the system pressure, pressure unit, molar masses and mass unit
     fn configure_system_properties(
         &mut self,
@@ -426,21 +477,11 @@ pub trait ThermodynamicsCalculatorTrait {
 
         Tm: f64,
     ) -> SubsDataResult<Vec<Expr>>;
-    fn calculate_Lagrange_equations_fun(
-        &mut self,
-        A: DMatrix<f64>,
-        dG_fun: HashMap<
-            Option<String>,
-            HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
-        >,
-        Tm: f64,
-    ) -> SubsDataResult<
-        Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
-    >;
+
     fn calculate_Lagrange_equations_fun2(
         &mut self,
         A: DMatrix<f64>,
-              T: f64,
+        T: f64,
         P: f64,
         Tm: f64,
     ) -> SubsDataResult<
@@ -500,12 +541,14 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         self.apply_to_all_phases(|subsdata| subsdata.extract_all_thermal_coeffs(temperature))?;
         Ok(())
     }
-    
+
     fn calculate_therm_map_of_properties(&mut self, temperature: f64) -> SubsDataResult<()> {
-        self.apply_to_all_phases(|subsdata| subsdata.calculate_therm_map_of_properties(temperature))?;
+        self.apply_to_all_phases(|subsdata| {
+            subsdata.calculate_therm_map_of_properties(temperature)
+        })?;
         Ok(())
     }
-    
+
     fn calculate_therm_map_of_sym(&mut self) -> SubsDataResult<()> {
         self.apply_to_all_phases(|subsdata| subsdata.calculate_therm_map_of_sym())?;
         Ok(())
@@ -566,8 +609,8 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         Ok(())
     }
 
-     fn set_P_to_sym_in_G_sym(&mut self, P:f64) {
-         let dG_sym = &mut self.dG_sym;
+    fn set_P_to_sym_in_G_sym(&mut self, P: f64) {
+        let dG_sym = &mut self.dG_sym;
         for (_phase_or_solution_name, sym_fun) in dG_sym.iter_mut() {
             for (_, sym_fun) in sym_fun.iter_mut() {
                 *sym_fun = sym_fun.set_variable("P", P).simplify()
@@ -575,8 +618,8 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         }
     }
 
-     fn set_T_to_sym_in_G_sym(&mut self, T:f64) {
-              let dG_sym = &mut self.dG_sym;
+    fn set_T_to_sym_in_G_sym(&mut self, T: f64) {
+        let dG_sym = &mut self.dG_sym;
         for (_phase_or_solution_name, sym_fun) in dG_sym.iter_mut() {
             for (_, sym_fun) in sym_fun.iter_mut() {
                 *sym_fun = sym_fun.set_variable("T", T).simplify()
@@ -590,18 +633,6 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         });
     }
 
-    fn calculate_Gibbs_fun_unmut(
-        &mut self,
-        T: f64,
-        P: f64,
-    ) -> HashMap<
-        Option<String>,
-        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
-    > {
-        self.apply_to_all_phases_infallible(|subsdata| {
-            subsdata.calculate_Gibbs_fun_one_phase(P, T)
-        })
-    }
     fn calculate_S(
         &mut self,
         T: f64,
@@ -651,19 +682,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
             subsdata.calculate_S_fun_for_one_phase(P, T)
         });
     }
-    
-    fn calculate_S_fun_unmut(
-        &mut self,
-        T: f64,
-        P: f64,
-    ) -> HashMap<
-        Option<String>,
-        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
-    > {
-        self.apply_to_all_phases_infallible(|subsdata| {
-            subsdata.calculate_S_fun_for_one_phase(P, T)
-        })
-    }
+
     fn configure_system_properties(
         &mut self,
         pressure: f64,
@@ -678,7 +697,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         })?;
         Ok(())
     }
-    
+
     fn if_not_found_go_NIST(&mut self) -> SubsDataResult<()> {
         self.apply_to_all_phases(|subs_data| subs_data.if_not_found_go_NIST())?;
         Ok(())
@@ -853,47 +872,7 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         Ok(vec_of_eqs)
     }
 
-    fn calculate_Lagrange_equations_fun(
-        &mut self,
-        A: DMatrix<f64>,
-        G_fun: HashMap<
-            Option<String>,
-            HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
-        >,
-
-        Tm: f64,
-    ) -> SubsDataResult<
-        Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
-    > {
-        let substances = self.clone().get_all_substances();
-        let f = move |T: f64, n: Option<Vec<f64>>, Np: Option<f64>, Lambda: Vec<f64>| -> Vec<f64> {
-            let A = A.transpose(); // now rows are elements and columns are substances
-
-            // create a vector of Lagrange multipliers for each element
-            let n_substances = A.ncols();
-            let Lambda: DVector<f64> = DVector::from_vec(Lambda);
-
-            let mut vec_of_eqs: Vec<f64> = Vec::new();
-            for (_phasse_or_solution, G_phase) in G_fun.iter() {
-                for i in 0..n_substances {
-                    let substance_i = &substances[i];
-                    if let Some(G_i) = G_phase.get(substance_i) {
-                        let col_i: Vec<f64> = A.column(i).iter().map(|&v| v).collect();
-                        // get vector of numbers of elements corresponding to the i-th substance
-                        let col_of_subs_i: DVector<f64> = DVector::from(col_i);
-                        // sum over all elements of the i-th substance multiplied by the corresponding Lagrange multiplier
-                        let sum_by_elemnts: f64 = col_of_subs_i.dot(&Lambda);
-                        let eq_i = sum_by_elemnts + G_i(T, n.clone(), Np) / (R * Tm);
-                        vec_of_eqs.push(eq_i);
-                    } // if let Some(G_i)
-                } // for i
-            } // for 
-            vec_of_eqs
-        };
-        Ok(Box::new(f))
-    }
-
-        fn calculate_Lagrange_equations_fun2(
+    fn calculate_Lagrange_equations_fun2(
         &mut self,
         A: DMatrix<f64>,
         T: f64,
@@ -901,10 +880,11 @@ impl ThermodynamicsCalculatorTrait for PhaseOrSolution {
         Tm: f64,
     ) -> SubsDataResult<
         Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
-    >{
-
-            let dG_fun = self.calculate_Gibbs_fun_unmut(T, P);
-             let Lagrange_equations: Box< dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static> = self
+    > {
+        let dG_fun = self.calculate_Gibbs_fun_unmut(T, P);
+        let Lagrange_equations: Box<
+            dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static,
+        > = self
             .calculate_Lagrange_equations_fun(A, dG_fun, Tm)
             .unwrap();
         Ok(Lagrange_equations)

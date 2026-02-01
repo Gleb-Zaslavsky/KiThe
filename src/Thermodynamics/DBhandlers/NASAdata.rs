@@ -252,13 +252,13 @@ pub struct NASAdata {
     pub ds: f64,
     /// heat capacity function
     #[allow(clippy::type_complexity)]
-    pub C_fun: Box<dyn Fn(f64) -> f64>,
+    pub C_fun: Box<dyn Fn(f64) -> f64 + Send + Sync>,
     /// enthalpy function
     #[allow(clippy::type_complexity)]
-    pub dh_fun: Box<dyn Fn(f64) -> f64 + 'static>,
+    pub dh_fun: Box<dyn Fn(f64) -> f64 + Send + Sync>,
     /// entropy function
     #[allow(clippy::type_complexity)]
-    pub ds_fun: Box<dyn Fn(f64) -> f64 + 'static>,
+    pub ds_fun: Box<dyn Fn(f64) -> f64 + Send + Sync>,
     /// symbolic heat capacity
     pub Cp_sym: Expr,
     /// symbolic enthalpy
@@ -956,15 +956,15 @@ impl ThermoCalculator for NASAdata {
         Ok(self.ds)
     }
 
-    fn get_C_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, ThermoError> {
+    fn get_C_fun(&self) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, ThermoError> {
         Ok(self.clone().C_fun)
     }
 
-    fn get_dh_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, ThermoError> {
+    fn get_dh_fun(&self) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, ThermoError> {
         Ok(self.clone().dh_fun)
     }
 
-    fn get_ds_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, ThermoError> {
+    fn get_ds_fun(&self) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, ThermoError> {
         Ok(self.clone().ds_fun)
     }
 

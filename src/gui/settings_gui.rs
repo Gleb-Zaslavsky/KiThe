@@ -80,6 +80,14 @@ impl SettingsGui {
             if ui.button("Reset to Defaults").clicked() {
                 self.reset_to_defaults();
             }
+
+            if ui.button("Recreate All Keys").clicked() {
+                self.recreate_all_keys();
+            }
+
+            if ui.button("Create Elements Base").clicked() {
+                self.create_elements_base();
+            }
         });
 
         // Status message
@@ -129,6 +137,30 @@ impl SettingsGui {
             }
             Err(e) => {
                 self.status_message = format!("✗ Failed to reset: {}", e);
+            }
+        }
+    }
+
+    fn recreate_all_keys(&mut self) {
+        use crate::library_manager::with_library_manager;
+        match with_library_manager(|manager| manager.recreate_all_keys_substance()) {
+            Ok(_) => {
+                self.status_message = "✓ Recreated All Keys Substance successfully".to_string();
+            }
+            Err(e) => {
+                self.status_message = format!("✗ Failed to recreate All Keys: {}", e);
+            }
+        }
+    }
+
+    fn create_elements_base(&mut self) {
+        use crate::library_manager::with_library_manager;
+        match with_library_manager(|manager| manager.create_elements_base()) {
+            Ok(_) => {
+                self.status_message = "✓ Created Elements Base successfully".to_string();
+            }
+            Err(e) => {
+                self.status_message = format!("✗ Failed to create Elements Base: {}", e);
             }
         }
     }

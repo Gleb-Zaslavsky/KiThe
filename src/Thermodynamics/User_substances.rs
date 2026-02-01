@@ -274,13 +274,15 @@ pub struct SubsData {
     /// Calculated thermodynamic property values at specific conditions
     pub therm_map_of_properties_values: HashMap<String, HashMap<DataType, Option<f64>>>,
     /// Function closures for temperature-dependent thermodynamic calculations
-    pub therm_map_of_fun: HashMap<String, HashMap<DataType, Option<Box<dyn Fn(f64) -> f64>>>>,
+    pub therm_map_of_fun:
+        HashMap<String, HashMap<DataType, Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>>,
     /// Symbolic expressions for analytical thermodynamic calculations
     pub therm_map_of_sym: HashMap<String, HashMap<DataType, Option<Box<Expr>>>>,
     /// Calculated transport property values at specific conditions
     pub transport_map_of_properties_values: HashMap<String, HashMap<DataType, Option<f64>>>,
     /// Function closures for temperature-dependent transport calculations
-    pub transport_map_of_fun: HashMap<String, HashMap<DataType, Option<Box<dyn Fn(f64) -> f64>>>>,
+    pub transport_map_of_fun:
+        HashMap<String, HashMap<DataType, Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>>,
     /// Symbolic expressions for analytical transport calculations
     pub transport_map_of_sym: HashMap<String, HashMap<DataType, Option<Box<Expr>>>>,
     /// Matrix of elemental composition for all substances
@@ -383,6 +385,34 @@ impl SubsData {
             ro_map_sym: None,
             map_of_phases: HashMap::new(),
             thermo_data: ThermoData::new(),
+            therm_map_of_properties_values: HashMap::new(),
+            therm_map_of_fun: HashMap::new(),
+            therm_map_of_sym: HashMap::new(),
+            transport_map_of_properties_values: HashMap::new(),
+            transport_map_of_fun: HashMap::new(),
+            transport_map_of_sym: HashMap::new(),
+            elem_composition_matrix: None,
+            hasmap_of_molar_mass: HashMap::new(),
+            diffusion_data: None,
+            unique_elements: Vec::new(),
+            logger: SimpleExceptionLogger::new(),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            P: None,
+            P_unit: None,
+            T: None,
+            Molar_mass_unit: None,
+            substances: Vec::new(),
+            library_priorities: HashMap::new(),
+            explicit_search_insructions: HashMap::new(),
+            search_results: HashMap::new(),
+            ro_map: None,
+            ro_map_sym: None,
+            map_of_phases: HashMap::new(),
+            thermo_data: ThermoData::empty(),
             therm_map_of_properties_values: HashMap::new(),
             therm_map_of_fun: HashMap::new(),
             therm_map_of_sym: HashMap::new(),
@@ -910,12 +940,53 @@ impl SubsData {
             .collect()
     }
 
-    /// Returns substances found only in secondary (permitted) libraries
-    ///
-    /// Lists substances that were found in libraries marked with
-    /// `LibraryPriority::Permitted`, indicating fallback data sources.
-    ///
-    /// # Returns
+    /// Search substances by elements and populate search results
+    pub fn search_by_elements(&mut self, elements: Vec<String>) -> SubsDataResult<Vec<String>> {
+        let found_substances = self.thermo_data.search_by_elements(elements);
+        self.substances = found_substances.clone();
+        self.populate_element_search_results(found_substances)
+    }
+
+    /// Search substances containing only specified elements and populate search results
+    pub fn search_by_elements_only(
+        &mut self,
+        elements: Vec<String>,
+    ) -> SubsDataResult<Vec<String>> {
+        let found_substances = self.thermo_data.search_by_elements_only(elements);
+        self.substances = found_substances.clone();
+        self.populate_element_search_results(found_substances)
+    }
+
+    /// Common function to populate search results from element-based searches
+    fn populate_element_search_results(
+        &mut self,
+        found_substances: Vec<String>,
+    ) -> SubsDataResult<Vec<String>> {
+        for substance in &found_substances {
+            if let Some(thermo_data) = self.thermo_data.hashmap_of_thermo_data.get(substance) {
+                for (library, data) in thermo_data {
+                    let mut calculator = self.create_calculator(library);
+
+                    if let Some(CalculatorType::Thermo(thermo)) = calculator.as_mut() {
+                        thermo.from_serde(data.clone())?;
+                        self.search_results
+                            .entry(substance.clone())
+                            .or_insert_with(HashMap::new)
+                            .insert(
+                                WhatIsFound::Thermo,
+                                Some(SearchResult {
+                                    library: library.clone(),
+                                    priority_type: LibraryPriority::Priority,
+                                    data: data.clone(),
+                                    calculator,
+                                }),
+                            );
+                    }
+                }
+            }
+        }
+        Ok(found_substances)
+    }
     ///
     /// Vector of substance names found in permitted libraries
     ///
@@ -967,7 +1038,7 @@ impl SubsData {
         &self,
         substance: &str,
         data_type: DataType,
-    ) -> Option<&Box<dyn Fn(f64) -> f64>> {
+    ) -> Option<&Box<dyn Fn(f64) -> f64 + Send + Sync>> {
         self.therm_map_of_fun
             .get(substance)
             .and_then(|map| map.get(&data_type))
@@ -1676,7 +1747,7 @@ impl SubsData {
     fn calculate_single_thermo_functions(
         &mut self,
         substance: &str,
-    ) -> SubsDataResult<HashMap<DataType, Option<Box<dyn Fn(f64) -> f64>>>> {
+    ) -> SubsDataResult<HashMap<DataType, Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>> {
         self.with_thermo_calculator(substance, |thermo| {
             thermo.create_closures_Cp_dH_dS()?;
             let mut function_map = HashMap::new();

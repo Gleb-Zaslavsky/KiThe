@@ -340,8 +340,8 @@ pub struct TransportData {
     pub Lambda: f64,
     pub V: f64,
 
-    pub Lambda_fun: Box<dyn Fn(f64) -> f64 + 'static>,
-    pub V_fun: Box<dyn Fn(f64) -> f64>,
+    pub Lambda_fun: Box<dyn Fn(f64) -> f64 + Send + Sync>,
+    pub V_fun: Box<dyn Fn(f64) -> f64 + Send + Sync>,
 
     pub Lambda_sym: Option<Expr>,
     pub V_sym: Option<Expr>,
@@ -540,7 +540,7 @@ impl TransportData {
         if self.P <= 0.0 {
             return Err(TransportError::InvalidPressure(self.P));
         }
-        let ro_fn: Box<dyn Fn(f64) -> f64> = if let Some(ro) = ro {
+        let ro_fn: Box<dyn Fn(f64) -> f64 + Send + Sync> = if let Some(ro) = ro {
             Box::new(move |_| ro * um)
         } else {
             Box::new(move |T| um * P * M / (R * T))
@@ -746,7 +746,7 @@ impl super::transport_api::TransportCalculator for TransportData {
         &mut self,
         C: Option<f64>,
         ro: Option<f64>,
-    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+    ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, super::transport_api::TransportError> {
         validate_molar_mass(self.M)?;
         validate_pressure(self.P)?;
         let C = C.unwrap();
@@ -763,7 +763,7 @@ impl super::transport_api::TransportCalculator for TransportData {
 
     fn create_viscosity_closure(
         &mut self,
-    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+    ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, super::transport_api::TransportError> {
         validate_molar_mass(self.M)?;
 
         let p = self.input.clone();
@@ -876,12 +876,12 @@ impl super::transport_api::TransportCalculator for TransportData {
     }
     fn get_lambda_fun(
         &self,
-    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+    ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, super::transport_api::TransportError> {
         Ok(self.clone().Lambda_fun)
     }
     fn get_viscosity_fun(
         &self,
-    ) -> Result<Box<dyn Fn(f64) -> f64>, super::transport_api::TransportError> {
+    ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, super::transport_api::TransportError> {
         Ok(self.clone().V_fun)
     }
     fn fitting_coeffs_for_T_interval(

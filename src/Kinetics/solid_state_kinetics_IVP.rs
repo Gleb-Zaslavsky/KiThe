@@ -101,7 +101,7 @@
 use RustedSciThe::Utils::plots::plots_terminal;
 use RustedSciThe::numerical::ODE_api2::{SolverParam, SolverType, UniversalODESolver};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
-use nalgebra::DVector;
+use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -405,7 +405,31 @@ impl KineticModelNames {
             KineticModelNames::SBtp => "c*(1-a)^m*a^n".to_string(),
         }
     }
-
+    pub fn required_params(&self) -> Vec<String> {
+        match self {
+            KineticModelNames::A2
+            | KineticModelNames::A3
+            | KineticModelNames::A4
+            | KineticModelNames::R2
+            | KineticModelNames::R3
+            | KineticModelNames::D1
+            | KineticModelNames::D2
+            | KineticModelNames::D3
+            | KineticModelNames::D4
+            | KineticModelNames::P2_3
+            | KineticModelNames::P2
+            | KineticModelNames::P3
+            | KineticModelNames::F1
+            | KineticModelNames::F2
+            | KineticModelNames::F3 => vec![],
+            KineticModelNames::SB => vec!["m".to_string(), "n".to_string(), "p".to_string()],
+            KineticModelNames::JMA => vec!["m".to_string()],
+            KineticModelNames::Ac => vec!["m".to_string()],
+            KineticModelNames::Dec => vec!["m".to_string()],
+            KineticModelNames::PTe => vec!["m".to_string(), "n".to_string()],
+            KineticModelNames::SBtp => vec!["m".to_string(), "n".to_string(), "c".to_string()],
+        }
+    }
     pub fn pretty_print() {
         #[derive(Tabled)]
         struct ModelRow {
@@ -466,6 +490,31 @@ pub enum KineticModel {
 }
 
 impl KineticModel {
+    pub fn required_params(&self) -> Vec<String> {
+        match self {
+            KineticModel::A2
+            | KineticModel::A3
+            | KineticModel::A4
+            | KineticModel::R2
+            | KineticModel::R3
+            | KineticModel::D1
+            | KineticModel::D2
+            | KineticModel::D3
+            | KineticModel::D4
+            | KineticModel::P2_3
+            | KineticModel::P2
+            | KineticModel::P3
+            | KineticModel::F1
+            | KineticModel::F2
+            | KineticModel::F3 => vec![],
+            KineticModel::SB(_, _, _) => vec!["m".to_string(), "n".to_string(), "p".to_string()],
+            KineticModel::JMA(_) => vec!["m".to_string()],
+            KineticModel::Ac(_) => vec!["m".to_string()],
+            KineticModel::Dec(_) => vec!["m".to_string()],
+            KineticModel::PTe(_, _) => vec!["m".to_string(), "n".to_string()],
+            KineticModel::SBtp(_, _, _) => vec!["m".to_string(), "n".to_string(), "c".to_string()],
+        }
+    }
     pub fn from_name_and_params(name: KineticModelNames, params: Vec<f64>) -> Result<Self, String> {
         match name {
             KineticModelNames::A2 => Ok(KineticModel::A2),
@@ -845,6 +894,15 @@ impl KineticModelIVP {
             t.unwrap(),
             a.unwrap(),
         )
+    }
+
+    pub fn get_result(&self) -> Result<(DVector<f64>, DMatrix<f64>), String> {
+        let (t, a) = self.solver.as_ref().unwrap().get_result();
+        if let (Some(t), Some(a)) = (t, a) {
+            Ok((t, a))
+        } else {
+            Err("no results found!".to_string())
+        }
     }
     /// Saves the solution results to file.
     ///

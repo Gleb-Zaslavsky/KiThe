@@ -262,7 +262,7 @@ mod tests {
         assert!(result.is_ok());
 
         let mut custom_substance = result.unwrap();
-        let mut nv= HashMap::new();
+        let mut nv = HashMap::new();
         nv.insert(None, (Some(1.0), Some(vec![0.5, 0.5])));
 
         let mut n = HashMap::new();

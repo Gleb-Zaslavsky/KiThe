@@ -151,6 +151,7 @@ mod User_PhaseOrSolution_tests;
 /// ```
 pub mod User_substances;
 pub mod User_substances2;
+pub mod User_substances3;
 /// Error handling for User_substances modules
 pub mod User_substances_error;
 /// Error handling tests

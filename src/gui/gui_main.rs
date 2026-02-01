@@ -1,6 +1,7 @@
 use crate::gui::all_libs_gui;
 use crate::gui::combustion;
 use crate::gui::gui_main::egui::IconData;
+use crate::gui::gui_solid_ivp;
 use crate::gui::kinetics_gui;
 use crate::gui::settings_gui;
 use crate::gui::thermochemistry_gui;
@@ -78,6 +79,8 @@ struct MainApp {
     settings_app: Option<settings_gui::SettingsGui>,
     all_libs_open: bool,
     all_libs_app: Option<all_libs_gui::AllLibsGui>,
+    solid_ivp_open: bool,
+    solid_ivp_app: Option<gui_solid_ivp::SolidIVPApp>,
     logo_texture: Option<egui::TextureHandle>,
 }
 impl MainApp {
@@ -101,6 +104,8 @@ impl MainApp {
             settings_app: None,
             all_libs_open: false,
             all_libs_app: None,
+            solid_ivp_open: false,
+            solid_ivp_app: None,
             logo_texture,
         }
     }
@@ -207,6 +212,18 @@ impl eframe::App for MainApp {
                                 }
                             }
                         });
+
+                        // Fourth row of buttons
+                        ui.add_space(20.0);
+                            ui.horizontal(|ui| {
+                            if ui.add_sized([200.0, 80.0], egui::Button::new("Solid-state kinetics")).clicked() {
+                                self.solid_ivp_open = true;
+                                if self.solid_ivp_app.is_none() {
+                                    self.solid_ivp_app = Some(gui_solid_ivp::SolidIVPApp::new());
+                                }
+                            }
+
+                        });
                     });
                 });
                 ui.add_space(50.0);
@@ -274,6 +291,12 @@ impl eframe::App for MainApp {
         if self.all_libs_open {
             if let Some(all_libs_app) = &mut self.all_libs_app {
                 all_libs_app.show(ctx, &mut self.all_libs_open);
+            }
+        }
+
+        if self.solid_ivp_open {
+            if let Some(solid_ivp_app) = &mut self.solid_ivp_app {
+                solid_ivp_app.show(ctx, &mut self.solid_ivp_open)
             }
         }
     }

@@ -16,6 +16,7 @@ pub mod gui;
 use cli::cli_main::run_interactive_menu;
 use gui::gui_main::gui_main;
 pub mod library_manager;
+pub mod library_manager2;
 pub mod settings;
 pub mod simple_combustion_models;
 pub fn main() {
@@ -30,9 +31,6 @@ TODO list
 
  - All substances comparing gui instrument
  - fix chemical equilibrium
-
-
- - integral mean properties
 
 
 

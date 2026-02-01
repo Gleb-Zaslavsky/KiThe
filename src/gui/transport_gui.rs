@@ -21,6 +21,7 @@ use eframe::egui;
 use crate::Thermodynamics::DBhandlers::transport_api::{
     LambdaUnit, TransportCalculator, ViscosityUnit, create_transport_calculator_by_name,
 };
+use crate::Thermodynamics::User_substances::SubsData;
 use crate::Thermodynamics::thermo_lib_api::ThermoData;
 /*
     Example usage within the GUI context:
@@ -266,30 +267,30 @@ impl TransportApp {
         substance_data: &serde_json::Value,
         temperature: f64,
     ) -> Result<(f64, f64), String> {
-        let mut transport_calc = create_transport_calculator_by_name(&self.selected_library);
-
-        transport_calc
-            .from_serde(substance_data.clone())
-            .map_err(|e| format!("Failed to load data: {}", e))?;
-        transport_calc
-            .set_lambda_unit(Some(self.lambda_unit))
-            .map_err(|e| format!("Failed to set lambda unit: {}", e))?;
-        transport_calc
-            .set_viscosity_unit(Some(self.viscosity_unit))
-            .map_err(|e| format!("Failed to set viscosity unit: {}", e))?;
-        transport_calc
-            .extract_coefficients(temperature)
-            .map_err(|e| format!("Failed to extract coefficients: {}", e))?;
         let mut lambda: f64 = 0.0;
+        let mut viscosity: f64 = 0.0;
         if self.selected_library == "CEA" {
+            let mut transport_calc = create_transport_calculator_by_name(&self.selected_library);
+            transport_calc
+                .from_serde(substance_data.clone())
+                .map_err(|e| format!("Failed to load data: {}", e))?;
+            transport_calc
+                .set_lambda_unit(Some(self.lambda_unit))
+                .map_err(|e| format!("Failed to set lambda unit: {}", e))?;
+            transport_calc
+                .set_viscosity_unit(Some(self.viscosity_unit))
+                .map_err(|e| format!("Failed to set viscosity unit: {}", e))?;
+            transport_calc
+                .extract_coefficients(temperature)
+                .map_err(|e| format!("Failed to extract coefficients: {}", e))?;
             lambda = transport_calc
                 .calculate_lambda(None, None, temperature)
                 .map_err(|e| format!("Failed to calculate thermal conductivity: {}", e))?;
+            viscosity = transport_calc
+                .calculate_viscosity(temperature)
+                .map_err(|e| format!("Failed to calculate viscosity: {}", e))?;
         } else {
         };
-        let viscosity = transport_calc
-            .calculate_viscosity(temperature)
-            .map_err(|e| format!("Failed to calculate viscosity: {}", e))?;
 
         Ok((lambda, viscosity))
     }

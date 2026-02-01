@@ -1,27 +1,27 @@
 use crate::Kinetics::solid_state_kinetics_IVP::{KineticModelIVP, KineticModelNames};
 use RustedSciThe::numerical::ODE_api2::SolverType;
 use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
-use std::io::{self, Write};
+use dialoguer::{Input, Select, theme::ColorfulTheme};
 
 pub fn solid_state_ivp_menu() {
+    let theme = ColorfulTheme::default();
     loop {
-        println!("\n=== Solid State Kinetics IVP Solver ===");
-        println!("1. Solve kinetic problem");
-        println!("2. Exit");
-        print!("Choose option: ");
-        io::stdout().flush().unwrap();
+        let items = vec!["Solve kinetic problem", "Exit"];
+        let selection = Select::with_theme(&theme)
+            .with_prompt("=== Solid State Kinetics IVP Solver ===")
+            .items(&items)
+            .default(0)
+            .interact()
+            .unwrap();
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
-
-        match input.trim() {
-            "1" => {
+        match selection {
+            0 => {
                 if let Err(e) = run_solver() {
                     println!("Error: {}", e);
                 }
             }
-            "2" => break,
-            _ => println!("Invalid option"),
+            1 => break,
+            _ => {}
         }
     }
 }
@@ -53,22 +53,25 @@ fn run_solver() -> Result<(), String> {
 }
 
 fn choose_solver_type() -> Result<SolverType, String> {
-    println!("\nChoose solver type:");
-    println!("1. BDF (recommended for stiff problems!!!OPTION NON PRODUCT READY)");
-    println!("2. Radau (high accuracy)");
-    println!("3. RK45 (non-stiff problems)");
-    println!("4. Backward Euler (simple implicit)");
-    print!("Enter choice (1-4): ");
-    io::stdout().flush().unwrap();
+    let theme = ColorfulTheme::default();
+    let items = vec![
+        "BDF (recommended for stiff problems!!!OPTION NON PRODUCT READY)",
+        "Radau (high accuracy)",
+        "RK45 (non-stiff problems)",
+        "Backward Euler (simple implicit)",
+    ];
+    let selection = Select::with_theme(&theme)
+        .with_prompt("Choose solver type")
+        .items(&items)
+        .default(1)
+        .interact()
+        .unwrap();
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-
-    match input.trim() {
-        "1" => Ok(SolverType::BDF),
-        "2" => Ok(SolverType::Radau(RadauOrder::Order3)),
-        "3" => Ok(SolverType::NonStiff("RK45".to_owned())),
-        "4" => Ok(SolverType::BackwardEuler),
+    match selection {
+        0 => Ok(SolverType::BDF),
+        1 => Ok(SolverType::Radau(RadauOrder::Order3)),
+        2 => Ok(SolverType::NonStiff("RK45".to_owned())),
+        3 => Ok(SolverType::BackwardEuler),
         _ => Err("Invalid solver choice".to_string()),
     }
 }
@@ -77,12 +80,12 @@ fn choose_kinetic_model() -> Result<(KineticModelNames, Vec<f64>), String> {
     println!("\nAvailable kinetic models:");
     KineticModelNames::pretty_print();
 
-    print!("\nEnter model code (e.g., A2, JMA, SB): ");
-    io::stdout().flush().unwrap();
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    let model_code = input.trim().to_uppercase();
+    let theme = ColorfulTheme::default();
+    let model_code: String = Input::with_theme(&theme)
+        .with_prompt("Enter model code (e.g., A2, JMA, SB)")
+        .interact_text()
+        .unwrap();
+    let model_code = model_code.trim().to_uppercase();
 
     let model_name = match model_code.as_str() {
         "A2" => KineticModelNames::A2,
@@ -141,20 +144,16 @@ fn choose_kinetic_model() -> Result<(KineticModelNames, Vec<f64>), String> {
 }
 
 fn input_model_params(count: usize) -> Result<Vec<f64>, String> {
+    let theme = ColorfulTheme::default();
     let mut params = Vec::new();
 
     for i in 0..count {
-        print!("Parameter {}: ", i + 1);
-        io::stdout().flush().unwrap();
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
-
-        let param: f64 = input
-            .trim()
-            .parse()
+        let prompt = format!("Parameter {}", i + 1);
+        let val: f64 = Input::<f64>::with_theme(&theme)
+            .with_prompt(prompt)
+            .interact_text()
             .map_err(|_| "Invalid number format".to_string())?;
-        params.push(param);
+        params.push(val);
     }
 
     Ok(params)
@@ -162,50 +161,31 @@ fn input_model_params(count: usize) -> Result<Vec<f64>, String> {
 
 fn input_parameters() -> Result<(f64, f64, f64, f64, f64), String> {
     println!("\nEnter problem parameters:");
+    let theme = ColorfulTheme::default();
 
-    print!("t_final (final time, s): ");
-    io::stdout().flush().unwrap();
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    let t_final: f64 = input
-        .trim()
-        .parse()
+    let t_final: f64 = Input::<f64>::with_theme(&theme)
+        .with_prompt("t_final (final time, s)")
+        .interact_text()
         .map_err(|_| "Invalid t_final format".to_string())?;
 
-    print!("beta (heating rate, K/s): ");
-    io::stdout().flush().unwrap();
-    input.clear();
-    io::stdin().read_line(&mut input).unwrap();
-    let beta: f64 = input
-        .trim()
-        .parse()
+    let beta: f64 = Input::<f64>::with_theme(&theme)
+        .with_prompt("beta (heating rate, K/s)")
+        .interact_text()
         .map_err(|_| "Invalid beta format".to_string())?;
 
-    print!("T0 (initial temperature, K): ");
-    io::stdout().flush().unwrap();
-    input.clear();
-    io::stdin().read_line(&mut input).unwrap();
-    let t0: f64 = input
-        .trim()
-        .parse()
+    let t0: f64 = Input::<f64>::with_theme(&theme)
+        .with_prompt("T0 (initial temperature, K)")
+        .interact_text()
         .map_err(|_| "Invalid T0 format".to_string())?;
 
-    print!("E (activation energy, J/mol): ");
-    io::stdout().flush().unwrap();
-    input.clear();
-    io::stdin().read_line(&mut input).unwrap();
-    let e: f64 = input
-        .trim()
-        .parse()
+    let e: f64 = Input::<f64>::with_theme(&theme)
+        .with_prompt("E (activation energy, J/mol)")
+        .interact_text()
         .map_err(|_| "Invalid E format".to_string())?;
 
-    print!("A (pre-exponential factor, 1/s): ");
-    io::stdout().flush().unwrap();
-    input.clear();
-    io::stdin().read_line(&mut input).unwrap();
-    let a: f64 = input
-        .trim()
-        .parse()
+    let a: f64 = Input::<f64>::with_theme(&theme)
+        .with_prompt("A (pre-exponential factor, 1/s)")
+        .interact_text()
         .map_err(|_| "Invalid A format".to_string())?;
 
     Ok((t_final, beta, t0, e, a))

@@ -18,11 +18,11 @@
 //!
 //! ```rust
 //! use std::collections::HashMap;
-//! 
+//!
 //! // Single-phase gas system
 //! let mut system = OnePhase::new();
 //! // system.subs_data.substances = vec!["CO2".to_string(), "H2O".to_string()];
-//! 
+//!
 //! // Calculate properties - results use None key for compatibility
 //! // let result = system.calculate_Gibbs_sym(298.15)?;
 //! // assert!(result.contains_key(&None));
@@ -47,10 +47,10 @@ use std::collections::HashMap;
 use std::f64;
 
 /// Single-phase thermodynamic system with optimized data access.
-/// 
+///
 /// Provides direct access to substance data without phase-level indirection.
 /// All HashMap returns use `None` as the key for API compatibility with multi-phase systems.
-/// 
+///
 /// # Example
 /// ```rust
 /// let mut system = OnePhase::new();
@@ -102,46 +102,119 @@ impl OnePhase {
         outer.insert(None, result);
         outer
     }
-    
+
     /// Extracts data from trait's expected format with proper error handling.
     /// Looks for None key which represents the single phase.
-    fn extract_phase_data<'a, T>(&self, n: &'a HashMap<Option<String>, T>) -> SubsDataResult<&'a T>{
-        n.get(&None).ok_or_else(move|| SubsDataError::MissingData {
+    fn extract_phase_data<'a, T>(
+        &self,
+        n: &'a HashMap<Option<String>, T>,
+    ) -> SubsDataResult<&'a T> {
+        n.get(&None).ok_or_else(move || SubsDataError::MissingData {
             field: "phase data".to_string(),
             substance: "None".to_string(),
         })
     }
 
-    /// Calculates Gibbs functions and wraps with outer map structure.
-    /// Convenience method for compatibility with multi-phase interface.
-    pub fn calculate_Gibbs_fun_unmut_with_outer_map(&mut self, T: f64, P: f64) -> 
-        HashMap<
-        Option<String>,
-        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
-        >
-         {
-        let map_to_insert_phase = self.subs_data.calculate_Gibbs_fun_one_phase(P, T);
-        self.wrap_result(map_to_insert_phase)
-    }
-}
+    fn indexed_moles_variables_local(
+        &mut self,
+        Np: Option<Expr>,
+    ) -> Result<
+        (
+            (Option<Expr>, Option<Vec<Expr>>),
+            Vec<Expr>,
+            Vec<Expr>,
+            HashMap<String, Expr>,
+        ),
+        SubsDataError,
+    > {
+        let n = Expr::IndexedVars(self.subs_data.substances.len(), "N").0;
+        let Np = Np.unwrap_or_else(|| Expr::Var("Np".to_string()));
 
-/// Macro to wrap SubsData method calls with None key for trait compatibility.
-/// Reduces boilerplate for simple delegation patterns.
-/// 
-/// # Example
-/// ```rust
-/// // Instead of:
-/// // let result = self.subs_data.some_method(args);
-/// // self.wrap_result(result)
-/// 
-/// // Use:
-/// // wrap_with_none_key!(self, some_method, args)
-/// ```
-macro_rules! wrap_with_none_key {
-    ($self:ident, $method:ident, $($args:expr),*) => {{
-        let result = $self.subs_data.$method($($args),*);
-        $self.wrap_result(result)
-    }};
+        let mut map_of_var_each_substance = HashMap::with_capacity(self.subs_data.substances.len());
+        for (i, substance) in self.subs_data.substances.iter().enumerate() {
+            let var = Expr::Var(format!("N{}", i));
+            map_of_var_each_substance.insert(substance.clone(), var);
+        }
+
+        self.symbolic_vars = (Some(Np.clone()), Some(n.clone()));
+        self.vec_of_n_vars = n.clone();
+        self.Np = Np.clone();
+        self.map_of_var_each_substance = map_of_var_each_substance.clone();
+
+        Ok((
+            (Some(Np.clone()), Some(n.clone())),
+            n,
+            vec![Np],
+            map_of_var_each_substance.clone(),
+        ))
+    }
+
+    /// Calculates Gibbs free energy for given conditions and mole numbers.
+    pub fn calcutate_Gibbs_free_energy_local(
+        &mut self,
+        T: f64,
+        P: f64,
+        n: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
+    ) -> SubsDataResult<()> {
+        let n_Np = self.extract_phase_data(&n)?.clone();
+        let Np = n_Np.0;
+        let n = n_Np.1;
+        let dG_phase = self.subs_data.calc_dG_for_one_phase(P, T, n, Np);
+        self.dG = dG_phase.clone();
+        Ok(())
+    }
+
+    pub fn calculate_Gibbs_fun_unmut(
+        &mut self,
+        T: f64,
+        P: f64,
+    ) -> HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>> {
+        self.subs_data.calculate_Gibbs_fun_one_phase(P, T)
+    }
+    /// Returns entropy functions wrapped for trait compatibility.
+    pub fn calculate_S_fun_unmut(
+        &mut self,
+        T: f64,
+        P: f64,
+    ) -> HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>> {
+        self.subs_data.calculate_S_fun_for_one_phase(P, T)
+    }
+
+    pub fn calculate_Lagrange_equations_fun(
+        &mut self,
+        A: DMatrix<f64>,
+        G_fun: HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
+
+        Tm: f64,
+    ) -> Result<
+        Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
+        SubsDataError,
+    > {
+        let G = G_fun;
+        let subs = self.subs_data.substances.clone();
+        let fun =
+            move |T: f64, n: Option<Vec<f64>>, Np: Option<f64>, Lambda: Vec<f64>| -> Vec<f64> {
+                let A = A.transpose();
+                let n_substances = A.ncols();
+
+                let mut vec_of_eqs: Vec<f64> = Vec::new();
+
+                for i in 0..n_substances {
+                    let subst_i = subs[i].clone();
+                    let G_i = G.get(&subst_i).unwrap();
+                    let col_of_subs_i = A.column(i).iter().map(|&v| v).collect::<Vec<f64>>();
+                    let sum_by_elemnts: f64 = col_of_subs_i
+                        .iter()
+                        .zip(Lambda.iter())
+                        .map(|(aij, Lambda_j)| aij * Lambda_j)
+                        .fold(0.0, |acc, x| acc + x);
+                    let eq_i = sum_by_elemnts + G_i(T, n.clone(), Np.clone()) / (R * Tm);
+                    vec_of_eqs.push(eq_i);
+                }
+                vec_of_eqs
+            };
+        Ok(Box::new(fun))
+    }
 }
 
 impl Clone for OnePhase {
@@ -199,20 +272,20 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
         self.subs_data.extract_all_thermal_coeffs(temperature)?;
         Ok(())
     }
-    
+
     /// Calculates thermodynamic property maps at given temperature.
     fn calculate_therm_map_of_properties(&mut self, temperature: f64) -> SubsDataResult<()> {
         self.subs_data
             .calculate_therm_map_of_properties(temperature)?;
         Ok(())
     }
-    
+
     /// Creates symbolic expressions for thermodynamic properties.
     fn calculate_therm_map_of_sym(&mut self) -> SubsDataResult<()> {
         self.subs_data.calculate_therm_map_of_sym()?;
         Ok(())
     }
-    
+
     /// Validates and extracts coefficients for temperature range.
     fn extract_coeffs_if_current_coeffs_not_valid(
         &mut self,
@@ -231,11 +304,8 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
         P: f64,
         n: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
     ) -> SubsDataResult<HashMap<Option<String>, HashMap<String, f64>>> {
-        let n_Np = self.extract_phase_data(&n)?.clone();
-        let Np = n_Np.0;
-        let n = n_Np.1;
-        let dG_phase = self.subs_data.calc_dG_for_one_phase(P, T, n, Np);
-        self.dG = dG_phase.clone();
+        self.calcutate_Gibbs_free_energy_local(T, P, n)?;
+        let dG_phase = self.dG.clone();
         Ok(self.wrap_result(dG_phase))
     }
 
@@ -246,7 +316,7 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
         self.dG_sym = self.subs_data.calculate_Gibbs_sym_one_phase(T, n, Np);
         Ok(())
     }
-    
+
     /// Sets pressure value in symbolic Gibbs expressions.
     fn set_P_to_sym_in_G_sym(&mut self, P: f64) {
         for (_, sym_fun) in self.dG_sym.iter_mut() {
@@ -260,24 +330,12 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
             *sym_fun = sym_fun.set_variable("T", T).simplify()
         }
     }
-    
+
     /// Creates Gibbs free energy functions for given conditions.
     fn calculate_Gibbs_fun(&mut self, T: f64, P: f64) {
         self.dG_fun = self.subs_data.calculate_Gibbs_fun_one_phase(P, T);
     }
 
-    /// Returns Gibbs functions wrapped for trait compatibility.
-    fn calculate_Gibbs_fun_unmut(
-        &mut self,
-        T: f64,
-        P: f64,
-    ) -> HashMap<
-        Option<String>,
-        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
-    > {
-        wrap_with_none_key!(self, calculate_Gibbs_fun_one_phase, P, T)
-    }
-    
     /// Calculates entropy for given conditions and mole numbers.
     fn calculate_S(
         &mut self,
@@ -299,22 +357,10 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
         self.dS_sym = self.subs_data.calculate_S_sym_for_one_phase(T, n, Np);
         Ok(())
     }
-    
+
     /// Creates entropy functions for given conditions.
     fn calculate_S_fun(&mut self, T: f64, P: f64) {
         self.dS_fun = self.subs_data.calculate_S_fun_for_one_phase(P, T);
-    }
-    
-    /// Returns entropy functions wrapped for trait compatibility.
-    fn calculate_S_fun_unmut(
-        &mut self,
-        T: f64,
-        P: f64,
-    ) -> HashMap<
-        Option<String>,
-        HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
-    > {
-        wrap_with_none_key!(self, calculate_S_fun_for_one_phase, P, T)
     }
 
     fn configure_system_properties(
@@ -378,23 +424,23 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
     > {
         let n = Expr::IndexedVars(self.subs_data.substances.len(), "N").0;
         let Np = Expr::Var("Np".to_string());
-        
+
         let mut map_of_var_each_substance = HashMap::with_capacity(self.subs_data.substances.len());
         for (i, substance) in self.subs_data.substances.iter().enumerate() {
             let var = Expr::Var(format!("N{}", i));
             map_of_var_each_substance.insert(substance.clone(), var);
         }
-        
+
         self.symbolic_vars = (Some(Np.clone()), Some(n.clone()));
         self.vec_of_n_vars = n.clone();
         self.Np = Np.clone();
         self.map_of_var_each_substance = map_of_var_each_substance.clone();
-        
+
         Ok((
             self.wrap_result((Some(Np.clone()), Some(n.clone()))),
             n,
             vec![Np],
-            self.wrap_result(map_of_var_each_substance)
+            self.wrap_result(map_of_var_each_substance),
         ))
     }
     /////////////////////////////equations for G->min///////////////////////////////////////
@@ -409,7 +455,7 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
         let n_substances = A.ncols();
         let subs = self.subs_data.substances.clone();
         let mut vec_of_eqs: Vec<Expr> = Vec::new();
-        
+
         for i in 0..n_substances {
             let Tm = Expr::Const(Tm);
             let subst_i = subs[i].clone();
@@ -431,43 +477,6 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
         Ok(vec_of_eqs)
     }
 
-    fn calculate_Lagrange_equations_fun(
-        &mut self,
-        A: DMatrix<f64>,
-        G_fun: HashMap<
-            Option<String>,
-            HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>>,
-        >,
-        Tm: f64,
-    ) -> Result<
-        Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
-        SubsDataError,
-    > {
-        let subs = self.subs_data.substances.clone();
-        let fun =
-            move |T: f64, n: Option<Vec<f64>>, Np: Option<f64>, Lambda: Vec<f64>| -> Vec<f64> {
-                let A = A.transpose();
-                let n_substances = A.ncols();
-                let G = G_fun.get(&None).unwrap();
-                let mut vec_of_eqs: Vec<f64> = Vec::new();
-                
-                for i in 0..n_substances {
-                    let subst_i = subs[i].clone();
-                    let G_i = G.get(&subst_i).unwrap();
-                    let col_of_subs_i = A.column(i).iter().map(|&v| v).collect::<Vec<f64>>();
-                    let sum_by_elemnts: f64 = col_of_subs_i
-                        .iter()
-                        .zip(Lambda.iter())
-                        .map(|(aij, Lambda_j)| aij * Lambda_j)
-                        .fold(0.0, |acc, x| acc + x);
-                    let eq_i = sum_by_elemnts + G_i(T, n.clone(), Np.clone()) / (R * Tm);
-                    vec_of_eqs.push(eq_i);
-                }
-                vec_of_eqs
-            };
-        Ok(Box::new(fun))
-    }
-
     fn calculate_Lagrange_equations_fun2(
         &mut self,
         A: DMatrix<f64>,
@@ -479,7 +488,7 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
     > {
         let dG_fun = self.calculate_Gibbs_fun_unmut(T, P);
         let Lagrange_equations = self.calculate_Lagrange_equations_fun(A, dG_fun, Tm)?;
-             Ok(Lagrange_equations)
+        Ok(Lagrange_equations)
     }
     //////////////////////////////equations for Keq///////////////////////////////////////
     /*

@@ -66,6 +66,7 @@ impl Settings {
             "All Keys Substance".to_string(),
             config.all_keys_substance.clone(),
         );
+        library_versions.insert("Elements".to_string(), config.elements.clone());
         library_versions.insert("Reactbase".to_string(), config.reactbase.clone());
         library_versions.insert("Dict Reaction".to_string(), config.dict_reaction.clone());
         library_versions.insert(
@@ -117,6 +118,7 @@ impl Settings {
         let result = with_library_manager_mut(|manager| match library_name {
             "Substance Base" => manager.set_substance_base(version),
             "All Keys Substance" => manager.set_all_keys_substance(version),
+            "Elements" => manager.set_elements(version),
             "Reactbase" => manager.set_reactbase(version),
             "Dict Reaction" => manager.set_dict_reaction(version),
             "Problems Folder" => manager.set_problems_folder(version),
@@ -174,6 +176,8 @@ impl Settings {
                     config.all_keys_substance.clone(),
                 );
                 self.library_versions
+                    .insert("Elements".to_string(), config.elements.clone());
+                self.library_versions
                     .insert("Reactbase".to_string(), config.reactbase.clone());
                 self.library_versions
                     .insert("Dict Reaction".to_string(), config.dict_reaction.clone());
@@ -218,6 +222,7 @@ impl Settings {
             let internal_key = match *display_name {
                 "Substance Base" => "substance_base",
                 "All Keys Substance" => "all_keys_substance",
+                "Elements" => "elements",
                 "Reactbase" => "reactbase",
                 "Dict Reaction" => "dict_reaction",
                 "Problems Folder" => "problems_folder",
@@ -250,12 +255,13 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn create_test_manager() -> LibraryManager {
-        let (substance_file, keys_file, react_file, dict_file) = create_test_files();
+        let (substance_file, keys_file, elements_file, react_file, dict_file) = create_test_files();
         let mut config_file = NamedTempFile::new().unwrap();
 
         let config = LibraryConfig {
             substance_base: substance_file.path().to_str().unwrap().to_string(),
             all_keys_substance: keys_file.path().to_str().unwrap().to_string(),
+            elements: elements_file.path().to_str().unwrap().to_string(),
             reactbase: react_file.path().to_str().unwrap().to_string(),
             dict_reaction: dict_file.path().to_str().unwrap().to_string(),
             problems_folder: "problems".to_string(),
@@ -267,18 +273,32 @@ mod tests {
         LibraryManager::with_config_file(config_file.path().to_str().unwrap())
     }
 
-    fn create_test_files() -> (NamedTempFile, NamedTempFile, NamedTempFile, NamedTempFile) {
+    fn create_test_files() -> (
+        NamedTempFile,
+        NamedTempFile,
+        NamedTempFile,
+        NamedTempFile,
+        NamedTempFile,
+    ) {
         let mut substance_file = NamedTempFile::new().unwrap();
         let mut keys_file = NamedTempFile::new().unwrap();
+        let mut elements_file = NamedTempFile::new().unwrap();
         let mut react_file = NamedTempFile::new().unwrap();
         let mut dict_file = NamedTempFile::new().unwrap();
 
         substance_file.write_all(b"{}").unwrap();
         keys_file.write_all(b"[]").unwrap();
+        elements_file.write_all(b"[]").unwrap();
         react_file.write_all(b"{}").unwrap();
         dict_file.write_all(b"{}").unwrap();
 
-        (substance_file, keys_file, react_file, dict_file)
+        (
+            substance_file,
+            keys_file,
+            elements_file,
+            react_file,
+            dict_file,
+        )
     }
 
     #[test]

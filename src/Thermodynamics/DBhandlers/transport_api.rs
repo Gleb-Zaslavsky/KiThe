@@ -176,8 +176,10 @@ pub trait TransportCalculator {
         &mut self,
         C: Option<f64>,
         ro: Option<f64>,
-    ) -> Result<Box<dyn Fn(f64) -> f64>, TransportError>;
-    fn create_viscosity_closure(&mut self) -> Result<Box<dyn Fn(f64) -> f64>, TransportError>;
+    ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, TransportError>;
+    fn create_viscosity_closure(
+        &mut self,
+    ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, TransportError>;
 
     // Symbolic calculations
     fn create_symbolic_lambda(
@@ -201,8 +203,8 @@ pub trait TransportCalculator {
     fn print_instance(&self) -> Result<(), TransportError>;
     fn get_lambda_sym(&self) -> Result<Expr, TransportError>;
     fn get_viscosity_sym(&self) -> Result<Expr, TransportError>;
-    fn get_lambda_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, TransportError>;
-    fn get_viscosity_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, TransportError>;
+    fn get_lambda_fun(&self) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, TransportError>;
+    fn get_viscosity_fun(&self) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, TransportError>;
     fn fitting_coeffs_for_T_interval(&mut self) -> Result<(), TransportError>;
     fn integr_mean(&mut self) -> Result<(), TransportError>;
     fn set_T_interval(&mut self, T_min: f64, T_max: f64) -> Result<(), TransportError>;

@@ -134,7 +134,7 @@ impl Thermodynamics {
         let A = self.elem_composition_matrix.clone().unwrap();
 
         self.subdata.calculate_Gibbs_fun(T, self.P);
-  
+
         let Lagrange_equations: Box<
             dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static,
         > = self

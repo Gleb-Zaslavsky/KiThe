@@ -5,6 +5,7 @@ pub mod combustion;
 mod combustion_test;
 pub mod gui_main;
 pub mod gui_plot;
+pub mod gui_solid_ivp;
 pub mod kinetics_gui;
 pub mod settings_gui;
 pub mod thermochemistry_gui;

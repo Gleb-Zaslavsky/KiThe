@@ -165,9 +165,9 @@ pub trait ThermoCalculator {
     fn get_Cp(&self) -> Result<f64, ThermoError>;
     fn get_dh(&self) -> Result<f64, ThermoError>;
     fn get_ds(&self) -> Result<f64, ThermoError>;
-    fn get_C_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, ThermoError>;
-    fn get_dh_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, ThermoError>;
-    fn get_ds_fun(&self) -> Result<Box<dyn Fn(f64) -> f64>, ThermoError>;
+    fn get_C_fun(&self) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, ThermoError>;
+    fn get_dh_fun(&self) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, ThermoError>;
+    fn get_ds_fun(&self) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, ThermoError>;
     fn get_Cp_sym(&self) -> Result<Expr, ThermoError>;
     fn get_dh_sym(&self) -> Result<Expr, ThermoError>;
     fn get_ds_sym(&self) -> Result<Expr, ThermoError>;

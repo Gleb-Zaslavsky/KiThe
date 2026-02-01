@@ -1,3 +1,8 @@
+pub mod Chem_eq_K_eq;
+pub mod Chem_eq_K_eq2;
+pub mod Chem_eq_K_eq3;
+pub mod Chem_eq_K_eq_test;
+pub mod Chem_eq_K_eq_test2;
 pub mod ClassicalThermodynamics;
 pub mod ClassicalThermodynamics2;
 pub mod ClassicalThermodynamics3;
@@ -79,4 +84,3 @@ mod ClassicalThermodynamics_tests;
 mod ClassicalThermodynamics_tests2;
 mod ClassicalThermodynamics_tests3;
 pub mod easy_equilibrium;
-pub mod easy_equilibrium2;

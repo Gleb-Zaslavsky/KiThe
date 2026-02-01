@@ -13,5 +13,6 @@ pub mod Utils;
 pub mod cli;
 pub mod gui;
 pub mod library_manager;
+pub mod library_manager2;
 pub mod settings;
 pub mod simple_combustion_models;

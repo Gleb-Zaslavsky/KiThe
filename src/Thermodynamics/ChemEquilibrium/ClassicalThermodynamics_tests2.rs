@@ -82,24 +82,24 @@ mod tests {
         // Check results
         let binding = thermo.subdata.get_dG();
         let g = binding.get(&None).unwrap();
-          let binding = thermo.subdata.get_dG_sym();
+        let binding = thermo.subdata.get_dG_sym();
         let g_sym = binding.get(&None).unwrap();
         //  let binding = thermo.subdata.get_dG_fun();
-      //  let g_fun = binding.get(&None).unwrap();
+        //  let g_fun = binding.get(&None).unwrap();
         for gas in subs.clone() {
             assert!(g.contains_key(&gas));
             assert!(g_sym.contains_key(&gas));
-          //  assert!(g_fun.contains_key(&gas));
+            //  assert!(g_fun.contains_key(&gas));
             let g_sym = g_sym.get(&gas).unwrap().clone();
             println!("I. g_sym for gas: {},\n:  {}", &gas, &g_sym);
             let g_sym_fun = g_sym.lambdify_wrapped();
             let g_sym_value = g_sym_fun(vec![0.5, 1.0]);
 
             let g = g.get(&gas).unwrap().clone();
-        //    let g_fun = g_fun.get(&gas).unwrap();
-        //    let g_fun_value = g_fun(400.0, Some(vec![0.5, 0.5]), Some(1.0));
-         //   assert_relative_eq!(g_fun_value, g, epsilon = 1e-6);
-         //   assert_relative_eq!(g_sym_value, g_fun_value, epsilon = 1e-6);
+            //    let g_fun = g_fun.get(&gas).unwrap();
+            //    let g_fun_value = g_fun(400.0, Some(vec![0.5, 0.5]), Some(1.0));
+            //   assert_relative_eq!(g_fun_value, g, epsilon = 1e-6);
+            //   assert_relative_eq!(g_sym_value, g_fun_value, epsilon = 1e-6);
         }
         // test with lambdify owned
 
@@ -223,7 +223,7 @@ mod tests {
 
         // compare results from direct calculation and from lambdified symbolic expression
         let binding = td.subdata.get_dG_sym();
-        let g_sym =binding.get(&None).unwrap();
+        let g_sym = binding.get(&None).unwrap();
         let g_sym = g_sym.get(&"H2".to_string()).unwrap().clone();
         let g_sym_fun = g_sym.lambdify_wrapped();
         let g_sym_value = g_sym_fun(vec![400.0, 0.5, 0.5]);

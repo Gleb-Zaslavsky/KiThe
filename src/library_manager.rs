@@ -62,6 +62,7 @@ use std::sync::{Mutex, OnceLock};
 pub enum LibraryType {
     SubstanceBase,
     AllKeysSubstance,
+    Elements,
     Reactbase,
     DictReaction,
 }
@@ -72,6 +73,7 @@ impl LibraryType {
         match self {
             LibraryType::SubstanceBase => "substance_base",
             LibraryType::AllKeysSubstance => "all_keys_substance",
+            LibraryType::Elements => "elements",
             LibraryType::Reactbase => "reactbase",
             LibraryType::DictReaction => "dict_reaction",
         }
@@ -93,6 +95,7 @@ impl LibraryType {
 pub struct LibraryConfig {
     pub substance_base: String,
     pub all_keys_substance: String,
+    pub elements: String,
     pub reactbase: String,
     pub dict_reaction: String,
     pub problems_folder: String,
@@ -111,6 +114,7 @@ impl Default for LibraryConfig {
         Self {
             substance_base: "substance_base_v2.json".to_string(),
             all_keys_substance: "all_keys_substance.json".to_string(),
+            elements: "elements.json".to_string(),
             reactbase: "Reactbase.json".to_string(),
             dict_reaction: "dict_reaction.json".to_string(),
             problems_folder: "problems".to_string(),
@@ -255,6 +259,14 @@ impl LibraryManager {
         &self.config.dict_reaction
     }
 
+    /// Returns the current path to the elements JSON file.
+    ///
+    /// # Returns
+    /// String slice containing the file path (e.g., "elements.json")
+    pub fn elements_path(&self) -> &str {
+        &self.config.elements
+    }
+
     /// Returns the current path to the problems folder.
     ///
     /// # Returns
@@ -274,6 +286,7 @@ impl LibraryManager {
         match library_type {
             LibraryType::SubstanceBase => &self.config.substance_base,
             LibraryType::AllKeysSubstance => &self.config.all_keys_substance,
+            LibraryType::Elements => &self.config.elements,
             LibraryType::Reactbase => &self.config.reactbase,
             LibraryType::DictReaction => &self.config.dict_reaction,
         }
@@ -342,6 +355,27 @@ impl LibraryManager {
         }
     }
 
+    /// Updates the elements library file path.
+    ///
+    /// Validates that the new file exists before updating the configuration.
+    /// Automatically saves the configuration after successful update.
+    ///
+    /// # Arguments
+    /// * `path` - New file path for the elements library
+    ///
+    /// # Returns
+    /// * `Ok(())` - If file exists and update was successful
+    /// * `Err(Box<dyn std::error::Error>)` - If file doesn't exist or save failed
+    pub fn set_elements(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if Path::new(path).exists() {
+            self.config.elements = path.to_string();
+            self.save_config()?;
+            Ok(())
+        } else {
+            Err(format!("File does not exist: {}", path).into())
+        }
+    }
+
     /// Updates the reaction dictionary file path.
     ///
     /// Validates that the new file exists before updating the configuration.
@@ -401,6 +435,7 @@ impl LibraryManager {
             match key {
                 "substance_base" => self.config.substance_base = path.to_string(),
                 "all_keys_substance" => self.config.all_keys_substance = path.to_string(),
+                "elements" => self.config.elements = path.to_string(),
                 "reactbase" => self.config.reactbase = path.to_string(),
                 "dict_reaction" => self.config.dict_reaction = path.to_string(),
                 "problems_folder" => {
@@ -493,6 +528,7 @@ impl LibraryManager {
         let actual_filename = match library_type {
             LibraryType::SubstanceBase => &self.config.substance_base,
             LibraryType::AllKeysSubstance => &self.config.all_keys_substance,
+            LibraryType::Elements => &self.config.elements,
             LibraryType::Reactbase => &self.config.reactbase,
             LibraryType::DictReaction => &self.config.dict_reaction,
         };
@@ -831,6 +867,7 @@ mod tests {
         let config = LibraryConfig {
             substance_base: temp_substance.path().to_str().unwrap().to_string(),
             all_keys_substance: temp_keys.path().to_str().unwrap().to_string(),
+            elements: temp_keys.path().to_str().unwrap().to_string(),
             reactbase: temp_react.path().to_str().unwrap().to_string(),
             dict_reaction: temp_dict.path().to_str().unwrap().to_string(),
             problems_folder: "problems".to_string(),

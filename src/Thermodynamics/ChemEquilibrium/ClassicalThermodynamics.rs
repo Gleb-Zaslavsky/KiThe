@@ -424,7 +424,7 @@ impl Thermodynamics {
     /// convert symbolic variable T in G symbolic function to numerical value
     pub fn set_T_to_sym(&mut self) {
         let T = self.T;
-         self.subdata.set_T_to_sym_in_G_sym(T);
+        self.subdata.set_T_to_sym_in_G_sym(T);
         if self.solver.eq_mu.len() > 0 {
             for mu in self.solver.eq_mu.iter_mut() {
                 *mu = mu.set_variable("T", T).simplify()
@@ -522,6 +522,14 @@ impl Thermodynamics {
     ///  create_sum_of_mole_numbers_sym().unwrap();
     ///  form_full_system_sym().unwrap();
     ///  pretty_print_full_system();
+    ///
+    /// ATTENTION!
+    /// This shortcut creates functions that use a single set of thermochemical polynomial coefficients
+    ///  (i.e., a set corresponding to a certain temperature range). Therefore, calculating equilibrium using
+    ///  it for an arbitrary temperature range can go beyond the range where the coefficients are valid. Use
+    /// this function only for equilibrium calculations at a single temperature point.
+    /// The algorithm that allows you to always keep the coefficients up to date is given in the function
+    /// calculate_equilibrium_for_T_range
     pub fn create_full_system_of_equations_with_const_T(&mut self) -> Result<(), std::io::Error> {
         self.set_P_to_sym();
         self.composition_equations().unwrap();
@@ -538,6 +546,13 @@ impl Thermodynamics {
         Ok(())
     }
     /// here T is still a symbolic variable
+    /// ATTENTION!
+    /// This shortcut creates functions that use a single set of thermochemical polynomial coefficients
+    ///  (i.e., a set corresponding to a certain temperature range). Therefore, calculating equilibrium using
+    ///  it for an arbitrary temperature range can go beyond the range where the coefficients are valid. Use
+    /// this function only for equilibrium calculations at a single temperature point.
+    /// The algorithm that allows you to always keep the coefficients up to date is given in the function
+    /// calculate_equilibrium_for_T_range
     pub fn create_full_system_of_equations(&mut self) -> Result<(), std::io::Error> {
         self.set_P_to_sym();
         self.composition_equations().unwrap();

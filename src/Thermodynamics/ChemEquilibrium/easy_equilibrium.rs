@@ -158,4 +158,46 @@ mod easy_equilibrium_tests {
         assert_eq!(eq.dnu, 1.0);
         assert_eq!(eq.n_total, 1.0);
     }
+    #[test]
+    fn test_easy_equilibrium_basic2() {
+        let subs = vec!["N2".to_string(), "N".to_string()];
+        let mut subdata = SubsData::new();
+        subdata
+            .library_priorities
+            .insert("NASA_gas".to_string(), LibraryPriority::Priority);
+        subdata
+            .map_of_phases
+            .insert(subs[0].clone(), Some(Phases::Gas));
+        subdata
+            .map_of_phases
+            .insert(subs[1].clone(), Some(Phases::Gas));
+        subdata.substances = subs.clone();
+        let _ = subdata.search_substances();
+        let _ = subdata.extract_thermal_coeffs(subs[0].as_str(), 3000.0);
+        let _ = subdata.extract_thermal_coeffs(subs[1].as_str(), 3000.0);
+        let _ = subdata.calculate_therm_map_of_sym();
+
+        let mut subs_coeffs = HashMap::new();
+        subs_coeffs.insert("N2".to_string(), -1.0);
+        subs_coeffs.insert("N".to_string(), 2.0);
+
+        let mut initial_moles = HashMap::new();
+        initial_moles.insert("N2".to_string(), 1.0);
+        initial_moles.insert("N".to_string(), 0.0);
+
+        let mut eq = EasyEquilibrium::new(101325.0, subdata, subs_coeffs, initial_moles);
+        let solutions = eq.solve(400.0, 100.0, 5500.0);
+        let n2_sol = solutions.get("N2").unwrap();
+        let n_sol = solutions.get("N").unwrap();
+        println!("T\t N2\t N");
+        let mut T = 400.0;
+        for i in 0..n2_sol.len() {
+            println!("{}\t {:.6}\t {:.6}", T, n2_sol[i], n_sol[i]);
+            T += 100.0;
+        }
+
+        assert_eq!(eq.P, 1.0);
+        assert_eq!(eq.dnu, 1.0);
+        assert_eq!(eq.n_total, 1.0);
+    }
 }
