@@ -1,12 +1,12 @@
 #[cfg(test)]
-mod tests {
-    use crate::Kinetics::experimental_kinetics::exp_kinetics_main::*;
+pub mod tests {
+    use crate::Kinetics::experimental_kinetics::one_experiment_dataset::*;
 
+    // use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::*;
     use crate::Kinetics::experimental_kinetics::testing_mod::*;
-
     use polars::prelude::*;
 
-    fn make_csv(n_points: usize, seed: u64) -> tempfile::NamedTempFile {
+    pub fn make_csv(n_points: usize, seed: u64) -> tempfile::NamedTempFile {
         let cfg = VirtualTGAConfig {
             n_points,
             dt: 0.1,
@@ -26,7 +26,7 @@ mod tests {
         csv
     }
 
-    fn ds_from_csv(csv: &tempfile::NamedTempFile) -> TGADataset {
+    pub fn ds_from_csv(csv: &tempfile::NamedTempFile) -> TGADataset {
         TGADataset::from_csv(csv.path().to_str().unwrap(), "time", "temperature", "mass").unwrap()
     }
 
@@ -308,7 +308,7 @@ mod tests {
             unit: Unit::Celsius,
             origin: ColumnOrigin::PolarsDerived,
         };
-        let ds2 = ds.with_column_expr(meta.clone(), (col("temperature") + lit(10.0)));
+        let ds2 = ds.with_column_expr(meta.clone(), col("temperature") + lit(10.0));
         // schema contains the derived column
         assert!(ds2.schema.columns.contains_key("temp_plus10"));
 
@@ -506,19 +506,19 @@ mod tests {
             .derive_conversion();
 
         // check schema has both
-        assert!(ds_dim.schema.columns.contains_key("dimensionless_mass"));
-        assert!(ds_dim.schema.columns.contains_key("conversion"));
+        assert!(ds_dim.schema.columns.contains_key("alpha"));
+        assert!(ds_dim.schema.columns.contains_key("eta"));
 
         let df = ds_dim.frame.collect().unwrap();
         let m_dim: Vec<f64> = df
-            .column("dimensionless_mass")
+            .column("alpha")
             .unwrap()
             .f64()
             .unwrap()
             .into_no_null_iter()
             .collect();
         let conv: Vec<f64> = df
-            .column("conversion")
+            .column("eta")
             .unwrap()
             .f64()
             .unwrap()
@@ -538,52 +538,11 @@ mod tests {
         let dTdt = df.column("dT_dt").unwrap().f64().unwrap();
         let dTdt_mean_polars = dTdt.mean().unwrap();
         assert!(dTdt.mean().unwrap().abs() < 1e-2);
-        let dTdt_vec: Vec<f64> = dTdt.into_no_null_iter().collect();
-        let dTdt_mean_custom: f64 = dTdt_vec.iter().sum::<f64>() / dTdt.len() as f64;
+        // let dTdt_vec: Vec<f64> = dTdt.into_no_null_iter().collect();
+        // let dTdt_mean_custom: f64 = dTdt_vec.iter().sum::<f64>() / dTdt.len() as f64;
         println!("dTdt mean ={}", dTdt_mean_polars);
         //  assert!( (dTdt_mean_custom - dTdt_mean_polars).abs() <1e-4);
         // temperature should not increase because there is isothermic regime
-    }
-
-    #[test]
-    fn rolling_mean_smoothes_signal() {
-        let csv = make_csv(100_000, 9876);
-        let ds = ds_from_csv(&csv);
-        // Use a relatively large window to ensure smoothing effect
-        let ds_sm = ds.clone().rolling_mean("mass", 125);
-        let df0 = ds.frame.collect().unwrap();
-        let df_smooth = ds_sm.frame.collect().unwrap();
-
-        let m0: Vec<f64> = df0
-            .column("mass")
-            .unwrap()
-            .f64()
-            .unwrap()
-            .into_no_null_iter()
-            .collect();
-        let m_smooth: Vec<f64> = df_smooth
-            .column("mass")
-            .unwrap()
-            .f64()
-            .unwrap()
-            .into_no_null_iter()
-            .collect();
-        // lengths equal
-        assert_eq!(m0.len(), m_smooth.len());
-        // variance should not increase (rough heuristic)
-        let mean0 = m0.iter().sum::<f64>() / m0.len() as f64;
-        let var0 = m0.iter().map(|v| (v - mean0).powi(2)).sum::<f64>() / m0.len() as f64;
-        let mean_smooth = m_smooth.iter().sum::<f64>() / m_smooth.len() as f64;
-        let var_smooth = m_smooth
-            .iter()
-            .map(|v| (v - mean_smooth).powi(2))
-            .sum::<f64>()
-            / m_smooth.len() as f64;
-        println!(
-            "mean0 = {}, var0 = {}, mean1 = {}, var1 = {}",
-            mean0, var0, mean_smooth, var_smooth
-        );
-        assert!(var_smooth <= var0 * 1.05); // allow small numerical tolerance
     }
 
     #[test]
@@ -668,6 +627,51 @@ mod tests {
                 assert!((a - b).abs() < 1e-12);
             }
         }
+    }
+
+    #[test]
+    fn from_csv_universal_reads_units_format_via_metadata_header() {
+        let csv = make_csv(180, 7171);
+        let ds = ds_from_csv(&csv).celsius_to_kelvin();
+
+        let out = tempfile::NamedTempFile::new().unwrap();
+        ds.to_csv_with_units(out.path()).unwrap();
+
+        let ds2 = TGADataset::from_csv_universal(out.path()).unwrap();
+
+        let time_col = ds.schema.time.clone().unwrap();
+        let temp_col = ds.schema.temperature.clone().unwrap();
+        let mass_col = ds.schema.mass.clone().unwrap();
+
+        assert_eq!(
+            ds2.schema.columns.get(&time_col).unwrap().unit,
+            ds.schema.columns.get(&time_col).unwrap().unit
+        );
+        assert_eq!(
+            ds2.schema.columns.get(&temp_col).unwrap().unit,
+            ds.schema.columns.get(&temp_col).unwrap().unit
+        );
+        assert_eq!(
+            ds2.schema.columns.get(&mass_col).unwrap().unit,
+            ds.schema.columns.get(&mass_col).unwrap().unit
+        );
+    }
+
+    #[test]
+    fn from_csv_universal_reads_raw_csv_without_metadata_header() {
+        let csv = make_csv(160, 8181);
+
+        let ds_universal = TGADataset::from_csv_universal(csv.path()).unwrap();
+        let ds_raw = TGADataset::from_csv_raw(csv.path()).unwrap();
+
+        assert!(ds_universal.schema.time.is_none());
+        assert!(ds_universal.schema.temperature.is_none());
+        assert!(ds_universal.schema.mass.is_none());
+
+        let df_u = ds_universal.frame.collect().unwrap();
+        let df_r = ds_raw.frame.collect().unwrap();
+        assert_eq!(df_u.shape(), df_r.shape());
+        assert_eq!(df_u.get_column_names(), df_r.get_column_names());
     }
 
     #[test]
@@ -806,57 +810,88 @@ mod tests {
     }
 
     #[test]
-    fn hampel_filter_replace_with_median() {
-        use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy;
-        let csv = make_csv(1000, 777);
-        let mut ds = ds_from_csv(&csv);
-
-        // Add artificial outliers
-        let df = ds.frame.clone().collect().unwrap();
-        let mut mass: Vec<f64> = df
-            .column("mass")
+    fn move_time_to_zero_shifts_time_start() {
+        let csv = make_csv(123, 2024);
+        let ds = ds_from_csv(&csv);
+        let df_before = ds.frame.clone().collect().unwrap();
+        let t_before: Vec<f64> = df_before
+            .column("time")
             .unwrap()
             .f64()
             .unwrap()
             .into_no_null_iter()
             .collect();
-        mass[100] = mass[100] * 10.0; // outlier
-        mass[500] = mass[500] * 0.1; // outlier
-
-        ds.frame = ds.frame.with_column(Series::new("mass".into(), mass).lit());
-
-        let ds_filtered = ds
-            .hampel_filter("mass", 11, 3.0, HampelStrategy::ReplaceWithMedian)
-            .unwrap();
-        let df_filtered = ds_filtered.frame.collect().unwrap();
-
-        assert_eq!(df_filtered.height(), df.height());
-        assert!(df_filtered.column("mass").is_ok());
+        let t0 = t_before[0];
+        let ds_zeroed = ds.move_time_to_zero().unwrap();
+        let df_after = ds_zeroed.frame.collect().unwrap();
+        let t_after: Vec<f64> = df_after
+            .column("time")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        assert_eq!(t_after.len(), t_before.len());
+        // first value becomes zero
+        assert!(t_after[0].abs() < 1e-12);
+        // all values are shifted by -t0
+        for (a, b) in t_before.iter().zip(t_after.iter()) {
+            assert!((*b - (a - t0)).abs() < 1e-12);
+        }
     }
 
     #[test]
-    fn hampel_filter_drop_outliers() {
-        use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy;
-        let csv = make_csv(200, 888);
-        let mut ds = ds_from_csv(&csv);
+    fn check_nulls_prints_null_counts() {
+        let csv = make_csv(100, 999);
+        let ds = ds_from_csv(&csv);
 
-        let df = ds.frame.clone().collect().unwrap();
-        let mut mass: Vec<f64> = df
-            .column("mass")
-            .unwrap()
-            .f64()
-            .unwrap()
-            .into_no_null_iter()
-            .collect();
-        mass[50] = mass[50] * 20.0; // strong outlier
+        // Add a column with some nulls by creating a derived column
+        let ds_with_nulls = ds.with_column_expr(
+            ColumnMeta {
+                name: "test_nulls".into(),
+                unit: Unit::Dimensionless,
+                origin: ColumnOrigin::PolarsDerived,
+            },
+            when(col("time").lt(lit(5.0)))
+                .then(lit(1.0))
+                .otherwise(lit(NULL)),
+        );
 
-        ds.frame = ds.frame.with_column(Series::new("mass".into(), mass).lit());
+        // This should print null counts for all columns
+        let _ds_checked = ds_with_nulls.check_nulls();
 
-        let ds_filtered = ds
-            .hampel_filter("mass", 7, 2.0, HampelStrategy::Drop)
-            .unwrap();
-        let df_filtered = ds_filtered.frame.collect().unwrap();
+        // Test passes if no panic occurs
+        assert!(true);
+    }
 
-        assert!(df_filtered.height() < df.height());
+    #[test]
+    fn drop_column_removes_column_and_clears_binding() {
+        let csv = make_csv(50, 2025);
+        // Drop a non-role column: create a derived column then drop it
+        let ds = ds_from_csv(&csv);
+        let ds2 = ds.with_column_expr(
+            ColumnMeta {
+                name: "aux".into(),
+                unit: Unit::Dimensionless,
+                origin: ColumnOrigin::PolarsDerived,
+            },
+            col("time") * lit(0.0),
+        );
+        let df2 = ds2.frame.clone().collect().unwrap();
+        assert!(df2.column("aux").is_ok());
+        let ds3 = ds2.drop_column("aux").unwrap();
+        let df3 = ds3.frame.clone().collect().unwrap();
+        assert!(df3.column("aux").is_err());
+        assert!(!ds3.schema.columns.contains_key("aux"));
+
+        // Drop a role column: time
+        let ds4 = ds3.drop_column("time").unwrap();
+        let df4 = ds4.frame.clone().collect().unwrap();
+        assert!(df4.column("time").is_err());
+        assert!(ds4.schema.time.is_none());
+
+        // Ensure other role bindings remain
+        assert!(ds4.schema.temperature.is_some());
+        assert!(ds4.schema.mass.is_some());
     }
 }

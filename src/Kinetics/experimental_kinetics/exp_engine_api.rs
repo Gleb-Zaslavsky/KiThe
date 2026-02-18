@@ -1,0 +1,448 @@
+use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
+    OneFramePlot, TGADataset, TGADomainError,
+};
+use crate::Kinetics::experimental_kinetics::splines::SplineKind;
+
+#[derive(Clone, Debug)]
+pub struct ViewRange {
+    pub t_min: f64,
+    pub t_max: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct PlotSeries {
+    pub name_x: String,
+    pub name_y: String,
+    pub x: Vec<f64>,
+    pub y: Vec<f64>,
+}
+
+/// Selects which axis column from `oneframeplot` is used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XY {
+    X,
+    Y,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct Ranges {
+    pub x_min: f64,
+    pub x_max: f64,
+    pub y_min: f64,
+    pub y_max: f64,
+}
+impl Default for Ranges {
+    fn default() -> Self {
+        Self {
+            x_min: 0.0,
+            x_max: 0.0,
+            y_min: 0.0,
+            y_max: 0.0,
+        }
+    }
+}
+impl TGADataset {
+    //==================================================================================
+    // PLOT SETTTERS
+    //=======================================================================
+    /// Resolves and returns the configured `(x, y)` column names from `oneframeplot`.
+    fn oneframeplot_xy_names(&self) -> Result<(String, String), TGADomainError> {
+        let oneframe = self.oneframeplot.as_ref().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function  oneframeplot_xy_names:oneframeplot is not configured".to_string(),
+            )
+        })?;
+
+        let x_col = oneframe.x.clone().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function  oneframeplot_xy_names:oneframeplot.x is not configured".to_string(),
+            )
+        })?;
+        let y_col = oneframe.y.clone().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function  oneframeplot_xy_names:oneframeplot.y is not configured".to_string(),
+            )
+        })?;
+
+        Ok((x_col, y_col))
+    }
+
+    /// Resolves and returns one configured axis column name from `oneframeplot`.
+    fn oneframeplot_axis_name(&self, axis: XY) -> Result<String, TGADomainError> {
+        let (x, y) = self.oneframeplot_xy_names()?;
+        Ok(match axis {
+            XY::X => x,
+            XY::Y => y,
+        })
+    }
+
+    /// Sets the x-axis column name in `oneframeplot`.
+    ///
+    /// The provided column must exist in the dataset schema.
+    /// If `oneframeplot` is not initialized yet, it is created.
+    pub fn set_oneframeplot_x(mut self, x_col: &str) -> Result<Self, TGADomainError> {
+        println!("\n setting x");
+        if !self.schema.columns.contains_key(x_col) {
+            return Err(TGADomainError::ColumnNotFound(x_col.into()));
+        }
+
+        match self.oneframeplot.as_mut() {
+            Some(plot) => plot.x = Some(x_col.to_string()),
+            None => {
+                self.oneframeplot = Some(OneFramePlot {
+                    x: Some(x_col.to_string()),
+                    y: None,
+                });
+            }
+        }
+
+        Ok(self)
+    }
+
+    /// Sets the y-axis column name in `oneframeplot`.
+    ///
+    /// The provided column must exist in the dataset schema.
+    /// If `oneframeplot` is not initialized yet, it is created.
+    pub fn set_oneframeplot_y(mut self, y_col: &str) -> Result<Self, TGADomainError> {
+        println!("\n setting y");
+        if !self.schema.columns.contains_key(y_col) {
+            return Err(TGADomainError::ColumnNotFound(y_col.into()));
+        }
+
+        match self.oneframeplot.as_mut() {
+            Some(plot) => plot.y = Some(y_col.to_string()),
+            None => {
+                self.oneframeplot = Some(OneFramePlot {
+                    x: None,
+                    y: Some(y_col.to_string()),
+                });
+            }
+        }
+
+        Ok(self)
+    }
+    //==================================================================
+    //  GETTERS
+    //==================================================================
+    pub fn get_axis_as_vec(&self, axis: XY) -> Result<Vec<f64>, TGADomainError> {
+        let selected = self.oneframeplot_axis_name(axis)?;
+        let df = self
+            .frame
+            .clone()
+            .collect()
+            .map_err(TGADomainError::PolarsError)?;
+        let series = df.column(&selected).map_err(TGADomainError::PolarsError)?;
+        let f64_series = series.f64().map_err(TGADomainError::PolarsError)?;
+        Ok(f64_series.into_no_null_iter().collect())
+    }
+    /// returns full x column as Vec
+    pub fn get_x_as_vec(&self) -> Result<Vec<f64>, TGADomainError> {
+        let x = XY::X;
+        let x_vec = self.get_axis_as_vec(x)?;
+        Ok(x_vec)
+    }
+    /// returns full y column as Vec
+    pub fn get_y_as_vec(&self) -> Result<Vec<f64>, TGADomainError> {
+        let x_vec = self.get_axis_as_vec(XY::Y)?;
+        Ok(x_vec)
+    }
+    /// returns struct
+    ///  PlotSeries {
+    /// pub name_x: String,
+    /// pub name_y: String,
+    ///  pub x: Vec<f64>,
+    ///  pub y: Vec<f64>,
+
+    pub fn get_plotseries(&self) -> Result<PlotSeries, TGADomainError> {
+        let x = self.get_x_as_vec()?;
+        let y = self.get_y_as_vec()?;
+        let oneframe = self.oneframeplot.as_ref().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function   get_plotseries:oneframeplot is not configured".to_string(),
+            )
+        })?;
+
+        let x_col = oneframe.x.as_deref().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function   get_plotseries:oneframeplot.x is not configured".to_string(),
+            )
+        })?;
+        let y_col = oneframe.y.as_deref().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function   get_plotseries:oneframeplot.y is not configured".to_string(),
+            )
+        })?;
+        let series = PlotSeries {
+            name_x: x_col.to_string(),
+            name_y: y_col.to_string(),
+            x,
+            y,
+        };
+        Ok(series)
+    }
+    //==================================================================
+    // PLOT DATA MANIPULATIONS
+    //===================================================================
+    /// Samples one plot series using x/y names stored in `oneframeplot`.
+    ///
+    /// This method applies the same range filtering and downsampling logic
+    /// as `sample_columns`, but always returns a single `PlotSeries`.
+    pub fn sample_oneframeplot(
+        &self,
+        range: Option<ViewRange>,
+        max_points: usize,
+    ) -> Result<PlotSeries, TGADomainError> {
+        let oneframe = self.oneframeplot.as_ref().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function sample_oneframeplot: oneframeplot is not configured".to_string(),
+            )
+        })?;
+
+        let x_col = oneframe.x.as_deref().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function sample_oneframeplot:oneframeplot.x is not configured".to_string(),
+            )
+        })?;
+        let y_col = oneframe.y.as_deref().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function sample_oneframeplot: oneframeplot.y is not configured".to_string(),
+            )
+        })?;
+
+        let mut sampled = self.sample_columns(x_col, &[y_col], range, max_points)?;
+        sampled.pop().ok_or_else(|| {
+            TGADomainError::InvalidOperation("no data points in selected range".to_string())
+        })
+    }
+
+    /// Spline-resamples the configured one-frame plot pair.
+    ///
+    /// Internally forwards:
+    /// - `oneframeplot.x` as `time_col`
+    /// - `oneframeplot.y` as `columns = &[y]`
+    ///
+    /// The resampled time column is written under `new_time_col`.
+    pub fn spline_resample_oneframeplot(
+        self,
+        new_time_col: &str,
+        n_points: usize,
+        kind: SplineKind,
+    ) -> Result<Self, TGADomainError> {
+        let oneframe = self.oneframeplot.clone().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function spline_resample_oneframeplot: oneframeplot is not configured".to_string(),
+            )
+        })?;
+
+        let x_col = oneframe.x.as_deref().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function spline_resample_oneframeplot: oneframeplot.x is not configured"
+                    .to_string(),
+            )
+        })?;
+        let y_col = oneframe.y.as_deref().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function spline_resample_oneframeplot: oneframeplot.y is not configured"
+                    .to_string(),
+            )
+        })?;
+
+        self.spline_resample_columns(x_col, new_time_col, &[y_col], n_points, kind)
+    }
+
+    /// Applies a generic operation to one selected axis column (`X` or `Y`)
+    /// configured in `oneframeplot`.
+    ///
+    /// The closure receives `(dataset, selected_column_name)` and must return
+    /// the updated dataset.
+    pub fn with_x_or_y<F>(self, axis: XY, op: F) -> Result<Self, TGADomainError>
+    where
+        F: FnOnce(Self, &str) -> Result<Self, TGADomainError>,
+    {
+        let selected = self.oneframeplot_axis_name(axis)?;
+        op(self, &selected)
+    }
+
+    /// Applies a generic operation that engages both configured axis columns
+    /// from `oneframeplot`.
+    ///
+    /// The closure receives `(dataset, x_column_name, y_column_name)` and must
+    /// return the updated dataset.
+    pub fn with_x_and_y<F>(self, op: F) -> Result<Self, TGADomainError>
+    where
+        F: FnOnce(Self, &str, &str) -> Result<Self, TGADomainError>,
+    {
+        let (x_col, y_col) = self.oneframeplot_xy_names()?;
+        op(self, &x_col, &y_col)
+    }
+
+    /// Cuts all rows before `start_value` on the selected axis (`X` or `Y`).
+    ///
+    /// Because filtering is row-wise, points in the paired axis are removed
+    /// at the same indices, so x/y lengths remain equal.
+    pub fn cut_before_x_or_y(self, axis: XY, start_value: f64) -> Result<Self, TGADomainError> {
+        self.with_x_or_y(axis, |ds, selected_col| {
+            Ok(ds.trim_range(selected_col, start_value, f64::INFINITY))
+        })
+    }
+
+    /// Cuts all rows after `end_value` on the selected axis (`X` or `Y`).
+    ///
+    /// Because filtering is row-wise, points in the paired axis are removed
+    /// at the same indices, so x/y lengths remain equal.
+    pub fn cut_after_x_or_y(self, axis: XY, end_value: f64) -> Result<Self, TGADomainError> {
+        self.with_x_or_y(axis, |ds, selected_col| {
+            Ok(ds.trim_range(selected_col, f64::NEG_INFINITY, end_value))
+        })
+    }
+
+    /// Cuts rows to the closed interval `[from, to]` on the selected axis (`X` or `Y`).
+    ///
+    /// Because filtering is row-wise, points in the paired axis are removed
+    /// at the same indices, so x/y lengths remain equal.
+    pub fn cut_range_x_or_y(self, axis: XY, from: f64, to: f64) -> Result<Self, TGADomainError> {
+        self.with_x_or_y(axis, |ds, selected_col| {
+            Ok(ds.trim_range(selected_col, from, to))
+        })
+    }
+
+    /// Returns the smallest Euclidean distance from `point` to the nearest
+    /// data point formed by configured `oneframeplot` `(x, y)` columns.
+    ///
+    /// Rows where either x or y is null are ignored.
+    pub fn min_distance_to_oneframeplot_point(
+        &self,
+        point: (f64, f64),
+    ) -> Result<f64, TGADomainError> {
+        let (x_col, y_col) = self.oneframeplot_xy_names()?;
+        let df = self.frame.clone().collect()?;
+
+        let x = df.column(&x_col)?.f64()?;
+        let y = df.column(&y_col)?.f64()?;
+
+        let mut best: Option<f64> = None;
+        for (ox, oy) in x.into_iter().zip(y.into_iter()) {
+            if let (Some(px), Some(py)) = (ox, oy) {
+                let dx = px - point.0;
+                let dy = py - point.1;
+                let d = (dx * dx + dy * dy).sqrt();
+                best = Some(match best {
+                    Some(cur) => cur.min(d),
+                    None => d,
+                });
+            }
+        }
+
+        best.ok_or_else(|| {
+            TGADomainError::InvalidOperation(format!(
+                "No valid (x, y) points found in columns '{}' and '{}'",
+                x_col, y_col
+            ))
+        })
+    }
+
+    pub fn plot_xy_ranges(&self) -> Result<Ranges, TGADomainError> {
+        let (x_col, y_col) = self.oneframeplot_xy_names()?;
+        let df = self.frame.clone().collect()?;
+
+        let x = df.column(&x_col)?.f64()?;
+        let y = df.column(&y_col)?.f64()?;
+
+        let (x_min, x_max) = x
+            .into_iter()
+            .flatten()
+            .fold(None, |acc: Option<(f64, f64)>, v| {
+                Some(match acc {
+                    Some((mn, mx)) => (mn.min(v), mx.max(v)),
+                    None => (v, v),
+                })
+            })
+            .ok_or_else(|| {
+                TGADomainError::InvalidOperation(format!(
+                    "x column '{}' has no valid values",
+                    x_col
+                ))
+            })?;
+        let (y_min, y_max) = y
+            .into_iter()
+            .flatten()
+            .fold(None, |acc: Option<(f64, f64)>, v| {
+                Some(match acc {
+                    Some((mn, mx)) => (mn.min(v), mx.max(v)),
+                    None => (v, v),
+                })
+            })
+            .ok_or_else(|| {
+                TGADomainError::InvalidOperation(format!(
+                    "y column '{}' has no valid values",
+                    y_col
+                ))
+            })?;
+
+        Ok(Ranges {
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+        })
+    }
+
+    //===================================================================================================================
+    // MISC
+
+    pub fn sample_columns(
+        &self,
+        time_col: &str,
+        value_cols: &[&str],
+        range: Option<ViewRange>,
+        max_points: usize,
+    ) -> Result<Vec<PlotSeries>, TGADomainError> {
+        let df = self.frame.clone().collect()?;
+
+        let time = df.column(time_col)?.f64()?;
+
+        // 1️⃣ выбрать индексы по диапазону
+        let indices: Vec<usize> = time
+            .into_no_null_iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                range
+                    .as_ref()
+                    .map_or(true, |r| *t >= r.t_min && *t <= r.t_max)
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        if indices.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // 2️⃣ равномерная подсэмплинг-сетка
+        let step = (indices.len() as f64 / max_points as f64).ceil() as usize;
+        let sampled_idx: Vec<usize> = indices.into_iter().step_by(step).collect();
+
+        // 3️⃣ собрать серии
+        let x: Vec<f64> = sampled_idx.iter().map(|&i| time.get(i).unwrap()).collect();
+
+        let mut out = Vec::new();
+
+        for &col in value_cols {
+            let s = df.column(col)?.f64()?;
+            let y: Vec<f64> = sampled_idx.iter().map(|&i| s.get(i).unwrap()).collect();
+
+            out.push(PlotSeries {
+                name_x: time_col.to_string().clone(),
+                name_y: col.to_string(),
+                x: x.clone(),
+                y,
+            });
+        }
+
+        Ok(out)
+    }
+
+    pub fn list_of_columns(&self) -> Vec<String> {
+        let schema = &self.schema.columns;
+        let columns: Vec<String> = schema.keys().cloned().collect();
+        columns
+    }
+}

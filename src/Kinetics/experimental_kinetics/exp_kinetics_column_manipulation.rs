@@ -1,11 +1,170 @@
-use crate::Kinetics::experimental_kinetics::exp_kinetics_main::{
+use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     ColumnMeta, ColumnOrigin, TGADataset, TGADomainError, UnaryOp, Unit,
 };
 use polars::error::PolarsResult;
 use polars::prelude::DataType;
 use polars::prelude::Expr;
 use polars::prelude::*;
+use tabled::builder::Builder;
+use tabled::settings::Style;
+
 impl TGADataset {
+    //================================================================
+    // GETTERS
+
+    pub fn get_time(&self) -> Result<Vec<f64>, TGADomainError> {
+        let time_col = self
+            .schema
+            .time
+            .as_ref()
+            .ok_or(TGADomainError::TimeNotBound)?;
+        let df = self
+            .frame
+            .clone()
+            .collect()
+            .map_err(TGADomainError::PolarsError)?;
+        let series = df.column(time_col).map_err(TGADomainError::PolarsError)?;
+        let f64_series = series.f64().map_err(TGADomainError::PolarsError)?;
+        Ok(f64_series.into_no_null_iter().collect())
+    }
+
+    pub fn get_mass(&self) -> Result<Vec<f64>, TGADomainError> {
+        let mass_col = self
+            .schema
+            .mass
+            .as_ref()
+            .ok_or(TGADomainError::MassNotBound)?;
+        let df = self
+            .frame
+            .clone()
+            .collect()
+            .map_err(TGADomainError::PolarsError)?;
+        let series = df.column(mass_col).map_err(TGADomainError::PolarsError)?;
+        let f64_series = series.f64().map_err(TGADomainError::PolarsError)?;
+        Ok(f64_series.into_no_null_iter().collect())
+    }
+
+    pub fn get_temperature(&self) -> Result<Vec<f64>, TGADomainError> {
+        let temp_col = self
+            .schema
+            .temperature
+            .as_ref()
+            .ok_or(TGADomainError::TemperatureNotBound)?;
+        let df = self
+            .frame
+            .clone()
+            .collect()
+            .map_err(TGADomainError::PolarsError)?;
+        let series = df.column(temp_col).map_err(TGADomainError::PolarsError)?;
+        let f64_series = series.f64().map_err(TGADomainError::PolarsError)?;
+        Ok(f64_series.into_no_null_iter().collect())
+    }
+
+    pub fn get_column(&self, name: &str) -> Result<Vec<f64>, TGADomainError> {
+        let df = self
+            .frame
+            .clone()
+            .collect()
+            .map_err(TGADomainError::PolarsError)?;
+        let series = df.column(name).map_err(TGADomainError::PolarsError)?;
+        let f64_series = series.f64().map_err(TGADomainError::PolarsError)?;
+        Ok(f64_series.into_no_null_iter().collect())
+    }
+    pub fn get_dT_dt(&self) -> Result<Vec<f64>, TGADomainError> {
+        let dT_dt_col = self
+            .schema
+            .dT_dt
+            .as_ref()
+            .ok_or(TGADomainError::DtDtNotFound)?;
+        let df = self
+            .frame
+            .clone()
+            .collect()
+            .map_err(TGADomainError::PolarsError)?;
+        let series = df.column(dT_dt_col).map_err(TGADomainError::PolarsError)?;
+        let f64_series = series.f64().map_err(TGADomainError::PolarsError)?;
+        Ok(f64_series.into_no_null_iter().collect())
+    }
+    pub fn get_dm_dt(&self) -> Result<Vec<f64>, TGADomainError> {
+        let dm_dt_col = self
+            .schema
+            .dm_dt
+            .as_ref()
+            .ok_or(TGADomainError::DmDtNotFound)?;
+        let df = self
+            .frame
+            .clone()
+            .collect()
+            .map_err(TGADomainError::PolarsError)?;
+        let series = df.column(dm_dt_col).map_err(TGADomainError::PolarsError)?;
+        let f64_series = series.f64().map_err(TGADomainError::PolarsError)?;
+        Ok(f64_series.into_no_null_iter().collect())
+    }
+    pub fn get_alpha(&self) -> Result<Vec<f64>, TGADomainError> {
+        let alpha_col = self
+            .schema
+            .alpha
+            .as_ref()
+            .ok_or(TGADomainError::AlphaNotFound)?;
+        let df = self
+            .frame
+            .clone()
+            .collect()
+            .map_err(TGADomainError::PolarsError)?;
+        let series = df.column(alpha_col).map_err(TGADomainError::PolarsError)?;
+        let f64_series = series.f64().map_err(TGADomainError::PolarsError)?;
+        Ok(f64_series.into_no_null_iter().collect())
+    }
+    pub fn get_dalpha_dt(&self) -> Result<Vec<f64>, TGADomainError> {
+        let dalpha_dt_col = self
+            .schema
+            .dm_dt
+            .as_ref()
+            .ok_or(TGADomainError::DalphaDtNotFound)?;
+        let df = self
+            .frame
+            .clone()
+            .collect()
+            .map_err(TGADomainError::PolarsError)?;
+        let series = df
+            .column(dalpha_dt_col)
+            .map_err(TGADomainError::PolarsError)?;
+        let f64_series = series.f64().map_err(TGADomainError::PolarsError)?;
+        Ok(f64_series.into_no_null_iter().collect())
+    }
+
+    pub fn get_eta(&self) -> Result<Vec<f64>, TGADomainError> {
+        let eta_col = self
+            .schema
+            .eta
+            .as_ref()
+            .ok_or(TGADomainError::EtaNotFound)?;
+        let df = self
+            .frame
+            .clone()
+            .collect()
+            .map_err(TGADomainError::PolarsError)?;
+        let series = df.column(eta_col).map_err(TGADomainError::PolarsError)?;
+        let f64_series = series.f64().map_err(TGADomainError::PolarsError)?;
+        Ok(f64_series.into_no_null_iter().collect())
+    }
+    pub fn get_deta_dt(&self) -> Result<Vec<f64>, TGADomainError> {
+        let deta_dt_col = self
+            .schema
+            .dm_dt
+            .as_ref()
+            .ok_or(TGADomainError::DetaDtNotFound)?;
+        let df = self
+            .frame
+            .clone()
+            .collect()
+            .map_err(TGADomainError::PolarsError)?;
+        let series = df
+            .column(deta_dt_col)
+            .map_err(TGADomainError::PolarsError)?;
+        let f64_series = series.f64().map_err(TGADomainError::PolarsError)?;
+        Ok(f64_series.into_no_null_iter().collect())
+    }
     //================================================================
     // BASIC TRANSFORMATIONS: COLUMN CUT AND FILTER
     pub fn with_column_expr(mut self, meta: ColumnMeta, expr: Expr) -> Self {
@@ -21,6 +180,7 @@ impl TGADataset {
         Self {
             frame,
             schema: self.schema,
+            oneframeplot: None,
         }
     }
     pub fn filter_by_mask(self, mask: Expr) -> Self {
@@ -73,7 +233,73 @@ impl TGADataset {
         Self {
             frame,
             schema: self.schema,
+            oneframeplot: None,
         }
+    }
+
+    pub fn trim_null_edges(mut self) -> Self {
+        let df = self.frame.clone().collect().unwrap();
+
+        // найдём максимальное количество null слева и справа по всем колонкам
+        let mut left = 0usize;
+        let mut right = 0usize;
+
+        for col in df.get_columns() {
+            let s = col;
+
+            let n = s.len();
+            let mut l = 0;
+            while l < n && s.is_null().get(l).unwrap_or(false) {
+                l += 1;
+            }
+
+            let mut r = 0;
+            while r < n && s.is_null().get(n - 1 - r).unwrap_or(false) {
+                r += 1;
+            }
+
+            left = left.max(l);
+            right = right.max(r);
+        }
+
+        self.frame = self
+            .frame
+            .slice(left as i64, (df.height() - left - right) as u32);
+
+        self
+    }
+
+    pub fn trim_null_edges_for_columns(mut self, cols_to_trim: &[&str]) -> Self {
+        let df = self.frame.clone().collect().unwrap();
+
+        let mut left = 0usize;
+        let mut right = 0usize;
+
+        for &col_name in cols_to_trim {
+            if let Ok(col) = df.column(col_name) {
+                let s = col;
+
+                let n = s.len();
+                let mut l = 0;
+                while l < n && s.is_null().get(l).unwrap_or(false) {
+                    l += 1;
+                }
+
+                let mut r = 0;
+                while r < n && s.is_null().get(n - 1 - r).unwrap_or(false) {
+                    r += 1;
+                }
+
+                left = left.max(l);
+                right = right.max(r);
+            }
+        }
+
+        self.frame = self
+            .frame
+            .slice(left as i64, (df.height() - left - right) as u32);
+
+        self
     }
     pub fn rename_column(mut self, old: &str, new: &str) -> Result<Self, TGADomainError> {
         self.frame = self.frame.rename([old], [new], false);
@@ -97,6 +323,46 @@ impl TGADataset {
         Ok(self)
     }
 
+    /// Drop a column by name from the dataset. This removes the column from the frame and metadata.
+    /// If the column is currently bound as time, temperature, or mass, the corresponding binding is set to None.
+    pub fn drop_column(mut self, col_name: &str) -> Result<Self, TGADomainError> {
+        // Check column existence either in metadata or in the physical frame schema
+        let exists_in_meta = self.schema.columns.contains_key(col_name);
+        let exists_in_frame = self
+            .frame
+            .clone()
+            .collect_schema()?
+            .iter_names()
+            .any(|n| n == col_name);
+        if !exists_in_meta && !exists_in_frame {
+            return Err(TGADomainError::ColumnNotFound(col_name.into()));
+        }
+
+        // Remove from LazyFrame by selecting all columns except the one to drop
+        let schema = self.frame.clone().collect_schema()?;
+        let remaining_cols: Vec<Expr> = schema
+            .iter_names()
+            .filter(|&name| name != col_name)
+            .map(|name| col(name.as_str()))
+            .collect();
+        self.frame = self.frame.select(remaining_cols);
+
+        // Remove from metadata map
+        self.schema.columns.remove(col_name);
+
+        // Clear bindings if they point to this column
+        if self.schema.time.as_deref() == Some(col_name) {
+            self.schema.time = None;
+        }
+        if self.schema.temperature.as_deref() == Some(col_name) {
+            self.schema.temperature = None;
+        }
+        if self.schema.mass.as_deref() == Some(col_name) {
+            self.schema.mass = None;
+        }
+
+        Ok(self)
+    }
     //======================================================================
     // UNIT TRANSFORMATIONS
     /// Это не просто offset, это семантическая операция, меняющая единицы.
@@ -145,6 +411,26 @@ impl TGADataset {
             }
         }
         self
+    }
+
+    //
+    pub fn move_time_to_zero(mut self) -> Result<Self, TGADomainError> {
+        let time = self
+            .schema
+            .time
+            .as_ref()
+            .ok_or(TGADomainError::TimeNotBound)?
+            .clone();
+
+        // Materialize the very first time value t0
+        let df = self.frame.clone().select([col(&time)]).limit(1).collect()?;
+        let t0 = df.column(&time)?.f64()?.get(0).ok_or_else(|| {
+            TGADomainError::InvalidOperation("Time column is empty; cannot offset".into())
+        })?;
+
+        // Offset the time column by -t0
+        self = self.offset_column(&time, -t0);
+        Ok(self)
     }
     /// прибавление константы ко всем значениям в колонке
     pub fn offset_column(mut self, colmn: &str, offset: f64) -> Self {
@@ -372,13 +658,13 @@ impl TGADataset {
     //======================================================================
     // DIMENSIONLESS
     /// dimensionless mass
-    pub fn derive_dimensionless_mass(mut self, from: f64, to: f64) -> PolarsResult<Self> {
+    pub fn derive_dimensionless_mass(mut self, from: f64, to: f64) -> Result<Self, TGADomainError> {
         let mass_col = self.schema.mass.as_ref().unwrap().clone();
         let time_col = self.schema.time.as_ref().unwrap().clone();
 
         let m0 = self.mean_on_interval(&mass_col, &time_col, from, to)?;
 
-        let new_name = "dimensionless_mass".to_string();
+        let new_name = "alpha".to_string();
 
         self.frame = self
             .frame
@@ -393,6 +679,7 @@ impl TGADataset {
             },
         );
 
+        self.schema.alpha = Some("alpha".to_string());
         Ok(self)
     }
 
@@ -444,13 +731,13 @@ impl TGADataset {
                 origin: ColumnOrigin::PolarsDerived,
             },
         );
-
+        self.schema.alpha = Some(new_col.to_string());
         Ok(self)
     }
     /// conversion = 1 - dimensionless_mass
     pub fn derive_conversion(mut self) -> Self {
-        let src = "dimensionless_mass";
-        let dst = "conversion";
+        let src = "alpha";
+        let dst = "eta";
 
         self.frame = self.frame.with_column((lit(1.0) - col(src)).alias(dst));
 
@@ -490,4 +777,329 @@ impl TGADataset {
 
         Ok(self)
     }
+    //================================================================================================
+    //      DIAGNOSTICS AND TESTING
+    /// Check for null values in all columns and print information
+    pub fn check_nulls(self) -> Self {
+        let df = self.frame.clone().collect().unwrap();
+        for col_name in df.get_column_names() {
+            let null_count = df.column(col_name).unwrap().null_count();
+            println!("Column '{}': {} null values", col_name, null_count);
+        }
+        self
+    }
+
+    pub fn check_nulls_for_operation(self, operation: &str) -> Self {
+        let df = self.frame.clone().collect().unwrap();
+        for col_name in df.get_column_names() {
+            let null_count = df.column(col_name).unwrap().null_count();
+            if null_count > 0 {
+                println!(
+                    "Opaeration {}. Column '{}': {} null values",
+                    operation, col_name, null_count
+                )
+            };
+        }
+        self
+    }
+
+    pub fn check_nulls_for_operation_borrowed(&self, operation: &str) {
+        let df = self.frame.clone().collect().unwrap();
+        for col_name in df.get_column_names() {
+            let null_count = df.column(col_name).unwrap().null_count();
+            if null_count > 0 {
+                println!(
+                    "Opaeration {}. Column '{}': {} null values",
+                    operation, col_name, null_count
+                )
+            };
+        }
+    }
+    pub fn assert_no_nulls(self, operation: &str) -> Result<Self, TGADomainError> {
+        let df = self.frame.clone().collect()?;
+
+        let mut offenders = Vec::new();
+
+        for col in df.get_column_names() {
+            let n = df.column(col)?.null_count();
+            if n > 0 {
+                offenders.push((col.to_string(), n));
+            }
+        }
+
+        if !offenders.is_empty() {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "Operation '{}': nulls detected {:?}",
+                operation, offenders
+            )));
+        }
+
+        Ok(self)
+    }
+
+    pub fn print_column_stats(&self, cols: &[&str]) {
+        let df = self.frame.clone().collect().unwrap();
+
+        for &col in cols {
+            let s = df.column(col).unwrap().f64().unwrap();
+            let values: Vec<f64> = s.into_no_null_iter().collect();
+
+            let mean = values.iter().copied().sum::<f64>() / values.len() as f64;
+            let std = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                / values.len() as f64)
+                .sqrt();
+
+            let diffs: Vec<f64> = values.windows(2).map(|w| w[1] - w[0]).collect();
+            let noise = diffs.iter().map(|v| v.powi(2)).sum::<f64>().sqrt() / diffs.len() as f64;
+
+            println!(
+                "Column '{}': n={}, mean={:.4}, std={:.4}, diff_noise={:.4}",
+                col,
+                values.len(),
+                mean,
+                std,
+                noise
+            );
+        }
+    }
+
+    pub fn validate_required_columns(&self, cols: &[&str]) -> Result<(), TGADomainError> {
+        let schema = &self.schema;
+
+        for &col in cols {
+            if !schema.columns.contains_key(col) {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Required column '{}' is missing",
+                    col
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Samples all dataframe columns into `n` evenly spaced layers.
+    ///
+    /// Outer vector: sampled layers (rows),
+    /// inner vector: values for each column at that sampled index.
+    /// Null values are represented as `NaN`.
+    pub fn sample_all_columns_even_layers(
+        &self,
+        n: usize,
+    ) -> Result<Vec<Vec<f64>>, TGADomainError> {
+        let df = self.frame.clone().collect()?;
+        let width = df.width();
+        let height = df.height();
+
+        if n == 0 || width == 0 || height == 0 {
+            return Ok(Vec::new());
+        }
+
+        let sample_count = n.min(height);
+        let indices: Vec<usize> = if sample_count == 1 {
+            vec![0]
+        } else {
+            (0..sample_count)
+                .map(|i| i * (height - 1) / (sample_count - 1))
+                .collect()
+        };
+
+        let mut columns_sampled: Vec<Vec<f64>> = Vec::with_capacity(width);
+
+        for col in df.get_columns() {
+            let col_f64 = col.cast(&DataType::Float64)?;
+            let chunked = col_f64.f64()?;
+            let sampled = indices
+                .iter()
+                .map(|&idx| chunked.get(idx).unwrap_or(f64::NAN))
+                .collect::<Vec<f64>>();
+            columns_sampled.push(sampled);
+        }
+
+        let mut layers: Vec<Vec<f64>> = vec![Vec::with_capacity(width); sample_count];
+        for col_values in &columns_sampled {
+            for (row_i, value) in col_values.iter().enumerate() {
+                layers[row_i].push(*value);
+            }
+        }
+
+        Ok(layers)
+    }
+
+    /// Builds a table from `sample_all_columns_even_layers` using `tabled`.
+    ///
+    /// `headers` should correspond to dataframe columns by position.
+    /// If a header entry is `None` or missing, the dataframe column name is used.
+    pub fn sample_all_columns_even_layers_table(
+        &self,
+        n: usize,
+        headers: Vec<Option<String>>,
+    ) -> Result<(), TGADomainError> {
+        let df = self.frame.clone().collect()?;
+        let layers = self.sample_all_columns_even_layers(n)?;
+
+        if df.width() == 0 {
+            return Ok(());
+        }
+
+        let mut builder = Builder::default();
+        let header_row: Vec<String> = if headers.is_empty() {
+            let header_row: Vec<String> = self.list_of_columns();
+            header_row
+        } else {
+            let header_row: Vec<String> = df
+                .get_columns()
+                .iter()
+                .enumerate()
+                .map(|(i, col)| {
+                    headers
+                        .get(i)
+                        .and_then(|h| h.clone())
+                        .unwrap_or_else(|| col.name().to_string())
+                })
+                .collect();
+            header_row
+        };
+        builder.push_record(header_row);
+
+        for row in layers {
+            builder.push_record(row.into_iter().map(|v| format!("{:.6}", v)));
+        }
+
+        let mut table = builder.build();
+        table.with(Style::rounded());
+        println!("{}", table);
+        Ok(())
+        //Ok(table.to_string())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ColumnStats {
+    pub mean: f64,
+    pub std: f64,
+    pub mad: f64,
+    pub min: f64,
+    pub max: f64,
+}
+use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::extract_f64_column;
+pub fn column_stats(df: &DataFrame, col: &str) -> Result<ColumnStats, TGADomainError> {
+    let s = df
+        .column(col)?
+        .f64()
+        .map_err(|_| TGADomainError::InvalidColumnType(col.into()))?;
+
+    let values: Vec<f64> = s.into_no_null_iter().collect();
+    if values.is_empty() {
+        return Err(TGADomainError::EmptyColumn(col.into()));
+    }
+
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let std = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64).sqrt();
+
+    let mut sorted = values.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let med = sorted[sorted.len() / 2];
+    let mad = sorted.iter().map(|v| (v - med).abs()).sum::<f64>() / sorted.len() as f64;
+
+    Ok(ColumnStats {
+        mean,
+        std,
+        mad,
+        min: *sorted.first().unwrap(),
+        max: *sorted.last().unwrap(),
+    })
+}
+
+#[derive(Debug)]
+pub struct StatsDiff {
+    pub before: ColumnStats,
+    pub after: ColumnStats,
+}
+
+impl StatsDiff {
+    pub fn std_ratio(&self) -> f64 {
+        self.after.std / self.before.std
+    }
+
+    pub fn mad_ratio(&self) -> f64 {
+        self.after.mad / self.before.mad
+    }
+
+    pub fn improvement(&self) -> bool {
+        self.std_ratio() < 1.0 && self.mad_ratio() < 1.0
+    }
+}
+
+pub fn diff_column_stats(
+    before: &DataFrame,
+    after: &DataFrame,
+    col: &str,
+) -> Result<StatsDiff, TGADomainError> {
+    Ok(StatsDiff {
+        before: column_stats(before, col)?,
+        after: column_stats(after, col)?,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OperationGuarantees {
+    pub preserves_length: bool,
+    pub produces_nulls: bool,
+    pub preserves_monotonicity: bool,
+}
+
+use std::collections::HashMap;
+pub fn operation_guarantees() -> HashMap<&'static str, OperationGuarantees> {
+    use OperationGuarantees as G;
+
+    HashMap::from([
+        (
+            "trim_edges",
+            G {
+                preserves_length: false,
+                produces_nulls: false,
+                preserves_monotonicity: true,
+            },
+        ),
+        (
+            "hampel_filter",
+            G {
+                preserves_length: true,
+                produces_nulls: false,
+                preserves_monotonicity: true,
+            },
+        ),
+        (
+            "rolling_mean",
+            G {
+                preserves_length: true,
+                produces_nulls: true,
+                preserves_monotonicity: true,
+            },
+        ),
+        (
+            "sg_filter",
+            G {
+                preserves_length: true,
+                produces_nulls: false,
+                preserves_monotonicity: true,
+            },
+        ),
+        (
+            "spline_smooth",
+            G {
+                preserves_length: true,
+                produces_nulls: false,
+                preserves_monotonicity: true,
+            },
+        ),
+        (
+            "derive_rate",
+            G {
+                preserves_length: false,
+                produces_nulls: true,
+                preserves_monotonicity: false,
+            },
+        ),
+    ])
 }

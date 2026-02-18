@@ -1,5 +1,7 @@
 use crate::gui::all_libs_gui;
 use crate::gui::combustion;
+
+use crate::gui::experimental_kinetics_gui::experimental_kinetics_gui_main;
 use crate::gui::gui_main::egui::IconData;
 use crate::gui::gui_solid_ivp;
 use crate::gui::kinetics_gui;
@@ -81,6 +83,8 @@ struct MainApp {
     all_libs_app: Option<all_libs_gui::AllLibsGui>,
     solid_ivp_open: bool,
     solid_ivp_app: Option<gui_solid_ivp::SolidIVPApp>,
+    experimental_kinetics_open: bool,
+    experimental_kinetics_app: Option<experimental_kinetics_gui_main::PlotApp>,
     logo_texture: Option<egui::TextureHandle>,
 }
 impl MainApp {
@@ -106,6 +110,8 @@ impl MainApp {
             all_libs_app: None,
             solid_ivp_open: false,
             solid_ivp_app: None,
+            experimental_kinetics_open: false,
+            experimental_kinetics_app: None,
             logo_texture,
         }
     }
@@ -222,7 +228,13 @@ impl eframe::App for MainApp {
                                     self.solid_ivp_app = Some(gui_solid_ivp::SolidIVPApp::new());
                                 }
                             }
-
+                            ui.add_space(20.0);
+                            if ui.add_sized([200.0, 80.0], egui::Button::new("📊 Experimental Kinetics")).clicked() {
+                                self.experimental_kinetics_open = true;
+                                if self.experimental_kinetics_app.is_none() {
+                                    self.experimental_kinetics_app = Some(experimental_kinetics_gui_main::PlotApp::new());
+                                }
+                            }
                         });
                     });
                 });
@@ -297,6 +309,12 @@ impl eframe::App for MainApp {
         if self.solid_ivp_open {
             if let Some(solid_ivp_app) = &mut self.solid_ivp_app {
                 solid_ivp_app.show(ctx, &mut self.solid_ivp_open)
+            }
+        }
+
+        if self.experimental_kinetics_open {
+            if let Some(experimental_kinetics_app) = &mut self.experimental_kinetics_app {
+                experimental_kinetics_app.show(ctx, &mut self.experimental_kinetics_open);
             }
         }
     }

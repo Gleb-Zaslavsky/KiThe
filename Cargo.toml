@@ -1,6 +1,6 @@
 [package]
 name = "KiThe"
-version = "0.2.13"
+version = "0.2.15"
 edition = "2024"
 author = "Gleb Zasllavsky"
 license = "MIT"
@@ -41,8 +41,11 @@ dialoguer = "0.12.0"
 egui_extras = "0.33.3"
 polars ={ version = "0.52.0", features = ["lazy", "csv", "parquet", "rolling_window", "polars-ops"] }
 ndarray = "0.17.2"
+ndarray-stats = "0.7.0"
 rand = "0.9.2"
 rand_distr = "0.5.1"
+splines = "5.0.0"
+bspline = "1.1.0"
 
 lstsq = "0.7.0"
 [build-dependencies]

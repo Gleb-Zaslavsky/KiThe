@@ -1,3 +1,4 @@
+use polars::prelude::{DataFrame, LazyFrame, PolarsResult};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
@@ -146,9 +147,70 @@ impl VirtualTGABuilder {
         VirtualTGA::generate(&self.cfg)
     }
 }
+//================================================================================================================
+//  PIPELINR INVARIANT TEST
+pub struct PipelineInvariantTest {
+    pub df: DataFrame,
+}
 
+impl PipelineInvariantTest {
+    pub fn from_lazy(frame: &LazyFrame) -> PolarsResult<Self> {
+        Ok(Self {
+            df: frame.clone().collect()?,
+        })
+    }
 
+    pub fn no_nulls(&self, cols: &[&str]) {
+        for &c in cols {
+            let n = self.df.column(c).unwrap().null_count();
+            assert_eq!(n, 0, "Column '{}' has {} nulls", c, n);
+        }
+    }
 
+    pub fn same_length(&self, cols: &[&str]) {
+        let len = self.df.height();
+        for &c in cols {
+            assert_eq!(
+                self.df.column(c).unwrap().len(),
+                len,
+                "Column '{}' length mismatch",
+                c
+            );
+        }
+    }
+
+    pub fn monotonic_increasing(&self, col: &str) {
+        let s = self.df.column(col).unwrap().f64().unwrap();
+        let mut prev = None;
+        for v in s.into_no_null_iter() {
+            if let Some(p) = prev {
+                assert!(v > p, "Column '{}' not monotonic", col);
+            }
+            prev = Some(v);
+        }
+    }
+
+    pub fn all_no_nulls(&self) {
+        for s in self.df.get_columns() {
+            let n = s.null_count();
+            assert_eq!(n, 0, "Column '{}' has {} nulls", s.name(), n);
+        }
+    }
+
+    pub fn min_length(&self, min: usize) {
+        let h = self.df.height();
+        assert!(h >= min, "DataFrame too short: {}, expected >= {}", h, min);
+    }
+
+    pub fn same_length_all(&self) {
+        let len = self.df.height();
+        for s in self.df.get_columns() {
+            assert_eq!(s.len(), len, "Column '{}' length mismatch", s.name());
+        }
+    }
+}
+
+//===================================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,8 +230,6 @@ mod tests {
             }),
             seed: 42,
         };
-
-        // дальше: normalize_txt → TGADataset → cut_interval → assert lengths
     }
 
     #[test]
@@ -187,6 +247,7 @@ mod tests {
         };
 
         let virtual_tga = VirtualTGA::generate(&cfg);
+        println!("time {:?}", virtual_tga.time);
 
         assert_eq!(virtual_tga.time.len(), cfg.n_points);
         assert_eq!(virtual_tga.temperature.len(), cfg.n_points);
@@ -303,5 +364,94 @@ mod tests {
             }
         }
         assert!(has_spike, "Expected at least one spike in the data");
+    }
+}
+
+#[cfg(test)]
+mod tests2 {
+    use super::*;
+    use crate::Kinetics::experimental_kinetics::exp_engine_api::ViewRange;
+    use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
+    use crate::Kinetics::experimental_kinetics::one_experiment_dataset_test::tests::{
+        ds_from_csv, make_csv,
+    };
+    #[test]
+    fn sample_columns_respects_max_points() {
+        let csv = make_csv(100_000, 42);
+        let ds = ds_from_csv(&csv);
+
+        let series = ds.sample_columns("time", &["mass"], None, 2000).unwrap();
+
+        assert_eq!(series.len(), 1);
+        assert!(series[0].x.len() <= 2000);
+        assert_eq!(series[0].x.len(), series[0].y.len());
+    }
+    #[test]
+    fn sample_columns_respects_max_points2() {
+        let csv = make_csv(100_000, 123);
+        let ds = ds_from_csv(&csv)
+            .bind_time("time", Unit::Second)
+            .unwrap()
+            .bind_mass("mass", Unit::Milligram)
+            .unwrap();
+
+        let out = ds.sample_columns("time", &["mass"], None, 2000).unwrap();
+
+        assert_eq!(out.len(), 1);
+
+        let s = &out[0];
+        assert!(s.x.len() <= 2000);
+        assert_eq!(s.x.len(), s.y.len());
+    }
+    #[test]
+    fn sample_columns_respects_range() {
+        let csv = make_csv(10_000, 7);
+        let ds = ds_from_csv(&csv);
+
+        let series = ds
+            .sample_columns(
+                "time",
+                &["mass"],
+                Some(ViewRange {
+                    t_min: 10.0,
+                    t_max: 20.0,
+                }),
+                500,
+            )
+            .unwrap();
+
+        let s = &series[0];
+        assert!(!s.x.is_empty());
+
+        assert!(s.x.iter().all(|&t| t >= 10.0 && t <= 20.0));
+    }
+
+    #[test]
+    fn sample_columns_respects_view_range2() {
+        let csv = make_csv(50_000, 999);
+        let ds = ds_from_csv(&csv)
+            .bind_time("time", Unit::Second)
+            .unwrap()
+            .bind_mass("mass", Unit::Milligram)
+            .unwrap();
+
+        let out = ds
+            .sample_columns(
+                "time",
+                &["mass"],
+                Some(ViewRange {
+                    t_min: 100.0,
+                    t_max: 200.0,
+                }),
+                1000,
+            )
+            .unwrap();
+
+        let s = &out[0];
+        assert!(!s.x.is_empty());
+
+        for &t in &s.x {
+            assert!(t >= 100.0 && t <= 200.0);
+        }
     }
 }
