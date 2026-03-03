@@ -1,0 +1,7 @@
+{
+  "substance_base": "substance_base_v2.json",
+  "all_keys_substance": "all_keys_substance.json",
+  "elements": "elements.json",
+  "reactbase": "Reactbase.json",
+  "dict_reaction": "dict_reaction.json"
+}

@@ -1,0 +1,9 @@
+{
+  "calibration_line": {
+    "k": -1.0017,
+    "b": 40.88
+  },
+  "n_points": 1000,
+  "symbolic_expression": "mass",
+  "log_level": "info"
+}
