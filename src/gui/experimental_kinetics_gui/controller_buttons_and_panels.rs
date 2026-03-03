@@ -2,12 +2,21 @@
 //! Direct Problem and Test Options with stub handlers.
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
+use crate::Kinetics::experimental_kinetics::exp_engine_api::XY;
 use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
+use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
 use crate::gui::experimental_kinetics_gui::model::TGAGUIError;
+
+use crate::gui::experimental_kinetics_gui::controller_filters::Mathematics;
+use crate::gui::experimental_kinetics_gui::controller_kinetics::{DirectProblem, KineticMethods};
+
+use crate::gui::experimental_kinetics_gui::test_options::TestOptions;
 use eframe::egui;
+use log::info;
 use std::path::Path;
 use std::path::PathBuf;
+
 //===================================================================================
 //  DROP DOWN MENUE AT THE TOP OF WINDOW
 //====================================================================================
@@ -19,7 +28,9 @@ impl TopDropDownMenues {
     pub fn top_menus(
         ui: &mut egui::Ui,
         model: &mut PlotModel,
+        mathematics: &mut Mathematics,
         new_experiment_dialog: &mut NewExperimentDialogState,
+        test_options: &mut TestOptions,
     ) {
         ui.horizontal_wrapped(|ui| {
             ui.menu_button("File Manager", |ui| {
@@ -27,7 +38,7 @@ impl TopDropDownMenues {
             });
 
             ui.menu_button("Math", |ui| {
-                Mathematics::show(ui, model);
+                mathematics.show_menu(ui);
             });
 
             ui.menu_button("Kinetic Methods", |ui| {
@@ -39,10 +50,11 @@ impl TopDropDownMenues {
             });
 
             ui.menu_button("Test Options", |ui| {
-                TestOptions::show(ui, model);
+                TestOptions::show(ui, model, test_options);
             });
         });
         ui.separator();
+        mathematics.show_windows(ui.ctx(), model);
     }
 }
 
@@ -75,7 +87,16 @@ impl FileManager {
             new_experiment_dialog.manage_plot_open = true;
             ui.ctx().request_repaint();
         }
-
+        ui.separator();
+        if ui.button("Save As CSV").clicked() {
+            new_experiment_dialog.open_save_series_dialog(SaveSeriesFormat::Csv);
+            ui.ctx().request_repaint();
+        }
+        if ui.button("Save As TXT").clicked() {
+            new_experiment_dialog.open_save_series_dialog(SaveSeriesFormat::Txt);
+            ui.ctx().request_repaint();
+        }
+        if ui.button("Save As Excel").clicked() {}
         if ui.button("Save As Image").clicked() {
             Self::save_as_image(model);
         }
@@ -98,103 +119,16 @@ impl FileManager {
     }
 }
 
-// Group: Mathematics
-struct Mathematics;
-
-impl Mathematics {
-    fn show(ui: &mut egui::Ui, model: &mut PlotModel) {
-        if ui.button("Filter Data").clicked() {
-            Self::filter_data(model);
-        }
-
-        if ui.button("Differentiate").clicked() {
-            Self::differentiate(model);
-        }
-
-        if ui.button("Smooth").clicked() {
-            Self::smooth(model);
-        }
-
-        if ui.button("Average Data").clicked() {
-            Self::average_data(model);
-        }
-
-        if ui.button("Splines").clicked() {
-            Self::splines(model);
-        }
-    }
-
-    fn filter_data(_model: &mut PlotModel) {
-        println!("Stub: Filter Data clicked");
-    }
-
-    fn differentiate(_model: &mut PlotModel) {
-        println!("Stub: Differentiate clicked");
-    }
-
-    fn smooth(_model: &mut PlotModel) {
-        println!("Stub: Smooth clicked");
-    }
-
-    fn average_data(_model: &mut PlotModel) {
-        println!("Stub: Average Data clicked");
-    }
-
-    fn splines(_model: &mut PlotModel) {
-        println!("Stub: Splines clicked");
-    }
-}
-
-// Group: Kinetic Methods (stubs)
-struct KineticMethods;
-
-impl KineticMethods {
-    fn show(ui: &mut egui::Ui, _model: &mut PlotModel) {
-        if ui.button("Estimate Rates").clicked() {
-            println!("Stub: Estimate Rates");
-        }
-
-        if ui.button("Fit Mechanism").clicked() {
-            println!("Stub: Fit Mechanism");
-        }
-    }
-}
-
-// Group: Direct Problem (stubs)
-struct DirectProblem;
-
-impl DirectProblem {
-    fn show(ui: &mut egui::Ui, _model: &mut PlotModel) {
-        if ui.button("Solve IVP").clicked() {
-            println!("Stub: Solve IVP");
-        }
-
-        if ui.button("Solve BVP").clicked() {
-            println!("Stub: Solve BVP");
-        }
-    }
-}
-
-// Group: Test Options (stubs)
-struct TestOptions;
-
-impl TestOptions {
-    fn show(ui: &mut egui::Ui, _model: &mut PlotModel) {
-        if ui.button("Run Tests").clicked() {
-            println!("Stub: Run Tests");
-        }
-
-        if ui.button("Show Logs").clicked() {
-            println!("Stub: Show Logs");
-        }
-    }
-}
 //=================================================================================================
-
+//  QUICK ACTION PANEL
+//=================================================================================================
 #[derive(Default)]
 pub struct QuickActionPanelState {
     pub input_value: f64,
     pub apply_only_to_selected_chart: bool,
+    pub input_string: Option<String>,
+    pub x_or_y: Option<XY>, //XY
+    pub plot_recreation_required: bool,
 }
 
 pub struct WrightPanelControllers;
@@ -208,21 +142,22 @@ impl WrightPanelControllers {
     ) -> Result<(), TGAGUIError> {
         let labels = [
             "Manage Plots",
-            "Clear Selection",
+            "Column Manager",
+            "golden pipeline",
+            "Clear Selected",
             "Reset View",
             "Refresh",
+            "cut before time",
+            "cut selected",
             "Zoom To Selection",
-            "from C° to K",
             "move time to zero",
-            "Delete",
-            "Divide",
-            "Sub",
-            "Mul",
-            "Add",
+            "Delete Plot",
+            // moved arithmetic buttons to be near input field below
             "calc relative mass",
             "calc conversion",
             "from mV to mg",
             "from s to h",
+            "from C° to K",
         ];
 
         let button_size = egui::vec2(108.0, 22.0);
@@ -235,13 +170,15 @@ impl WrightPanelControllers {
                         .add_sized(button_size, egui::Button::new(*label))
                         .clicked()
                     {
-                        let _ = Self::handle_quick_action(
+                        if let Err(err) = Self::handle_quick_action(
                             label,
                             model,
                             state,
                             manage_plot_dialog,
                             ui.ctx(),
-                        );
+                        ) {
+                            Self::set_action_error(model, err);
+                        }
                     }
                     if (index + 1) % 4 == 0 {
                         ui.end_row();
@@ -250,10 +187,68 @@ impl WrightPanelControllers {
             });
 
         ui.separator();
-        ui.horizontal(|ui| {
+
+        // Controls row: Input value + X/Y selector + new column entry
+        ui.horizontal_wrapped(|ui| {
+            // Input value
             ui.label("Input value:");
             ui.add(egui::DragValue::new(&mut state.input_value).speed(0.1));
+
+            ui.separator();
+
+            // X/Y selector: sets state.x_or_y
+            if ui.button("X").clicked() {
+                state.x_or_y = Some(XY::X);
+            }
+            if ui.button("Y").clicked() {
+                state.x_or_y = Some(XY::Y);
+            }
+
+            ui.separator();
+
+            // New column input bound to state.input_string
+            let mut tmp = state.input_string.clone().unwrap_or_default();
+            ui.label("new column:");
+            if ui.text_edit_singleline(&mut tmp).changed() {
+                if tmp.trim().is_empty() {
+                    state.input_string = None;
+                } else {
+                    state.input_string = Some(tmp);
+                }
+            }
         });
+
+        ui.add_space(4.0);
+        // Arithmetic operation buttons below "new column:" in a 2x3 grid.
+        egui::Grid::new("exp_kinetics_arith_grid")
+            .num_columns(3)
+            .spacing([4.0, 4.0])
+            .show(ui, |ui| {
+                let button_size_small = egui::vec2(64.0, 22.0);
+                for (idx, label) in ["Divide", "Sub", "Mul", "Add", "ln", "exp"]
+                    .iter()
+                    .enumerate()
+                {
+                    if ui
+                        .add_sized(button_size_small, egui::Button::new(*label))
+                        .clicked()
+                    {
+                        if let Err(err) = Self::handle_quick_action(
+                            label,
+                            model,
+                            state,
+                            manage_plot_dialog,
+                            ui.ctx(),
+                        ) {
+                            Self::set_action_error(model, err);
+                        }
+                    }
+                    if (idx + 1) % 3 == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+
         ui.checkbox(
             &mut state.apply_only_to_selected_chart,
             "apply only to the selected chart.",
@@ -274,7 +269,11 @@ impl WrightPanelControllers {
                 manage_plot_dialog.manage_plot_open = true;
                 ctx.request_repaint();
             }
-            "Clear Selection" => {
+            "Column Manager" => {
+                manage_plot_dialog.column_manager_open = true;
+                ctx.request_repaint();
+            }
+            "Clear Selected" => {
                 model.clear_selection_rect();
                 model.clear_selection();
             }
@@ -289,6 +288,18 @@ impl WrightPanelControllers {
                 model.fit_to_selection();
                 ctx.request_repaint();
             }
+            "cut before time" => {
+                model.cut_before_time_for_selected(state.input_value)?;
+                ctx.request_repaint();
+            }
+
+            "cut selected" => {
+                let xy = state.x_or_y.ok_or_else(|| {
+                    TGAGUIError::BindingError("Select X or Y before applying operation".to_string())
+                })?;
+                model.cut_range_x_or_y_for_selected(xy)?;
+                ctx.request_repaint();
+            }
 
             "from C° to K" => {
                 model.from_C_to_K_of_selected()?;
@@ -298,7 +309,77 @@ impl WrightPanelControllers {
                 model.from_s_to_h_of_selected()?;
                 ctx.request_repaint();
             }
+            "Delete Plot" => {
+                model.delete_selected_curve()?;
+                ctx.request_repaint();
+            }
+            "calc relative mass" => {
+                model
+                    .relative_mass_for_selected(state.input_value, state.input_string.as_deref())?;
+                ctx.request_repaint();
+            }
+            "calc conversion" => {
+                model.conversion_for_selected(state.input_value, state.input_string.as_deref())?;
+                ctx.request_repaint();
+            }
+            "from mV to mg" => {
+                model.calibrate_mass_from_voltage_with_new_optional_column_for_selected(
+                    state.input_string.as_deref(),
+                )?;
+                ctx.request_repaint();
+            }
+            "move time to zero" => {
+                model.move_time_to_zero_for_selected()?;
+                ctx.request_repaint();
+            }
 
+            "Add" => {
+                let column = Self::resolve_selected_column(model, state)?;
+                info!("adding to column {}", column);
+                if state.apply_only_to_selected_chart {
+                    model.add_column_in_its_range_for_selected(&column, state.input_value)?;
+                } else {
+                    model.add_column_for_selected(&column, state.input_value)?;
+                }
+                ctx.request_repaint();
+            }
+            "Sub" => {
+                let column = Self::resolve_selected_column(model, state)?;
+                if state.apply_only_to_selected_chart {
+                    model.sub_column_in_its_range_for_selected(&column, state.input_value)?;
+                } else {
+                    model.sub_column_for_selected(&column, state.input_value)?;
+                }
+                ctx.request_repaint();
+            }
+            "Mul" => {
+                let column = Self::resolve_selected_column(model, state)?;
+                if state.apply_only_to_selected_chart {
+                    model.mul_column_in_its_range_for_selected(&column, state.input_value)?;
+                } else {
+                    model.mul_column_of_selected(&column, state.input_value)?;
+                }
+                ctx.request_repaint();
+            }
+            "Divide" => {
+                let column = Self::resolve_selected_column(model, state)?;
+                if state.apply_only_to_selected_chart {
+                    model.div_column_in_its_range_for_selected(&column, state.input_value)?;
+                } else {
+                    model.div_column_of_selected(&column, state.input_value)?;
+                }
+                ctx.request_repaint();
+            }
+            "ln" => {
+                let column = Self::resolve_selected_column(model, state)?;
+                model.ln_column_for_selected(&column)?;
+                ctx.request_repaint();
+            }
+            "exp" => {
+                let column = Self::resolve_selected_column(model, state)?;
+                model.exp_column_for_selected(&column)?;
+                ctx.request_repaint();
+            }
             _ => {
                 println!(
                     "Stub: {action} clicked (input_value={}, selected_only={})",
@@ -309,6 +390,31 @@ impl WrightPanelControllers {
         Ok(())
     }
 
+    fn set_action_error(model: &mut PlotModel, err: TGAGUIError) {
+        let text = match err {
+            TGAGUIError::TGADomainError(domain) => format!("{:?}", domain),
+            TGAGUIError::SettingsErrors(msg) => msg,
+            TGAGUIError::BindingError(msg) => msg,
+        };
+        let _ = model.push_message(&text);
+    }
+    /// The functions for processing button presses for div, mul, add, sub, ln, exp.
+    /// Pressing the "X" or "Y" button calls the this_is_x_or_y function, which specifies the name of the column
+    /// to convert. Then, for a specific operation, like add_column_for_selected and sub_column_for_selected
+    ///  functions are called, and the value for addition, multiplication, etc. is taken from the input value field.
+    fn resolve_selected_column(
+        model: &PlotModel,
+        state: &QuickActionPanelState,
+    ) -> Result<String, TGAGUIError> {
+        let xy = state.x_or_y.ok_or_else(|| {
+            TGAGUIError::BindingError("Select X or Y before applying operation".to_string())
+        })?;
+        model.this_is_x_or_y(xy)
+    }
+
+    //==================================================================================
+    //     COLOUR AND SHOW PANEL
+    //==================================================================================
     /// Обрабатывает взаимодействия с пользовательским интерфейсом (кнопки, слайдеры)
     ///
     /// Эта функция отвечает за:
@@ -323,20 +429,21 @@ impl WrightPanelControllers {
         model: &mut PlotModel,
         manage_plot_dialog: &mut NewExperimentDialogState,
     ) {
-        if ui.button("Reset View").clicked() {
-            model.reset_view();
-        }
+        /*
+            if ui.button("Reset View").clicked() {
+                model.reset_view();
+            }
 
-        if ui.button("Clear Selection").clicked() {
-            model.clear_selection_rect();
-            model.clear_selection();
-        }
+            if ui.button("Clear Selection").clicked() {
+                model.clear_selection_rect();
+                model.clear_selection();
+            }
 
-        if ui.button("📊 Manage Plots").clicked() {
-            manage_plot_dialog.manage_plot_open = true;
-            ui.ctx().request_repaint();
-        }
-
+            if ui.button("📊 Manage Plots").clicked() {
+                manage_plot_dialog.manage_plot_open = true;
+                ui.ctx().request_repaint();
+            }
+        */
         ui.separator();
 
         for curve in model.plots.iter_mut() {
@@ -365,6 +472,28 @@ impl WrightPanelControllers {
 //========================================================================================
 // NEW EXPERIMENT DIALOGUE WINNDOW
 //============================================================================================
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SaveSeriesFormat {
+    Csv,
+    Txt,
+}
+
+impl SaveSeriesFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::Txt => "txt",
+        }
+    }
+
+    fn dialog_title(self) -> &'static str {
+        match self {
+            Self::Csv => "Save Series As CSV",
+            Self::Txt => "Save Series As TXT",
+        }
+    }
+}
 /// State for the new experiment file selection dialog
 #[derive(Clone, Debug, Default)]
 pub struct PlotConfig {
@@ -377,13 +506,24 @@ pub struct PlotConfig {
 pub struct NewExperimentDialogState {
     pub open: bool,
     pub manage_plot_open: bool,
+    pub column_manager_open: bool,
+    pub save_series_open: bool,
     pub current_dir: PathBuf,
     pub selected_file: Option<PathBuf>,
     file_path_input: String,
     browse_disks_level: bool,
     pub last_error: Option<String>,
+    save_series_format: SaveSeriesFormat,
+    save_series_filename_input: String,
+    save_series_last_status: Option<String>,
     heating_rate_input: String,
     isothermal_temp_input: String,
+    bind_mass_input: String,
+    bind_mass_unit: Unit,
+    bind_temperature_input: String,
+    bind_temperature_unit: Unit,
+    bind_time_input: String,
+    bind_time_unit: Unit,
     meta: ExperimentMeta,
     plot_configs: Vec<PlotConfig>,
 }
@@ -394,20 +534,168 @@ impl NewExperimentDialogState {
         Self {
             open: false,
             manage_plot_open: false,
+            column_manager_open: false,
+            save_series_open: false,
             current_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             selected_file: None,
             file_path_input: String::new(),
             browse_disks_level: false,
             last_error: None,
+            save_series_format: SaveSeriesFormat::Csv,
+            save_series_filename_input: "series_export.csv".to_string(),
+            save_series_last_status: None,
             heating_rate_input: String::new(),
             isothermal_temp_input: String::new(),
+            bind_mass_input: String::new(),
+            bind_mass_unit: Unit::MilliVolt,
+            bind_temperature_input: String::new(),
+            bind_temperature_unit: Unit::Celsius,
+            bind_time_input: String::new(),
+            bind_time_unit: Unit::Second,
             meta: ExperimentMeta::new(),
             plot_configs: vec![PlotConfig::default()],
         }
     }
 
+    fn unit_options() -> &'static [Unit] {
+        &[
+            Unit::Second,
+            Unit::Hour,
+            Unit::Kelvin,
+            Unit::Celsius,
+            Unit::MilliVolt,
+            Unit::Milligram,
+            Unit::MilligramPerSecond,
+            Unit::KelvinPerSecond,
+            Unit::CelsiusPerSecond,
+            Unit::PerSecond,
+            Unit::Gram,
+            Unit::Dimensionless,
+            Unit::Unknown,
+        ]
+    }
+
+    fn show_bind_input_block(
+        ui: &mut egui::Ui,
+        label: &str,
+        input: &mut String,
+        unit: &mut Unit,
+        combo_id: &str,
+    ) {
+        ui.vertical(|ui| {
+            ui.label(label);
+            ui.text_edit_singleline(input);
+            egui::ComboBox::from_id_salt(combo_id)
+                .selected_text(unit.to_string())
+                .show_ui(ui, |ui| {
+                    for option in Self::unit_options() {
+                        ui.selectable_value(unit, *option, option.to_string());
+                    }
+                });
+        });
+    }
+    /// 1) label "bind m" - under it an entry field for text input and under it a drop down menu field with Unit enum one_experiment_dataset.rs
+    ///  with Unit::mV as default 2) a label "bind T" - under it an entry field for text input and under it a drop down menu field with Unit
+    /// enum with Unit::Celsius as default 3) a label "bind t" - under it an entry field for text input and under it a drop down menu field with
+    /// Unit enum with Unit::Second as default.
+    fn show_bindings_row(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            Self::show_bind_input_block(
+                ui,
+                "bind m",
+                &mut self.bind_mass_input,
+                &mut self.bind_mass_unit,
+                "bind_m_unit",
+            );
+
+            Self::show_bind_input_block(
+                ui,
+                "bind T",
+                &mut self.bind_temperature_input,
+                &mut self.bind_temperature_unit,
+                "bind_t_unit",
+            );
+            Self::show_bind_input_block(
+                ui,
+                "bind t",
+                &mut self.bind_time_input,
+                &mut self.bind_time_unit,
+                "bind_time_unit",
+            );
+        });
+    }
+
+    fn apply_bindings_to_last_experiment(
+        &mut self,
+        model: &mut PlotModel,
+    ) -> Result<(), TGAGUIError> {
+        let Some(last_exp) = model.series.experiments.last() else {
+            return Ok(());
+        };
+        let exp_id = last_exp.meta.id.clone();
+
+        let bind_mass = self.bind_mass_input.trim();
+        if !bind_mass.is_empty() {
+            model
+                .series
+                .bind_mass(&exp_id, bind_mass, self.bind_mass_unit)
+                .map_err(|e| TGAGUIError::BindingError(format!("bind m failed: {:?}", e)))?;
+            match model.series.get_mass_col(&exp_id) {
+                Ok(mass_name) => {
+                    println!("binded mass column {}", mass_name);
+                }
+                Err(e) => {
+                    return Err(TGAGUIError::BindingError(format!(
+                        "failed to read bound mass column for '{}': {:?}",
+                        exp_id, e
+                    )));
+                }
+            }
+        }
+
+        let bind_temperature = self.bind_temperature_input.trim();
+        if !bind_temperature.is_empty() {
+            model
+                .series
+                .bind_temperature(&exp_id, bind_temperature, self.bind_temperature_unit)
+                .map_err(|e| TGAGUIError::BindingError(format!("bind T failed: {:?}", e)))?;
+            match model.series.get_temperature_col(&exp_id) {
+                Ok(t_name) => {
+                    println!("binded temperature column {}", t_name);
+                }
+                Err(e) => {
+                    return Err(TGAGUIError::BindingError(format!(
+                        "failed to read bound temperature column for '{}': {:?}",
+                        exp_id, e
+                    )));
+                }
+            }
+        }
+
+        let bind_time = self.bind_time_input.trim();
+        if !bind_time.is_empty() {
+            model
+                .series
+                .bind_time(&exp_id, bind_time, self.bind_time_unit)
+                .map_err(|e| TGAGUIError::BindingError(format!("bind t failed: {:?}", e)))?;
+            match model.series.get_time_col(&exp_id) {
+                Ok(t_name) => {
+                    println!("binded time column {}", t_name);
+                }
+                Err(e) => {
+                    return Err(TGAGUIError::BindingError(format!(
+                        "failed to read bound time column for '{}': {:?}",
+                        exp_id, e
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Show the new experiment dialog
-    pub fn show_dialogue(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
+    pub fn show_new_experiment_dialogue(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
         let mut should_load_experiment = false;
 
         if self.open {
@@ -470,6 +758,9 @@ impl NewExperimentDialogState {
                             ui.label("Comment:");
                             let comment = self.meta.comment.get_or_insert_with(String::new);
                             ui.text_edit_multiline(comment);
+
+                            ui.add_space(8.0);
+                            self.show_bindings_row(ui);
 
                             ui.add_space(10.0);
 
@@ -544,6 +835,10 @@ impl NewExperimentDialogState {
                             model.series.exp_map.clear();
                             for (idx, exp) in model.series.experiments.iter().enumerate() {
                                 model.series.exp_map.insert(exp.meta.id.clone(), idx);
+                            }
+                            if let Err(e) = self.apply_bindings_to_last_experiment(model) {
+                                self.last_error = Some(format!("{:?}", e));
+                                return;
                             }
                             self.last_error = None;
                             self.open = false;
@@ -628,6 +923,158 @@ impl NewExperimentDialogState {
             ui.label("Unable to read directory");
         }
     }
+
+    fn show_directory_browser(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Directories");
+        ui.separator();
+
+        if self.browse_disks_level {
+            ui.label("Available disks:");
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for disk in Self::list_windows_disks() {
+                    let disk_label = disk.to_string_lossy().to_string();
+                    if ui.button(disk_label).clicked() {
+                        self.current_dir = disk;
+                        self.browse_disks_level = false;
+                    }
+                }
+            });
+            return;
+        }
+
+        if let Ok(entries) = std::fs::read_dir(&self.current_dir) {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for entry in entries.filter_map(Result::ok) {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let file_name_str = entry.file_name().to_string_lossy().to_string();
+                    if ui.button(format!("[D] {}", file_name_str)).clicked() {
+                        self.current_dir = path;
+                    }
+                }
+            });
+        } else {
+            ui.label("Unable to read directory");
+        }
+    }
+
+    fn with_extension(filename: &str, ext: &str) -> String {
+        let trimmed = filename.trim();
+        let required_suffix = format!(".{}", ext);
+        if trimmed.to_ascii_lowercase().ends_with(&required_suffix) {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}{required_suffix}")
+        }
+    }
+
+    fn open_save_series_dialog(&mut self, format: SaveSeriesFormat) {
+        self.save_series_open = true;
+        self.save_series_format = format;
+        self.save_series_last_status = None;
+        self.last_error = None;
+        self.save_series_filename_input = match format {
+            SaveSeriesFormat::Csv => "series_export.csv".to_string(),
+            SaveSeriesFormat::Txt => "series_export.txt".to_string(),
+        };
+    }
+
+    pub fn show_save_series_dialog(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
+        if !self.save_series_open {
+            return;
+        }
+
+        let mut should_save_series = false;
+        let mut dialog_open = self.save_series_open;
+
+        egui::Window::new(self.save_series_format.dialog_title())
+            .open(&mut dialog_open)
+            .resizable(true)
+            .default_size([700.0, 420.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Current directory:");
+                    if ui.button("Up").clicked() {
+                        self.move_up();
+                    }
+                    if self.browse_disks_level {
+                        ui.label("<Disks>");
+                    } else {
+                        ui.label(self.current_dir.to_string_lossy().as_ref());
+                    }
+                });
+
+                ui.separator();
+
+                egui::SidePanel::left("save_series_dir_browser")
+                    .resizable(true)
+                    .default_width(360.0)
+                    .show_inside(ui, |ui| {
+                        self.show_directory_browser(ui);
+                    });
+
+                egui::SidePanel::right("save_series_meta_panel")
+                    .resizable(true)
+                    .default_width(280.0)
+                    .show_inside(ui, |ui| {
+                        ui.heading("Save Options");
+                        ui.separator();
+                        ui.label("Directory:");
+                        ui.label(self.current_dir.to_string_lossy().as_ref());
+                        ui.add_space(8.0);
+
+                        ui.label("File name:");
+                        ui.text_edit_singleline(&mut self.save_series_filename_input);
+                        ui.label(format!(
+                            "Extension will be: .{}",
+                            self.save_series_format.extension()
+                        ));
+                        ui.add_space(8.0);
+
+                        if let Some(status) = &self.save_series_last_status {
+                            ui.colored_label(egui::Color32::GREEN, status);
+                        }
+                        if let Some(err) = &self.last_error {
+                            ui.colored_label(egui::Color32::RED, err);
+                        }
+                        ui.add_space(6.0);
+
+                        if ui.button("Save").clicked() {
+                            should_save_series = true;
+                        }
+                    });
+            });
+
+        self.save_series_open = dialog_open;
+
+        if should_save_series {
+            let filename = self.save_series_filename_input.trim();
+            if filename.is_empty() {
+                self.last_error = Some("File name cannot be empty".to_string());
+                return;
+            }
+
+            let output_file_name =
+                Self::with_extension(filename, self.save_series_format.extension());
+            let mut save_path = self.current_dir.clone();
+            save_path.push(output_file_name);
+
+            match model.to_csv_series(&save_path) {
+                Ok(()) => {
+                    self.last_error = None;
+                    self.save_series_last_status =
+                        Some(format!("Saved to {}", save_path.to_string_lossy()));
+                    self.save_series_open = false;
+                }
+                Err(err) => {
+                    self.save_series_last_status = None;
+                    self.last_error = Some(format!("Failed to save series: {:?}", err));
+                }
+            }
+        }
+    }
 }
 
 impl Default for NewExperimentDialogState {
@@ -635,7 +1082,9 @@ impl Default for NewExperimentDialogState {
         Self::new()
     }
 }
-
+//=========================================================================================================
+//           MANAGE PLOT DIALOGUE
+//========================================================================================================
 impl NewExperimentDialogState {
     pub fn show_manage_plot_dialog(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
         if !self.manage_plot_open {

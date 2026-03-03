@@ -1,5 +1,6 @@
 #[cfg(test)]
 pub mod tests {
+    use crate::Kinetics::experimental_kinetics::exp_engine_api::XY;
     use crate::Kinetics::experimental_kinetics::one_experiment_dataset::*;
 
     // use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::*;
@@ -100,6 +101,40 @@ pub mod tests {
         let max_t = time.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         assert!(min_t >= 5.0 - 1e-12);
         assert!(max_t <= 50.0 + 1e-12);
+    }
+
+    #[test]
+    fn trim_range_inverse_removes_time_interval_inclusive() {
+        let csv = make_csv(2_000, 70);
+        let ds = ds_from_csv(&csv);
+        let ds_trim = ds.trim_range_inverse("time", 5.0, 50.0);
+        let df = ds_trim.frame.collect().unwrap();
+        assert!(df.height() > 0);
+        let time: Vec<f64> = df
+            .column("time")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        assert!(time.iter().all(|&t| t < 5.0 || t > 50.0));
+    }
+
+    #[test]
+    fn cut_range_inverse_x_or_y_removes_selected_axis_interval() {
+        let csv = make_csv(2_000, 71);
+        let ds = ds_from_csv(&csv)
+            .set_oneframeplot_x("time")
+            .unwrap()
+            .set_oneframeplot_y("mass")
+            .unwrap()
+            .cut_range_inverse_x_or_y(XY::X, 5.0, 50.0)
+            .unwrap();
+
+        let x = ds.get_x_as_vec().unwrap();
+        let y = ds.get_y_as_vec().unwrap();
+        assert_eq!(x.len(), y.len());
+        assert!(x.iter().all(|&t| t < 5.0 || t > 50.0));
     }
 
     #[test]
@@ -786,7 +821,7 @@ pub mod tests {
             Unit::Dimensionless
         );
 
-        let ds_conv = ds_dim.conversion("dim_mass", "conv").unwrap();
+        let ds_conv = ds_dim.conversion(0.0, 2.0, "conv").unwrap();
         assert!(ds_conv.schema.columns.contains_key("conv"));
 
         let df = ds_conv.frame.collect().unwrap();

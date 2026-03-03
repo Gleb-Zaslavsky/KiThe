@@ -37,7 +37,7 @@ impl PlotController {
                 let primary_down = input.pointer.button_down(egui::PointerButton::Primary);
                 if primary_down {
                     // Левая кнопка мыши - начинаем панорамирование
-                    model.interaction.start_pan(mouse_pos[0]);
+                    model.interaction.start_pan(mouse_pos);
                 } else {
                     // Другая кнопка мыши (например, правая) - начинаем выделение области
                     model.start_selection(mouse_pos);
@@ -49,7 +49,7 @@ impl PlotController {
                 // Если в данный момент происходит панорамирование
                 if model.interaction.is_panning {
                     // Обновляем панорамирование с новой позицией мыши
-                    model.update_pan(mouse_pos[0]);
+                    model.update_pan(mouse_pos);
                     // Запрашиваем перерисовку для отображения изменений
                     response.ctx.request_repaint();
                 // Если в данный момент происходит выделение области
@@ -85,6 +85,14 @@ impl PlotController {
                     model.select_curve(curve_index);
                     // Очищаем выделение области
                     model.clear_selection_rect();
+                } else if model.is_only_one_shown() {
+                    if let Some(curve_index) = model.plots.iter().position(|curve| curve.is_shown())
+                    {
+                        model.select_curve(curve_index);
+                        model.clear_selection_rect();
+                    } else {
+                        model.clear_selection();
+                    }
                 } else {
                     // Если график не найден, очищаем выбор
                     model.clear_selection();
@@ -107,7 +115,7 @@ impl PlotController {
             // Получаем позицию указателя мыши для масштабирования относительно точки
             if let Some(pointer_pos) = plot_ui.pointer_coordinate() {
                 // Применяем масштабирование относительно позиции указателя
-                model.zoom(zoom_factor, pointer_pos.x as f64);
+                model.zoom(zoom_factor, [pointer_pos.x as f64, pointer_pos.y as f64]);
                 // Запрашиваем перерисовку для отображения изменений
                 response.ctx.request_repaint();
             }

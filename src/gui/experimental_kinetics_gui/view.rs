@@ -208,9 +208,13 @@ impl PlotView {
         }
 
         ui.label(format!(
-            "👁️ View: x=[{:.2}, {:.2}]",
-            model.interaction.view_range.0, model.interaction.view_range.1
+            "👁️ View: x=[{:.2}, {:.2}], y=[{:.2}, {:.2}]",
+            model.interaction.view_range.0,
+            model.interaction.view_range.1,
+            model.interaction.view_y_range.0,
+            model.interaction.view_y_range.1
         ));
+        ui.label(format!("{}", model.message));
     }
 
     /// Форматирует метки сетки по оси X

@@ -1,12 +1,12 @@
 use crate::gui::experimental_kinetics_gui::model::TGAGUIError;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_N_POINTS: usize = 1000;
 const DEFAULT_SYMBOLIC_EXPRESSION: &str = "mass";
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub struct CalibrationLine {
     k: f64,
     b: f64,
@@ -36,22 +36,25 @@ impl CalibrationLine {
 
 impl Default for CalibrationLine {
     fn default() -> Self {
-        Self { k: 1.0, b: 0.0 }
+        //m = k*U+b
+        Self { k: -1.0, b: 40.0 }
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     calibration_line: Option<CalibrationLine>,
     n_points: Option<usize>,
     symbolic_expression: Option<String>,
+    log_level: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct SettingsFile {
     calibration_line: Option<CalibrationLine>,
     n_points: Option<usize>,
     symbolic_expression: Option<String>,
+    log_level: Option<String>,
 }
 
 impl Default for Settings {
@@ -60,6 +63,7 @@ impl Default for Settings {
             calibration_line: Some(CalibrationLine::default()),
             n_points: Some(DEFAULT_N_POINTS),
             symbolic_expression: Some(DEFAULT_SYMBOLIC_EXPRESSION.to_string()),
+            log_level: Some("info".to_string()),
         }
     }
 }
@@ -81,6 +85,10 @@ impl Settings {
         self.symbolic_expression.as_deref()
     }
 
+    pub fn log_level(&self) -> Option<&str> {
+        self.log_level.as_deref()
+    }
+
     pub fn set_calibration_line(&mut self, calibration_line: Option<CalibrationLine>) {
         self.calibration_line = calibration_line;
     }
@@ -95,6 +103,10 @@ impl Settings {
 
     pub fn set_symbolic_expression<S: Into<String>>(&mut self, symbolic_expression: Option<S>) {
         self.symbolic_expression = symbolic_expression.map(Into::into);
+    }
+
+    pub fn set_log_level<S: Into<String>>(&mut self, log_level: Option<S>) {
+        self.log_level = log_level.map(Into::into);
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self, TGAGUIError> {
@@ -122,6 +134,9 @@ impl Settings {
         if let Some(symbolic_expression) = parsed.symbolic_expression {
             settings.symbolic_expression = Some(symbolic_expression);
         }
+        if let Some(log_level) = parsed.log_level {
+            settings.log_level = Some(log_level);
+        }
         Ok(settings)
     }
 
@@ -147,5 +162,31 @@ impl Settings {
         ];
 
         names.into_iter().map(PathBuf::from).collect()
+    }
+
+    /// Saves settings to a JSON file at the specified path
+    pub fn save_to_file(&self, path: &Path) -> Result<(), TGAGUIError> {
+        let json = serde_json::to_string_pretty(self).map_err(|e| {
+            TGAGUIError::SettingsErrors(format!("Failed to serialize settings: {e}"))
+        })?;
+
+        fs::write(path, json).map_err(|e| {
+            TGAGUIError::SettingsErrors(format!(
+                "Failed to write settings to '{}': {e}",
+                path.display()
+            ))
+        })?;
+
+        Ok(())
+    }
+
+    /// Saves settings to the default location (tgasettings.json in current directory)
+    pub fn save_to_default_location(&self) -> Result<(), TGAGUIError> {
+        self.save_to_file(Path::new("tgasettings.json"))
+    }
+
+    /// Creates or recreates the settings file with current settings
+    pub fn create_or_recreate_config(&self) -> Result<(), TGAGUIError> {
+        self.save_to_default_location()
     }
 }

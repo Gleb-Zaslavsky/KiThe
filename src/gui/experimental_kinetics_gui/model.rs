@@ -1,9 +1,15 @@
-use crate::Kinetics::experimental_kinetics::exp_engine_api::{PlotSeries, Ranges, ViewRange};
-use crate::Kinetics::experimental_kinetics::experiment_series_main::{TGAExperiment, TGASeries};
-use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{TGADomainError, Unit};
+use crate::Kinetics::experimental_kinetics::exp_engine_api::Ranges;
+
+use crate::Kinetics::experimental_kinetics::experiment_series_main::TGASeries;
+use crate::Kinetics::experimental_kinetics::one_experiment_dataset::TGADomainError;
+
 use crate::gui::experimental_kinetics_gui::interaction::InteractionState;
 use crate::gui::experimental_kinetics_gui::settings::Settings;
-use std::path::Path;
+use log::info;
+use simplelog::{Config, LevelFilter, SimpleLogger};
+
+use std::sync::Once;
+use tabled::{Table, Tabled};
 /// Константа, определяющая диапазон отображения по умолчанию (от 0 до 10)
 const DEFAULT_VIEW_RANGE: (f64, f64) = (0.0, 10.0);
 
@@ -13,12 +19,41 @@ const DEFAULT_VIEW_RANGE: (f64, f64) = (0.0, 10.0);
 pub enum TGAGUIError {
     TGADomainError(TGADomainError),
     SettingsErrors(String),
+    BindingError(String),
 }
 
 impl From<TGADomainError> for TGAGUIError {
     fn from(err: TGADomainError) -> Self {
         TGAGUIError::TGADomainError(err)
     }
+}
+
+fn parse_log_level(level: Option<&str>) -> LevelFilter {
+    match level.unwrap_or("info").trim().to_ascii_lowercase().as_str() {
+        "off" => LevelFilter::Off,
+        "error" => LevelFilter::Error,
+        "warn" | "warning" => LevelFilter::Warn,
+        "info" => LevelFilter::Info,
+        "debug" => LevelFilter::Debug,
+        "trace" => LevelFilter::Trace,
+        _ => LevelFilter::Info,
+    }
+}
+
+fn init_logging(settings: &Settings) {
+    static LOGGER_INIT: Once = Once::new();
+    let level = parse_log_level(settings.log_level());
+    let requested_level = settings.log_level().unwrap_or("info").to_string();
+
+    LOGGER_INIT.call_once(|| {
+        let _ = SimpleLogger::init(level, Config::default());
+    });
+
+    log::set_max_level(level);
+    info!(
+        "Experimental kinetics logger initialized with level '{}' ({:?})",
+        requested_level, level
+    );
 }
 //======================================================================
 /// TGA Plot Curve - represents experimental data curve
@@ -35,6 +70,41 @@ pub struct PlotCurve {
     pub ranges: Ranges,
     pub highlighted: bool,
     pub shown: bool,
+}
+
+/// Типовые цвета для кривых графика / Typical preset colours for plot curves
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Colours {
+    Blue,
+    Red,
+    Green,
+    Yellow,
+    Orange,
+    Purple,
+    Cyan,
+    Magenta,
+    Black,
+    White,
+    Gray,
+}
+
+impl Colours {
+    /// Преобразует вариант enum в RGB-массив / Converts enum variant into RGB array
+    pub fn as_rgb(self) -> [u8; 3] {
+        match self {
+            Colours::Blue => [0, 0, 255],
+            Colours::Red => [255, 0, 0],
+            Colours::Green => [0, 255, 0],
+            Colours::Yellow => [255, 255, 0],
+            Colours::Orange => [255, 165, 0],
+            Colours::Purple => [128, 0, 128],
+            Colours::Cyan => [0, 255, 255],
+            Colours::Magenta => [255, 0, 255],
+            Colours::Black => [0, 0, 0],
+            Colours::White => [255, 255, 255],
+            Colours::Gray => [128, 128, 128],
+        }
+    }
 }
 
 impl PlotCurve {
@@ -103,6 +173,16 @@ impl PlotCurve {
     pub fn get_short_name(&self) -> String {
         self.plot_short_name.clone()
     }
+
+    /// Устанавливает цвет по enum-варианту / Sets curve colour using enum variant
+    pub fn set_colour(&mut self, colour: Colours) {
+        self.color = colour.as_rgb();
+    }
+
+    /// Устанавливает цвет напрямую по RGB / Sets curve colour directly from RGB
+    pub fn set_colour_rgb(&mut self, rgb: [u8; 3]) {
+        self.color = rgb;
+    }
 }
 
 impl Default for PlotCurve {
@@ -136,396 +216,94 @@ pub struct PlotModel {
 
     pub interaction: InteractionState,
     /// Количество точек для отображения каждого графика
-    pub n_points: usize,
+    pub settings: Settings,
     /// Флаг, указывающий, что был запрошен сброс вида
     pub reset_view_requested: bool,
+    pub plot_recreation_required: bool,
+    pub message: String,
 }
 
 impl Default for PlotModel {
     /// Реализация значения по умолчанию для модели
     ///
-    /// Создает модель с двумя графиками (синус и косинус),
+
     /// стандартными параметрами отображения и сброшенным состоянием
     fn default() -> Self {
         let settings = Settings::new().unwrap_or_else(|_| Settings::default());
-        let n_points = settings.n_points().unwrap_or(1000);
+        init_logging(&settings);
+
+        // Print settings as a table to terminal
+        print_settings_table(&settings);
 
         Self {
             series: TGASeries::new(),
             plots: Vec::new(),
 
             interaction: InteractionState::default(),
-            n_points,
+            settings,
             reset_view_requested: false,
+            plot_recreation_required: false,
+            message: String::new(),
         }
     }
 }
-//===========================================================================================
-impl PlotModel {
-    //=================================================================
-    // SETTERS
-    //=======================================================================
-    pub fn push_from_file(&mut self, path: &Path) -> Result<(), TGAGUIError> {
-        self.series.push_from_file(path)?;
-        Ok(())
-    }
-    /// list of experiments
-    pub fn list_of_experiments(&self) -> Vec<String> {
-        self.series.ids()
-    }
 
-    pub fn get_list_of_complex_id(&self) -> Vec<String> {
-        self.series.get_list_of_complex_id()
-    }
+/// Helper struct for displaying settings in a table format
+#[derive(Tabled)]
+struct SettingsRow {
+    #[tabled(rename = "Parameter")]
+    parameter: String,
+    #[tabled(rename = "Value")]
+    value: String,
+}
 
-    pub fn get_experiment_by_id_mut(
-        &mut self,
-        id: &str,
-    ) -> Result<&mut TGAExperiment, TGAGUIError> {
-        let exp = self.series.get_experiment_by_id_mut(id)?;
-        Ok(exp)
-    }
+/// Prints settings as a formatted table to the terminal
+fn print_settings_table(settings: &Settings) {
+    let mut rows = Vec::new();
 
-    pub fn bind_time_of_experiment(
-        &mut self,
-        id: &str,
-        col: &str,
-        unit: Unit,
-    ) -> Result<(), TGAGUIError> {
-        self.series.bind_time(id, col, unit)?;
-        Ok(())
-    }
-
-    pub fn bind_temperature_of_experiment(
-        &mut self,
-        id: &str,
-        col: &str,
-        unit: Unit,
-    ) -> Result<(), TGAGUIError> {
-        self.series.bind_temperature(id, col, unit)?;
-        Ok(())
-    }
-
-    pub fn bind_mass_of_experiment(
-        &mut self,
-        id: &str,
-        col: &str,
-        unit: Unit,
-    ) -> Result<(), TGAGUIError> {
-        self.series.bind_mass(id, col, unit)?;
-        Ok(())
-    }
-
-    pub fn bind_time_of_selected(&mut self, col: &str, unit: Unit) -> Result<(), TGAGUIError> {
-        let id = self.get_experiment_by_selected_curve()?;
-        self.bind_time_of_experiment(&id, col, unit)?;
-        Ok(())
-    }
-
-    pub fn bind_temperature_of_selected(
-        &mut self,
-        col: &str,
-        unit: Unit,
-    ) -> Result<(), TGAGUIError> {
-        let id = self.get_experiment_by_selected_curve()?;
-        self.bind_temperature_of_experiment(&id, col, unit)?;
-        Ok(())
-    }
-
-    pub fn bind_mass_of_selected(&mut self, col: &str, unit: Unit) -> Result<(), TGAGUIError> {
-        let id = self.get_experiment_by_selected_curve()?;
-        self.bind_mass_of_experiment(&id, col, unit)?;
-        Ok(())
-    }
-    //========================================================================
-
-    //========================================================================
-    // GENERIC METHODS
-    pub fn apply_by_id<R, F>(&self, id: &str, op: F) -> Result<R, TGAGUIError>
-    where
-        F: FnOnce(&TGAExperiment) -> R,
-    {
-        let res = self.series.apply_by_id(id, op)?;
-        Ok(res)
-    }
-
-    /// try_apply_by_id API method in the experiment/series facade.
-    /// Calls a fallible read-only operation on one experiment selected by id.
-    /// generic argument:  FnOnce(&TGAExperiment) -> Result<R, TGADomainError>,
-    pub fn try_apply_by_id<R, F>(&self, id: &str, op: F) -> Result<R, TGAGUIError>
-    where
-        F: FnOnce(&TGAExperiment) -> Result<R, TGADomainError>,
-    {
-        let res = self.series.try_apply_by_id(id, op)?;
-        Ok(res)
-    }
-
-    /// mutate_by_id API method in the experiment/series facade.
-    /// Calls an infallible mutable operation on one experiment selected by id.
-    ///  generic argument:  FnOnce(&mut TGAExperiment) -> R,
-    pub fn mutate_by_id<R, F>(&mut self, id: &str, op: F) -> Result<R, TGAGUIError>
-    where
-        F: FnOnce(&mut TGAExperiment) -> R,
-    {
-        let res = self.series.mutate_by_id(id, op)?;
-        Ok(res)
-    }
-
-    /// try_mutate_by_id API method in the experiment/series facade.
-    /// Calls a fallible mutable operation on one experiment selected by id.
-    ///generic argument:  FnOnce(&mut TGAExperiment) -> Result<R, TGADomainError>,
-    pub fn try_mutate_by_id<R, F>(&mut self, id: &str, op: F) -> Result<R, TGAGUIError>
-    where
-        F: FnOnce(&mut TGAExperiment) -> Result<R, TGADomainError>,
-    {
-        let res = self.series.try_mutate_by_id(id, op)?;
-        Ok(res)
-    }
-
-    /// transform_by_id API method in the experiment/series facade.
-    /// Applies an infallible consuming transformation (`TGAExperiment -> TGAExperiment`)
-    /// to one experiment selected by id.
-    /// generic argument: FnOnce(TGAExperiment) -> TGAExperiment,
-    pub fn transform_by_id<F>(&mut self, id: &str, op: F) -> Result<(), TGAGUIError>
-    where
-        F: FnOnce(TGAExperiment) -> TGAExperiment,
-    {
-        self.series.transform_by_id(id, op)?;
-        Ok(())
-    }
-
-    /// try_transform_by_id API method in the experiment/series facade.
-    /// Applies a fallible consuming transformation
-    /// (`TGAExperiment -> Result<TGAExperiment, TGADomainError>`)
-    /// to one experiment selected by id.
-    /// generic argument: FnOnce(TGAExperiment) -> Result<TGAExperiment, TGADomainError>,
-    pub fn try_transform_by_id<F>(&mut self, id: &str, op: F) -> Result<(), TGAGUIError>
-    where
-        F: FnOnce(TGAExperiment) -> Result<TGAExperiment, TGADomainError>,
-    {
-        self.series.try_transform_by_id(id, op)?;
-
-        Ok(())
-    }
-    //=================================================================================
-    // CREATING PLOT
-    //=========================================================================
-    ///
-    pub fn set_x(&mut self, id: &str, x_col: &str) -> Result<(), TGAGUIError> {
-        self.series.set_oneframeplot_x(id, x_col)?;
-        Ok(())
-    }
-    pub fn set_y(&mut self, id: &str, y_col: &str) -> Result<(), TGAGUIError> {
-        self.series.set_oneframeplot_y(id, y_col)?;
-        Ok(())
-    }
-    pub fn list_of_columns(&self, id: &str) -> Result<Vec<String>, TGAGUIError> {
-        let list = self.series.list_of_columns(id)?;
-        Ok(list)
-    }
-    /// max and min of x and y
-    pub fn plot_range(&mut self, id: &str) -> Result<Ranges, TGAGUIError> {
-        println!("\n setting plot named {} the  range!", id);
-        let ranges = self.series.plot_xy_ranges(id)?;
-        Ok(ranges)
-    }
-    // initial ranges
-    pub fn give_ranges_to_plot(&mut self, id: &str) -> Result<Ranges, TGAGUIError> {
-        println!("\n giving ranges to plot named {}", id);
-
-        let ranges = self.plot_range(id)?;
-        let x_min = ranges.x_min;
-        let y_min = ranges.y_min;
-        let x_max = ranges.x_max;
-        let y_max = ranges.y_max;
-        self.interaction.view_range = (x_min, x_max);
-        self.interaction.view_y_range = (y_min, y_max);
-        Ok(ranges)
-    }
-    pub fn calculate_samplepoints_for_plot(
-        &mut self,
-        id: &str,
-        x_range: [f64; 2],
-    ) -> Result<PlotSeries, TGAGUIError> {
-        let range = Some({
-            ViewRange {
-                t_min: x_range[0],
-                t_max: x_range[1],
-            }
+    // Add calibration line settings
+    if let Some(cal) = settings.calibration_line() {
+        rows.push(SettingsRow {
+            parameter: "Calibration k".to_string(),
+            value: format!("{:.4}", cal.k()),
         });
-        let plot = self.series.sample_oneframeplot(id, range, self.n_points)?;
-        Ok(plot)
-    }
-    /// get number of plot by itd String id
-    pub fn index_by_id(&self, id: &str) -> Result<usize, TGAGUIError> {
-        let res = self.series.index_by_id(id)?;
-        Ok(res)
-    }
-    pub fn create_points_for_curve(&mut self, id: &str) -> Result<(), TGAGUIError> {
-        println!("calculating points for curve");
-        let ranges = self.give_ranges_to_plot(id)?;
-        let x0 = self.interaction.view_range.0;
-        let x1 = self.interaction.view_range.1;
-        let x_range = [x0, x1];
-        let plot = self.calculate_samplepoints_for_plot(id, x_range)?;
-        let index = self.index_by_id(id)?;
-        self.push_to_vec_of_curves(plot, id, index, ranges)?;
-        Ok(())
+        rows.push(SettingsRow {
+            parameter: "Calibration b".to_string(),
+            value: format!("{:.4}", cal.b()),
+        });
     }
 
-    pub fn create_plot_short_name(&self, id: &str, x_name: &String, y_name: &String) -> String {
-        format!("{}_{}_{}", id.to_string(), x_name, y_name)
+    // Add number of points
+    if let Some(n) = settings.n_points() {
+        rows.push(SettingsRow {
+            parameter: "Number of points".to_string(),
+            value: n.to_string(),
+        });
     }
 
-    pub fn push_to_vec_of_curves(
-        &mut self,
-        plot: PlotSeries,
-        id: &str,
-        index: usize,
-        ranges: Ranges,
-    ) -> Result<(), TGAGUIError> {
-        let mut new_curve = PlotCurve::default();
-        new_curve.experiment_id = id.to_string().clone();
-        new_curve.experiment_index = index;
-        let x_name = plot.name_x;
-        let y_name = plot.name_y;
-        let short_name = self.create_plot_short_name(id, &x_name, &y_name);
-        new_curve.x_name = x_name;
-        new_curve.y_name = y_name;
-        let x_vec = plot.x;
-        let y_vec = plot.y;
-        let mut points = Vec::new();
-        for (xi, yi) in x_vec.iter().zip(y_vec) {
-            points.push([*xi, yi]);
-        }
-        new_curve.ranges = ranges;
-        new_curve.points = points;
-        new_curve.plot_short_name = short_name;
-        self.plots.push(new_curve);
-        Ok(())
-    }
-    //=================================================================================
-    //COLUMNS TRASFORMATION
-    //================================================================================
-
-    // column transformations
-    pub fn move_time_to_zero_for_experiment(&mut self, id: &str) -> Result<(), TGAGUIError> {
-        self.series.move_time_to_zero(id)?;
-        Ok(())
+    // Add symbolic expression
+    if let Some(expr) = settings.symbolic_expression() {
+        rows.push(SettingsRow {
+            parameter: "Symbolic expression".to_string(),
+            value: expr.to_string(),
+        });
     }
 
-    pub fn move_time_to_zero_of_selected(&mut self) -> Result<(), TGAGUIError> {
-        let id = self.get_experiment_by_selected_curve()?;
-        self.move_time_to_zero_for_experiment(&id)?;
-        Ok(())
+    // Add log level
+    if let Some(log) = settings.log_level() {
+        rows.push(SettingsRow {
+            parameter: "Log level".to_string(),
+            value: log.to_string(),
+        });
     }
 
-    pub fn from_C_to_K_for_experiment(&mut self, id: &str) -> Result<(), TGAGUIError> {
-        self.series.celsius_to_kelvin(id)?;
-        Ok(())
-    }
-
-    pub fn from_C_to_K_of_selected(&mut self) -> Result<(), TGAGUIError> {
-        let id = self.get_experiment_by_selected_curve()?;
-        self.from_C_to_K_for_experiment(&id)?;
-        Ok(())
-    }
-
-    pub fn from_s_to_h_for_experiment(&mut self, id: &str) -> Result<(), TGAGUIError> {
-        self.series.seconds_to_hours(id)?;
-        Ok(())
-    }
-
-    pub fn from_s_to_h_of_selected(&mut self) -> Result<(), TGAGUIError> {
-        let id = self.get_experiment_by_selected_curve()?;
-        self.from_s_to_h_for_experiment(&id)?;
-        Ok(())
-    }
-
-    pub fn offset_column(
-        &mut self,
-        id: &str,
-        column: &str,
-        offset: f64,
-    ) -> Result<(), TGAGUIError> {
-        self.series.offset_column(id, column, offset)?;
-        Ok(())
-    }
-    pub fn offset_column_for_selected(
-        &mut self,
-        column: &str,
-        offset: f64,
-    ) -> Result<(), TGAGUIError> {
-        let id = self.get_experiment_by_selected_curve()?;
-        self.series.offset_column(&id, column, offset)?;
-        Ok(())
-    }
-    pub fn add_column_for_selected(
-        &mut self,
-        column: &str,
-        offset: f64,
-    ) -> Result<(), TGAGUIError> {
-        self.offset_column_for_selected(column, offset)
-    }
-    pub fn sub_column_for_selected(
-        &mut self,
-        column: &str,
-        offset: f64,
-    ) -> Result<(), TGAGUIError> {
-        self.offset_column_for_selected(column, -offset)
-    }
-
-    pub fn scale_columns(
-        &mut self,
-        id: &str,
-        cols: &[&str],
-        factor: f64,
-    ) -> Result<(), TGAGUIError> {
-        self.series.scale_columns(id, cols, factor)?;
-        Ok(())
-    }
-
-    pub fn scale_column(&mut self, id: &str, col: &str, factor: f64) -> Result<(), TGAGUIError> {
-        self.scale_columns(id, &[col], factor)?;
-        Ok(())
-    }
-
-    pub fn scale_column_of_selected(&mut self, col: &str, factor: f64) -> Result<(), TGAGUIError> {
-        let id = self.get_experiment_by_selected_curve()?;
-        self.scale_column(&id, col, factor)?;
-        Ok(())
-    }
-
-    pub fn mul_column_of_selected(&mut self, col: &str, factor: f64) -> Result<(), TGAGUIError> {
-        self.scale_column_of_selected(col, factor)
-    }
-
-    pub fn div_column_of_selected(&mut self, col: &str, factor: f64) -> Result<(), TGAGUIError> {
-        self.scale_column_of_selected(col, 1.0 / factor)
-    }
-
-    pub fn exp_column(&mut self, id: &str, col_name: &str) -> Result<(), TGAGUIError> {
-        self.series.exp_column(id, col_name)?;
-        Ok(())
-    }
-
-    pub fn exp_column_for_selected(&mut self, col_name: &str) -> Result<(), TGAGUIError> {
-        let id = self.get_experiment_by_selected_curve()?;
-        self.exp_column(&id, col_name)?;
-        Ok(())
-    }
-
-    pub fn ln_column(&mut self, id: &str, col_name: &str) -> Result<(), TGAGUIError> {
-        self.series.ln_column(id, col_name)?;
-        Ok(())
-    }
-
-    pub fn ln_column_for_selected(&mut self, col_name: &str) -> Result<(), TGAGUIError> {
-        let id = self.get_experiment_by_selected_curve()?;
-        self.ln_column(&id, col_name)?;
-        Ok(())
-    }
+    // Create and print the table
+    let table = Table::new(rows).to_string();
+    println!("\n=== TGA Application Settings ===");
+    println!("{}", table);
+    println!("================================\n");
 }
+
 //============================================================================================
 impl PlotModel {
     /// Создает новую модель с параметрами по умолчанию
@@ -565,18 +343,23 @@ impl PlotModel {
     }
 
     pub fn get_experiment_by_selected_curve(&self) -> Result<String, TGAGUIError> {
-        let id = if let Some(number) = self.get_selected_curve_index() {
-            self.plots[number].experiment_id.clone()
+        if let Some(number) = self.get_selected_curve_index() {
+            return Ok(self.plots[number].experiment_id.clone());
         } else if self.is_only_one_shown() {
-            self.plots
+            let id = self
+                .plots
                 .iter()
                 .find(|curve| curve.is_shown())
                 .map(|curve| curve.experiment_id.clone())
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        Ok(id)
+                .unwrap_or_default();
+            if !id.is_empty() {
+                return Ok(id);
+            }
+        }
+
+        Err(TGAGUIError::BindingError(
+            "No selected curve. Select a curve first.".to_string(),
+        ))
     }
 
     /// Returns true when all currently shown curves belong to one experiment.
@@ -603,9 +386,9 @@ impl PlotModel {
     /// Обновляет процесс панорамирования
     ///
     /// # Параметры
-    /// * `current_x` - текущая x-координата панорамирования
-    pub fn update_pan(&mut self, current_x: f64) {
-        self.interaction.update_pan(current_x);
+    /// * `current_point` - текущая позиция панорамирования [x, y]
+    pub fn update_pan(&mut self, current_point: [f64; 2]) {
+        self.interaction.update_pan(current_point);
     }
 
     /// Обновляет процесс выделения
@@ -633,8 +416,8 @@ impl PlotModel {
     ///
     /// # Параметры
     /// * `factor` - коэффициент масштабирования
-    /// * `center` - центральная точка масштабирования
-    pub fn zoom(&mut self, factor: f64, center: f64) {
+    /// * `center` - центральная точка масштабирования [x, y]
+    pub fn zoom(&mut self, factor: f64, center: [f64; 2]) {
         self.interaction.zoom(factor, center);
     }
     /// Масштабирует отображение под выделенную область
@@ -672,9 +455,41 @@ impl PlotModel {
     }
 
     /// Сбрасывает отображение к значениям по умолчанию
+    /// Now calculates ranges from all visible plots instead of using hardcoded values
     pub fn reset_view(&mut self) {
-        self.interaction.view_range = DEFAULT_VIEW_RANGE;
-        self.interaction.view_y_range = (-1.0, 1.0);
+        // Calculate ranges from all visible plots
+        let visible_plots: Vec<_> = self.plots.iter().filter(|p| p.is_shown()).collect();
+
+        if visible_plots.is_empty() {
+            // No visible plots - use default ranges
+            self.interaction.view_range = DEFAULT_VIEW_RANGE;
+            self.interaction.view_y_range = (-1.0, 1.0);
+        } else {
+            // Calculate combined ranges from all visible plots
+            let mut x_min = f64::INFINITY;
+            let mut x_max = f64::NEG_INFINITY;
+            let mut y_min = f64::INFINITY;
+            let mut y_max = f64::NEG_INFINITY;
+
+            for plot in visible_plots {
+                x_min = x_min.min(plot.ranges.x_min);
+                x_max = x_max.max(plot.ranges.x_max);
+                y_min = y_min.min(plot.ranges.y_min);
+                y_max = y_max.max(plot.ranges.y_max);
+            }
+
+            // Add margin and ensure non-degenerate bounds even for flat/single-point curves.
+            let x_span = (x_max - x_min).abs();
+            let y_span = (y_max - y_min).abs();
+            let x_floor = x_max.abs().max(x_min.abs()) * 1e-6 + 1e-9;
+            let y_floor = y_max.abs().max(y_min.abs()) * 1e-6 + 1e-9;
+            let x_margin = (x_span * 0.05).max(x_floor);
+            let y_margin = (y_span * 0.05).max(y_floor);
+
+            self.interaction.view_range = (x_min - x_margin, x_max + x_margin);
+            self.interaction.view_y_range = (y_min - y_margin, y_max + y_margin);
+        }
+
         self.reset_view_requested = true;
     }
     /// Получает и сбрасывает флаг запроса сброса вида
@@ -695,7 +510,7 @@ impl PlotModel {
     /// Some(индекс) если найден близкий график, None если нет
     pub fn find_nearest_curve(&self, point: [f64; 2]) -> Option<usize> {
         // Normalized (dimensionless) pick radius.
-        let tolerance = 0.03;
+        let tolerance = 0.06;
         self.plots
             .iter()
             .enumerate()

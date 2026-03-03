@@ -64,7 +64,7 @@ mod tests {
         let df = exp.dataset.frame.collect().unwrap();
 
         assert!(df.height() > 1000);
-        for col in df.get_columns() {
+        for col in df.columns() {
             assert_eq!(col.null_count(), 0);
         }
     }

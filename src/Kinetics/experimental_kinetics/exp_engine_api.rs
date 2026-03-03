@@ -23,6 +23,11 @@ pub enum XY {
     X,
     Y,
 }
+impl Default for XY {
+    fn default() -> Self {
+        XY::X
+    }
+}
 #[derive(Clone, Copy, Debug)]
 pub struct Ranges {
     pub x_min: f64,
@@ -45,6 +50,7 @@ impl TGADataset {
     // PLOT SETTTERS
     //=======================================================================
     /// Resolves and returns the configured `(x, y)` column names from `oneframeplot`.
+    /// Получение имен колонок x и y из oneframeplot
     fn oneframeplot_xy_names(&self) -> Result<(String, String), TGADomainError> {
         let oneframe = self.oneframeplot.as_ref().ok_or_else(|| {
             TGADomainError::InvalidOperation(
@@ -65,9 +71,15 @@ impl TGADataset {
 
         Ok((x_col, y_col))
     }
-
+    pub fn get_oneframeplot_x_name(&self) -> Result<String, TGADomainError> {
+        self.oneframeplot_axis_name(XY::X)
+    }
+    pub fn get_oneframeplot_y_name(&self) -> Result<String, TGADomainError> {
+        self.oneframeplot_axis_name(XY::Y)
+    }
     /// Resolves and returns one configured axis column name from `oneframeplot`.
-    fn oneframeplot_axis_name(&self, axis: XY) -> Result<String, TGADomainError> {
+    /// Получение имени колонки для заданной оси из oneframeplot
+    pub fn oneframeplot_axis_name(&self, axis: XY) -> Result<String, TGADomainError> {
         let (x, y) = self.oneframeplot_xy_names()?;
         Ok(match axis {
             XY::X => x,
@@ -79,6 +91,7 @@ impl TGADataset {
     ///
     /// The provided column must exist in the dataset schema.
     /// If `oneframeplot` is not initialized yet, it is created.
+    /// Установка имени колонки для оси x в oneframeplot
     pub fn set_oneframeplot_x(mut self, x_col: &str) -> Result<Self, TGADomainError> {
         println!("\n setting x");
         if !self.schema.columns.contains_key(x_col) {
@@ -102,6 +115,7 @@ impl TGADataset {
     ///
     /// The provided column must exist in the dataset schema.
     /// If `oneframeplot` is not initialized yet, it is created.
+    /// Установка имени колонки для оси y в oneframeplot
     pub fn set_oneframeplot_y(mut self, y_col: &str) -> Result<Self, TGADomainError> {
         println!("\n setting y");
         if !self.schema.columns.contains_key(y_col) {
@@ -123,8 +137,10 @@ impl TGADataset {
     //==================================================================
     //  GETTERS
     //==================================================================
+    /// Получение значений для заданной оси в виде вектора
     pub fn get_axis_as_vec(&self, axis: XY) -> Result<Vec<f64>, TGADomainError> {
         let selected = self.oneframeplot_axis_name(axis)?;
+        println!("\n column: {} ", selected);
         let df = self
             .frame
             .clone()
@@ -135,12 +151,14 @@ impl TGADataset {
         Ok(f64_series.into_no_null_iter().collect())
     }
     /// returns full x column as Vec
+    /// Получение значений оси x в виде вектора
     pub fn get_x_as_vec(&self) -> Result<Vec<f64>, TGADomainError> {
         let x = XY::X;
         let x_vec = self.get_axis_as_vec(x)?;
         Ok(x_vec)
     }
     /// returns full y column as Vec
+    /// Получение значений оси y в виде вектора
     pub fn get_y_as_vec(&self) -> Result<Vec<f64>, TGADomainError> {
         let x_vec = self.get_axis_as_vec(XY::Y)?;
         Ok(x_vec)
@@ -151,7 +169,7 @@ impl TGADataset {
     /// pub name_y: String,
     ///  pub x: Vec<f64>,
     ///  pub y: Vec<f64>,
-
+    /// Получение данных для построения графика
     pub fn get_plotseries(&self) -> Result<PlotSeries, TGADomainError> {
         let x = self.get_x_as_vec()?;
         let y = self.get_y_as_vec()?;
@@ -186,6 +204,7 @@ impl TGADataset {
     ///
     /// This method applies the same range filtering and downsampling logic
     /// as `sample_columns`, but always returns a single `PlotSeries`.
+    /// Выборка данных для одной серии графика
     pub fn sample_oneframeplot(
         &self,
         range: Option<ViewRange>,
@@ -221,6 +240,7 @@ impl TGADataset {
     /// - `oneframeplot.y` as `columns = &[y]`
     ///
     /// The resampled time column is written under `new_time_col`.
+    /// Сплайн-ресэмплинг данных для графика
     pub fn spline_resample_oneframeplot(
         self,
         new_time_col: &str,
@@ -248,12 +268,39 @@ impl TGADataset {
 
         self.spline_resample_columns(x_col, new_time_col, &[y_col], n_points, kind)
     }
+    pub fn spline_resample_oneframeplot_as(
+        self,
+        new_time_col: &str,
+        n_points: usize,
+        kind: SplineKind,
+        out_col: Option<&str>,
+    ) -> Result<Self, TGADomainError> {
+        let oneframe = self.oneframeplot.clone().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function spline_resample_oneframeplot: oneframeplot is not configured".to_string(),
+            )
+        })?;
 
+        let x_col = oneframe.x.as_deref().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function spline_resample_oneframeplot: oneframeplot.x is not configured"
+                    .to_string(),
+            )
+        })?;
+        let y_col = oneframe.y.as_deref().ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "function spline_resample_oneframeplot: oneframeplot.y is not configured"
+                    .to_string(),
+            )
+        })?;
+        self.spline_resample_columns_as(x_col, new_time_col, &[y_col], &[out_col], n_points, kind)
+    }
     /// Applies a generic operation to one selected axis column (`X` or `Y`)
     /// configured in `oneframeplot`.
     ///
     /// The closure receives `(dataset, selected_column_name)` and must return
     /// the updated dataset.
+    /// Применение операции к одной оси графика
     pub fn with_x_or_y<F>(self, axis: XY, op: F) -> Result<Self, TGADomainError>
     where
         F: FnOnce(Self, &str) -> Result<Self, TGADomainError>,
@@ -267,6 +314,7 @@ impl TGADataset {
     ///
     /// The closure receives `(dataset, x_column_name, y_column_name)` and must
     /// return the updated dataset.
+    /// Применение операции к обеим осям графика
     pub fn with_x_and_y<F>(self, op: F) -> Result<Self, TGADomainError>
     where
         F: FnOnce(Self, &str, &str) -> Result<Self, TGADomainError>,
@@ -279,6 +327,7 @@ impl TGADataset {
     ///
     /// Because filtering is row-wise, points in the paired axis are removed
     /// at the same indices, so x/y lengths remain equal.
+    /// Обрезка данных до заданного значения по оси
     pub fn cut_before_x_or_y(self, axis: XY, start_value: f64) -> Result<Self, TGADomainError> {
         self.with_x_or_y(axis, |ds, selected_col| {
             Ok(ds.trim_range(selected_col, start_value, f64::INFINITY))
@@ -289,6 +338,7 @@ impl TGADataset {
     ///
     /// Because filtering is row-wise, points in the paired axis are removed
     /// at the same indices, so x/y lengths remain equal.
+    /// Обрезка данных после заданного значения по оси
     pub fn cut_after_x_or_y(self, axis: XY, end_value: f64) -> Result<Self, TGADomainError> {
         self.with_x_or_y(axis, |ds, selected_col| {
             Ok(ds.trim_range(selected_col, f64::NEG_INFINITY, end_value))
@@ -299,9 +349,25 @@ impl TGADataset {
     ///
     /// Because filtering is row-wise, points in the paired axis are removed
     /// at the same indices, so x/y lengths remain equal.
+    /// Обрезка данных в заданном диапазоне по оси
     pub fn cut_range_x_or_y(self, axis: XY, from: f64, to: f64) -> Result<Self, TGADomainError> {
         self.with_x_or_y(axis, |ds, selected_col| {
             Ok(ds.trim_range(selected_col, from, to))
+        })
+    }
+
+    /// Removes rows inside the closed interval `[from, to]` on the selected axis (`X` or `Y`).
+    ///
+    /// Because filtering is row-wise, points in the paired axis are removed
+    /// at the same indices, so x/y lengths remain equal.
+    pub fn cut_range_inverse_x_or_y(
+        self,
+        axis: XY,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        self.with_x_or_y(axis, |ds, selected_col| {
+            Ok(ds.trim_range_inverse(selected_col, from, to))
         })
     }
 
@@ -309,11 +375,14 @@ impl TGADataset {
     /// data point formed by configured `oneframeplot` `(x, y)` columns.
     ///
     /// Rows where either x or y is null are ignored.
+    /// Вычисление минимального расстояния до точки данных
     pub fn min_distance_to_oneframeplot_point(
         &self,
         point: (f64, f64),
     ) -> Result<f64, TGADomainError> {
         let (x_col, y_col) = self.oneframeplot_xy_names()?;
+        println!("\n column: {} ", x_col);
+        println!("\n column: {} ", y_col);
         let df = self.frame.clone().collect()?;
 
         let x = df.column(&x_col)?.f64()?;
@@ -340,8 +409,11 @@ impl TGADataset {
         })
     }
 
+    /// Получение диапазонов значений для осей графика
     pub fn plot_xy_ranges(&self) -> Result<Ranges, TGADomainError> {
         let (x_col, y_col) = self.oneframeplot_xy_names()?;
+        println!("\n column: {} ", x_col);
+        println!("\n column: {} ", y_col);
         let df = self.frame.clone().collect()?;
 
         let x = df.column(&x_col)?.f64()?;
@@ -386,8 +458,127 @@ impl TGADataset {
         })
     }
 
+    pub fn offset_y_column_in_range_by_x_reference(
+        self,
+        offset: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let (x_col, y_col) = self.oneframeplot_xy_names()?;
+        let r = self.offset_column_in_range_by_reference(&y_col, &x_col, offset, from, to);
+        Ok(r)
+    }
+    pub fn offset_y_column_in_its_range(
+        self,
+        offset: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let (_, y_col) = self.oneframeplot_xy_names()?;
+        let r = self.offset_column_in_its_range(&y_col, offset, from, to);
+        Ok(r)
+    }
+
+    pub fn offset_x_column_in_its_range(
+        self,
+        offset: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let (x_col, _) = self.oneframeplot_xy_names()?;
+        let r = self.offset_column_in_its_range(&x_col, offset, from, to);
+        Ok(r)
+    }
+    pub fn scale_y_column_in_range_by_x_reference(
+        self,
+        s: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let (x_col, y_col) = self.oneframeplot_xy_names()?;
+        let r = self.scale_column_in_range_by_reference(&y_col, &x_col, s, from, to);
+        Ok(r)
+    }
+    pub fn scale_y_column_in_its_range(
+        self,
+        s: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let (_, y_col) = self.oneframeplot_xy_names()?;
+        let r = self.scale_column_in_its_range(&y_col, s, from, to);
+        Ok(r)
+    }
+
+    pub fn scale_x_column_in_its_range(
+        self,
+        s: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let (x_col, _) = self.oneframeplot_xy_names()?;
+        let r = self.scale_column_in_its_range(&x_col, s, from, to);
+        Ok(r)
+    }
     //===================================================================================================================
     // MISC
+
+    /// Samples a single column with evenly distributed points.
+    ///
+    /// # Arguments
+    /// * `col_name` - Name of the column to sample
+    /// * `range` - Optional range (min, max) to filter values. If None, samples entire column
+    /// * `n_points` - Number of sample points to return
+    ///
+    /// # Returns
+    /// Vector of f64 values with approximately evenly distributed sample points
+    ///
+    /// # Behavior
+    /// 1. If `range` is None: returns evenly distributed points from the entire column
+    /// 2. If `range` is Some((min, max)): finds points within the range and samples them evenly
+    ///
+    /// Выборка данных из одной колонки с равномерным распределением точек
+    pub fn sample_column(
+        &self,
+        col_name: &str,
+        range: Option<(f64, f64)>,
+        n_points: usize,
+    ) -> Result<Vec<f64>, TGADomainError> {
+        let df = self.frame.clone().collect()?;
+        let col = df.column(col_name)?.f64()?;
+
+        let indices: Vec<usize> = col
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, val)| {
+                val.and_then(|v| {
+                    if range.map_or(true, |(min, max)| v >= min && v <= max) {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        if indices.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let step = (indices.len() as f64 / n_points as f64).ceil().max(1.0) as usize;
+        let sampled: Result<Vec<f64>, TGADomainError> = indices
+            .into_iter()
+            .step_by(step)
+            .map(|i| {
+                col.get(i).ok_or(TGADomainError::InvalidOperation(format!(
+                    "no column number {}",
+                    i
+                )))
+            })
+            .collect();
+
+        Ok(sampled?)
+    }
 
     pub fn sample_columns(
         &self,
@@ -396,53 +587,81 @@ impl TGADataset {
         range: Option<ViewRange>,
         max_points: usize,
     ) -> Result<Vec<PlotSeries>, TGADomainError> {
-        let df = self.frame.clone().collect()?;
-
-        let time = df.column(time_col)?.f64()?;
-
-        // 1️⃣ выбрать индексы по диапазону
-        let indices: Vec<usize> = time
-            .into_no_null_iter()
-            .enumerate()
-            .filter(|(_, t)| {
-                range
-                    .as_ref()
-                    .map_or(true, |r| *t >= r.t_min && *t <= r.t_max)
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        if indices.is_empty() {
-            return Ok(vec![]);
+        println!("\n column: {} ", time_col);
+        for &col in value_cols {
+            println!("\n column: {} ", col);
         }
-
-        // 2️⃣ равномерная подсэмплинг-сетка
-        let step = (indices.len() as f64 / max_points as f64).ceil() as usize;
-        let sampled_idx: Vec<usize> = indices.into_iter().step_by(step).collect();
-
-        // 3️⃣ собрать серии
-        let x: Vec<f64> = sampled_idx.iter().map(|&i| time.get(i).unwrap()).collect();
+        let df = self.frame.clone().collect()?;
+        let row_count = df.height();
 
         let mut out = Vec::new();
 
         for &col in value_cols {
+            let time = df.column(time_col)?.f64()?;
             let s = df.column(col)?.f64()?;
-            let y: Vec<f64> = sampled_idx.iter().map(|&i| s.get(i).unwrap()).collect();
+
+            let mut points: Vec<(f64, f64)> = (0..row_count)
+                .filter_map(|i| {
+                    let t = time.get(i)?;
+                    if !range
+                        .as_ref()
+                        .map_or(true, |r| t >= r.t_min && t <= r.t_max)
+                    {
+                        return None;
+                    }
+
+                    let y = s.get(i)?;
+                    Some((t, y))
+                })
+                .collect();
+
+            if points.is_empty() {
+                continue;
+            }
+
+            let step = (points.len() as f64 / max_points as f64).ceil().max(1.0) as usize;
+            points = points.into_iter().step_by(step).collect();
+            let (x, y): (Vec<f64>, Vec<f64>) = points.into_iter().unzip();
 
             out.push(PlotSeries {
-                name_x: time_col.to_string().clone(),
+                name_x: time_col.to_string(),
                 name_y: col.to_string(),
-                x: x.clone(),
+                x,
                 y,
             });
         }
 
         Ok(out)
     }
+    pub fn get_time_col(&self) -> Result<String, TGADomainError> {
+        let time_col = self
+            .schema
+            .time
+            .as_ref()
+            .ok_or(TGADomainError::TimeNotBound)?;
 
-    pub fn list_of_columns(&self) -> Vec<String> {
-        let schema = &self.schema.columns;
-        let columns: Vec<String> = schema.keys().cloned().collect();
-        columns
+        Ok(time_col.to_string())
+    }
+
+    /// Получение имени колонки массы
+    pub fn get_mass_col(&self) -> Result<String, TGADomainError> {
+        let mass_col = self
+            .schema
+            .mass
+            .as_ref()
+            .ok_or(TGADomainError::MassNotBound)?;
+
+        Ok(mass_col.to_string())
+    }
+
+    /// Получение имени колонки температуры
+    pub fn get_temperature_col(&self) -> Result<String, TGADomainError> {
+        let temp_col = self
+            .schema
+            .temperature
+            .as_ref()
+            .ok_or(TGADomainError::TemperatureNotBound)?;
+
+        Ok(temp_col.to_string())
     }
 }

@@ -2,6 +2,7 @@ pub mod bsplines;
 pub mod exp_engine_api;
 pub mod exp_kinetics_column_manipulation;
 pub mod exp_kinetics_smooth_filter;
+pub mod experiment_series2;
 pub mod experiment_series_main;
 pub mod experiment_series_main_test;
 mod filters_smoothing_test;
@@ -12,3 +13,7 @@ pub mod savgol;
 pub mod savgol2;
 pub mod splines;
 pub mod testing_mod;
+//pub mod LSQSplines2;
+
+pub mod LSQSplines;
+mod LSQSplines_tests;

@@ -1,11 +1,21 @@
+use crate::Kinetics::experimental_kinetics::LSQSplines::SolverKind;
 use crate::Kinetics::experimental_kinetics::exp_engine_api::{PlotSeries, Ranges, ViewRange, XY};
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::ColumnRole;
+use crate::Kinetics::experimental_kinetics::one_experiment_dataset::History;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    ColumnMeta, TGADataset, TGADomainError, UnaryOp, Unit,
+    ColumnHistory, ColumnMeta, ColumnOrigin, OperationRecord, TGADataset, TGADomainError,
+    TGASchema, UnaryOp, Unit,
 };
 use crate::Kinetics::experimental_kinetics::splines::SplineKind;
+use crate::Kinetics::experimental_kinetics::testing_mod::VirtualTGA;
+use polars::prelude::{
+    Column, CsvWriter, DataFrame, DataType, IntoLazy, LazyCsvReader, LazyFileListReader, NamedFrom,
+    PlRefPath, SerWriter, Series,
+};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
+
 #[derive(Clone, Debug, Default)]
 /// ExperimentMeta data structure for the experimental kinetics API layer.
 /// It groups domain data and exposes a stable facade over
@@ -401,6 +411,37 @@ impl TGAExperiment {
             meta: self.meta,
         }
     }
+    pub fn scale_column(self, col: &str, factor: f64) -> Self {
+        let dataset = self.dataset.scale_column(col, factor);
+        Self {
+            dataset,
+            meta: self.meta,
+        }
+    }
+    pub fn scale_column_in_its_range(self, colmn: &str, s: f64, from: f64, to: f64) -> Self {
+        let dataset = self.dataset.scale_column_in_its_range(colmn, s, from, to);
+        Self {
+            dataset,
+            meta: self.meta,
+        }
+    }
+
+    pub fn scale_column_in_range_by_reference(
+        self,
+        target_col: &str,
+        reference_col: &str,
+        s: f64,
+        from: f64,
+        to: f64,
+    ) -> Self {
+        let dataset =
+            self.dataset
+                .scale_column_in_range_by_reference(target_col, reference_col, s, from, to);
+        Self {
+            dataset,
+            meta: self.meta,
+        }
+    }
 
     /// move_time_to_zero API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
@@ -424,6 +465,36 @@ impl TGAExperiment {
         }
     }
 
+    pub fn offset_column_in_its_range(self, colmn: &str, offset: f64, from: f64, to: f64) -> Self {
+        let dataset = self
+            .dataset
+            .offset_column_in_its_range(colmn, offset, from, to);
+        Self {
+            dataset,
+            meta: self.meta,
+        }
+    }
+
+    pub fn offset_column_in_range_by_reference(
+        self,
+        target_col: &str,
+        reference_col: &str,
+        offset: f64,
+        from: f64,
+        to: f64,
+    ) -> Self {
+        let dataset = self.dataset.offset_column_in_range_by_reference(
+            target_col,
+            reference_col,
+            offset,
+            from,
+            to,
+        );
+        Self {
+            dataset,
+            meta: self.meta,
+        }
+    }
     /// calibrate_mass_from_voltage API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
@@ -526,8 +597,8 @@ impl TGAExperiment {
     /// conversion API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
-    pub fn conversion(self, src: &str, new_col: &str) -> Result<Self, TGADomainError> {
-        let dataset = self.dataset.conversion(src, new_col)?;
+    pub fn conversion(self, from: f64, to: f64, new_col: &str) -> Result<Self, TGADomainError> {
+        let dataset = self.dataset.conversion(from, to, new_col)?;
         Ok(Self {
             dataset,
             meta: self.meta,
@@ -536,6 +607,14 @@ impl TGAExperiment {
 
     //================================================================================================
     //      DIAGNOSTICS AND TESTING
+
+    pub fn create_from_synthetic_data(
+        virtga: &VirtualTGA,
+        meta: ExperimentMeta,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = TGADataset::create_from_synthetic_data(virtga)?;
+        Ok(Self { dataset, meta })
+    }
     /// check_nulls API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
@@ -694,6 +773,13 @@ impl TGAExperiment {
             meta: self.meta,
         }
     }
+    pub fn rolling_mean_as(self, col_name: &str, window: usize, out_col: Option<&str>) -> Self {
+        let dataset = self.dataset.rolling_mean_as(col_name, window, out_col);
+        Self {
+            dataset,
+            meta: self.meta,
+        }
+    }
 
     /// hampel_filter API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
@@ -711,7 +797,22 @@ impl TGAExperiment {
             meta: self.meta,
         })
     }
-
+    pub fn hampel_filter_as(
+        self,
+        col: &str,
+        window: usize,
+        n_sigma: f64,
+        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy,
+        out_col: Option<&str>,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self
+            .dataset
+            .hampel_filter_as(col, window, n_sigma, strategy, out_col)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
     /// hampel_filter_null_safe API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
@@ -725,6 +826,23 @@ impl TGAExperiment {
         let dataset = self
             .dataset
             .hampel_filter_null_safe(col, window, n_sigma, strategy)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+
+    pub fn hampel_filter_null_safe_as(
+        self,
+        col: &str,
+        window: usize,
+        n_sigma: f64,
+        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy,
+        out_col: Option<&str>,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self
+            .dataset
+            .hampel_filter_null_safe_as(col, window, n_sigma, strategy, out_col)?;
         Ok(Self {
             dataset,
             meta: self.meta,
@@ -751,6 +869,109 @@ impl TGAExperiment {
         })
     }
 
+    pub fn sg_filter_column_as(
+        self,
+        col: &str,
+        window: usize,
+        poly_order: usize,
+        deriv: usize,
+        delta: f64,
+        out_col: Option<&str>,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self
+            .dataset
+            .sg_filter_column_as(col, window, poly_order, deriv, delta, out_col)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+
+    pub fn spline_resample_columns_as(
+        self,
+        time_col: &str,
+        new_time_col: &str,
+        columns: &[&str],
+        out_columns: &[Option<&str>],
+        n_points: usize,
+        kind: SplineKind,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self.dataset.spline_resample_columns_as(
+            time_col,
+            new_time_col,
+            columns,
+            out_columns,
+            n_points,
+            kind,
+        )?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+
+    pub fn spline_resample_columns(
+        self,
+        time_col: &str,
+        new_time_col: &str,
+        columns: &[&str],
+
+        n_points: usize,
+        kind: SplineKind,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self.dataset.spline_resample_columns(
+            time_col,
+            new_time_col,
+            columns,
+            n_points,
+            kind,
+        )?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+
+    pub fn lsq_spline_resample_columns(
+        self,
+        time_col: &str,
+        new_time_col: &str,
+        columns: &[&str],
+        n_points: usize,
+    ) -> Result<Self, TGADomainError> {
+        let dataset =
+            self.dataset
+                .lsq_spline_resample_columns(time_col, new_time_col, columns, n_points)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+
+    pub fn lsq_spline_resample_columns_as(
+        mut self,
+        time_col: &str,
+        new_time_col: &str,
+        columns: &[&str],
+        out_columns: &[Option<&str>],
+        n_points: usize,
+        degree: usize,
+        n_internal_knots: usize,
+        solver: SolverKind,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self.dataset.lsq_spline_resample_columns_as(
+            time_col,
+            new_time_col,
+            columns,
+            out_columns,
+            n_points,
+            degree,
+            n_internal_knots,
+            solver,
+        )?;
+        self.dataset = dataset;
+        Ok(self)
+    }
     //==========================================================
     // for GUI API features
     /// set_oneframeplot_x API method in the experiment/series facade.
@@ -763,7 +984,9 @@ impl TGAExperiment {
             meta: self.meta,
         })
     }
-
+    pub fn oneframeplot_axis_name(&self, axis: XY) -> Result<String, TGADomainError> {
+        self.dataset.oneframeplot_axis_name(axis)
+    }
     /// set_oneframeplot_y API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
@@ -785,7 +1008,14 @@ impl TGAExperiment {
     ) -> Result<PlotSeries, TGADomainError> {
         self.dataset.sample_oneframeplot(range, max_points)
     }
-
+    pub fn sample_column(
+        &self,
+        col_name: &str,
+        range: Option<(f64, f64)>,
+        n_points: usize,
+    ) -> Result<Vec<f64>, TGADomainError> {
+        self.dataset.sample_column(col_name, range, n_points)
+    }
     /// spline_resample_oneframeplot API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
@@ -798,6 +1028,22 @@ impl TGAExperiment {
         let dataset = self
             .dataset
             .spline_resample_oneframeplot(new_time_col, n_points, kind)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+    pub fn spline_resample_oneframeplot_as(
+        self,
+        new_time_col: &str,
+        n_points: usize,
+
+        kind: SplineKind,
+        out_col: Option<&str>,
+    ) -> Result<Self, TGADomainError> {
+        let dataset =
+            self.dataset
+                .spline_resample_oneframeplot_as(new_time_col, n_points, kind, out_col)?;
         Ok(Self {
             dataset,
             meta: self.meta,
@@ -864,7 +1110,18 @@ impl TGAExperiment {
             meta: self.meta,
         })
     }
-
+    pub fn cut_range_inverse_x_or_y(
+        self,
+        axis: XY,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self.dataset.cut_range_inverse_x_or_y(axis, from, to)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
     /// min_distance_to_oneframeplot_point API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
@@ -911,6 +1168,118 @@ impl TGAExperiment {
     pub fn plot_xy_ranges(&self) -> Result<Ranges, TGADomainError> {
         self.dataset.plot_xy_ranges()
     }
+
+    pub fn get_time_col(&self) -> Result<String, TGADomainError> {
+        self.dataset.get_time_col()
+    }
+    pub fn get_mass_col(&self) -> Result<String, TGADomainError> {
+        self.dataset.get_mass_col()
+    }
+    pub fn get_temperature_col(&self) -> Result<String, TGADomainError> {
+        self.dataset.get_temperature_col()
+    }
+
+    pub fn offset_y_column_in_range_by_x_reference(
+        self,
+        offset: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self
+            .dataset
+            .offset_y_column_in_range_by_x_reference(offset, from, to)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+    pub fn offset_y_column_in_its_range(
+        self,
+        offset: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self
+            .dataset
+            .offset_y_column_in_its_range(offset, from, to)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+
+    pub fn offset_x_column_in_its_range(
+        self,
+        offset: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self
+            .dataset
+            .offset_x_column_in_its_range(offset, from, to)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+    pub fn scale_y_column_in_range_by_x_reference(
+        self,
+        s: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self
+            .dataset
+            .scale_y_column_in_range_by_x_reference(s, from, to)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+    pub fn scale_y_column_in_its_range(
+        self,
+        s: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self.dataset.scale_y_column_in_its_range(s, from, to)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+    pub fn scale_x_column_in_its_range(
+        self,
+        s: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self.dataset.scale_x_column_in_its_range(s, from, to)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+
+    pub fn history_of_operations(&self) -> Vec<OperationRecord> {
+        self.dataset
+            .history_of_operations
+            .vector_of_operations
+            .clone()
+    }
+    pub fn operations_on_column(&self, col: &str) -> Vec<OperationRecord> {
+        self.dataset.operations_on_column(col)
+    }
+    pub fn get_column_history(&self, col: &str) -> ColumnHistory {
+        self.dataset.get_column_history(col)
+    }
+
+    pub fn take_column(&mut self, column_name: &str) -> Option<String> {
+        self.dataset.take_column(column_name)
+    }
+    pub fn list_of_columns_to_recalc(&mut self) -> Vec<String> {
+        self.dataset.list_of_columns_to_recalc()
+    }
     //===============================================================================
     //  END OF THIN WRAPPERS
 }
@@ -924,7 +1293,8 @@ impl TGAExperiment {
             .validate_required_columns(&["temperature", "alpha", "dalpha_dt"])
     }
 }
-
+//======================================================================================
+//      TGA SERIES
 //======================================================================================
 #[derive(Clone, Debug)]
 /// TGASeries data structure for the experimental kinetics API layer.
@@ -933,6 +1303,25 @@ impl TGAExperiment {
 pub struct TGASeries {
     pub experiments: Vec<TGAExperiment>,
     pub exp_map: HashMap<String, usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SeriesExperimentRecord {
+    id: String,
+    heating_rate: Option<f64>,
+    isothermal_temperature: Option<f64>,
+    comment: Option<String>,
+    len: usize,
+    columns: Vec<SeriesColumnRecord>,
+    binds: HashMap<String, Option<String>>,
+}
+
+#[derive(Clone, Debug)]
+struct SeriesColumnRecord {
+    column_name: String,
+    header_name: String,
+    unit: Unit,
+    origin: ColumnOrigin,
 }
 
 impl TGASeries {
@@ -962,6 +1351,17 @@ impl TGASeries {
         }
     }
 
+    pub fn drop_experiment(&mut self, idx: usize) {
+        self.experiments.remove(idx);
+        self.rebuild_index();
+    }
+
+    pub fn drop_experiment_by_id(&mut self, id: &str) -> Result<(), TGADomainError> {
+        let idx = self.exp_map.get(id).ok_or(TGADomainError::NotImplemented)?;
+        self.experiments.remove(*idx);
+        self.rebuild_index();
+        Ok(())
+    }
     /// push API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
@@ -1114,6 +1514,559 @@ impl TGASeries {
             }
         }
         vec_of_complex_ids
+    }
+    //==========================================================================
+    //                    I/O
+    //==========================================================================
+    /// Save the full series to a single CSV file with `#META` helper lines.
+    /// The data columns are written as `<experiment_id>_<column_name>` (sanitized and uniquified).
+    pub fn to_csv_series(&self, path: &Path) -> Result<(), TGADomainError> {
+        let mut collected: Vec<DataFrame> = Vec::with_capacity(self.experiments.len());
+        let mut max_height = 0usize;
+        for exp in &self.experiments {
+            let df = exp.dataset.frame.clone().collect()?;
+            max_height = max_height.max(df.height());
+            collected.push(df);
+        }
+
+        let mut meta_lines: Vec<String> = Vec::new();
+        let mut export_columns: Vec<Column> = Vec::new();
+        let mut header_counts: HashMap<String, usize> = HashMap::new();
+
+        for (idx, exp) in self.experiments.iter().enumerate() {
+            let df = &collected[idx];
+            let exp_id = exp.meta.id.clone();
+            let exp_id_token = Self::escape_meta_field(&exp_id);
+
+            meta_lines.push(format!(
+                "#META\tEXP\t{}\t{}\t{}\t{}",
+                exp_id_token,
+                Self::encode_opt_f64(exp.meta.heating_rate),
+                Self::encode_opt_f64(exp.meta.isothermal_temperature),
+                Self::encode_opt_string(exp.meta.comment.as_deref()),
+            ));
+            meta_lines.push(format!("#META\tLEN\t{}\t{}", exp_id_token, df.height()));
+
+            for (bind_key, bind_value) in [
+                ("time", exp.dataset.schema.time.as_ref()),
+                ("temperature", exp.dataset.schema.temperature.as_ref()),
+                ("mass", exp.dataset.schema.mass.as_ref()),
+                ("alpha", exp.dataset.schema.alpha.as_ref()),
+                ("dm_dt", exp.dataset.schema.dm_dt.as_ref()),
+                ("eta", exp.dataset.schema.eta.as_ref()),
+                ("deta_dt", exp.dataset.schema.deta_dt.as_ref()),
+                ("dalpha_dt", exp.dataset.schema.dalpha_dt.as_ref()),
+                ("dT_dt", exp.dataset.schema.dT_dt.as_ref()),
+            ] {
+                meta_lines.push(format!(
+                    "#META\tBIND\t{}\t{}\t{}",
+                    exp_id_token,
+                    bind_key,
+                    Self::encode_opt_string(bind_value.map(String::as_str)),
+                ));
+            }
+
+            for col in df.columns() {
+                let col_name = col.name().to_string();
+                let header_name =
+                    Self::build_unique_series_header(&mut header_counts, &exp_id, &col_name, idx);
+                let meta = exp.dataset.schema.columns.get(&col_name);
+                let unit = meta.map(|m| m.unit).unwrap_or(Unit::Unknown);
+                let origin = meta.map(|m| m.origin).unwrap_or(ColumnOrigin::Imported);
+
+                meta_lines.push(format!(
+                    "#META\tCOL\t{}\t{}\t{}\t{}\t{}",
+                    exp_id_token,
+                    Self::escape_meta_field(&col_name),
+                    Self::escape_meta_field(&header_name),
+                    Self::unit_tag(unit),
+                    Self::origin_tag(origin),
+                ));
+
+                let casted = col.cast(&DataType::Float64)?;
+                let values = casted.f64()?;
+                let mut padded: Vec<Option<f64>> = Vec::with_capacity(max_height);
+                for row in 0..max_height {
+                    if row < values.len() {
+                        padded.push(values.get(row));
+                    } else {
+                        padded.push(None);
+                    }
+                }
+                export_columns.push(Series::new(header_name.clone().into(), padded).into());
+            }
+        }
+
+        let mut file = std::fs::File::create(path).map_err(|e| {
+            TGADomainError::InvalidOperation(format!(
+                "Failed to create series CSV '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+        writeln!(file, "# KiThe TGA Series").map_err(|e| {
+            TGADomainError::InvalidOperation(format!(
+                "Failed to write series CSV '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+        writeln!(file, "# format_version=1").map_err(|e| {
+            TGADomainError::InvalidOperation(format!(
+                "Failed to write series CSV '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+        for line in &meta_lines {
+            writeln!(file, "{line}").map_err(|e| {
+                TGADomainError::InvalidOperation(format!(
+                    "Failed to write series CSV '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+        }
+
+        if !export_columns.is_empty() {
+            let mut df = DataFrame::new(max_height, export_columns)?;
+            CsvWriter::new(&mut file)
+                .include_header(true)
+                .finish(&mut df)?;
+        }
+
+        Ok(())
+    }
+
+    /// Read the CSV format produced by `to_csv_series` and reconstruct `TGASeries`.
+    pub fn from_csv_series(path: &Path) -> Result<Self, TGADomainError> {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            TGADomainError::InvalidOperation(format!(
+                "Failed to read series CSV '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        let mut records: HashMap<String, SeriesExperimentRecord> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        let mut csv_data_lines: Vec<String> = Vec::new();
+
+        for line in text.lines() {
+            if let Some(meta_payload) = line.strip_prefix("#META\t") {
+                Self::parse_series_meta_line(meta_payload, &mut records, &mut order)?;
+                continue;
+            }
+            if line.trim().is_empty() || line.starts_with('#') {
+                continue;
+            }
+            csv_data_lines.push(line.to_string());
+        }
+
+        let data_df = if csv_data_lines.is_empty() {
+            None
+        } else {
+            let tmp = tempfile::NamedTempFile::new().map_err(|e| {
+                TGADomainError::InvalidOperation(format!(
+                    "Failed to create temp file while reading '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+            std::fs::write(tmp.path(), csv_data_lines.join("\n")).map_err(|e| {
+                TGADomainError::InvalidOperation(format!(
+                    "Failed to write temp CSV while reading '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+            let plpath = PlRefPath::try_from_path(tmp.path())?;
+            Some(
+                LazyCsvReader::new(plpath)
+                    .with_has_header(true)
+                    .finish()?
+                    .collect()?,
+            )
+        };
+
+        let mut series = TGASeries::new();
+        for id in order {
+            let rec = records.get(&id).cloned().ok_or_else(|| {
+                TGADomainError::InvalidOperation(format!(
+                    "Series metadata is inconsistent for experiment id '{}'",
+                    id
+                ))
+            })?;
+
+            let mut exp_columns: Vec<Column> = Vec::new();
+            if let Some(df) = data_df.as_ref() {
+                for c in &rec.columns {
+                    let column = df.column(&c.header_name).map_err(|_| {
+                        TGADomainError::InvalidOperation(format!(
+                            "Series CSV is missing expected header '{}'",
+                            c.header_name
+                        ))
+                    })?;
+                    let mut owned = column.clone();
+                    owned.rename(c.column_name.clone().into());
+                    exp_columns.push(owned);
+                }
+            }
+
+            let mut exp_df = if exp_columns.is_empty() {
+                DataFrame::default()
+            } else {
+                let height = exp_columns.iter().map(|c| c.len()).max().unwrap_or(0);
+                DataFrame::new(height, exp_columns)?
+            };
+            if rec.len < exp_df.height() {
+                exp_df = exp_df.slice(0, rec.len);
+            }
+            if rec.len > exp_df.height() {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Series CSV for experiment '{}' has less data rows than declared length {}",
+                    id, rec.len
+                )));
+            }
+
+            let mut schema_columns: HashMap<String, ColumnMeta> = HashMap::new();
+            for c in &rec.columns {
+                schema_columns.insert(
+                    c.column_name.clone(),
+                    ColumnMeta {
+                        name: c.column_name.clone(),
+                        unit: c.unit,
+                        origin: c.origin,
+                    },
+                );
+            }
+
+            let dataset = TGADataset {
+                frame: exp_df.lazy(),
+                schema: TGASchema {
+                    columns: schema_columns,
+                    time: rec.binds.get("time").cloned().unwrap_or(None),
+                    temperature: rec.binds.get("temperature").cloned().unwrap_or(None),
+                    mass: rec.binds.get("mass").cloned().unwrap_or(None),
+                    alpha: rec.binds.get("alpha").cloned().unwrap_or(None),
+                    dm_dt: rec.binds.get("dm_dt").cloned().unwrap_or(None),
+                    eta: rec.binds.get("eta").cloned().unwrap_or(None),
+                    deta_dt: rec.binds.get("deta_dt").cloned().unwrap_or(None),
+                    dalpha_dt: rec.binds.get("dalpha_dt").cloned().unwrap_or(None),
+                    dT_dt: rec.binds.get("dT_dt").cloned().unwrap_or(None),
+                },
+                oneframeplot: None,
+                history_of_operations: History {
+                    vector_of_operations: Vec::new(),
+                    columns_has_changed: Vec::new(),
+                },
+            };
+            let experiment = TGAExperiment {
+                dataset,
+                meta: ExperimentMeta {
+                    id: rec.id,
+                    heating_rate: rec.heating_rate,
+                    isothermal_temperature: rec.isothermal_temperature,
+                    comment: rec.comment,
+                },
+            };
+            series.push(experiment);
+        }
+
+        Ok(series)
+    }
+
+    fn parse_series_meta_line(
+        payload: &str,
+        records: &mut HashMap<String, SeriesExperimentRecord>,
+        order: &mut Vec<String>,
+    ) -> Result<(), TGADomainError> {
+        let parts: Vec<&str> = payload.split('\t').collect();
+        if parts.is_empty() {
+            return Ok(());
+        }
+
+        match parts[0] {
+            "EXP" => {
+                if parts.len() != 5 {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Invalid EXP metadata line: '{}'",
+                        payload
+                    )));
+                }
+                let id = Self::unescape_meta_field(parts[1])?;
+                if !records.contains_key(&id) {
+                    order.push(id.clone());
+                }
+                let rec = records
+                    .entry(id.clone())
+                    .or_insert_with(|| SeriesExperimentRecord {
+                        id: id.clone(),
+                        ..Default::default()
+                    });
+                rec.id = id;
+                rec.heating_rate = Self::decode_opt_f64(parts[2])?;
+                rec.isothermal_temperature = Self::decode_opt_f64(parts[3])?;
+                rec.comment = Self::decode_opt_string(parts[4])?;
+            }
+            "LEN" => {
+                if parts.len() != 3 {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Invalid LEN metadata line: '{}'",
+                        payload
+                    )));
+                }
+                let id = Self::unescape_meta_field(parts[1])?;
+                if !records.contains_key(&id) {
+                    order.push(id.clone());
+                }
+                let rec = records
+                    .entry(id.clone())
+                    .or_insert_with(|| SeriesExperimentRecord {
+                        id,
+                        ..Default::default()
+                    });
+                rec.len = parts[2].parse::<usize>().map_err(|e| {
+                    TGADomainError::InvalidOperation(format!(
+                        "Invalid LEN value '{}' in metadata: {}",
+                        parts[2], e
+                    ))
+                })?;
+            }
+            "BIND" => {
+                if parts.len() != 4 {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Invalid BIND metadata line: '{}'",
+                        payload
+                    )));
+                }
+                let id = Self::unescape_meta_field(parts[1])?;
+                if !records.contains_key(&id) {
+                    order.push(id.clone());
+                }
+                let rec = records
+                    .entry(id.clone())
+                    .or_insert_with(|| SeriesExperimentRecord {
+                        id,
+                        ..Default::default()
+                    });
+                rec.binds
+                    .insert(parts[2].to_string(), Self::decode_opt_string(parts[3])?);
+            }
+            "COL" => {
+                if parts.len() != 6 {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Invalid COL metadata line: '{}'",
+                        payload
+                    )));
+                }
+                let id = Self::unescape_meta_field(parts[1])?;
+                if !records.contains_key(&id) {
+                    order.push(id.clone());
+                }
+                let rec = records
+                    .entry(id.clone())
+                    .or_insert_with(|| SeriesExperimentRecord {
+                        id,
+                        ..Default::default()
+                    });
+                rec.columns.push(SeriesColumnRecord {
+                    column_name: Self::unescape_meta_field(parts[2])?,
+                    header_name: Self::unescape_meta_field(parts[3])?,
+                    unit: Self::parse_unit_tag(parts[4])?,
+                    origin: Self::parse_origin_tag(parts[5])?,
+                });
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn build_unique_series_header(
+        header_counts: &mut HashMap<String, usize>,
+        exp_id: &str,
+        col_name: &str,
+        exp_idx: usize,
+    ) -> String {
+        let left = Self::sanitize_for_header(exp_id);
+        let right = Self::sanitize_for_header(col_name);
+        let mut base = format!("{left}_{right}");
+        if left == "unnamed" {
+            base = format!("exp{exp_idx}_{right}");
+        }
+
+        let count = header_counts.entry(base.clone()).or_insert(0);
+        *count += 1;
+        if *count == 1 {
+            base
+        } else {
+            format!("{}_{}", base, count)
+        }
+    }
+
+    fn sanitize_for_header(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len());
+        for ch in raw.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                out.push(ch);
+            } else {
+                out.push('_');
+            }
+        }
+        let out = out.trim_matches('_').to_string();
+        if out.is_empty() {
+            "unnamed".to_string()
+        } else {
+            out
+        }
+    }
+
+    fn unit_tag(unit: Unit) -> &'static str {
+        match unit {
+            Unit::Second => "Second",
+            Unit::Hour => "Hour",
+            Unit::Kelvin => "Kelvin",
+            Unit::Celsius => "Celsius",
+            Unit::MilliVolt => "MilliVolt",
+            Unit::Milligram => "Milligram",
+            Unit::MilligramPerSecond => "MilligramPerSecond",
+            Unit::KelvinPerSecond => "KelvinPerSecond",
+            Unit::CelsiusPerSecond => "CelsiusPerSecond",
+            Unit::PerSecond => "PerSecond",
+            Unit::Gram => "Gram",
+            Unit::Dimensionless => "Dimensionless",
+            Unit::Unknown => "Unknown",
+        }
+    }
+
+    fn parse_unit_tag(tag: &str) -> Result<Unit, TGADomainError> {
+        match tag {
+            "Second" => Ok(Unit::Second),
+            "Hour" => Ok(Unit::Hour),
+            "Kelvin" => Ok(Unit::Kelvin),
+            "Celsius" => Ok(Unit::Celsius),
+            "MilliVolt" => Ok(Unit::MilliVolt),
+            "Milligram" => Ok(Unit::Milligram),
+            "MilligramPerSecond" => Ok(Unit::MilligramPerSecond),
+            "KelvinPerSecond" => Ok(Unit::KelvinPerSecond),
+            "CelsiusPerSecond" => Ok(Unit::CelsiusPerSecond),
+            "PerSecond" => Ok(Unit::PerSecond),
+            "Gram" => Ok(Unit::Gram),
+            "Dimensionless" => Ok(Unit::Dimensionless),
+            "Unknown" => Ok(Unit::Unknown),
+            _ => Err(TGADomainError::InvalidOperation(format!(
+                "Unknown unit tag '{}'",
+                tag
+            ))),
+        }
+    }
+
+    fn origin_tag(origin: ColumnOrigin) -> &'static str {
+        match origin {
+            ColumnOrigin::Raw => "Raw",
+            ColumnOrigin::PolarsDerived => "PolarsDerived",
+            ColumnOrigin::NumericDerived => "NumericDerived",
+            ColumnOrigin::Imported => "Imported",
+        }
+    }
+
+    fn parse_origin_tag(tag: &str) -> Result<ColumnOrigin, TGADomainError> {
+        match tag {
+            "Raw" => Ok(ColumnOrigin::Raw),
+            "PolarsDerived" => Ok(ColumnOrigin::PolarsDerived),
+            "NumericDerived" => Ok(ColumnOrigin::NumericDerived),
+            "Imported" => Ok(ColumnOrigin::Imported),
+            _ => Err(TGADomainError::InvalidOperation(format!(
+                "Unknown column origin tag '{}'",
+                tag
+            ))),
+        }
+    }
+
+    fn encode_opt_f64(v: Option<f64>) -> String {
+        match v {
+            Some(x) => format!("1:{x}"),
+            None => "0".to_string(),
+        }
+    }
+
+    fn decode_opt_f64(token: &str) -> Result<Option<f64>, TGADomainError> {
+        if token == "0" {
+            return Ok(None);
+        }
+        let raw = token.strip_prefix("1:").ok_or_else(|| {
+            TGADomainError::InvalidOperation(format!("Invalid optional-f64 token '{}'", token))
+        })?;
+        let parsed = raw.parse::<f64>().map_err(|e| {
+            TGADomainError::InvalidOperation(format!(
+                "Invalid optional-f64 value '{}' in token '{}': {}",
+                raw, token, e
+            ))
+        })?;
+        Ok(Some(parsed))
+    }
+
+    fn encode_opt_string(v: Option<&str>) -> String {
+        match v {
+            Some(x) => format!("1:{}", Self::escape_meta_field(x)),
+            None => "0".to_string(),
+        }
+    }
+
+    fn decode_opt_string(token: &str) -> Result<Option<String>, TGADomainError> {
+        if token == "0" {
+            return Ok(None);
+        }
+        let raw = token.strip_prefix("1:").ok_or_else(|| {
+            TGADomainError::InvalidOperation(format!("Invalid optional-string token '{}'", token))
+        })?;
+        Ok(Some(Self::unescape_meta_field(raw)?))
+    }
+
+    fn escape_meta_field(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len());
+        for ch in raw.chars() {
+            match ch {
+                '\\' => out.push_str("\\\\"),
+                '\t' => out.push_str("\\t"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                _ => out.push(ch),
+            }
+        }
+        out
+    }
+
+    fn unescape_meta_field(raw: &str) -> Result<String, TGADomainError> {
+        let mut out = String::with_capacity(raw.len());
+        let mut chars = raw.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                out.push(ch);
+                continue;
+            }
+
+            let next = chars.next().ok_or_else(|| {
+                TGADomainError::InvalidOperation(format!(
+                    "Invalid escaped metadata token '{}'",
+                    raw
+                ))
+            })?;
+            match next {
+                '\\' => out.push('\\'),
+                't' => out.push('\t'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                _ => {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Unsupported escape sequence '\\{}' in metadata token '{}'",
+                        next, raw
+                    )));
+                }
+            }
+        }
+        Ok(out)
     }
     //==========================================================
     // GENERICS
@@ -1448,6 +2401,36 @@ impl TGASeries {
         self.transform_by_id(id, |exp| exp.scale_columns(cols, factor))
     }
 
+    pub fn scale_column(&mut self, id: &str, col: &str, factor: f64) -> Result<(), TGADomainError> {
+        self.transform_by_id(id, |exp| exp.scale_column(col, factor))
+    }
+
+    pub fn scale_column_in_its_range(
+        &mut self,
+        id: &str,
+        colmn: &str,
+        scale: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<(), TGADomainError> {
+        self.transform_by_id(id, |exp| {
+            exp.scale_column_in_its_range(colmn, scale, from, to)
+        })
+    }
+
+    pub fn scale_column_in_range_by_reference(
+        &mut self,
+        id: &str,
+        target_col: &str,
+        reference_col: &str,
+        scale: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<(), TGADomainError> {
+        self.transform_by_id(id, |exp| {
+            exp.scale_column_in_range_by_reference(target_col, reference_col, scale, from, to)
+        })
+    }
     /// move_time_to_zero API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
@@ -1465,6 +2448,33 @@ impl TGASeries {
         offset: f64,
     ) -> Result<(), TGADomainError> {
         self.transform_by_id(id, |exp| exp.offset_column(colmn, offset))
+    }
+
+    pub fn offset_column_in_its_range(
+        &mut self,
+        id: &str,
+        colmn: &str,
+        offset: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<(), TGADomainError> {
+        self.transform_by_id(id, |exp| {
+            exp.offset_column_in_its_range(colmn, offset, from, to)
+        })
+    }
+
+    pub fn offset_column_in_range_by_reference(
+        &mut self,
+        id: &str,
+        target_col: &str,
+        reference_col: &str,
+        offset: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<(), TGADomainError> {
+        self.transform_by_id(id, |exp| {
+            exp.offset_column_in_range_by_reference(target_col, reference_col, offset, from, to)
+        })
     }
 
     /// calibrate_mass_from_voltage API method in the experiment/series facade.
@@ -1557,12 +2567,29 @@ impl TGASeries {
     /// conversion API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
-    pub fn conversion(&mut self, id: &str, src: &str, new_col: &str) -> Result<(), TGADomainError> {
-        self.try_transform_by_id(id, |exp| exp.conversion(src, new_col))
+    pub fn conversion(
+        &mut self,
+        id: &str,
+        from: f64,
+        to: f64,
+        new_col: &str,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| exp.conversion(from, to, new_col))
     }
 
     //================================================================================================
     //      DIAGNOSTICS AND TESTING
+    pub fn create_from_synthetic_data(
+        &mut self,
+        virtga: &VirtualTGA,
+        meta: ExperimentMeta,
+    ) -> Result<(), TGADomainError> {
+        let exp = TGAExperiment::create_from_synthetic_data(virtga, meta)?;
+        self.push(exp);
+        self.rebuild_index();
+        Ok(())
+    }
+
     /// check_nulls API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
@@ -1695,6 +2722,15 @@ impl TGASeries {
     ) -> Result<(), TGADomainError> {
         self.transform_by_id(id, |exp| exp.rolling_mean(col_name, window))
     }
+    pub fn rolling_mean_as(
+        &mut self,
+        id: &str,
+        col_name: &str,
+        window: usize,
+        out_col: Option<&str>,
+    ) -> Result<(), TGADomainError> {
+        self.transform_by_id(id, |exp| exp.rolling_mean_as(col_name, window, out_col))
+    }
 
     /// hampel_filter API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
@@ -1708,6 +2744,19 @@ impl TGASeries {
         strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy,
     ) -> Result<(), TGADomainError> {
         self.try_transform_by_id(id, |exp| exp.hampel_filter(col, window, n_sigma, strategy))
+    }
+    pub fn hampel_filter_as(
+        &mut self,
+        id: &str,
+        col: &str,
+        window: usize,
+        n_sigma: f64,
+        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy,
+        out_col: Option<&str>,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.hampel_filter_as(col, window, n_sigma, strategy, out_col)
+        })
     }
 
     /// hampel_filter_null_safe API method in the experiment/series facade.
@@ -1726,6 +2775,19 @@ impl TGASeries {
         })
     }
 
+    pub fn hampel_filter_null_safe_as(
+        &mut self,
+        id: &str,
+        col: &str,
+        window: usize,
+        n_sigma: f64,
+        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy,
+        out_col: Option<&str>,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.hampel_filter_null_safe_as(col, window, n_sigma, strategy, out_col)
+        })
+    }
     /// sg_filter_column API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
@@ -1743,6 +2805,94 @@ impl TGASeries {
         })
     }
 
+    pub fn sg_filter_column_as(
+        &mut self,
+        id: &str,
+        col: &str,
+        window: usize,
+        poly_order: usize,
+        deriv: usize,
+        delta: f64,
+        out_col: Option<&str>,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.sg_filter_column_as(col, window, poly_order, deriv, delta, out_col)
+        })
+    }
+    pub fn spline_resample_columns(
+        &mut self,
+        id: &str,
+        time_col: &str,
+        new_time_col: &str,
+        columns: &[&str],
+
+        n_points: usize,
+        kind: SplineKind,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.spline_resample_columns(time_col, new_time_col, columns, n_points, kind)
+        })
+    }
+    pub fn spline_resample_columns_as(
+        &mut self,
+        id: &str,
+        time_col: &str,
+        new_time_col: &str,
+        columns: &[&str],
+        out_columns: &[Option<&str>],
+        n_points: usize,
+        kind: SplineKind,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.spline_resample_columns_as(
+                time_col,
+                new_time_col,
+                columns,
+                out_columns,
+                n_points,
+                kind,
+            )
+        })
+    }
+
+    pub fn lsq_spline_resample_columns(
+        &mut self,
+        id: &str,
+        time_col: &str,
+        new_time_col: &str,
+        columns: &[&str],
+        n_points: usize,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.lsq_spline_resample_columns(time_col, new_time_col, columns, n_points)
+        })
+    }
+
+    pub fn lsq_spline_resample_columns_as(
+        &mut self,
+        id: &str,
+        time_col: &str,
+        new_time_col: &str,
+        columns: &[&str],
+        out_columns: &[Option<&str>],
+        n_points: usize,
+        degree: usize,
+        n_internal_knots: usize,
+        solver: SolverKind,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.lsq_spline_resample_columns_as(
+                time_col,
+                new_time_col,
+                columns,
+                out_columns,
+                n_points,
+                degree,
+                n_internal_knots,
+                solver,
+            )
+        })
+    }
     //==========================================================
     // for GUI API features
     /// set_oneframeplot_x API method in the experiment/series facade.
@@ -1773,7 +2923,18 @@ impl TGASeries {
             exp.spline_resample_oneframeplot(new_time_col, n_points, kind)
         })
     }
-
+    pub fn spline_resample_oneframeplot_as(
+        &mut self,
+        id: &str,
+        new_time_col: &str,
+        n_points: usize,
+        kind: SplineKind,
+        out_col: Option<&str>,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.spline_resample_oneframeplot_as(new_time_col, n_points, kind, out_col)
+        })
+    }
     /// with_x_or_y API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
@@ -1830,7 +2991,15 @@ impl TGASeries {
     ) -> Result<(), TGADomainError> {
         self.try_transform_by_id(id, |exp| exp.cut_range_x_or_y(axis, from, to))
     }
-
+    pub fn cut_range_inverse_x_or_y(
+        &mut self,
+        id: &str,
+        axis: XY,
+        from: f64,
+        to: f64,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| exp.cut_range_inverse_x_or_y(axis, from, to))
+    }
     pub fn sample_oneframeplot(
         &mut self,
         id: &str,
@@ -1839,7 +3008,15 @@ impl TGASeries {
     ) -> Result<PlotSeries, TGADomainError> {
         self.try_apply_by_id(id, |exp| exp.sample_oneframeplot(range, max_points))
     }
-
+    pub fn sample_column(
+        &self,
+        id: &str,
+        col_name: &str,
+        range: Option<(f64, f64)>,
+        n_points: usize,
+    ) -> Result<Vec<f64>, TGADomainError> {
+        self.try_apply_by_id(id, |exp| exp.sample_column(col_name, range, n_points))
+    }
     pub fn list_of_columns(&self, id: &str) -> Result<Vec<String>, TGADomainError> {
         Ok(self.apply_by_id(id, |exp| exp.list_of_columns())?)
     }
@@ -1847,5 +3024,126 @@ impl TGASeries {
     pub fn plot_xy_ranges(&self, id: &str) -> Result<Ranges, TGADomainError> {
         let r = self.apply_by_id(id, |exp| exp.plot_xy_ranges())?;
         r
+    }
+
+    pub fn get_temperature_col(&self, id: &str) -> Result<String, TGADomainError> {
+        let r = self.apply_by_id(id, |exp| exp.get_temperature_col())?;
+        r
+    }
+
+    pub fn get_mass_col(&self, id: &str) -> Result<String, TGADomainError> {
+        let r = self.apply_by_id(id, |exp| exp.get_mass_col())?;
+        r
+    }
+    pub fn get_time_col(&self, id: &str) -> Result<String, TGADomainError> {
+        let r = self.apply_by_id(id, |exp| exp.get_time_col())?;
+        r
+    }
+    pub fn oneframeplot_axis_name(&self, id: &str, axis: XY) -> Result<String, TGADomainError> {
+        let r = self.apply_by_id(id, |exp| exp.oneframeplot_axis_name(axis))?;
+        r
+    }
+
+    pub fn offset_y_column_in_range_by_x_reference(
+        &mut self,
+        id: &str,
+        offset: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.offset_y_column_in_range_by_x_reference(offset, from, to)
+        })
+    }
+    pub fn offset_y_column_in_its_range(
+        &mut self,
+        id: &str,
+        offset: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| exp.offset_y_column_in_its_range(offset, from, to))
+    }
+
+    pub fn offset_x_column_in_its_range(
+        &mut self,
+        id: &str,
+        offset: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| exp.offset_x_column_in_its_range(offset, from, to))
+    }
+
+    pub fn scale_y_column_in_range_by_x_reference(
+        &mut self,
+        id: &str,
+        scale: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.scale_y_column_in_range_by_x_reference(scale, from, to)
+        })
+    }
+    pub fn scale_y_column_in_its_range(
+        &mut self,
+        id: &str,
+        scale: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| exp.scale_y_column_in_its_range(scale, from, to))
+    }
+
+    pub fn scale_x_column_in_its_range(
+        &mut self,
+        id: &str,
+        scale: f64,
+        from: f64,
+        to: f64,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| exp.scale_x_column_in_its_range(scale, from, to))
+    }
+
+    pub fn history_of_operations(&self, id: &str) -> Result<Vec<OperationRecord>, TGADomainError> {
+        self.apply_by_id(id, |exp| exp.history_of_operations())
+    }
+
+    pub fn operations_on_column(
+        &mut self,
+        id: &str,
+        col: &str,
+    ) -> Result<Vec<OperationRecord>, TGADomainError> {
+        self.apply_by_id(id, |exp| exp.operations_on_column(col).clone())
+    }
+    pub fn get_column_history(
+        &mut self,
+        id: &str,
+        col: &str,
+    ) -> Result<ColumnHistory, TGADomainError> {
+        self.apply_by_id(id, |exp| exp.get_column_history(col))
+    }
+
+    pub fn take_column(
+        &mut self,
+        id: &str,
+        column_name: &str,
+    ) -> Result<Option<String>, TGADomainError> {
+        self.mutate_by_id(id, |exp| exp.take_column(column_name))
+    }
+
+    pub fn list_of_columns_to_recalc(&mut self, id: &str) -> Result<Vec<String>, TGADomainError> {
+        self.mutate_by_id(id, |exp| exp.list_of_columns_to_recalc())
+    }
+    pub fn set_heating_rate(&mut self, id: &str, rate: f64) -> Result<(), TGADomainError> {
+        self.transform_by_id(id, |exp| exp.with_heating_rate(rate))
+    }
+    pub fn set_comment(&mut self, id: &str, comment: &str) -> Result<(), TGADomainError> {
+        self.transform_by_id(id, |exp| exp.with_comment(comment))
+    }
+
+    pub fn set_experiment_temperature(&mut self, id: &str, T: f64) -> Result<(), TGADomainError> {
+        self.transform_by_id(id, |exp| exp.with_isothermal_temperature(T))
     }
 }

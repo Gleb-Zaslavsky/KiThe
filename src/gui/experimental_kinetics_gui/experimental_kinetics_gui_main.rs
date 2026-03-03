@@ -62,8 +62,14 @@ use crate::gui::experimental_kinetics_gui::controller::PlotController;
 use crate::gui::experimental_kinetics_gui::controller_buttons_and_panels::{
     NewExperimentDialogState, QuickActionPanelState, TopDropDownMenues, WrightPanelControllers,
 };
+use crate::gui::experimental_kinetics_gui::controller_filters::Mathematics;
+use crate::gui::experimental_kinetics_gui::controller_table::{
+    ColumnManagerState, show_column_manager_window,
+};
 /// Импортируем модель данных графика
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
+/// Импортируем TestOptions для управления настройками
+use crate::gui::experimental_kinetics_gui::test_options::TestOptions;
 /// Импортируем представление графика
 use crate::gui::experimental_kinetics_gui::view::PlotView;
 /// Импортируем необходимые компоненты из библиотеки egui
@@ -74,9 +80,12 @@ use eframe::egui;
 /// Содержит модель данных графика
 pub struct PlotApp {
     /// Модель данных графика
-    model: PlotModel,
-    quick_actions_state: QuickActionPanelState,
-    new_experiment_dialog: NewExperimentDialogState,
+    pub model: PlotModel,
+    pub quick_actions_state: QuickActionPanelState,
+    pub new_experiment_dialog: NewExperimentDialogState,
+    pub mathematics: Mathematics,
+    pub test_options: TestOptions,
+    pub column_manager_state: ColumnManagerState,
 }
 
 impl PlotApp {
@@ -86,6 +95,9 @@ impl PlotApp {
             model: PlotModel::new(),
             quick_actions_state: QuickActionPanelState::default(),
             new_experiment_dialog: NewExperimentDialogState::new(),
+            mathematics: Mathematics::new(),
+            test_options: TestOptions::new(),
+            column_manager_state: ColumnManagerState::new(),
         }
     }
 
@@ -103,11 +115,36 @@ impl PlotApp {
     /// Отрисовка пользовательского интерфейса
     fn render_ui(&mut self, ui: &mut egui::Ui) {
         // Top drop-down menus (File Manager, Math, Kinetic Methods, ...)
-        TopDropDownMenues::top_menus(ui, &mut self.model, &mut self.new_experiment_dialog);
+        TopDropDownMenues::top_menus(
+            ui,
+            &mut self.model,
+            &mut self.mathematics,
+            &mut self.new_experiment_dialog,
+            &mut self.test_options,
+        );
         self.new_experiment_dialog
-            .show_dialogue(ui.ctx(), &mut self.model);
+            .show_new_experiment_dialogue(ui.ctx(), &mut self.model);
         self.new_experiment_dialog
             .show_manage_plot_dialog(ui.ctx(), &mut self.model);
+        self.new_experiment_dialog
+            .show_save_series_dialog(ui.ctx(), &mut self.model);
+        show_column_manager_window(
+            ui.ctx(),
+            &mut self.model,
+            &mut self.column_manager_state,
+            &mut self.new_experiment_dialog.column_manager_open,
+        );
+
+        // Show settings window if open
+        if self.test_options.is_settings_window_open() {
+            self.test_options
+                .show_settings_window(ui.ctx(), &mut self.model);
+        }
+        // Show help window if open (managed inside TestOptions)
+        self.test_options.show_help_window_ui(ui.ctx());
+        // Show synthetic data window if requested
+        self.test_options
+            .show_synthetic_data_window(ui.ctx(), &mut self.model);
         // Создаем две колонки для разделения графика и элементов управления
         ui.columns(2, |columns| {
             // Левая колонка: Область отображения графика

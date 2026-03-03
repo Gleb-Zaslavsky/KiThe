@@ -97,7 +97,7 @@ pub struct InteractionState {
     /// Флаг, указывающий, выполняется ли панорамирование
     pub is_panning: bool,
     /// Последняя позиция панорамирования (для вычисления смещения)
-    pub last_pan_pos: Option<f64>,
+    pub last_pan_pos: Option<[f64; 2]>,
     /// Диапазон отображения по оси X (минимум и максимум)
     pub view_range: (f64, f64),
     /// Диапазон отображения по оси Y (минимум и максимум)
@@ -124,6 +124,13 @@ impl InteractionState {
         self.view_range.0 += delta; // Сдвигаем минимальную границу
         self.view_range.1 += delta; // Сдвигаем максимальную границу
     }
+
+    pub fn pan_xy(&mut self, delta_x: f64, delta_y: f64) {
+        self.view_range.0 += delta_x;
+        self.view_range.1 += delta_x;
+        self.view_y_range.0 += delta_y;
+        self.view_y_range.1 += delta_y;
+    }
     /// Начинает процесс выделения области
     ///
     /// # Параметры
@@ -139,24 +146,25 @@ impl InteractionState {
     ///
     /// # Параметры
     /// * `start_x` - начальная x-координата панорамирования
-    pub fn start_pan(&mut self, start_x: f64) {
+    pub fn start_pan(&mut self, start_point: [f64; 2]) {
         self.is_panning = true; // Устанавливаем флаг панорамирования
-        self.last_pan_pos = Some(start_x); // Сохраняем начальную позицию
+        self.last_pan_pos = Some(start_point); // Сохраняем начальную позицию
     }
 
     /// Обновляет процесс панорамирования
     ///
     /// # Параметры
     /// * `current_x` - текущая x-координата панорамирования
-    pub fn update_pan(&mut self, current_x: f64) {
+    pub fn update_pan(&mut self, current_point: [f64; 2]) {
         // Проверяем, есть ли предыдущая позиция
         if let Some(prev) = self.last_pan_pos {
             // Вычисляем смещение
-            let dx = current_x - prev;
+            let dx = current_point[0] - prev[0];
+            let dy = current_point[1] - prev[1];
             // Перемещаем вид в противоположном направлении движения указателя
-            self.pan(-dx);
+            self.pan_xy(-dx, -dy);
             // Обновляем последнюю позицию
-            self.last_pan_pos = Some(current_x);
+            self.last_pan_pos = Some(current_point);
         }
     }
 
@@ -195,40 +203,42 @@ impl InteractionState {
     /// # Параметры
     /// * `factor` - коэффициент масштабирования
     /// * `center` - центральная точка масштабирования
-    pub fn zoom(&mut self, factor: f64, center: f64) {
-        // Предотвращаем вырожденные диапазоны и ограничиваем масштаб разумными пределами
-        let min_range = 1e-6_f64;
-        let mut range = self.view_range.1 - self.view_range.0;
-        if range <= min_range {
-            range = min_range;
-        }
-
-        // Убеждаемся, что коэффициент положительный и не слишком маленький
+    pub fn zoom(&mut self, factor: f64, center: [f64; 2]) {
         let factor = if factor <= 0.0 { 1.0 } else { factor };
-        let new_range = (range / factor).max(min_range);
+        let min_range = 1e-6_f64;
 
-        // Если центр вне текущего вида, используем текущую середину
-        let center_used = if center.is_finite() {
-            if center >= self.view_range.0 && center <= self.view_range.1 {
-                center
-            } else {
-                (self.view_range.0 + self.view_range.1) / 2.0
+        let zoom_axis = |axis_range: (f64, f64), axis_center: f64| -> Option<(f64, f64)> {
+            let mut range = axis_range.1 - axis_range.0;
+            if range <= min_range {
+                range = min_range;
             }
-        } else {
-            (self.view_range.0 + self.view_range.1) / 2.0
+
+            let new_range = (range / factor).max(min_range);
+            let center_used = if axis_center.is_finite()
+                && axis_center >= axis_range.0
+                && axis_center <= axis_range.1
+            {
+                axis_center
+            } else {
+                (axis_range.0 + axis_range.1) * 0.5
+            };
+
+            let center_ratio = (center_used - axis_range.0) / range;
+            let new_min = center_used - new_range * center_ratio;
+            let new_max = center_used + new_range * (1.0 - center_ratio);
+
+            if new_max > new_min {
+                Some((new_min, new_max))
+            } else {
+                None
+            }
         };
 
-        // Вычисляем отношение центральной точки в текущем диапазоне
-        let center_ratio = (center_used - self.view_range.0) / range;
-
-        // Вычисляем новые границы диапазона и применяем их
-        let new_min = center_used - new_range * center_ratio;
-        let new_max = center_used + new_range * (1.0 - center_ratio);
-
-        // Защита от инвертированных диапазонов
-        if new_max > new_min {
-            self.view_range.0 = new_min;
-            self.view_range.1 = new_max;
+        if let Some(new_x) = zoom_axis(self.view_range, center[0]) {
+            self.view_range = new_x;
+        }
+        if let Some(new_y) = zoom_axis(self.view_y_range, center[1]) {
+            self.view_y_range = new_y;
         }
     }
 

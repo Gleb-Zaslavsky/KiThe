@@ -109,6 +109,7 @@ pub enum TGADomainError {
     InvalidUnitForConversion,
     NotImplemented,
     InvalidOperation(String),
+    OutOfRange,
 }
 
 impl From<PolarsError> for TGADomainError {
@@ -276,7 +277,183 @@ impl TGASchema {
             dT_dt: None,
         }
     }
+
+    /// Update schema when a column is renamed
+    /// 1. Insert new column metadata with same unit/origin as old_name
+    /// 2. Keep old column metadata unchanged
+    /// 3. Update semantic fields (time, mass, etc.) if they reference old_name
+    pub fn update_schema(&mut self, old_name: &str, new_name: &str) {
+        // Clone the metadata of the old column if it exists
+        if let Some(old_meta) = self.columns.get(old_name) {
+            let new_meta = ColumnMeta {
+                name: new_name.to_string(),
+                unit: old_meta.unit,
+                origin: old_meta.origin,
+            };
+            // Insert the new column metadata
+            self.columns.insert(new_name.to_string(), new_meta);
+        }
+
+        // Update semantic fields if they reference the old name
+        if self.time.as_deref() == Some(old_name) {
+            self.time = Some(new_name.to_string());
+        }
+        if self.temperature.as_deref() == Some(old_name) {
+            self.temperature = Some(new_name.to_string());
+        }
+        if self.mass.as_deref() == Some(old_name) {
+            self.mass = Some(new_name.to_string());
+        }
+        if self.alpha.as_deref() == Some(old_name) {
+            self.alpha = Some(new_name.to_string());
+        }
+        if self.dm_dt.as_deref() == Some(old_name) {
+            self.dm_dt = Some(new_name.to_string());
+        }
+        if self.eta.as_deref() == Some(old_name) {
+            self.eta = Some(new_name.to_string());
+        }
+        if self.deta_dt.as_deref() == Some(old_name) {
+            self.deta_dt = Some(new_name.to_string());
+        }
+        if self.dalpha_dt.as_deref() == Some(old_name) {
+            self.dalpha_dt = Some(new_name.to_string());
+        }
+        if self.dT_dt.as_deref() == Some(old_name) {
+            self.dT_dt = Some(new_name.to_string());
+        }
+    }
+
+    pub fn drop_schema_record(&mut self, name: &str) {
+        // Clone the metadata of the old column if it exists
+        if let Some(_) = self.columns.get(name) {
+            self.columns.remove(name);
+        }
+
+        // Update semantic fields if they reference the old name
+        if self.time.as_deref() == Some(name) {
+            self.time = None;
+        }
+        if self.temperature.as_deref() == Some(name) {
+            self.temperature = None;
+        }
+        if self.mass.as_deref() == Some(name) {
+            self.mass = None;
+        }
+        if self.alpha.as_deref() == Some(name) {
+            self.alpha = None;
+        }
+        if self.dm_dt.as_deref() == Some(name) {
+            self.dm_dt = None;
+        }
+        if self.eta.as_deref() == Some(name) {
+            self.eta = None;
+        }
+        if self.deta_dt.as_deref() == Some(name) {
+            self.deta_dt = None;
+        }
+        if self.dalpha_dt.as_deref() == Some(name) {
+            self.dalpha_dt = None;
+        }
+        if self.dT_dt.as_deref() == Some(name) {
+            self.dT_dt = None;
+        }
+    }
 }
+//=============================================================================
+//             HISTORY OF OPERATIONS
+//===============================================================================
+#[derive(Clone, Debug)]
+pub struct History {
+    pub vector_of_operations: Vec<OperationRecord>,
+    pub columns_has_changed: Vec<Option<String>>,
+}
+impl History {
+    pub fn new() -> Self {
+        Self {
+            vector_of_operations: Vec::new(),
+            columns_has_changed: Vec::new(),
+        }
+    }
+    pub fn columns_has_changed(&self) -> Vec<Option<String>> {
+        self.columns_has_changed.clone()
+    }
+    pub fn take_column(&mut self, column_name: &str) -> Option<String> {
+        // Find the index of the column name in the columns_has_changed vector
+        let column_number = self
+            .columns_has_changed
+            .iter()
+            .position(|col| col.as_ref().map_or(false, |name| name == column_name));
+
+        // If found, take the column name at that position
+        if let Some(index) = column_number {
+            self.columns_has_changed
+                .get_mut(index)
+                .and_then(|col| col.take())
+        } else {
+            None
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ColumnTypes {
+    Time,
+    Temperature,
+    Mass,
+    Alpha,
+    Dmdt,
+    Eta,
+    Detadt,
+    Dalphadt,
+    DTdt,
+    Undefined,
+    All,
+}
+
+#[derive(Clone, Debug)]
+pub enum AffectedColumns {
+    Specific(Vec<String>),
+    All,
+    Semantic(Vec<ColumnTypes>),
+}
+
+#[derive(Clone, Debug)]
+pub struct OperationRecord {
+    pub timestamp: usize,
+    pub operation_name: String,
+    pub affected_columns: AffectedColumns,
+    pub expr: Option<Expr>,
+    pub description: String,
+    pub reversible: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ColumnHistory {
+    pub column_name: String,
+    pub operations: Vec<OperationRecord>,
+}
+
+impl ColumnHistory {
+    pub fn new(column_name: String) -> Self {
+        Self {
+            column_name,
+            operations: Vec::new(),
+        }
+    }
+
+    pub fn reversible_count(&self) -> usize {
+        self.operations.iter().filter(|op| op.reversible).count()
+    }
+
+    pub fn irreversible_count(&self) -> usize {
+        self.operations.iter().filter(|op| !op.reversible).count()
+    }
+
+    pub fn has_irreversible(&self) -> bool {
+        self.operations.iter().any(|op| !op.reversible)
+    }
+}
+
 //================================================================================
 //              TGADATASET - MAIN DATA STRUCTURE
 //==================================================================================
@@ -286,6 +463,7 @@ pub struct TGADataset {
     pub frame: LazyFrame,
     pub schema: TGASchema,
     pub oneframeplot: Option<OneFramePlot>,
+    pub history_of_operations: History,
 }
 
 impl std::fmt::Debug for TGADataset {
@@ -297,6 +475,9 @@ impl std::fmt::Debug for TGADataset {
     }
 }
 
+pub fn expr_into_str(expr: &Expr) -> Expr {
+    expr.clone().reverse()
+}
 /// Helper struct to nicely format the TGASchema for debugging
 struct DebugSchema<'a>(&'a TGASchema);
 
@@ -332,8 +513,153 @@ impl<'a> std::fmt::Debug for DebugSchema<'a> {
 }
 impl TGADataset {
     //=========================================================================
+    // HISTORY HELPERS
+
+    pub fn log_operation(
+        &mut self,
+        name: &str,
+        affected: AffectedColumns,
+        expr: Option<Expr>,
+        description: String,
+        reversible: bool,
+    ) {
+        let timestamp = self.history_of_operations.vector_of_operations.len();
+        self.populate_columns_has_changed(&affected);
+        self.history_of_operations
+            .vector_of_operations
+            .push(OperationRecord {
+                timestamp,
+                operation_name: name.to_string(),
+                affected_columns: affected,
+                expr,
+                description,
+                reversible,
+            });
+    }
+
+    fn populate_columns_has_changed(&mut self, affected: &AffectedColumns) {
+        let cols = match affected {
+            AffectedColumns::Specific(cols) => cols.clone(),
+            AffectedColumns::All => self.list_of_columns(),
+            AffectedColumns::Semantic(types) => {
+                let mut result = Vec::new();
+                for col in self.list_of_columns() {
+                    if types.iter().any(|ct| self.column_matches_type(&col, ct)) {
+                        result.push(col);
+                    }
+                }
+                result
+            }
+        };
+
+        for col in cols {
+            if !self
+                .history_of_operations
+                .columns_has_changed
+                .contains(&Some(col.clone()))
+            {
+                self.history_of_operations
+                    .columns_has_changed
+                    .push(Some(col));
+            }
+        }
+    }
+    ///
+    pub fn list_of_columns_to_recalc(&mut self) -> Vec<String> {
+        let list_of_columns = self.list_of_columns();
+        let mut list_of_columns_to_recalc = Vec::new();
+        for col in list_of_columns {
+            if let Some(col_to_recalc) = self.take_column(&col) {
+                list_of_columns_to_recalc.push(col_to_recalc);
+            }
+        }
+        list_of_columns_to_recalc
+    }
+
+    fn column_matches_type(&self, col: &str, ct: &ColumnTypes) -> bool {
+        match ct {
+            ColumnTypes::Time => self.schema.time.as_deref() == Some(col),
+            ColumnTypes::Temperature => self.schema.temperature.as_deref() == Some(col),
+            ColumnTypes::Mass => self.schema.mass.as_deref() == Some(col),
+            ColumnTypes::Alpha => self.schema.alpha.as_deref() == Some(col),
+            ColumnTypes::Dmdt => self.schema.dm_dt.as_deref() == Some(col),
+            ColumnTypes::Eta => self.schema.eta.as_deref() == Some(col),
+            ColumnTypes::Detadt => self.schema.deta_dt.as_deref() == Some(col),
+            ColumnTypes::Dalphadt => self.schema.dalpha_dt.as_deref() == Some(col),
+            ColumnTypes::DTdt => self.schema.dT_dt.as_deref() == Some(col),
+            ColumnTypes::All => true,
+            ColumnTypes::Undefined => false,
+        }
+    }
+
+    pub fn operations_on_column(&self, col: &str) -> Vec<OperationRecord> {
+        let h: Vec<&OperationRecord> = self
+            .history_of_operations
+            .vector_of_operations
+            .iter()
+            .filter(|op| match &op.affected_columns {
+                AffectedColumns::Specific(cols) => cols.contains(&col.to_string()),
+                AffectedColumns::All => true,
+                AffectedColumns::Semantic(types) => {
+                    types.iter().any(|ct| self.column_matches_type(col, ct))
+                }
+            })
+            .collect();
+        h.iter().map(|&op| op.clone()).collect()
+    }
+
+    pub fn get_column_history(&self, col: &str) -> ColumnHistory {
+        let operations = self.operations_on_column(col).into_iter().collect();
+        ColumnHistory {
+            column_name: col.to_string(),
+            operations,
+        }
+    }
+
+    pub fn list_of_columns(&self) -> Vec<String> {
+        self.schema.columns.keys().cloned().collect()
+    }
+
+    pub fn print_operation_history(&self) {
+        println!("\n=== Operation History ===");
+        for op in &self.history_of_operations.vector_of_operations {
+            println!(
+                "[{}] {} - {} (reversible: {})",
+                op.timestamp, op.operation_name, op.description, op.reversible
+            );
+            match &op.affected_columns {
+                AffectedColumns::Specific(cols) => println!("  Columns: {:?}", cols),
+                AffectedColumns::All => println!("  Columns: ALL"),
+                AffectedColumns::Semantic(types) => println!("  Semantic: {:?}", types),
+            }
+        }
+    }
+
+    pub fn print_column_history(&self, col: &str) {
+        let history = self.get_column_history(col);
+        println!("\n=== History for column '{}' ===", col);
+        println!("Total operations: {}", history.operations.len());
+        println!("Reversible: {}", history.reversible_count());
+        println!("Irreversible: {}", history.irreversible_count());
+        for op in &history.operations {
+            println!(
+                "  [{}] {} - {} (reversible: {})",
+                op.timestamp, op.operation_name, op.description, op.reversible
+            );
+        }
+    }
+
+    pub fn columns_has_changed(&self) -> Vec<Option<String>> {
+        self.history_of_operations.columns_has_changed()
+    }
+    pub fn take_column(&mut self, column_name: &str) -> Option<String> {
+        self.history_of_operations.take_column(column_name)
+    }
+
+    //=========================================================================
     // INPUT/OUTPUT
     /// Normalize txt file to csv
+    /// Преобразование txt файла в csv формат
     pub fn normalize_txt_to_csv(input: &Path, output: &Path) -> std::io::Result<()> {
         let input = std::fs::read_to_string(input)?;
         let mut out = String::new();
@@ -353,15 +679,18 @@ impl TGADataset {
         Ok(())
     }
     /// creation of TGA entity
+    /// Создание TGA сущности из CSV файла
     pub fn from_csv(
         path: &str,
         time_col: &str,
         temp_col: &str,
         mass_col: &str,
     ) -> PolarsResult<Self> {
-        let path_buf = PathBuf::from(path);
-        let path_arc = Arc::<Path>::from(path_buf.as_path());
-        let plpath = PlPath::Local(path_arc);
+        println!("\n column: {} ", time_col);
+        println!("\n column: {} ", temp_col);
+        println!("\n column: {} ", mass_col);
+
+        let plpath = PlRefPath::new(path);
         let frame = LazyCsvReader::new(plpath)
             .with_has_header(true)
             .finish()?
@@ -415,11 +744,16 @@ impl TGADataset {
                 dT_dt: None,
             },
             oneframeplot: None,
+            history_of_operations: History {
+                vector_of_operations: Vec::new(),
+                columns_has_changed: Vec::new(),
+            },
         })
     }
 
+    /// Создание TGA сущности из необработанного CSV файла
     pub fn from_csv_raw(path: &Path) -> PolarsResult<Self> {
-        let plpath = PlPath::Local(Arc::from(path));
+        let plpath = PlRefPath::try_from_path(path)?;
 
         let mut frame = LazyCsvReader::new(plpath).with_has_header(true).finish()?;
 
@@ -452,9 +786,14 @@ impl TGADataset {
                 dT_dt: None,
             },
             oneframeplot: None,
+            history_of_operations: History {
+                vector_of_operations: Vec::new(),
+                columns_has_changed: Vec::new(),
+            },
         })
     }
 
+    /// Привязка временной колонки с указанием единиц измерения
     pub fn bind_time(mut self, col: &str, unit: Unit) -> Result<Self, TGADomainError> {
         let meta = self
             .schema
@@ -464,9 +803,19 @@ impl TGADataset {
 
         meta.unit = unit;
         self.schema.time = Some(col.into());
+
+        self.log_operation(
+            "bind_time",
+            AffectedColumns::Semantic(vec![ColumnTypes::Time]),
+            None,
+            format!("Bound time column '{}' with unit {:?}", col, unit),
+            true,
+        );
+
         Ok(self)
     }
 
+    /// Привязка температурной колонки с указанием единиц измерения
     pub fn bind_temperature(mut self, col: &str, unit: Unit) -> Result<Self, TGADomainError> {
         let meta = self
             .schema
@@ -476,9 +825,19 @@ impl TGADataset {
 
         meta.unit = unit;
         self.schema.temperature = Some(col.into());
+
+        self.log_operation(
+            "bind_temperature",
+            AffectedColumns::Semantic(vec![ColumnTypes::Temperature]),
+            None,
+            format!("Bound temperature column '{}' with unit {:?}", col, unit),
+            true,
+        );
+
         Ok(self)
     }
 
+    /// Привязка массовой колонки с указанием единиц измерения
     pub fn bind_mass(mut self, col: &str, unit: Unit) -> Result<Self, TGADomainError> {
         let meta = self
             .schema
@@ -488,8 +847,18 @@ impl TGADataset {
 
         meta.unit = unit;
         self.schema.mass = Some(col.into());
+
+        self.log_operation(
+            "bind_mass",
+            AffectedColumns::Semantic(vec![ColumnTypes::Mass]),
+            None,
+            format!("Bound mass column '{}' with unit {:?}", col, unit),
+            true,
+        );
+
         Ok(self)
     }
+    /// Привязка колонки с указанием роли, имени и единиц измерения
     pub fn bind_column(
         mut self,
         role: ColumnRole,
@@ -513,6 +882,7 @@ impl TGADataset {
         Ok(self)
     }
 
+    /// Экспорт данных в CSV файл с указанием единиц измерения в заголовке
     pub fn to_csv_with_units(&self, path: &Path) -> PolarsResult<()> {
         let df = &mut self.frame.clone().collect()?;
         let mut file = std::fs::File::create(path)?;
@@ -541,6 +911,7 @@ impl TGADataset {
 
     /// Export selected columns to CSV with units encoded in a metadata header, similar to `to_csv_with_units`.
     /// Only the specified columns are exported, and units are taken from the schema.
+    /// Экспорт выбранных колонок в CSV файл с указанием единиц измерения
     pub fn to_csv_with_units_selected(&self, path: &Path, columns: &[&str]) -> PolarsResult<()> {
         if columns.is_empty() {
             // Nothing to export
@@ -561,6 +932,7 @@ impl TGADataset {
         let mut select_exprs: Vec<Expr> = Vec::with_capacity(columns.len());
         for &name in columns {
             select_exprs.push(col(name));
+            println!("\n column: {} ", name);
         }
 
         let mut df = self.frame.clone().select(select_exprs).collect()?;
@@ -588,6 +960,7 @@ impl TGADataset {
         Ok(())
     }
 
+    /// Создание TGA сущности из CSV файла с единицами измерения
     pub fn from_csv_with_units(path: &Path) -> PolarsResult<Self> {
         let text = std::fs::read_to_string(path)?;
         let mut lines = text.lines();
@@ -614,8 +987,8 @@ impl TGADataset {
         let data = lines.collect::<Vec<_>>().join("\n");
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), data)?;
-        let tmp_path_arc = Arc::<Path>::from(tmp.path());
-        let plpath = PlPath::Local(tmp_path_arc);
+
+        let plpath = PlRefPath::try_from_path(tmp.path())?;
         let frame = LazyCsvReader::new(plpath).with_has_header(true).finish()?;
         std::mem::forget(tmp); // Keep temp file alive
 
@@ -625,11 +998,16 @@ impl TGADataset {
             frame,
             schema,
             oneframeplot: None,
+            history_of_operations: History {
+                vector_of_operations: Vec::new(),
+                columns_has_changed: Vec::new(),
+            },
         })
     }
     /// There are 2 functions to read and parse from_csv_raw a function to read raw files with no metadata and headers and
     /// from_csv_with_units. This is a wrapper function from_csv_universal which recognizes if there in the file headers and call
     /// from_csv_with_units otherwise from_csv_raw
+    /// Универсальная функция чтения CSV файлов (с или без единиц измерения)
     pub fn from_csv_universal(path: &Path) -> PolarsResult<Self> {
         let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
 
@@ -675,6 +1053,7 @@ impl TGADataset {
 
     //==============================================================
     // RATES
+    /// Вычисление производной с заданными параметрами
     pub fn derive_rate0(
         mut self,
         source_col: &str,
@@ -688,15 +1067,26 @@ impl TGADataset {
             .ok_or(TGADomainError::TimeNotBound)?
             .clone();
 
+        println!("\n column: {} ", source_col);
         let dv = col(source_col).shift(lit(-1)) - col(source_col).shift(lit(1));
+        println!("\n column: {} ", time);
         let dt = col(&time).shift(lit(-1)) - col(time).shift(lit(1));
-        let rate = (dv / dt).alias(new_col);
-        self.frame = self.frame.with_column(rate);
+        let rate_expr = (dv.clone() / dt.clone()).alias(new_col);
+        self.frame = self.frame.with_column(rate_expr.clone());
 
         self.schema.columns.insert(new_col.into(), out_meta);
 
+        self.log_operation(
+            "derive_rate0",
+            AffectedColumns::Specific(vec![new_col.to_string()]),
+            Some(rate_expr),
+            format!("Computed rate {} from {}", new_col, source_col),
+            true,
+        );
+
         Ok(self)
     }
+    /// Вычисление производной с автоматическим определением единиц измерения
     pub fn derive_rate(mut self, source_col: &str, new_col: &str) -> Result<Self, TGADomainError> {
         let time = self
             .schema
@@ -709,7 +1099,6 @@ impl TGADataset {
             .schema
             .columns
             .get(source_col)
-            // .or_else(|| self.schema.mass.as_ref().filter(|m| m.name == source_col))
             .ok_or(TGADomainError::ColumnNotFound(source_col.into()))?;
 
         let out_unit = match src_meta.unit {
@@ -719,10 +1108,12 @@ impl TGADataset {
             Unit::Celsius => Unit::CelsiusPerSecond,
             _ => return Err(TGADomainError::UnsupportedRateUnit),
         };
+        println!("\n column: {} ", source_col);
         let dv = col(source_col).shift(lit(-1)) - col(source_col).shift(lit(1));
+        println!("\n column: {} ", time);
         let dt = col(&time).shift(lit(-1)) - col(time).shift(lit(1));
-        let rate = (dv / dt).alias(new_col);
-        self.frame = self.frame.with_column(rate);
+        let rate_expr = (dv.clone() / dt.clone()).alias(new_col);
+        self.frame = self.frame.with_column(rate_expr.clone());
 
         self.schema.columns.insert(
             new_col.into(),
@@ -733,9 +1124,21 @@ impl TGADataset {
             },
         );
 
+        self.log_operation(
+            "derive_rate",
+            AffectedColumns::Specific(vec![new_col.to_string()]),
+            Some(rate_expr),
+            format!(
+                "Computed rate {} from {} with unit {:?}",
+                new_col, source_col, out_unit
+            ),
+            true,
+        );
+
         Ok(self)
     }
 
+    /// Вычисление скорости изменения массы
     pub fn derive_mass_rate(mut self, new_col: &str) -> Result<Self, TGADomainError> {
         let mass = self
             .schema
@@ -747,6 +1150,7 @@ impl TGADataset {
         self.derive_rate(&mass, new_col)
     }
 
+    /// Вычисление скорости изменения температуры
     pub fn derive_temperature_rate(mut self, new_col: &str) -> Result<Self, TGADomainError> {
         let temp = self
             .schema
@@ -757,11 +1161,13 @@ impl TGADataset {
         self.schema.dT_dt = Some(new_col.to_string());
         self.derive_rate(&temp, new_col)
     }
+    /// Вычисление безразмерной скорости изменения
     pub fn derive_dimensionless_rate(
         mut self,
         col_name: &str,
         out_name: &str,
     ) -> Result<Self, TGADomainError> {
+        println!("\n column: {} ", col_name);
         let out_meta = ColumnMeta {
             name: out_name.into(),
             unit: Unit::PerSecond,
@@ -778,6 +1184,7 @@ impl TGADataset {
         self.derive_rate0(col_name, out_name, out_meta)
     }
 
+    /// Вычисление производной от eta
     pub fn derive_deta_dt(mut self, out_name: &str) -> Result<Self, TGADomainError> {
         let out_meta = ColumnMeta {
             name: out_name.into(),
@@ -794,6 +1201,7 @@ impl TGADataset {
         self.derive_rate0(&eta_col, out_name, out_meta)
     }
 
+    /// Вычисление производной от alpha
     pub fn derive_dalpha_dt(mut self, out_name: &str) -> Result<Self, TGADomainError> {
         let out_meta = ColumnMeta {
             name: out_name.into(),
@@ -818,12 +1226,15 @@ pub struct NumericBlock {
 }
 
 impl TGADataset {
+    /// Преобразование данных в численный формат для дальнейшей обработки
     pub fn materialize(&self, grid_col: &str, cols: &[&str]) -> PolarsResult<NumericBlock> {
+        println!("\n column: {} ", grid_col);
         let mut select_exprs = Vec::with_capacity(cols.len() + 1);
         select_exprs.push(col(grid_col));
 
         for &c in cols {
             select_exprs.push(col(c));
+            println!("\n column: {} ", c);
         }
 
         let df = self.frame.clone().select(select_exprs).collect()?;
@@ -846,16 +1257,19 @@ pub struct NumericColumn {
 }
 
 impl NumericColumn {
+    /// Преобразование в ndarray представление
     pub fn as_ndarray(&self) -> ArrayView1<f64> {
         ArrayView1::from(self.data.as_slice())
     }
 
+    /// Преобразование в DVector представление
     pub fn as_dvector(&self) -> DVectorView<f64> {
         DVectorView::from_slice(self.data.as_slice(), self.data.len())
     }
 }
 /// return data back to Polars
 impl TGADataset {
+    /// Добавление числовой колонки в набор данных
     pub fn add_numeric_column(
         mut self,
         name: &str,
@@ -872,6 +1286,14 @@ impl TGADataset {
                 unit,
                 origin: ColumnOrigin::NumericDerived,
             },
+        );
+
+        self.log_operation(
+            "add_numeric_column",
+            AffectedColumns::Specific(vec![name.to_string()]),
+            None,
+            format!("Added numeric column {} with unit {:?}", name, unit),
+            true,
         );
 
         Ok(self)

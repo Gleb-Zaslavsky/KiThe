@@ -129,7 +129,7 @@ mod tests {
         let original = mass[100];
         mass[100] *= 10.0;
 
-        df.replace("mass", Series::new("mass".into(), mass))
+        df.replace("mass", Column::new("mass".into(), mass))
             .unwrap();
         ds.frame = df.clone().lazy();
 
@@ -162,7 +162,7 @@ mod tests {
 
         mass[50] *= 20.0;
 
-        df.replace("mass", Series::new("mass".into(), mass))
+        df.replace("mass", Column::new("mass".into(), mass))
             .unwrap();
         ds.frame = df.clone().lazy();
 
@@ -336,7 +336,7 @@ mod tests {
 
         // --- Инварианты ---
         assert!(df.height() > 1000);
-        for col in df.get_columns() {
+        for col in df.columns() {
             assert_eq!(col.null_count(), 0);
         }
     }
@@ -456,9 +456,60 @@ mod tests {
         let df = ds.frame.collect().unwrap();
         let stats = column_stats(&df, "mass").unwrap();
         println!("columstats {:?}", stats);
-        for col in df.get_columns() {
+        for col in df.columns() {
             assert_eq!(col.null_count(), 0);
         }
         // --- Invariants ---
+    }
+
+    #[test]
+    fn lsq_spline_resample_columns_as_adds_padded_columns() {
+        let csv = make_csv(1000, 31415);
+        let ds = ds_from_csv(&csv);
+
+        let ds2 = ds
+            .lsq_spline_resample_columns_as(
+                "time",
+                "time_lsq",
+                &["mass"],
+                &[Some("mass_lsq")],
+                300,
+                3,
+                20,
+                crate::Kinetics::experimental_kinetics::LSQSplines::SolverKind::Banded,
+            )
+            .unwrap();
+
+        let df = ds2.frame.collect().unwrap();
+        assert_eq!(df.height(), 1000);
+
+        let mass_lsq = df.column("mass_lsq").unwrap();
+        let time_lsq = df.column("time_lsq").unwrap();
+        assert_eq!(mass_lsq.null_count(), 700);
+        assert_eq!(time_lsq.null_count(), 700);
+
+        let mass_vals: Vec<f64> = mass_lsq.f64().unwrap().into_iter().flatten().collect();
+        let time_vals: Vec<f64> = time_lsq.f64().unwrap().into_iter().flatten().collect();
+        assert_eq!(mass_vals.len(), 300);
+        assert_eq!(time_vals.len(), 300);
+        assert!(mass_vals.iter().all(|v| v.is_finite()));
+        for i in 1..time_vals.len() {
+            assert!(time_vals[i] > time_vals[i - 1]);
+        }
+    }
+
+    #[test]
+    fn lsq_spline_resample_column_default_overwrites_column() {
+        let csv = make_csv(600, 2718);
+        let ds = ds_from_csv(&csv);
+
+        let ds2 = ds
+            .lsq_spline_resample_column("time", "time_lsq_default", "mass", 200)
+            .unwrap();
+
+        let df = ds2.frame.collect().unwrap();
+        assert_eq!(df.height(), 600);
+        assert_eq!(df.column("mass").unwrap().null_count(), 400);
+        assert_eq!(df.column("time_lsq_default").unwrap().null_count(), 400);
     }
 }

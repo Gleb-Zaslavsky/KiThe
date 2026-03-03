@@ -33,6 +33,11 @@ When install as library:
     * CHEMICAL EQUILIBRIUM calculation 
 * Gaseos combustion/Plug-flow steady-state 1D boundary value problem.
 * IVP problem for multiple solid state kinetic models with constant or linear increasing temperature
+* condended phase combustion IVP problem (under development)
+* Experimental Kinetics - data processing pipeline for Thermogravimetric Analysis TGA
+  * raw data manupulations via Polars crate
+  * smothing and filtering: Hampel/MAD, savitzky–golay, LOWESS, splines
+
 
  When install as executable:
   CLI instrument to solve some of the heat-mass transfer, combustion, chemical engeneering problems. Now available:
@@ -40,11 +45,13 @@ When install as library:
   * IVP problem for multiple solid state kinetic models with constant or linear increasing temperature.
   
   pretty GUI menues:
+
     * Main menu
     * Menu for gas phase steady-state combustion/plug-flow with constant mass velocity BVP problem;
     * Chemical kinetics menu: searching reactions in kinetics libraries, kinetic paramters display;
     * Thermodynamics menu: Cp, dH, dS and Cp = Cp(T) polynoms for many substances;
     * Transport properies: Diffusion, viscosity, thermal condusctivity for many substances;
+    * solid state kinetics models
 
 ## Kinetics
 - parse reaction equations into a list of substances 

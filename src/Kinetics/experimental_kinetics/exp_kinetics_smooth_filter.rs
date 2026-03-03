@@ -1,8 +1,11 @@
+use crate::Kinetics::experimental_kinetics::LSQSplines::{SolverKind, make_lsq_univariate_spline};
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{TGADataset, TGADomainError};
 use crate::Kinetics::experimental_kinetics::savgol2::SG_filter_dyn;
 use crate::Kinetics::experimental_kinetics::splines::{
     SplineKind, spline_resample, uniform_grid_from,
 };
+use log::info;
+use ndarray::{Array1, s};
 use polars::prelude::*;
 use std::f64;
 /* TODO!:
@@ -46,7 +49,7 @@ pub fn resample_all_columns(
 ) -> Result<DataFrame, TGADomainError> {
     let mut cols: Vec<Column> = Vec::new();
 
-    for col in df.get_columns() {
+    for col in df.columns() {
         let name = col.name();
 
         let y_old = extract_f64_column(df, name)?;
@@ -58,7 +61,8 @@ pub fn resample_all_columns(
         cols.push(Series::new(name.clone(), y_new).into());
     }
 
-    Ok(DataFrame::new(cols)?)
+    let height = cols.iter().map(|c| c.len()).max().unwrap_or(0);
+    Ok(DataFrame::new(height, cols)?)
 }
 
 //=======================================================================
@@ -118,6 +122,41 @@ fn median_abs_deviation(v: &[f64], med: f64) -> f64 {
     let devs: Vec<f64> = v.iter().map(|x| (x - med).abs()).collect();
     hampel_median(devs)
 }
+
+fn default_output_name(prefix: &str, input_col: &str, output_col: Option<&str>) -> String {
+    match output_col.map(str::trim) {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => format!("{}{}", prefix, input_col),
+    }
+}
+
+fn resolved_output_names(
+    prefix: &str,
+    input_cols: &[&str],
+    output_cols: &[Option<&str>],
+) -> Result<Vec<String>, TGADomainError> {
+    if output_cols.is_empty() {
+        return Ok(input_cols
+            .iter()
+            .map(|col| default_output_name(prefix, col, None))
+            .collect());
+    }
+
+    if output_cols.len() != input_cols.len() {
+        return Err(TGADomainError::InvalidOperation(format!(
+            "Expected {} output column names, got {}",
+            input_cols.len(),
+            output_cols.len()
+        )));
+    }
+
+    Ok(input_cols
+        .iter()
+        .zip(output_cols.iter())
+        .map(|(&input, &output)| default_output_name(prefix, input, output))
+        .collect())
+}
+
 impl TGADataset {
     pub fn smooth_columns(
         mut self,
@@ -159,7 +198,8 @@ impl TGADataset {
     ///  длина таблицы не меняется
     ///  первые window-1 значений → null
     /// metadata (unit, origin) не меняются
-    pub fn rolling_mean(mut self, col_name: &str, window: usize) -> Self {
+    pub fn rolling_mean_as(mut self, col_name: &str, window: usize, out_col: Option<&str>) -> Self {
+        let out_col = default_output_name("rolling_", col_name, out_col);
         self.frame = self.frame.with_column(
             col(col_name)
                 .rolling_mean(RollingOptionsFixedWindow {
@@ -167,21 +207,32 @@ impl TGADataset {
                     min_periods: window,
                     ..Default::default()
                 })
-                .alias(col_name),
+                .alias(&out_col),
         );
+
+        info!(
+            "new column with rolling averaged data {:?} has been created",
+            out_col
+        );
+        self.schema.update_schema(col_name, &out_col);
 
         self
     }
+    pub fn rolling_mean(self, col_name: &str, window: usize) -> Self {
+        self.rolling_mean_as(col_name, window, Some(col_name))
+    }
     /// Hampel применяется к колонке без null
     /// Рекомендуется вызывать после trim_edges
-    pub fn hampel_filter(
+    pub fn hampel_filter_as(
         mut self,
         col: &str,
         window: usize,
         n_sigma: f64,
         strategy: HampelStrategy,
+        out_col: Option<&str>,
     ) -> Result<Self, TGADomainError> {
-        let df = self.frame.clone().collect()?;
+        let out_col = default_output_name("hampel_", col, out_col);
+        let mut df = self.frame.clone().collect()?;
         let s = df.column(col)?.f64()?;
 
         let values: Vec<f64> = s.into_no_null_iter().collect();
@@ -206,25 +257,43 @@ impl TGADataset {
             }
         }
 
-        let mut new_df = df.clone();
-        new_df.replace(col, Series::new(col.into(), out))?;
+        let new_df = df.with_column(Series::new(out_col.clone().into(), out).into())?;
 
-        if let HampelStrategy::Drop = strategy {
-            new_df = new_df.filter(&BooleanChunked::from_slice("mask".into(), &mask))?;
-        }
-
-        self.frame = new_df.lazy();
+        let new_df = if let HampelStrategy::Drop = strategy {
+            &mut new_df.filter(&BooleanChunked::from_slice("mask".into(), &mask))?
+        } else {
+            new_df
+        };
+        info!(
+            "new column with Hampel filtered data named {:?} has been created",
+            out_col
+        );
+        let list_of_cols = &new_df.get_column_names();
+        info!("now list of columns is {:?}", list_of_cols);
+        self.schema.update_schema(col, &out_col);
+        self.frame = new_df.clone().lazy();
         Ok(self)
     }
-
-    pub fn hampel_filter_null_safe(
-        mut self,
+    pub fn hampel_filter(
+        self,
         col: &str,
         window: usize,
         n_sigma: f64,
         strategy: HampelStrategy,
     ) -> Result<Self, TGADomainError> {
-        let df = self.frame.clone().collect()?;
+        self.hampel_filter_as(col, window, n_sigma, strategy, Some(col))
+    }
+
+    pub fn hampel_filter_null_safe_as(
+        mut self,
+        col: &str,
+        window: usize,
+        n_sigma: f64,
+        strategy: HampelStrategy,
+        out_col: Option<&str>,
+    ) -> Result<Self, TGADomainError> {
+        let out_col = default_output_name("hampel_", col, out_col);
+        let mut df = self.frame.clone().collect()?;
         let s = df.column(col)?.f64()?;
 
         let values: Vec<Option<f64>> = s.into_iter().collect();
@@ -236,7 +305,7 @@ impl TGADataset {
 
         for i in k..(n - k) {
             let Some(xi) = values[i] else {
-                continue; // null не фильтруем
+                continue;
             };
 
             let window_vals: Vec<f64> = values[(i - k)..=(i + k)]
@@ -266,17 +335,32 @@ impl TGADataset {
             }
         }
 
-        let mut new_df = df.clone();
-        let new_series = Series::new(col.into(), out);
-        new_df.replace(col, new_series)?;
+        let new_df = df.with_column(Series::new(out_col.clone().into(), out).into())?;
 
-        if let HampelStrategy::Drop = strategy {
+        let new_df = if let HampelStrategy::Drop = strategy {
             let mask = BooleanChunked::from_slice("mask".into(), &mask);
-            new_df = new_df.filter(&mask)?;
-        }
-
-        self.frame = new_df.lazy();
+            &mut new_df.filter(&mask)?
+        } else {
+            new_df
+        };
+        info!(
+            "new column with Hampel filtered data named {:?} has been created",
+            out_col
+        );
+        let list_of_cols = &new_df.get_column_names();
+        info!("now list of columns is {:?}", list_of_cols);
+        self.schema.update_schema(col, &out_col);
+        self.frame = new_df.clone().lazy();
         Ok(self)
+    }
+    pub fn hampel_filter_null_safe(
+        self,
+        col: &str,
+        window: usize,
+        n_sigma: f64,
+        strategy: HampelStrategy,
+    ) -> Result<Self, TGADomainError> {
+        self.hampel_filter_null_safe_as(col, window, n_sigma, strategy, Some(col))
     }
     /*
     pub fn ewm_mean(
@@ -316,15 +400,17 @@ impl TGADataset {
     /// первые window - 1 значений становятся NULL
 
     /// в конце — NULL не появляется
-    pub fn sg_filter_column(
+    pub fn sg_filter_column_as(
         mut self,
         col: &str,
         window: usize,
         poly_order: usize,
         deriv: usize,
         delta: f64,
+        out_col: Option<&str>,
     ) -> Result<Self, TGADomainError> {
-        let df = self.frame.clone().collect()?;
+        let out_col = default_output_name("sg_", col, out_col);
+        let mut df = self.frame.clone().collect()?;
 
         let s = df
             .column(col)
@@ -342,12 +428,30 @@ impl TGADataset {
         let values: Vec<f64> = s.into_no_null_iter().collect();
 
         let filtered = SG_filter_dyn(values.iter(), window, poly_order, Some(deriv), Some(delta));
+        let values = Column::new(out_col.clone().into(), filtered);
+        let new_df = df
+            .with_column(values)
+            .map_err(TGADomainError::PolarsError)?;
 
-        let mut new_df = df.clone();
-        new_df.replace(col, Series::new(col.into(), filtered))?;
-
-        self.frame = new_df.lazy();
+        info!(
+            "new column with SG filtered data named {:?} has been created",
+            out_col
+        );
+        let list_of_cols = &new_df.get_column_names();
+        info!("now list of columns is {:?}", list_of_cols);
+        self.frame = new_df.clone().lazy();
+        self.schema.update_schema(col, &out_col);
         Ok(self)
+    }
+    pub fn sg_filter_column(
+        self,
+        col: &str,
+        window: usize,
+        poly_order: usize,
+        deriv: usize,
+        delta: f64,
+    ) -> Result<Self, TGADomainError> {
+        self.sg_filter_column_as(col, window, poly_order, deriv, delta, Some(col))
     }
     //===============================================================================
 
@@ -367,14 +471,230 @@ impl TGADataset {
     /// - does NOT introduce nulls
     /// - overwrites the column in-place
     pub fn spline_resample_columns(
-        mut self,
+        self,
         time_col: &str,
         new_time_col: &str,
         columns: &[&str],
         n_points: usize,
         kind: SplineKind,
     ) -> Result<Self, TGADomainError> {
+        let out_cols: Vec<Option<&str>> = columns.iter().map(|&col| Some(col)).collect();
+        self.spline_resample_columns_as(time_col, new_time_col, columns, &out_cols, n_points, kind)
+    }
+
+    pub fn spline_resample_columns_as(
+        mut self,
+        time_col: &str,
+        new_time_col: &str,
+        columns: &[&str],
+        out_columns: &[Option<&str>],
+        n_points: usize,
+        kind: SplineKind,
+    ) -> Result<Self, TGADomainError> {
+        let mut df = self.frame.clone().collect()?;
+        let n = df.height();
+        let out_names = resolved_output_names("spline_", columns, out_columns)?;
+
+        // --- old time ---
+        let t_old = extract_f64_column(&df, time_col)?;
+
+        // --- resample requested columns ---
+        for (&col, out_name) in columns.iter().zip(out_names.iter()) {
+            let y_old = extract_f64_column(&df, col)?;
+
+            let (_, y_new) = spline_resample(&t_old, &y_old, n_points, kind)
+                .map_err(|e| TGADomainError::InvalidOperation(e))?;
+            let y_series = Column::new(out_name.clone().into(), y_new);
+            let n_new = y_series.len();
+            let y_series = y_series.extend_constant(AnyValue::Null, n - n_new)?;
+            df = df.with_column(y_series)?.clone();
+            self.schema.update_schema(col, &out_name);
+        }
+        info!("updating ");
+        // --- new grid ---
+        let t_new = uniform_grid_from(&t_old, n_points, kind)
+            .map_err(|e| TGADomainError::InvalidOperation(e))?;
+
+        // --- add new time column ---
+        let time_column = Column::new(new_time_col.into(), t_new);
+        let n_new = time_column.len();
+        let time_column = time_column.extend_constant(AnyValue::Null, n - n_new)?;
+        df = df.clone().with_column(time_column)?.clone();
+        self.schema.update_schema(time_col, new_time_col);
+        let list_of_cols = &df.get_column_names();
+        info!("now list of columns is {:?}", list_of_cols);
+        self.frame = df.lazy();
+        info!(
+            "new columns with splined data named {:?} have been created",
+            out_columns
+        );
+
+        Ok(self)
+    }
+
+    pub fn lsq_spline_resample_column(
+        self,
+        time_col: &str,
+        new_time_col: &str,
+        column: &str,
+        n_points: usize,
+    ) -> Result<Self, TGADomainError> {
+        self.lsq_spline_resample_column_as(
+            time_col,
+            new_time_col,
+            column,
+            Some(column),
+            n_points,
+            3,
+            24,
+            SolverKind::Banded,
+        )
+    }
+
+    pub fn lsq_spline_resample_column_as(
+        self,
+        time_col: &str,
+        new_time_col: &str,
+        column: &str,
+        out_column: Option<&str>,
+        n_points: usize,
+
+        degree: usize,
+        n_internal_knots: usize,
+        solver: SolverKind,
+    ) -> Result<Self, TGADomainError> {
+        self.lsq_spline_resample_columns_as(
+            time_col,
+            new_time_col,
+            &[column],
+            &[out_column],
+            n_points,
+            degree,
+            n_internal_knots,
+            solver,
+        )
+    }
+
+    pub fn lsq_spline_resample_columns(
+        self,
+        time_col: &str,
+        new_time_col: &str,
+        columns: &[&str],
+        n_points: usize,
+    ) -> Result<Self, TGADomainError> {
+        let out_cols: Vec<Option<&str>> = columns.iter().map(|&col| Some(col)).collect();
+        self.lsq_spline_resample_columns_as(
+            time_col,
+            new_time_col,
+            columns,
+            &out_cols,
+            n_points,
+            3,
+            24,
+            SolverKind::Banded,
+        )
+    }
+
+    pub fn lsq_spline_resample_columns_as(
+        mut self,
+        time_col: &str,
+        new_time_col: &str,
+        columns: &[&str],
+        out_columns: &[Option<&str>],
+        n_points: usize,
+        degree: usize,
+        n_internal_knots: usize,
+        solver: SolverKind,
+    ) -> Result<Self, TGADomainError> {
+        if n_points < 2 {
+            return Err(TGADomainError::InvalidOperation(
+                "n_points must be >= 2".into(),
+            ));
+        }
+        if degree == 0 {
+            return Err(TGADomainError::InvalidOperation(
+                "degree must be >= 1".into(),
+            ));
+        }
+
+        let mut df = self.frame.clone().collect()?;
+        let n = df.height();
+        let out_names = resolved_output_names("lsq_spline_", columns, out_columns)?;
+
+        let t_old = extract_f64_column(&df, time_col)?;
+        if t_old.len() < 2 {
+            return Err(TGADomainError::InvalidOperation(
+                "LSQ spline resampling requires at least 2 points".into(),
+            ));
+        }
+        for i in 1..t_old.len() {
+            if t_old[i] <= t_old[i - 1] {
+                return Err(TGADomainError::InvalidOperation(
+                    "Time column must be strictly monotonic for LSQ spline resampling".into(),
+                ));
+            }
+        }
+
+        let t_new = uniform_grid_from(&t_old, n_points, SplineKind::Linear)
+            .map_err(|e| TGADomainError::InvalidOperation(e))?;
+        let t_old_arr = Array1::from_vec(t_old.clone());
+        let t_new_arr = Array1::from_vec(t_new.clone());
+
+        let max_internal_knots = t_old.len().saturating_sub(degree + 1);
+        let used_internal_knots = n_internal_knots.min(max_internal_knots);
+        let xmin = t_old[0];
+        let xmax = t_old[t_old.len() - 1];
+        let internal_knots = if used_internal_knots == 0 {
+            Array1::<f64>::zeros(0)
+        } else {
+            Array1::linspace(xmin, xmax, used_internal_knots + 2)
+                .slice(s![1..used_internal_knots + 1])
+                .to_owned()
+        };
+
+        for (&col, out_name) in columns.iter().zip(out_names.iter()) {
+            let y_old = extract_f64_column(&df, col)?;
+            let y_old_arr = Array1::from_vec(y_old);
+
+            let spline =
+                make_lsq_univariate_spline(&t_old_arr, &y_old_arr, &internal_knots, degree, solver)
+                    .map_err(|e| {
+                        TGADomainError::InvalidOperation(format!(
+                            "LSQ spline fit failed for column '{}': {:?}",
+                            col, e
+                        ))
+                    })?;
+
+            let y_new = spline.evaluate_batch_array(&t_new_arr).to_vec();
+            let y_series = Column::new(out_name.clone().into(), y_new);
+            let n_new = y_series.len();
+            let y_series = y_series.extend_constant(AnyValue::Null, n - n_new)?;
+            df = df.with_column(y_series)?.clone();
+            self.schema.update_schema(col, out_name);
+        }
+
+        let time_column = Column::new(new_time_col.into(), t_new);
+        let n_new = time_column.len();
+        let time_column = time_column.extend_constant(AnyValue::Null, n - n_new)?;
+        df = df.with_column(time_column)?.clone();
+        self.schema.update_schema(time_col, new_time_col);
+        self.frame = df.lazy();
+
+        Ok(self)
+    }
+
+    /*
+    pub fn spline_resample_columns_as(
+        mut self,
+        time_col: &str,
+        new_time_col: &str,
+        columns: &[&str],
+        out_columns: &[Option<&str>],
+        n_points: usize,
+        kind: SplineKind,
+    ) -> Result<Self, TGADomainError> {
         let df = self.frame.clone().collect()?;
+        let out_names = resolved_output_names("spline_", columns, out_columns)?;
 
         // --- old time ---
         let t_old = extract_f64_column(&df, time_col)?;
@@ -386,13 +706,14 @@ impl TGADataset {
         let mut series: Vec<Column> = Vec::new();
 
         // --- resample requested columns ---
-        for &col in columns {
+        for (&col, out_name) in columns.iter().zip(out_names.iter()) {
             let y_old = extract_f64_column(&df, col)?;
 
             let (_, y_new) = spline_resample(&t_old, &y_old, n_points, kind)
                 .map_err(|e| TGADomainError::InvalidOperation(e))?;
-
-            series.push(Series::new(col.into(), y_new).into());
+            self.schema.update_schema(col, &out_name);
+            self.schema.drop_schema_record(col);
+            series.push(Series::new(out_name.clone().into(), y_new).into());
         }
 
         // --- add new time column ---
@@ -401,13 +722,20 @@ impl TGADataset {
         let new_df = DataFrame::new(series)?;
 
         // --- update schema ---
-        if self.schema.time.as_deref() == Some(time_col) {
-            self.schema.time = Some(new_time_col.into());
-        }
-
+       self.schema.update_schema(time_col, new_time_col );
+         self.schema.drop_schema_record(time_col);
+        let list_of_cols = &new_df.get_column_names();
+        info!("now list of columns is {:?}", list_of_cols);
         self.frame = new_df.lazy();
+        info!(
+            "new columns with splined data named {:?} have been created",
+            out_columns
+        );
+
         Ok(self)
     }
+
+    */
     /*
     pub fn spline_smooth_column(
         mut self,
