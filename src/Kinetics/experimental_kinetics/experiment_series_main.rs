@@ -1,10 +1,13 @@
 use crate::Kinetics::experimental_kinetics::LSQSplines::SolverKind;
-use crate::Kinetics::experimental_kinetics::exp_engine_api::{PlotSeries, Ranges, ViewRange, XY};
+use crate::Kinetics::experimental_kinetics::exp_engine_api::{
+    GoldenPipelineConfig, PlotSeries, Ranges, ViewRange, XY,
+};
+use crate::Kinetics::experimental_kinetics::lowess_wrapper::LowessConfig;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::ColumnRole;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::History;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    ColumnHistory, ColumnMeta, ColumnOrigin, OperationRecord, TGADataset, TGADomainError,
-    TGASchema, UnaryOp, Unit,
+    ColumnHistory, ColumnMeta, ColumnNature, ColumnOrigin, OperationRecord, TGADataset,
+    TGADomainError, TGASchema, UnaryOp, Unit,
 };
 use crate::Kinetics::experimental_kinetics::splines::SplineKind;
 use crate::Kinetics::experimental_kinetics::testing_mod::VirtualTGA;
@@ -680,8 +683,15 @@ impl TGAExperiment {
     /// derive_rate API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
-    pub fn derive_rate(self, source_col: &str, new_col: &str) -> Result<Self, TGADomainError> {
-        let dataset = self.dataset.derive_rate(source_col, new_col)?;
+    pub fn derive_rate(
+        self,
+        source_col: &str,
+        new_col: &str,
+        new_col_nature: ColumnNature,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self
+            .dataset
+            .derive_rate(source_col, new_col, new_col_nature)?;
         Ok(Self {
             dataset,
             meta: self.meta,
@@ -881,6 +891,67 @@ impl TGAExperiment {
         let dataset = self
             .dataset
             .sg_filter_column_as(col, window, poly_order, deriv, delta, out_col)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+    pub fn lowess_smooth_columns(
+        self,
+        time_col: &str,
+        columns: &[&str],
+        config: LowessConfig,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self
+            .dataset
+            .lowess_smooth_columns(time_col, columns, config)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+
+    pub fn lowess_smooth_column(
+        self,
+        time_col: &str,
+        column: &str,
+        config: LowessConfig,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self
+            .dataset
+            .lowess_smooth_column(time_col, column, config)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+
+    pub fn lowess_smooth_column_as(
+        self,
+        time_col: &str,
+        column: &str,
+        out_column: Option<&str>,
+        config: LowessConfig,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self
+            .dataset
+            .lowess_smooth_column_as(time_col, column, out_column, config)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+
+    pub fn lowess_smooth_columns_as(
+        self,
+        time_col: &str,
+        columns: &[&str],
+        out_columns: &[Option<&str>],
+        config: LowessConfig,
+    ) -> Result<Self, TGADomainError> {
+        let dataset =
+            self.dataset
+                .lowess_smooth_columns_as(time_col, columns, out_columns, config)?;
         Ok(Self {
             dataset,
             meta: self.meta,
@@ -1274,12 +1345,64 @@ impl TGAExperiment {
         self.dataset.get_column_history(col)
     }
 
+    /// Compute mean of `value_col` in the time interval `[from, to]`.
+    pub fn mean_on_interval(
+        &self,
+        value_col: &str,
+        time_col: &str,
+        from: f64,
+        to: f64,
+    ) -> Result<f64, TGADomainError> {
+        Ok(self
+            .dataset
+            .mean_on_interval(value_col, time_col, from, to)?)
+    }
+
+    /// Compute mean on a column constrained by the same column's range.
+    pub fn mean_on_interval_on_own_range(
+        &self,
+        column: &str,
+        from: f64,
+        to: f64,
+    ) -> Result<f64, TGADomainError> {
+        Ok(self
+            .dataset
+            .mean_on_interval_on_own_range(column, from, to)?)
+    }
+
+    /// Compute mean of all entries in a column.
+    pub fn mean_on_column(&self, column: &str) -> Result<f64, TGADomainError> {
+        Ok(self.dataset.mean_on_column(column)?)
+    }
+
     pub fn take_column(&mut self, column_name: &str) -> Option<String> {
         self.dataset.take_column(column_name)
     }
     pub fn list_of_columns_to_recalc(&mut self) -> Vec<String> {
         self.dataset.list_of_columns_to_recalc()
     }
+    pub fn drop_nulls(&mut self) -> Result<(), TGADomainError> {
+        self.dataset.drop_nulls()
+    }
+    pub fn apply_golden_pipeline(
+        self,
+        config: GoldenPipelineConfig,
+    ) -> Result<(Self, Vec<String>), TGADomainError> {
+        let (dataset, vec_of_new) = self.dataset.apply_golden_pipeline(config)?;
+        let exp = Self {
+            dataset,
+            meta: self.meta.clone(),
+        };
+        Ok((exp, vec_of_new))
+    }
+
+    pub fn get_column_by_nature(&self, nature: ColumnNature) -> Option<String> {
+        self.dataset.get_column_by_nature(nature)
+    }
+    pub fn get_columns_by_nature(&self, nature: Vec<ColumnNature>) -> Vec<Option<String>> {
+        self.dataset.get_columns_by_nature(nature)
+    }
+
     //===============================================================================
     //  END OF THIN WRAPPERS
 }
@@ -1344,7 +1467,7 @@ impl TGASeries {
         Ok(())
     }
 
-    fn rebuild_index(&mut self) {
+    pub fn rebuild_index(&mut self) {
         self.exp_map.clear();
         for (idx, exp) in self.experiments.iter().enumerate() {
             self.exp_map.insert(exp.meta.id.clone(), idx);
@@ -1737,6 +1860,7 @@ impl TGASeries {
                         name: c.column_name.clone(),
                         unit: c.unit,
                         origin: c.origin,
+                        nature: ColumnNature::Unknown,
                     },
                 );
             }
@@ -2649,8 +2773,11 @@ impl TGASeries {
         id: &str,
         source_col: &str,
         new_col: &str,
+        new_col_nature: ColumnNature,
     ) -> Result<(), TGADomainError> {
-        self.try_transform_by_id(id, |exp| exp.derive_rate(source_col, new_col))
+        self.try_transform_by_id(id, |exp| {
+            exp.derive_rate(source_col, new_col, new_col_nature)
+        })
     }
 
     /// derive_mass_rate API method in the experiment/series facade.
@@ -2817,6 +2944,53 @@ impl TGASeries {
     ) -> Result<(), TGADomainError> {
         self.try_transform_by_id(id, |exp| {
             exp.sg_filter_column_as(col, window, poly_order, deriv, delta, out_col)
+        })
+    }
+    pub fn lowess_smooth_columns(
+        &mut self,
+        id: &str,
+        time_col: &str,
+        columns: &[&str],
+        config: LowessConfig,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.lowess_smooth_columns(time_col, columns, config)
+        })
+    }
+
+    pub fn lowess_smooth_columns_as(
+        &mut self,
+        id: &str,
+        time_col: &str,
+        columns: &[&str],
+        out_columns: &[Option<&str>],
+        config: LowessConfig,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.lowess_smooth_columns_as(time_col, columns, out_columns, config)
+        })
+    }
+
+    pub fn lowess_smooth_column(
+        &mut self,
+        id: &str,
+        time_col: &str,
+        column: &str,
+        config: LowessConfig,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| exp.lowess_smooth_column(time_col, column, config))
+    }
+
+    pub fn lowess_smooth_column_as(
+        &mut self,
+        id: &str,
+        time_col: &str,
+        column: &str,
+        out_column: Option<&str>,
+        config: LowessConfig,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.lowess_smooth_column_as(time_col, column, out_column, config)
         })
     }
     pub fn spline_resample_columns(
@@ -3125,6 +3299,36 @@ impl TGASeries {
         self.apply_by_id(id, |exp| exp.get_column_history(col))
     }
 
+    /// series-level wrapper for `mean_on_interval`.
+    pub fn mean_on_interval(
+        &self,
+        id: &str,
+        value_col: &str,
+        time_col: &str,
+        from: f64,
+        to: f64,
+    ) -> Result<f64, TGADomainError> {
+        self.try_apply_by_id(id, |exp| {
+            exp.mean_on_interval(value_col, time_col, from, to)
+        })
+    }
+
+    /// series-level wrapper for `mean_on_interval_on_own_range`.
+    pub fn mean_on_interval_on_own_range(
+        &self,
+        id: &str,
+        col: &str,
+        from: f64,
+        to: f64,
+    ) -> Result<f64, TGADomainError> {
+        self.try_apply_by_id(id, |exp| exp.mean_on_interval_on_own_range(col, from, to))
+    }
+
+    /// series-level wrapper for `mean_on_column`.
+    pub fn mean_on_column(&self, id: &str, col: &str) -> Result<f64, TGADomainError> {
+        self.try_apply_by_id(id, |exp| exp.mean_on_column(col))
+    }
+
     pub fn take_column(
         &mut self,
         id: &str,
@@ -3145,5 +3349,20 @@ impl TGASeries {
 
     pub fn set_experiment_temperature(&mut self, id: &str, T: f64) -> Result<(), TGADomainError> {
         self.transform_by_id(id, |exp| exp.with_isothermal_temperature(T))
+    }
+
+    pub fn get_column_by_nature(
+        &self,
+        id: &str,
+        nature: ColumnNature,
+    ) -> Result<Option<String>, TGADomainError> {
+        self.apply_by_id(id, |exp| exp.get_column_by_nature(nature))
+    }
+    pub fn get_columns_by_nature(
+        &self,
+        id: &str,
+        nature: Vec<ColumnNature>,
+    ) -> Result<Vec<Option<String>>, TGADomainError> {
+        self.apply_by_id(id, |exp| exp.get_columns_by_nature(nature))
     }
 }

@@ -472,6 +472,39 @@ pub fn design_matrix_dense(x: &Array1<f64>, knots: &Array1<f64>, degree: usize) 
 
     A
 }
+
+/// Parallel variant of `design_matrix_dense`.
+/// Computes per-row local basis contributions in parallel and assembles dense matrix.
+pub fn design_matrix_dense_parallel(
+    x: &Array1<f64>,
+    knots: &Array1<f64>,
+    degree: usize,
+) -> Array2<f64> {
+    let m = x.len();
+    let n = knots.len() - degree - 1;
+
+    let row_entries: Vec<Vec<(usize, f64)>> = (0..m)
+        .into_par_iter()
+        .map(|i| {
+            let xi = x[i];
+            let span = find_span(n - 1, degree, xi, knots);
+            let basis = basis_functions(span, xi, degree, knots);
+
+            (0..=degree)
+                .map(|j| (span - degree + j, basis[j]))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    let mut A = Array2::<f64>::zeros((m, n));
+    for (i, entries) in row_entries.into_iter().enumerate() {
+        for (col, val) in entries {
+            A[[i, col]] = val;
+        }
+    }
+
+    A
+}
 //============================================================================
 // Solver enum (production API)
 //==============================================================================
@@ -549,6 +582,36 @@ pub fn solve_lsq(
         }
     }
 }
+
+/// Parallel variant of `solve_lsq`.
+pub fn solve_lsq_parallel(
+    x: &Array1<f64>,
+    y: &Array1<f64>,
+    w: &Array1<f64>,
+    knots: &Array1<f64>,
+    degree: usize,
+    solver: SolverKind,
+) -> Result<Array1<f64>, LssError> {
+    let total_started = Instant::now();
+    match solver {
+        SolverKind::DenseQR => {
+            let design_started = Instant::now();
+            let A = design_matrix_dense_parallel(x, knots, degree);
+            log_timing("dense.parallel.design_matrix", design_started);
+
+            let solve_started = Instant::now();
+            let result = dense_qr_nalgebra_parallel(A, y, w);
+            log_timing("dense.parallel.solve_qr", solve_started);
+            log_timing("dense.parallel.total", total_started);
+            result
+        }
+        SolverKind::Banded => {
+            let result = banded_solver_parallel(x, y, w, knots, degree);
+            log_timing("banded.parallel.total", total_started);
+            result
+        }
+    }
+}
 //===================================================================================
 // DENSE APPROACH (not for large systems - for testing purpose)
 //====================================================================================
@@ -601,6 +664,54 @@ fn dense_qr_nalgebra(
         .solve_upper_triangular(&qt_b_trunc)
         .ok_or(LssError::Linalg)?;
     log_timing("dense.back_substitution", solve_started);
+
+    Ok(Array1::from(solution.data.as_vec().clone()))
+}
+
+/// Parallel variant of `dense_qr_nalgebra`.
+/// QR factorization itself remains sequential in nalgebra; weighted assembly is parallelized.
+fn dense_qr_nalgebra_parallel(
+    A: Array2<f64>,
+    y: &Array1<f64>,
+    w: &Array1<f64>,
+) -> Result<Array1<f64>, LssError> {
+    let (m, n) = A.dim();
+
+    if m < n {
+        return Err(LssError::InvalidInput);
+    }
+
+    let weighted_started = Instant::now();
+    let weighted_rows: Vec<Vec<f64>> = (0..m)
+        .into_par_iter()
+        .map(|i| {
+            let wi = w[i].sqrt();
+            (0..n).map(|j| A[[i, j]] * wi).collect::<Vec<_>>()
+        })
+        .collect();
+    let flat_weighted: Vec<f64> = weighted_rows.into_iter().flatten().collect();
+    let mat = DMatrix::<f64>::from_row_slice(m, n, &flat_weighted);
+
+    let vec_data: Vec<f64> = (0..m).into_par_iter().map(|i| y[i] * w[i].sqrt()).collect();
+    let vec = DVector::<f64>::from_vec(vec_data);
+    log_timing("dense.parallel.weighted_assembly", weighted_started);
+
+    let qr_started = Instant::now();
+    let qr = mat.qr();
+    let q = qr.q();
+    let r = qr.r();
+    log_timing("dense.parallel.qr_factorization", qr_started);
+
+    let solve_started = Instant::now();
+    let qt_b = q.transpose() * vec;
+
+    let r_square = r.view((0, 0), (n, n));
+    let qt_b_trunc = qt_b.rows(0, n);
+
+    let solution = r_square
+        .solve_upper_triangular(&qt_b_trunc)
+        .ok_or(LssError::Linalg)?;
+    log_timing("dense.parallel.back_substitution", solve_started);
 
     Ok(Array1::from(solution.data.as_vec().clone()))
 }
@@ -983,6 +1094,58 @@ fn build_normal_equations_banded(
     (G, rhs)
 }
 
+/// Parallel variant of `build_normal_equations_banded`.
+fn build_normal_equations_banded_parallel(
+    x: &Array1<f64>,
+    y: &Array1<f64>,
+    w: &Array1<f64>,
+    knots: &Array1<f64>,
+    degree: usize,
+) -> (SymmetricBanded, Vec<f64>) {
+    let n = knots.len() - degree - 1;
+    let half_bandwidth = 2 * degree;
+
+    (0..x.len())
+        .into_par_iter()
+        .fold(
+            || (SymmetricBanded::new(n, half_bandwidth), vec![0.0; n]),
+            |(mut g_local, mut rhs_local), i| {
+                let xi = x[i];
+                let wi = w[i];
+                let yi = y[i];
+
+                let span = find_span(n - 1, degree, xi, knots);
+                let basis = basis_functions(span, xi, degree, knots);
+
+                for a in 0..=degree {
+                    let row = span - degree + a;
+                    let va = basis[a];
+                    rhs_local[row] += wi * va * yi;
+
+                    for b in a..=degree {
+                        let col = span - degree + b;
+                        let vb = basis[b];
+                        g_local.add(row, col, wi * va * vb);
+                    }
+                }
+
+                (g_local, rhs_local)
+            },
+        )
+        .reduce(
+            || (SymmetricBanded::new(n, half_bandwidth), vec![0.0; n]),
+            |(mut g_acc, mut rhs_acc), (g_part, rhs_part)| {
+                for (acc, part) in g_acc.data.iter_mut().zip(g_part.data.iter()) {
+                    *acc += *part;
+                }
+                for (acc, part) in rhs_acc.iter_mut().zip(rhs_part.iter()) {
+                    *acc += *part;
+                }
+                (g_acc, rhs_acc)
+            },
+        )
+}
+
 /// Banded solver:
 /// 1) сборка нормальных уравнений,
 /// 2) факторизация Холецкого,
@@ -1009,6 +1172,30 @@ fn banded_solver(
 
     Ok(Array1::from(rhs))
 }
+
+/// Parallel variant of `banded_solver`.
+fn banded_solver_parallel(
+    x: &Array1<f64>,
+    y: &Array1<f64>,
+    w: &Array1<f64>,
+    knots: &Array1<f64>,
+    degree: usize,
+) -> Result<Array1<f64>, LssError> {
+    let build_started = Instant::now();
+    let (mut G, mut rhs) = build_normal_equations_banded_parallel(x, y, w, knots, degree);
+    log_timing("banded.parallel.build_normal_eq", build_started);
+
+    let cholesky_started = Instant::now();
+    G.cholesky_in_place().map_err(|_| LssError::Linalg)?;
+    log_timing("banded.parallel.cholesky", cholesky_started);
+
+    let solve_started = Instant::now();
+    G.solve_spd_in_place(&mut rhs)
+        .map_err(|_| LssError::Linalg)?;
+    log_timing("banded.parallel.triangular_solve", solve_started);
+
+    Ok(Array1::from(rhs))
+}
 //=================================================================
 // schoenberg whitney
 /// Проверка условия Шенберга-Уитни.
@@ -1032,6 +1219,27 @@ pub fn check_schoenberg_whitney(
     }
 
     Ok(())
+}
+
+/// Parallel variant of `check_schoenberg_whitney`.
+pub fn check_schoenberg_whitney_parallel(
+    x: &Array1<f64>,
+    knots: &Array1<f64>,
+    degree: usize,
+) -> Result<(), &'static str> {
+    let n = knots.len() - degree - 1;
+
+    (0..n).into_par_iter().try_for_each(|j| {
+        let left = knots[j];
+        let right = knots[j + degree + 1];
+
+        let exists = x.iter().any(|&xi| xi > left && xi < right);
+        if exists {
+            Ok(())
+        } else {
+            Err("SchoenbergРІР‚вЂњWhitney condition violated")
+        }
+    })
 }
 //==============================================================================
 //                High-level API
@@ -1063,8 +1271,33 @@ pub fn make_lsq_spline(
         degree,
     })
 }
+
+/// Parallel variant of `make_lsq_spline`.
+pub fn make_lsq_spline_parallel(
+    x: &Array1<f64>,
+    y: &Array1<f64>,
+    knots: &Array1<f64>,
+    degree: usize,
+    weights: Option<&Array1<f64>>,
+    solver: SolverKind,
+) -> Result<BSpline, LssError> {
+    let n_coeffs = knots.len() - degree - 1;
+
+    if x.len() < n_coeffs {
+        return Err(LssError::InvalidInput);
+    }
+
+    let w = weights.cloned().unwrap_or_else(|| Array1::ones(x.len()));
+    let coeffs = solve_lsq_parallel(x, y, &w, knots, degree, solver)?;
+
+    Ok(BSpline {
+        knots: knots.clone(),
+        coeffs,
+        degree,
+    })
+}
 /// Удобный API: принимает только внутренние узлы и сам достраивает полный узловой вектор.
-pub fn make_lsq_univariate_spline(
+pub fn make_lsq_univariate_spline_nonparallel(
     x: &Array1<f64>,
     y: &Array1<f64>,
     internal_knots: &Array1<f64>,
@@ -1094,6 +1327,27 @@ pub fn make_lsq_univariate_spline(
     check_schoenberg_whitney(x, &knots, degree).map_err(|_| LssError::InvalidInput)?;
 
     make_lsq_spline(x, y, &knots, degree, None, solver)
+}
+
+/// Parallel variant of `make_lsq_univariate_spline`.
+pub fn make_lsq_univariate_spline(
+    x: &Array1<f64>,
+    y: &Array1<f64>,
+    internal_knots: &Array1<f64>,
+    degree: usize,
+    solver: SolverKind,
+) -> Result<BSpline, LssError> {
+    let xmin = x[0];
+    let xmax = x[x.len() - 1];
+
+    let mut knots = Vec::with_capacity(internal_knots.len() + 2 * (degree + 1));
+    knots.extend(std::iter::repeat_n(xmin, degree + 1));
+    knots.extend(internal_knots.iter().copied());
+    knots.extend(std::iter::repeat_n(xmax, degree + 1));
+    let knots = Array1::from(knots);
+
+    check_schoenberg_whitney_parallel(x, &knots, degree).map_err(|_| LssError::InvalidInput)?;
+    make_lsq_spline_parallel(x, y, &knots, degree, None, solver)
 }
 //Идея:
 //Мы знаем уровень шума sigm.а в данных (например, от характеристик прибора или от анализа остатков при большом числе узлов).

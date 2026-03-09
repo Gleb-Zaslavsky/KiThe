@@ -1,6 +1,8 @@
 use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy;
+use crate::Kinetics::experimental_kinetics::lowess_wrapper::LowessConfig;
 use crate::Kinetics::experimental_kinetics::splines::SplineKind;
 use crate::gui::experimental_kinetics_gui::model::{PlotModel, TGAGUIError};
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SplineKindChoice {
@@ -22,6 +24,7 @@ pub struct Mathematics {
     show_rolling_window: bool,
     show_splines_window: bool,
     show_sql_splines_window: bool,
+    show_lowess_window: bool,
 
     hampel_col: Option<String>,
     hampel_window: usize,
@@ -50,6 +53,14 @@ pub struct Mathematics {
     sql_splines_n_points: usize,
     sql_splines_out_col: String,
     sq_splines_n_internal_knots: usize,
+
+    lowess_time_col: Option<String>,
+    lowess_fraction: f64,
+    lowess_iterations: usize,
+    lowess_delta: f64,
+    lowess_parallel: bool,
+    lowess_selected_cols: Vec<String>,
+    lowess_out_cols: HashMap<String, String>,
 }
 
 impl Mathematics {
@@ -60,6 +71,7 @@ impl Mathematics {
             show_rolling_window: false,
             show_splines_window: false,
             show_sql_splines_window: false,
+            show_lowess_window: false,
 
             hampel_col: None,
             hampel_window: 11,
@@ -87,7 +99,15 @@ impl Mathematics {
             sql_splines_degree: 3,
             sql_splines_n_points: 1000,
             sql_splines_out_col: String::new(),
-            sq_splines_n_internal_knots: 100,
+            sq_splines_n_internal_knots: 10000,
+
+            lowess_time_col: None,
+            lowess_fraction: 0.5,
+            lowess_iterations: 3,
+            lowess_delta: 0.01,
+            lowess_parallel: true,
+            lowess_selected_cols: Vec::new(),
+            lowess_out_cols: HashMap::new(),
         }
     }
 
@@ -114,6 +134,10 @@ impl Mathematics {
         if ui.button("Differentiate").clicked() {
             println!("Stub: Differentiate clicked");
         }
+
+        if ui.button("LOWESS").clicked() {
+            self.show_lowess_window = true;
+        }
     }
 
     pub fn show_windows(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
@@ -122,6 +146,7 @@ impl Mathematics {
         self.show_rolling_window(ctx, model);
         self.show_splines_window(ctx, model);
         self.show_lsq_splines_window(ctx, model);
+        self.show_lowess_window(ctx, model);
     }
 
     fn columns_for_selected(model: &PlotModel) -> Result<Vec<String>, TGAGUIError> {
@@ -427,6 +452,149 @@ impl Mathematics {
                 });
             });
         self.show_rolling_window = open;
+    }
+
+    fn show_lowess_window(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
+        if !self.show_lowess_window {
+            return;
+        }
+
+        let mut open = self.show_lowess_window;
+        egui::Window::new("LOWESS")
+            .open(&mut open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                match Self::columns_for_selected(model) {
+                    Ok(columns) => {
+                        if columns.is_empty() {
+                            ui.label("No columns available for selected curve.");
+                            return;
+                        }
+
+                        ui.label("time_col");
+                        Self::selected_column_ui(
+                            ui,
+                            "lowess_time_col_combo",
+                            &mut self.lowess_time_col,
+                            &columns,
+                        );
+
+                        self.lowess_selected_cols
+                            .retain(|c| columns.iter().any(|x| x == c));
+                        self.lowess_out_cols
+                            .retain(|k, _| columns.iter().any(|x| x == k));
+
+                        ui.separator();
+                        ui.label("Columns to smooth");
+
+                        let selected_time = self.lowess_time_col.clone();
+                        for col in columns.iter() {
+                            if Some(col.as_str()) == selected_time.as_deref() {
+                                continue;
+                            }
+
+                            let mut checked = self.lowess_selected_cols.iter().any(|c| c == col);
+                            if ui.checkbox(&mut checked, col).changed() {
+                                if checked {
+                                    if !self.lowess_selected_cols.iter().any(|c| c == col) {
+                                        self.lowess_selected_cols.push(col.clone());
+                                    }
+                                } else {
+                                    self.lowess_selected_cols.retain(|c| c != col);
+                                }
+                            }
+
+                            if checked {
+                                let out_name = self
+                                    .lowess_out_cols
+                                    .entry(col.clone())
+                                    .or_insert_with(String::new);
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("out for {} (optional)", col));
+                                    ui.text_edit_singleline(out_name);
+                                });
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        ui.colored_label(egui::Color32::RED, Self::error_text(err));
+                        return;
+                    }
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("fraction");
+                    ui.add(egui::DragValue::new(&mut self.lowess_fraction).speed(0.01));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("iterations");
+                    ui.add(egui::DragValue::new(&mut self.lowess_iterations).speed(1.0));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("delta");
+                    ui.add(egui::DragValue::new(&mut self.lowess_delta).speed(0.001));
+                });
+                ui.checkbox(&mut self.lowess_parallel, "parallel");
+
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        let Some(time_col) = self.lowess_time_col.clone() else {
+                            let _ = model.push_message("Select time_col first.");
+                            return;
+                        };
+                        if self.lowess_selected_cols.is_empty() {
+                            let _ = model.push_message("Select at least one column to smooth.");
+                            return;
+                        }
+
+                        let mut source_cols = self.lowess_selected_cols.clone();
+                        source_cols.retain(|c| c != &time_col);
+                        if source_cols.is_empty() {
+                            let _ = model
+                                .push_message("Selected columns cannot contain only time_col.");
+                            return;
+                        }
+
+                        let out_names_owned: Vec<Option<String>> = source_cols
+                            .iter()
+                            .map(|col| {
+                                self.lowess_out_cols.get(col).and_then(|s| {
+                                    let t = s.trim();
+                                    if t.is_empty() {
+                                        None
+                                    } else {
+                                        Some(t.to_string())
+                                    }
+                                })
+                            })
+                            .collect();
+
+                        let col_refs: Vec<&str> = source_cols.iter().map(String::as_str).collect();
+                        let out_refs: Vec<Option<&str>> =
+                            out_names_owned.iter().map(|o| o.as_deref()).collect();
+
+                        let cfg = LowessConfig {
+                            fraction: self.lowess_fraction,
+                            iterations: self.lowess_iterations,
+                            delta: self.lowess_delta,
+                            parallel: self.lowess_parallel,
+                            ..LowessConfig::default()
+                        };
+
+                        match model.lowess_smooth_columns_for_selected_as(
+                            &time_col, &col_refs, &out_refs, cfg,
+                        ) {
+                            Ok(()) => Self::finalize_success(model, "LOWESS smoothing applied"),
+                            Err(err) => Self::set_action_error(model, err),
+                        }
+                    }
+                    if ui.button("Close").clicked() {
+                        self.show_lowess_window = false;
+                    }
+                });
+            });
+        self.show_lowess_window = open;
     }
 
     fn show_splines_window(&mut self, ctx: &egui::Context, model: &mut PlotModel) {

@@ -1,5 +1,8 @@
 #[cfg(test)]
 mod tests {
+    use crate::Kinetics::experimental_kinetics::exp_engine_api::{
+        GoldenPipelineConfig, SavGolConfig, SplineConfig,
+    };
     use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::*;
     use crate::Kinetics::experimental_kinetics::experiment_series_main::*;
     use crate::Kinetics::experimental_kinetics::one_experiment_dataset::TGADataset;
@@ -67,5 +70,89 @@ mod tests {
         for col in df.columns() {
             assert_eq!(col.null_count(), 0);
         }
+    }
+
+    #[test]
+    fn experiment_wrapper_mean_functions() {
+        let csv = make_csv(1000, 456);
+        let ds = ds_from_csv(&csv);
+        let exp = TGAExperiment::new(ds);
+        let _ = exp.mean_on_interval("mass", "time", 5.0, 10.0).unwrap();
+        let _ = exp
+            .mean_on_interval_on_own_range("mass", 5.0, 10.0)
+            .unwrap();
+        let _ = exp.mean_on_column("mass").unwrap();
+    }
+
+    #[test]
+    fn series_wrapper_mean_functions() {
+        let csv = make_csv(500, 789);
+        let ds = ds_from_csv(&csv);
+        let mut series = TGASeries::new();
+        series.push(TGAExperiment::new(ds.clone()).with_id("a"));
+        let _ = series
+            .mean_on_interval("a", "mass", "time", 0.0, 100.0)
+            .unwrap();
+        let _ = series
+            .mean_on_interval_on_own_range("a", "mass", 0.0, 100.0)
+            .unwrap();
+        let _ = series.mean_on_column("a", "mass").unwrap();
+    }
+
+    fn golden_cfg(save_to_new_experiment: bool, del_old_experiment: bool) -> GoldenPipelineConfig {
+        GoldenPipelineConfig {
+            k: 1.0,
+            b: 0.0,
+            time_cut_before: None,
+            time_cut_after: None,
+            sav_gol_config: SavGolConfig {
+                window_size: 11,
+                poly_degree: 3,
+                deriv: 0,
+                delta: 1.0,
+            },
+            averaging_time: 1.0,
+            spline_config: SplineConfig {
+                n_points: 300,
+                n_internal_points: 200,
+                degree: 3,
+            },
+            save_to_new_experiment,
+            del_old_experiment,
+        }
+    }
+
+    #[test]
+    fn series_apply_golden_pipeline_keeps_source_when_configured() {
+        let csv = make_csv(1200, 555001);
+        let ds = ds_from_csv(&csv);
+        let exp = TGAExperiment::new(ds).with_id("exp1");
+        let mut series = TGASeries::new();
+        series.push(exp);
+
+        series
+            .apply_golden_pipeline("exp1", golden_cfg(true, false))
+            .unwrap();
+
+        assert_eq!(series.len(), 2);
+        assert!(series.index_by_id("exp1").is_ok());
+        assert!(series.index_by_id("proceeded_exp1").is_ok());
+    }
+
+    #[test]
+    fn series_apply_golden_pipeline_drops_source_when_configured() {
+        let csv = make_csv(1200, 555002);
+        let ds = ds_from_csv(&csv);
+        let exp = TGAExperiment::new(ds).with_id("exp1");
+        let mut series = TGASeries::new();
+        series.push(exp);
+
+        series
+            .apply_golden_pipeline("exp1", golden_cfg(true, true))
+            .unwrap();
+
+        assert_eq!(series.len(), 1);
+        assert!(series.index_by_id("exp1").is_err());
+        assert!(series.index_by_id("proceeded_exp1").is_ok());
     }
 }

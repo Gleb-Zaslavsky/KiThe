@@ -9,7 +9,7 @@ pub fn run_interactive_menu() {
         println!(
             "\x1b[34m\n Wellcome to KiThe: Toolkit for chemical engineering, combustion,\n
     chemical kinetics, chemical thermodynamics and more \n
-    (c) Gleb E. Zaslavsky, 2024 \n \x1b[0m"
+    (c) Gleb E. Zaslavsky, 2024-2026 \n \x1b[0m"
         );
 
         let items = vec![

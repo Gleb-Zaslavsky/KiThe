@@ -1,8 +1,12 @@
 #[cfg(test)]
 mod tests {
 
+    use crate::Kinetics::experimental_kinetics::exp_engine_api::{
+        GoldenPipelineConfig, SavGolConfig, SplineConfig,
+    };
     use crate::Kinetics::experimental_kinetics::exp_kinetics_column_manipulation::column_stats;
     use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::*;
+    use crate::Kinetics::experimental_kinetics::lowess_wrapper::LowessConfig;
     use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{TGADataset, Unit};
     use crate::Kinetics::experimental_kinetics::one_experiment_dataset_test::tests::{
         ds_from_csv, make_csv,
@@ -201,6 +205,78 @@ mod tests {
             .sum();
 
         assert!(roughness.is_finite());
+    }
+
+    #[test]
+    fn lowess_filter_column_overwrites_column() {
+        let csv = make_csv(800, 903);
+        let ds = ds_from_csv(&csv);
+
+        let df0 = ds.frame.clone().collect().unwrap();
+        let m0: Vec<f64> = df0
+            .column("mass")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        let rough0: f64 = m0.windows(2).map(|w| (w[1] - w[0]).abs()).sum();
+
+        let ds2 = ds.lowess_filter_column("mass", 0.2).unwrap();
+        let df2 = ds2.frame.collect().unwrap();
+
+        assert_eq!(df2.height(), df0.height());
+        assert_eq!(df2.column("mass").unwrap().null_count(), 0);
+
+        let m1: Vec<f64> = df2
+            .column("mass")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        let rough1: f64 = m1.windows(2).map(|w| (w[1] - w[0]).abs()).sum();
+        assert!(rough1 <= rough0 * 1.05);
+    }
+
+    #[test]
+    fn lowess_smooth_columns_as_adds_named_columns() {
+        let csv = make_csv(700, 91011);
+        let ds = ds_from_csv(&csv);
+
+        let ds2 = ds
+            .lowess_smooth_columns_as(
+                "time",
+                &["mass", "temperature"],
+                &[Some("mass_lowess"), Some("temperature_lowess")],
+                LowessConfig {
+                    fraction: 0.25,
+                    ..LowessConfig::default()
+                },
+            )
+            .unwrap();
+
+        let df = ds2.frame.collect().unwrap();
+        assert!(df.column("mass_lowess").is_ok());
+        assert!(df.column("temperature_lowess").is_ok());
+        assert_eq!(df.column("mass_lowess").unwrap().len(), df.height());
+        assert_eq!(df.column("temperature_lowess").unwrap().len(), df.height());
+        assert_eq!(df.column("mass_lowess").unwrap().null_count(), 0);
+        assert_eq!(df.column("temperature_lowess").unwrap().null_count(), 0);
+    }
+
+    #[test]
+    fn smooth_strategy_lowess_path_works() {
+        let csv = make_csv(600, 314159);
+        let ds = ds_from_csv(&csv);
+
+        let ds2 = ds
+            .smooth_columns(&["mass"], SmoothStrategy::Lowess { frac: 0.3 })
+            .unwrap();
+
+        let df = ds2.frame.collect().unwrap();
+        assert!(df.column("mass").is_ok());
+        assert_eq!(df.column("mass").unwrap().null_count(), 0);
     }
     //==============================================================================
     // FULL PIPELINE
@@ -410,6 +486,63 @@ mod tests {
         inv.monotonic_increasing("time");
 
         assert!(inv.df.height() > 1000);
+    }
+
+    #[test]
+    fn apply_golden_pipeline_adds_expected_columns_and_reports_them() {
+        let csv = make_csv(1200, 20260304);
+        let ds = ds_from_csv(&csv)
+            .bind_time("time", Unit::Second)
+            .unwrap()
+            .bind_mass("mass", Unit::MilliVolt)
+            .unwrap()
+            .bind_temperature("temperature", Unit::Celsius)
+            .unwrap();
+
+        let cfg = GoldenPipelineConfig {
+            k: 1.0,
+            b: 0.0,
+            time_cut_before: None,
+            time_cut_after: None,
+            sav_gol_config: SavGolConfig {
+                window_size: 11,
+                poly_degree: 3,
+                deriv: 0,
+                delta: 1.0,
+            },
+            averaging_time: 1.0,
+            spline_config: SplineConfig {
+                n_points: 300,
+                n_internal_points: 200,
+                degree: 3,
+            },
+            save_to_new_experiment: false,
+            del_old_experiment: false,
+        };
+
+        let (ds2, new_columns) = ds.apply_golden_pipeline(cfg).unwrap();
+        let df = ds2.frame.collect().unwrap();
+
+        for col in [
+            "alpha",
+            "eta",
+            "dT/dt",
+            "dalpha_dt",
+            "deta_dt",
+            "time_splined",
+        ] {
+            assert!(df.column(col).is_ok(), "missing output column {}", col);
+            assert!(
+                new_columns.iter().any(|c| c == col),
+                "not reported: {}",
+                col
+            );
+        }
+
+        let time_splined = df.column("time_splined").unwrap().f64().unwrap();
+        let non_null: Vec<f64> = time_splined.into_iter().flatten().collect();
+        assert!(!non_null.is_empty());
+        assert!(non_null.iter().all(|v| v.is_finite()));
     }
 
     #[test]

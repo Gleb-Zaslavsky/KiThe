@@ -62,13 +62,15 @@ Dimensionless Transformations:
 */
 
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    AffectedColumns, ColumnMeta, ColumnOrigin, ColumnTypes, TGADataset, TGADomainError, UnaryOp,
-    Unit,
+    AffectedColumns, ColumnMeta, ColumnNature, ColumnOrigin, ColumnTypes, TGADataset,
+    TGADomainError, UnaryOp, Unit,
 };
+use log::info;
 use polars::error::PolarsResult;
 use polars::prelude::DataType;
 use polars::prelude::Expr;
 use polars::prelude::*;
+use std::time::Instant;
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
@@ -249,6 +251,7 @@ impl TGADataset {
         let f64_series = series.f64().map_err(TGADomainError::PolarsError)?;
         Ok(f64_series.into_no_null_iter().collect())
     }
+
     //================================================================
     // BASIC TRANSFORMATIONS: COLUMN CUT AND FILTER
     /// Добавление новой колонки с заданным выражением
@@ -334,6 +337,13 @@ impl TGADataset {
 
         self.filter_rows(col(&time_col).gt_eq(lit(t_start)))
     }
+
+    pub fn cut_after_time(self, t_after: f64) -> Self {
+        let time_col = self.schema.time.as_ref().unwrap().clone();
+        println!("\n column: {} ", time_col);
+
+        self.filter_rows(col(&time_col).lt_eq(lit(t_after)))
+    }
     /// trim edges
     /// Обрезка данных в заданном диапазоне
     pub fn trim_range(self, column: &str, from: f64, to: f64) -> Self {
@@ -373,6 +383,7 @@ impl TGADataset {
 
     /// Обрезка краев с нулевыми значениями
     pub fn trim_null_edges(mut self) -> Self {
+        let start = Instant::now();
         let df = self.frame.clone().collect().unwrap();
 
         let mut left = 0usize;
@@ -404,7 +415,7 @@ impl TGADataset {
             format!("Trimmed {} null rows from left, {} from right", left, right),
             false,
         );
-
+        info!("null trim finished in {} ms", start.elapsed().as_millis());
         self
     }
 
@@ -836,6 +847,7 @@ impl TGADataset {
                 name: dst.to_string(),
                 unit: out_unit,
                 origin: ColumnOrigin::PolarsDerived,
+                nature: ColumnNature::Unknown,
             },
         );
 
@@ -888,6 +900,7 @@ impl TGADataset {
                 name: new_name.clone(),
                 unit: Unit::Dimensionless,
                 origin: ColumnOrigin::PolarsDerived,
+                nature: ColumnNature::Unknown,
             },
         );
 
@@ -965,6 +978,7 @@ impl TGADataset {
                 name: new_name.clone(),
                 unit: Unit::Dimensionless,
                 origin: ColumnOrigin::PolarsDerived,
+                nature: ColumnNature::Unknown,
             },
         );
 
@@ -1002,6 +1016,35 @@ impl TGADataset {
 
         Ok(df.column(value_col)?.f64()?.get(0).unwrap())
     }
+
+    /// Compute mean of `col` restricted to its own value range `[from, to]`.
+    /// This is just a thin wrapper around `mean_on_interval` using the same
+    /// column for values and the range filter.
+    pub fn mean_on_interval_on_own_range(
+        &self,
+        colmn: &str,
+        from: f64,
+        to: f64,
+    ) -> PolarsResult<f64> {
+        let df = self
+            .frame
+            .clone()
+            .filter(col(colmn).gt_eq(lit(from)).and(col(colmn).lt_eq(lit(to))))
+            .select([col(colmn).mean()])
+            .collect()?;
+
+        Ok(df.column(colmn)?.f64()?.get(0).unwrap())
+    }
+
+    /// Compute the average of all entries in the specified column.
+    pub fn mean_on_column(&self, col_name: &str) -> PolarsResult<f64> {
+        let df = self
+            .frame
+            .clone()
+            .select([col(col_name).mean()])
+            .collect()?;
+        Ok(df.column(col_name)?.f64()?.get(0).unwrap())
+    }
     //======================================================================
     // DIMENSIONLESS
     /// dimensionless mass
@@ -1025,6 +1068,7 @@ impl TGADataset {
                 name: new_name.clone(),
                 unit: Unit::Dimensionless,
                 origin: ColumnOrigin::PolarsDerived,
+                nature: ColumnNature::DimensionlessMass,
             },
         );
 
@@ -1051,6 +1095,7 @@ impl TGADataset {
         to: f64,
         new_col: &str,
     ) -> Result<Self, TGADomainError> {
+        let start = Instant::now();
         let mass = self
             .schema
             .mass
@@ -1091,6 +1136,7 @@ impl TGADataset {
                 name: new_col.into(),
                 unit: Unit::Dimensionless,
                 origin: ColumnOrigin::PolarsDerived,
+                nature: ColumnNature::DimensionlessMass,
             },
         );
         self.schema.alpha = Some(new_col.to_string());
@@ -1105,7 +1151,10 @@ impl TGADataset {
             ),
             true,
         );
-
+        info!(
+            "dimensionless_mass completed in {:?} ms",
+            start.elapsed().as_millis()
+        );
         Ok(self)
     }
     /// conversion = 1 - dimensionless_mass
@@ -1124,6 +1173,7 @@ impl TGADataset {
                 name: dst.into(),
                 unit: Unit::Dimensionless,
                 origin: ColumnOrigin::PolarsDerived,
+                nature: ColumnNature::Conversion,
             },
         );
 
@@ -1140,6 +1190,7 @@ impl TGADataset {
 
     /// Конверсия
     pub fn conversion(mut self, from: f64, to: f64, new_col: &str) -> Result<Self, TGADomainError> {
+        let start = Instant::now();
         let mass = self
             .schema
             .mass
@@ -1180,6 +1231,7 @@ impl TGADataset {
                 name: new_col.into(),
                 unit: Unit::Dimensionless,
                 origin: ColumnOrigin::PolarsDerived,
+                nature: ColumnNature::Conversion,
             },
         );
         self.schema.eta = Some(new_col.to_string());
@@ -1194,7 +1246,10 @@ impl TGADataset {
             ),
             true,
         );
-
+        info!(
+            "conversion completed in {:?} ms",
+            start.elapsed().as_millis()
+        );
         Ok(self)
     }
     //================================================================================================
@@ -1239,6 +1294,40 @@ impl TGADataset {
         }
     }
     /// Проверка отсутствия null значений
+    /// Checks that time values are strictly increasing: t[i] > t[i-1].
+    /// Returns each offending time value t[i] where monotonicity fails.
+    pub fn monotony_of_time_check(&self) -> Result<Vec<f64>, TGADomainError> {
+        let time_col = self
+            .schema
+            .time
+            .as_ref()
+            .ok_or(TGADomainError::TimeNotBound)?;
+        let df = self.frame.clone().collect()?;
+        let series = df.column(time_col)?;
+        let time = series.f64()?;
+
+        let mut failures = Vec::new();
+        let mut prev: Option<f64> = None;
+
+        for (idx, maybe_t) in time.into_iter().enumerate() {
+            let t = maybe_t.ok_or_else(|| {
+                TGADomainError::InvalidOperation(format!(
+                    "Time monotony check failed: null at index {} in column '{}'",
+                    idx, time_col
+                ))
+            })?;
+
+            if let Some(prev_t) = prev {
+                if t <= prev_t {
+                    failures.push(t);
+                }
+            }
+            prev = Some(t);
+        }
+
+        Ok(failures)
+    }
+
     pub fn assert_no_nulls(self, operation: &str) -> Result<Self, TGADomainError> {
         let df = self.frame.clone().collect()?;
 

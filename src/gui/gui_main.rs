@@ -260,7 +260,7 @@ impl eframe::App for MainApp {
                 } else {
                     ui.label("Logo not found");
                 }
-                ui.label("developed by Gleb E. Zaslavsky 2024-2025 (c)");
+                ui.label("developed by Gleb E. Zaslavsky 2024-2026 (c)");
             }) ;
         });
 

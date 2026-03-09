@@ -2,7 +2,7 @@ use polars::prelude::{DataFrame, LazyFrame, PolarsResult};
 
 use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    ColumnMeta, ColumnOrigin, History, TGADataset, TGADomainError, TGASchema, Unit,
+    ColumnMeta, ColumnNature, ColumnOrigin, History, TGADataset, TGADomainError, TGASchema, Unit,
 };
 use polars::prelude::*;
 use rand::rngs::StdRng;
@@ -34,6 +34,7 @@ impl TGADataset {
                 name: "time".to_string(),
                 unit: Unit::Second,
                 origin: ColumnOrigin::Raw,
+                nature: ColumnNature::Time,
             },
         );
         columns.insert(
@@ -42,6 +43,7 @@ impl TGADataset {
                 name: "mass".to_string(),
                 unit: Unit::Milligram,
                 origin: ColumnOrigin::Raw,
+                nature: ColumnNature::Mass,
             },
         );
         columns.insert(
@@ -50,6 +52,7 @@ impl TGADataset {
                 name: "temperature".to_string(),
                 unit: Unit::Celsius,
                 origin: ColumnOrigin::Raw,
+                nature: ColumnNature::Temperature,
             },
         );
 

@@ -62,11 +62,12 @@ use polars::prelude::LazyFrame;
 use polars::prelude::*;
 use polars::series::Series;
 
+use log::info;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
+use std::time::Instant;
 //===============================================================
 // One datafame plot data
 #[derive(Clone, Debug)]
@@ -110,6 +111,7 @@ pub enum TGADomainError {
     NotImplemented,
     InvalidOperation(String),
     OutOfRange,
+    TimeNonMonotonic(String),
 }
 
 impl From<PolarsError> for TGADomainError {
@@ -210,6 +212,21 @@ pub enum ColumnRole {
     Temperature,
     Mass,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnNature {
+    Time,
+    Temperature,
+    Mass,
+    // other name eta
+    Conversion,
+    // other name alpha
+    DimensionlessMass,
+    MassRate,
+    ConversionRate,
+    TemperatureRate,
+    DimensionlessMassRate,
+    Unknown,
+}
 /// Columns Origin
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnOrigin {
@@ -224,6 +241,17 @@ pub struct ColumnMeta {
     pub name: String,
     pub unit: Unit,
     pub origin: ColumnOrigin,
+    pub nature: ColumnNature,
+}
+
+impl ColumnMeta {
+    pub fn set_nature(&mut self, nature: ColumnNature) {
+        self.nature = nature;
+    }
+
+    pub fn get_nature(&self) -> ColumnNature {
+        self.nature
+    }
 }
 
 /// Scheme of TGA dataset
@@ -261,6 +289,7 @@ impl TGASchema {
                     name: name.clone(),
                     unit: units[i],
                     origin,
+                    nature: ColumnNature::Unknown,
                 },
             );
         }
@@ -289,6 +318,7 @@ impl TGASchema {
                 name: new_name.to_string(),
                 unit: old_meta.unit,
                 origin: old_meta.origin,
+                nature: old_meta.nature,
             };
             // Insert the new column metadata
             self.columns.insert(new_name.to_string(), new_meta);
@@ -708,6 +738,7 @@ impl TGADataset {
                 name: time_col.into(),
                 unit: Unit::Second,
                 origin: ColumnOrigin::Raw,
+                nature: ColumnNature::Time,
             },
         );
 
@@ -717,6 +748,7 @@ impl TGADataset {
                 name: temp_col.into(),
                 unit: Unit::Celsius,
                 origin: ColumnOrigin::Raw,
+                nature: ColumnNature::Temperature,
             },
         );
 
@@ -726,6 +758,7 @@ impl TGADataset {
                 name: mass_col.into(),
                 unit: Unit::Milligram,
                 origin: ColumnOrigin::Raw,
+                nature: ColumnNature::Mass,
             },
         );
 
@@ -767,6 +800,7 @@ impl TGADataset {
                     name: name.to_string(),
                     unit: Unit::Unknown,
                     origin: ColumnOrigin::Raw,
+                    nature: ColumnNature::Unknown,
                 },
             );
         }
@@ -865,10 +899,16 @@ impl TGADataset {
         name: &str,
         unit: Unit,
     ) -> Result<Self, TGADomainError> {
+        let nature = match role {
+            ColumnRole::Time => ColumnNature::Time,
+            ColumnRole::Temperature => ColumnNature::Temperature,
+            ColumnRole::Mass => ColumnNature::Mass,
+        };
         let meta = ColumnMeta {
             name: name.into(),
             unit,
             origin: ColumnOrigin::Raw,
+            nature,
         };
 
         self.schema.columns.insert(name.into(), meta);
@@ -1087,7 +1127,12 @@ impl TGADataset {
         Ok(self)
     }
     /// Вычисление производной с автоматическим определением единиц измерения
-    pub fn derive_rate(mut self, source_col: &str, new_col: &str) -> Result<Self, TGADomainError> {
+    pub fn derive_rate(
+        mut self,
+        source_col: &str,
+        new_col: &str,
+        new_col_nature: ColumnNature,
+    ) -> Result<Self, TGADomainError> {
         let time = self
             .schema
             .time
@@ -1121,6 +1166,7 @@ impl TGADataset {
                 name: new_col.into(),
                 unit: out_unit,
                 origin: ColumnOrigin::PolarsDerived,
+                nature: new_col_nature,
             },
         );
 
@@ -1147,11 +1193,12 @@ impl TGADataset {
             .ok_or(TGADomainError::MassNotBound)?
             .clone();
         self.schema.dm_dt = Some(new_col.to_string());
-        self.derive_rate(&mass, new_col)
+        self.derive_rate(&mass, new_col, ColumnNature::MassRate)
     }
 
     /// Вычисление скорости изменения температуры
     pub fn derive_temperature_rate(mut self, new_col: &str) -> Result<Self, TGADomainError> {
+        let start = std::time::Instant::now();
         let temp = self
             .schema
             .temperature
@@ -1159,7 +1206,12 @@ impl TGADataset {
             .ok_or(TGADomainError::TemperatureNotBound)?
             .clone();
         self.schema.dT_dt = Some(new_col.to_string());
-        self.derive_rate(&temp, new_col)
+        let dT_dt = self.derive_rate(&temp, new_col, ColumnNature::TemperatureRate)?;
+        info!(
+            "Derived temperature rate in {:?} ms",
+            start.elapsed().as_millis()
+        );
+        Ok(dT_dt)
     }
     /// Вычисление безразмерной скорости изменения
     pub fn derive_dimensionless_rate(
@@ -1172,6 +1224,7 @@ impl TGADataset {
             name: out_name.into(),
             unit: Unit::PerSecond,
             origin: ColumnOrigin::PolarsDerived,
+            nature: ColumnNature::DimensionlessMassRate,
         };
         if let Some(_) = self.schema.eta {
             self.schema.deta_dt = Some(out_name.to_string());
@@ -1186,10 +1239,12 @@ impl TGADataset {
 
     /// Вычисление производной от eta
     pub fn derive_deta_dt(mut self, out_name: &str) -> Result<Self, TGADomainError> {
+        let start = Instant::now();
         let out_meta = ColumnMeta {
             name: out_name.into(),
             unit: Unit::PerSecond,
             origin: ColumnOrigin::PolarsDerived,
+            nature: ColumnNature::ConversionRate,
         };
         let eta_col = self
             .schema
@@ -1198,15 +1253,19 @@ impl TGADataset {
             .ok_or(TGADomainError::EtaNotFound)?
             .clone();
         self.schema.deta_dt = Some(out_name.to_string());
-        self.derive_rate0(&eta_col, out_name, out_meta)
+        let deta_dt = self.derive_rate0(&eta_col, out_name, out_meta);
+        info!("Derived deta_dt in {:?} ms", start.elapsed().as_millis());
+        deta_dt
     }
 
     /// Вычисление производной от alpha
     pub fn derive_dalpha_dt(mut self, out_name: &str) -> Result<Self, TGADomainError> {
+        let start = Instant::now();
         let out_meta = ColumnMeta {
             name: out_name.into(),
             unit: Unit::PerSecond,
             origin: ColumnOrigin::PolarsDerived,
+            nature: ColumnNature::DimensionlessMassRate,
         };
         let alpha_col = self
             .schema
@@ -1215,7 +1274,29 @@ impl TGADataset {
             .ok_or(TGADomainError::AlphaNotFound)?
             .clone();
         self.schema.dalpha_dt = Some(out_name.to_string());
-        self.derive_rate0(&alpha_col, out_name, out_meta)
+        let dalpha_dt = self.derive_rate0(&alpha_col, out_name, out_meta);
+        info!("Derived dalpha_dt in {:?} ms", start.elapsed().as_millis());
+        dalpha_dt
+    }
+
+    pub fn drop_nulls(&mut self) -> Result<(), TGADomainError> {
+        self.frame = self.frame.clone().drop_nulls(None);
+        Ok(())
+    }
+
+    pub fn get_column_by_nature(&self, nature: ColumnNature) -> Option<String> {
+        self.schema
+            .columns
+            .values()
+            .find(|meta| meta.nature == nature)
+            .map(|meta| meta.name.clone())
+    }
+    pub fn get_columns_by_nature(&self, nature: Vec<ColumnNature>) -> Vec<Option<String>> {
+        let r = nature
+            .iter()
+            .map(|n| self.get_column_by_nature(n.clone()))
+            .collect();
+        r
     }
 }
 //==============================================================
@@ -1275,6 +1356,7 @@ impl TGADataset {
         name: &str,
         unit: Unit,
         data: Arc<Vec<f64>>,
+        nature: ColumnNature,
     ) -> PolarsResult<Self> {
         let series = Series::new(name.into(), data.as_ref());
         self.frame = self.frame.with_column(lit(series));
@@ -1285,6 +1367,7 @@ impl TGADataset {
                 name: name.into(),
                 unit,
                 origin: ColumnOrigin::NumericDerived,
+                nature,
             },
         );
 

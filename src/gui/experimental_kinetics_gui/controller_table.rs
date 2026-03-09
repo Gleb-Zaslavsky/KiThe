@@ -90,6 +90,9 @@ impl ColumnManagerState {
             if ui.button("Drop experiment").clicked() {
                 self.handle_drop_experiment(model);
             }
+            if ui.button("check time monotonity").clicked() {
+                self.handle_check_time_monotonity(model);
+            }
         });
 
         if !self.system_message.is_empty() {
@@ -185,6 +188,55 @@ impl ColumnManagerState {
 
         // Show confirmation dialog
         self.confirm_drop_experiment = Some(exp_id.clone());
+    }
+
+    fn handle_check_time_monotonity(&mut self, model: &mut PlotModel) {
+        let mut selected_experiments: Vec<_> = self
+            .column_checkboxes
+            .iter()
+            .filter(|&(_, &checked)| checked)
+            .map(|((exp_id, _), _)| exp_id.clone())
+            .collect();
+
+        selected_experiments.sort();
+        selected_experiments.dedup();
+
+        if selected_experiments.is_empty() {
+            self.system_message =
+                "Select at least one experiment (via any column checkbox)".to_string();
+            println!("{}", self.system_message);
+            return;
+        }
+
+        let mut per_experiment_messages = Vec::new();
+
+        for exp_id in selected_experiments {
+            match model.monotony_of_time_check_for_experiment(&exp_id) {
+                Ok(failures) if failures.is_empty() => {
+                    let msg = format!("Experiment '{}': time monotony OK", exp_id);
+                    println!("{}", msg);
+                    per_experiment_messages.push(msg);
+                }
+                Ok(failures) => {
+                    let msg = format!(
+                        "Experiment '{}': time monotony FAILED at t={:?}",
+                        exp_id, failures
+                    );
+                    println!("{}", msg);
+                    per_experiment_messages.push(msg);
+                }
+                Err(e) => {
+                    let msg = format!(
+                        "Experiment '{}': time monotony check error: {:?}",
+                        exp_id, e
+                    );
+                    println!("{}", msg);
+                    per_experiment_messages.push(msg);
+                }
+            }
+        }
+
+        self.system_message = per_experiment_messages.join(" | ");
     }
 
     /// Renders the data table with checkboxes in header
@@ -359,7 +411,7 @@ pub fn show_column_manager_window(
     open: &mut bool,
 ) {
     state.show_metadata_window(ctx, model);
-    state.system_message.clear();
+    // state.system_message.clear();
     egui::Window::new("Column Manager")
         .open(open)
         .resizable(true)

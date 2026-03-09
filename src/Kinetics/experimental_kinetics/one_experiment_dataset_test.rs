@@ -281,7 +281,12 @@ pub mod tests {
         let data: Arc<Vec<f64>> = Arc::new((0..n).map(|i| i as f64).collect());
 
         let ds2 = ds
-            .add_numeric_column("row_index", Unit::Dimensionless, data)
+            .add_numeric_column(
+                "row_index",
+                Unit::Dimensionless,
+                data,
+                ColumnNature::Unknown,
+            )
             .unwrap();
 
         // column is present and materializable
@@ -342,6 +347,7 @@ pub mod tests {
             name: "temp_plus10".into(),
             unit: Unit::Celsius,
             origin: ColumnOrigin::PolarsDerived,
+            nature: ColumnNature::Temperature,
         };
         let ds2 = ds.with_column_expr(meta.clone(), col("temperature") + lit(10.0));
         // schema contains the derived column
@@ -478,6 +484,52 @@ pub mod tests {
         }
         let avg = sum / cnt as f64;
         assert!((m - avg).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mean_on_interval_on_own_range_matches_manual() {
+        let csv = make_csv(1000, 123);
+        let ds = ds_from_csv(&csv);
+        let df = ds.frame.clone().collect().unwrap();
+        let from = 5.0;
+        let to = 10.0;
+        let m = ds.mean_on_interval_on_own_range("mass", from, to).unwrap();
+
+        let mask: Vec<bool> = df
+            .column("mass")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .map(|v| v >= from && v <= to)
+            .collect();
+        let mass: Vec<f64> = df
+            .column("mass")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        let mut sum = 0.0;
+        let mut cnt = 0usize;
+        for (v, keep) in mass.into_iter().zip(mask.into_iter()) {
+            if keep {
+                sum += v;
+                cnt += 1;
+            }
+        }
+        let avg = sum / cnt as f64;
+        assert!((m - avg).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mean_on_column_matches_manual() {
+        let csv = make_csv(1000, 123);
+        let ds = ds_from_csv(&csv);
+        let df = ds.frame.clone().collect().unwrap();
+        let m = ds.mean_on_column("mass").unwrap();
+        let manual = df.column("mass").unwrap().f64().unwrap().mean().unwrap();
+        assert_eq!(m, manual);
     }
 
     #[test]
@@ -886,6 +938,7 @@ pub mod tests {
                 name: "test_nulls".into(),
                 unit: Unit::Dimensionless,
                 origin: ColumnOrigin::PolarsDerived,
+                nature: ColumnNature::Unknown,
             },
             when(col("time").lt(lit(5.0)))
                 .then(lit(1.0))
@@ -909,6 +962,7 @@ pub mod tests {
                 name: "aux".into(),
                 unit: Unit::Dimensionless,
                 origin: ColumnOrigin::PolarsDerived,
+                nature: ColumnNature::Unknown,
             },
             col("time") * lit(0.0),
         );

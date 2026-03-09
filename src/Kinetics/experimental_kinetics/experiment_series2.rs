@@ -1,12 +1,13 @@
+use crate::Kinetics::experimental_kinetics::exp_engine_api::GoldenPipelineConfig;
 use crate::Kinetics::experimental_kinetics::experiment_series_main::{
     ExperimentMeta, TGAExperiment, TGASeries,
 };
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    TGADataset, TGADomainError, TGASchema,
+    ColumnNature, TGADataset, TGADomainError, TGASchema,
 };
 use polars::prelude::*;
 use std::collections::HashMap;
-
+//=================================================================================
 #[derive(Clone)]
 pub struct UnitedDataset {
     pub frame: LazyFrame,
@@ -14,6 +15,23 @@ pub struct UnitedDataset {
 }
 
 impl UnitedDataset {
+    /// Canonical output column names used by united datasets created from
+    /// `ColumnNature`-based selection in series-level APIs.
+    pub fn canonical_column_name(nature: ColumnNature) -> &'static str {
+        match nature {
+            ColumnNature::Time => "time",
+            ColumnNature::Temperature => "temperature",
+            ColumnNature::Mass => "mass",
+            ColumnNature::Conversion => "conversion",
+            ColumnNature::DimensionlessMass => "dimensionless_mass",
+            ColumnNature::MassRate => "mass_rate",
+            ColumnNature::ConversionRate => "conversion_rate",
+            ColumnNature::TemperatureRate => "temperature_rate",
+            ColumnNature::DimensionlessMassRate => "dimensionless_mass_rate",
+            ColumnNature::Unknown => "unknown",
+        }
+    }
+
     pub fn empty() -> Self {
         Self {
             frame: DataFrame::default().lazy(),
@@ -61,6 +79,88 @@ impl UnitedDataset {
         ParquetWriter::new(&mut file).finish(df)?;
         Ok(())
     }
+
+    /// Materialize one numeric column from a vertical-stack united dataset
+    /// for one experiment (`exp_id`).
+    pub fn materialize_vertical_column_by_name(
+        &self,
+        id: &str,
+        column_name: &str,
+    ) -> Result<Vec<f64>, TGADomainError> {
+        let df = self
+            .frame
+            .clone()
+            .filter(col("exp_id").eq(lit(id)))
+            .select([col(column_name)])
+            .collect()?;
+
+        if df.height() == 0 {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "No rows for experiment id '{}'",
+                id
+            )));
+        }
+
+        let out = df
+            .column(column_name)?
+            .f64()?
+            .into_no_null_iter()
+            .collect::<Vec<f64>>();
+        Ok(out)
+    }
+
+    /// Materialize one numeric column from a vertical-stack united dataset
+    /// by semantic `ColumnNature`.
+    pub fn materialize_vertical_column_by_nature(
+        &self,
+        id: &str,
+        nature: ColumnNature,
+    ) -> Result<Vec<f64>, TGADomainError> {
+        self.materialize_vertical_column_by_name(id, Self::canonical_column_name(nature))
+    }
+
+    /// Materialize one numeric field from a struct-based united dataset
+    /// for one experiment (`exp_id`), where points are stored in `data: List<Struct>`.
+    pub fn materialize_struct_field_by_name(
+        &self,
+        id: &str,
+        field_name: &str,
+    ) -> Result<Vec<f64>, TGADomainError> {
+        let df = self
+            .frame
+            .clone()
+            .filter(col("exp_id").eq(lit(id)))
+            .select([col("data")])
+            .collect()?;
+
+        if df.height() == 0 {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "No rows for experiment id '{}'",
+                id
+            )));
+        }
+
+        let list_col = df.column("data")?.list()?;
+        let struct_series = list_col.get_as_series(0).ok_or_else(|| {
+            TGADomainError::InvalidOperation(
+                "Struct dataset contains no list payload for selected experiment".to_string(),
+            )
+        })?;
+
+        let field = struct_series.struct_()?.field_by_name(field_name)?;
+        let out = field.f64()?.into_no_null_iter().collect::<Vec<f64>>();
+        Ok(out)
+    }
+
+    /// Materialize one numeric field from a struct-based united dataset
+    /// by semantic `ColumnNature`.
+    pub fn materialize_struct_field_by_nature(
+        &self,
+        id: &str,
+        nature: ColumnNature,
+    ) -> Result<Vec<f64>, TGADomainError> {
+        self.materialize_struct_field_by_name(id, Self::canonical_column_name(nature))
+    }
 }
 pub fn write_lazy_frame_eagerly(lf: LazyFrame, path: &str) -> PolarsResult<()> {
     let df = &mut lf.clone().collect()?;
@@ -68,7 +168,58 @@ pub fn write_lazy_frame_eagerly(lf: LazyFrame, path: &str) -> PolarsResult<()> {
     CsvWriter::new(&mut file).include_header(true).finish(df)?;
     Ok(())
 }
+//====================================================================================
+//=========================================================
+pub struct SampledColumns {
+    cols: Vec<Vec<f64>>,
+    names: Vec<String>,
+}
+impl SampledColumns {
+    pub fn new(cols: Vec<Vec<f64>>, names: Vec<String>) -> Self {
+        Self { cols, names }
+    }
+
+    pub fn new_empty() -> Self {
+        Self {
+            cols: Vec::new(),
+            names: Vec::new(),
+        }
+    }
+
+    pub fn push_column(&mut self, col: Vec<f64>, name: String) {
+        self.cols.push(col);
+        self.names.push(name);
+    }
+
+    pub fn column(&self, name: &str) -> Option<Vec<f64>> {
+        self.names
+            .iter()
+            .position(|n| n == name)
+            .map(|idx| self.cols[idx].clone())
+    }
+
+    pub fn column_names(&self) -> Vec<String> {
+        self.names.clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.cols.first().map(|c| c.len()).unwrap_or(0)
+    }
+}
+
+impl TGAExperiment {
+    /// Thin wrapper for dataset monotonicity diagnostics on bound time column.
+    pub fn monotony_of_time_check(&self) -> Result<Vec<f64>, TGADomainError> {
+        self.dataset.monotony_of_time_check()
+    }
+}
+
 impl TGASeries {
+    /// Thin wrapper for per-experiment time monotonicity diagnostics.
+    pub fn monotony_of_time_check(&self, id: &str) -> Result<Vec<f64>, TGADomainError> {
+        self.try_apply_by_id(id, |exp| exp.monotony_of_time_check())
+    }
+
     pub fn unite_datasets(&self) -> Result<UnitedDataset, TGADomainError> {
         if self.experiments.is_empty() {
             return Ok(UnitedDataset::empty());
@@ -156,7 +307,7 @@ impl TGASeries {
         })?;
 
         let new_exp = Self::extract_columns_to_new_experiment(parent, new_id, columns)?;
-        self.experiments.push(new_exp);
+        self.push(new_exp);
         Ok(())
     }
 
@@ -231,6 +382,76 @@ impl TGASeries {
                 None
             }
         })
+    }
+
+    //=======================================================================================
+    //  GOLDEN PIPELINE
+    //================================================================================
+    pub fn drop_nulls(&mut self, id: &str) -> Result<(), TGADomainError> {
+        self.try_mutate_by_id(id, |exp| exp.drop_nulls())
+    }
+
+    pub fn apply_golden_pipeline_inner(
+        &mut self,
+        id: &str,
+        config: GoldenPipelineConfig,
+    ) -> Result<Vec<String>, TGADomainError> {
+        let mut new_columns = None;
+        self.try_transform_by_id(id, |exp| {
+            let (new_exp, cols) = exp.apply_golden_pipeline(config)?;
+            new_columns = Some(cols);
+            Ok(new_exp)
+        })?;
+        Ok(new_columns.unwrap_or_default())
+    }
+    pub fn apply_golden_pipeline(
+        &mut self,
+        id: &str,
+        config: GoldenPipelineConfig,
+    ) -> Result<(), TGADomainError> {
+        let do_we_need_new_exp = config.save_to_new_experiment;
+        let do_we_need_drop_old_exp = config.del_old_experiment;
+        let new_columns = self.apply_golden_pipeline_inner(id, config)?;
+
+        if do_we_need_new_exp {
+            let idx = self.index_by_id(id)?;
+            let new_id = format!("proceeded_{}", id);
+            let new_columns: Vec<&str> = new_columns.iter().map(|x| x.as_str()).collect();
+            self.create_experiment_from_columns(idx, new_id.clone(), &new_columns)?;
+            // self.trim_null_edges(&new_id)?;
+            self.drop_nulls(&new_id)?;
+            self.assert_no_nulls(&new_id, "final")?;
+            if do_we_need_drop_old_exp {
+                self.drop_experiment(idx);
+            }
+            self.rebuild_index();
+        }
+        Ok(())
+    }
+
+    pub fn column_samples_for_all_experiment_for_plotting(
+        &mut self,
+        n_points: usize,
+    ) -> Result<(HashMap<String, Vec<f64>>, SampledColumns), TGADomainError> {
+        let mut data_map: HashMap<String, Vec<f64>> = HashMap::new();
+        let mut sampled_cols = SampledColumns::new_empty();
+
+        for id in self.ids() {
+            let idx = self.index_by_id(&id)?;
+            let frame = self.experiments[idx].dataset.frame.clone().collect()?;
+            for col in self.list_of_columns(&id)? {
+                let short_name = format!("{}_{}", id, col);
+                let eager_col: Vec<f64> = frame.column(&col)?.f64()?.into_no_null_iter().collect();
+                let sampled_col = if n_points < eager_col.len() {
+                    self.sample_column(&id, &col, None, n_points)?
+                } else {
+                    eager_col
+                };
+                sampled_cols.push_column(sampled_col.clone(), short_name.clone());
+                data_map.insert(short_name, sampled_col);
+            }
+        }
+        Ok((data_map, sampled_cols))
     }
 }
 
@@ -355,6 +576,7 @@ mod tests {
                 name: "time".to_string(),
                 unit: Unit::Second,
                 origin: ColumnOrigin::Raw,
+                nature: ColumnNature::Time,
             },
         );
         columns.insert(
@@ -363,6 +585,7 @@ mod tests {
                 name: "temperature".to_string(),
                 unit: Unit::Kelvin,
                 origin: ColumnOrigin::Raw,
+                nature: ColumnNature::Temperature,
             },
         );
         columns.insert(
@@ -371,6 +594,7 @@ mod tests {
                 name: "mass".to_string(),
                 unit: Unit::Milligram,
                 origin: ColumnOrigin::Raw,
+                nature: ColumnNature::Mass,
             },
         );
         columns.insert(
@@ -379,6 +603,7 @@ mod tests {
                 name: "mass_smooth".to_string(),
                 unit: Unit::Milligram,
                 origin: ColumnOrigin::PolarsDerived,
+                nature: ColumnNature::Mass,
             },
         );
 

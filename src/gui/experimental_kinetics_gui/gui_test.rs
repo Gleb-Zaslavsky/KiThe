@@ -61,6 +61,7 @@ mod tests {
                 NewExperimentDialogState, QuickActionPanelState,
             };
             use super::super::controller_filters::Mathematics;
+            use super::super::kitheplot_wrapper::KiThePlotWindowState;
             Self {
                 model,
                 quick_actions_state: QuickActionPanelState::default(),
@@ -68,6 +69,7 @@ mod tests {
                 mathematics: Mathematics::new(),
                 test_options: TestOptions::new(),
                 column_manager_state: ColumnManagerState::new(),
+                kithe_plot_window: KiThePlotWindowState::default(),
             }
         }
     }

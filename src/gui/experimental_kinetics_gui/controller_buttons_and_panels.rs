@@ -9,7 +9,9 @@ use crate::gui::experimental_kinetics_gui::model::PlotModel;
 use crate::gui::experimental_kinetics_gui::model::TGAGUIError;
 
 use crate::gui::experimental_kinetics_gui::controller_filters::Mathematics;
+use crate::gui::experimental_kinetics_gui::controller_golden_pipeline::GoldenPipelineDialogState;
 use crate::gui::experimental_kinetics_gui::controller_kinetics::{DirectProblem, KineticMethods};
+use crate::gui::experimental_kinetics_gui::kitheplot_wrapper::KiThePlotWindowState;
 
 use crate::gui::experimental_kinetics_gui::test_options::TestOptions;
 use eframe::egui;
@@ -31,10 +33,11 @@ impl TopDropDownMenues {
         mathematics: &mut Mathematics,
         new_experiment_dialog: &mut NewExperimentDialogState,
         test_options: &mut TestOptions,
+        kithe_plot_window: &mut KiThePlotWindowState,
     ) {
         ui.horizontal_wrapped(|ui| {
             ui.menu_button("File Manager", |ui| {
-                FileManager::show(ui, model, new_experiment_dialog);
+                FileManager::show(ui, model, new_experiment_dialog, kithe_plot_window);
             });
 
             ui.menu_button("Math", |ui| {
@@ -66,6 +69,7 @@ impl FileManager {
         ui: &mut egui::Ui,
         model: &mut PlotModel,
         new_experiment_dialog: &mut NewExperimentDialogState,
+        kithe_plot_window: &mut KiThePlotWindowState,
     ) {
         if ui.button("Import Data").clicked() {
             Self::import_data(model);
@@ -98,7 +102,7 @@ impl FileManager {
         }
         if ui.button("Save As Excel").clicked() {}
         if ui.button("Save As Image").clicked() {
-            Self::save_as_image(model);
+            Self::save_as_image(model, kithe_plot_window);
         }
     }
 
@@ -114,8 +118,20 @@ impl FileManager {
         println!("Stub: Manage Data clicked");
     }
 
-    fn save_as_image(_model: &mut PlotModel) {
-        println!("Stub: Save As Image clicked");
+    fn save_as_image(model: &mut PlotModel, kithe_plot_window: &mut KiThePlotWindowState) {
+        match kithe_plot_window.open_from_model(model) {
+            Ok(()) => {
+                let _ = model.push_message("KiThe Plot Redactor window opened");
+            }
+            Err(err) => {
+                let message = match err {
+                    TGAGUIError::TGADomainError(domain) => format!("{:?}", domain),
+                    TGAGUIError::SettingsErrors(msg) => msg,
+                    TGAGUIError::BindingError(msg) => msg,
+                };
+                let _ = model.push_message(&format!("Save As Image failed: {message}"));
+            }
+        }
     }
 }
 
@@ -129,6 +145,7 @@ pub struct QuickActionPanelState {
     pub input_string: Option<String>,
     pub x_or_y: Option<XY>, //XY
     pub plot_recreation_required: bool,
+    pub golden_pipeline_dialog: GoldenPipelineDialogState,
 }
 
 pub struct WrightPanelControllers;
@@ -140,6 +157,7 @@ impl WrightPanelControllers {
         state: &mut QuickActionPanelState,
         manage_plot_dialog: &mut NewExperimentDialogState,
     ) -> Result<(), TGAGUIError> {
+        state.golden_pipeline_dialog.show(ui.ctx(), model);
         let labels = [
             "Manage Plots",
             "Column Manager",
@@ -158,6 +176,7 @@ impl WrightPanelControllers {
             "from mV to mg",
             "from s to h",
             "from C° to K",
+            "average on column",
         ];
 
         let button_size = egui::vec2(108.0, 22.0);
@@ -260,7 +279,7 @@ impl WrightPanelControllers {
     fn handle_quick_action(
         action: &str,
         model: &mut PlotModel,
-        state: &QuickActionPanelState,
+        state: &mut QuickActionPanelState,
         manage_plot_dialog: &mut NewExperimentDialogState,
         ctx: &egui::Context,
     ) -> Result<(), TGAGUIError> {
@@ -271,6 +290,10 @@ impl WrightPanelControllers {
             }
             "Column Manager" => {
                 manage_plot_dialog.column_manager_open = true;
+                ctx.request_repaint();
+            }
+            "golden pipeline" => {
+                state.golden_pipeline_dialog.open();
                 ctx.request_repaint();
             }
             "Clear Selected" => {
@@ -380,6 +403,17 @@ impl WrightPanelControllers {
                 model.exp_column_for_selected(&column)?;
                 ctx.request_repaint();
             }
+
+            "average on column" => {
+                let column = Self::resolve_selected_column(model, state)?;
+                info!("averaging column {}", column);
+                let r = if state.apply_only_to_selected_chart {
+                    model.mean_on_interval_on_own_range_for_selected()?
+                } else {
+                    model.mean_on_column_for_selected()?
+                };
+                info!("AVERAGE ON COLUMN {} =  {}", column, r);
+            }
             _ => {
                 println!(
                     "Stub: {action} clicked (input_value={}, selected_only={})",
@@ -429,21 +463,6 @@ impl WrightPanelControllers {
         model: &mut PlotModel,
         manage_plot_dialog: &mut NewExperimentDialogState,
     ) {
-        /*
-            if ui.button("Reset View").clicked() {
-                model.reset_view();
-            }
-
-            if ui.button("Clear Selection").clicked() {
-                model.clear_selection_rect();
-                model.clear_selection();
-            }
-
-            if ui.button("📊 Manage Plots").clicked() {
-                manage_plot_dialog.manage_plot_open = true;
-                ui.ctx().request_repaint();
-            }
-        */
         ui.separator();
 
         for curve in model.plots.iter_mut() {

@@ -66,6 +66,7 @@ use crate::gui::experimental_kinetics_gui::controller_filters::Mathematics;
 use crate::gui::experimental_kinetics_gui::controller_table::{
     ColumnManagerState, show_column_manager_window,
 };
+use crate::gui::experimental_kinetics_gui::kitheplot_wrapper::KiThePlotWindowState;
 /// Импортируем модель данных графика
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
 /// Импортируем TestOptions для управления настройками
@@ -86,6 +87,7 @@ pub struct PlotApp {
     pub mathematics: Mathematics,
     pub test_options: TestOptions,
     pub column_manager_state: ColumnManagerState,
+    pub kithe_plot_window: KiThePlotWindowState,
 }
 
 impl PlotApp {
@@ -98,6 +100,7 @@ impl PlotApp {
             mathematics: Mathematics::new(),
             test_options: TestOptions::new(),
             column_manager_state: ColumnManagerState::new(),
+            kithe_plot_window: KiThePlotWindowState::default(),
         }
     }
 
@@ -121,6 +124,7 @@ impl PlotApp {
             &mut self.mathematics,
             &mut self.new_experiment_dialog,
             &mut self.test_options,
+            &mut self.kithe_plot_window,
         );
         self.new_experiment_dialog
             .show_new_experiment_dialogue(ui.ctx(), &mut self.model);
@@ -192,5 +196,7 @@ impl PlotApp {
                 );
             });
         });
+
+        self.kithe_plot_window.show(ui.ctx());
     }
 }

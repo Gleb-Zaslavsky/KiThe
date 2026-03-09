@@ -4,7 +4,7 @@
 
 This is a package of structures, functions and databases useful for such areas as chemical thermodynamics, chemical kinetics, as well as modeling of chemical reactors, combustion, processes in shock tubes and rocket engines, propulsion. 
 
-PROJECT NEWS: CHEMICAL EQUILIBRIUM calculations added
+PROJECT NEWS: Experimental kinetics pipeline (with GUI)  added
 ## Content
 - [Kinetics](#Kinetics)
 - [Thermodynamics](#Thermodynamics)
@@ -37,6 +37,7 @@ When install as library:
 * Experimental Kinetics - data processing pipeline for Thermogravimetric Analysis TGA
   * raw data manupulations via Polars crate
   * smothing and filtering: Hampel/MAD, savitzky–golay, LOWESS, splines
+  * Kinetyc methods - work in progress
 
 
  When install as executable:
@@ -52,6 +53,7 @@ When install as library:
     * Thermodynamics menu: Cp, dH, dS and Cp = Cp(T) polynoms for many substances;
     * Transport properies: Diffusion, viscosity, thermal condusctivity for many substances;
     * solid state kinetics models
+    * Solid GUI for Thermogravimetric Analysis suite:1) window for columns manipulations, filtering, scaling, filtering and smoothing,2) window for Table operations 3) window to create and redact plots (almost publishing level) 
 
 ## Kinetics
 - parse reaction equations into a list of substances 

@@ -1,11 +1,14 @@
 use crate::Kinetics::experimental_kinetics::LSQSplines::SolverKind;
+use crate::Kinetics::experimental_kinetics::exp_engine_api::GoldenPipelineConfig;
 use crate::Kinetics::experimental_kinetics::exp_engine_api::{PlotSeries, Ranges, ViewRange, XY};
 use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy;
 use crate::Kinetics::experimental_kinetics::experiment_series_main::{
     ExperimentMeta, TGAExperiment, TGASeries,
 };
+use crate::Kinetics::experimental_kinetics::experiment_series2::SampledColumns;
+use crate::Kinetics::experimental_kinetics::lowess_wrapper::LowessConfig;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    ColumnHistory, OperationRecord, TGADomainError, Unit,
+    ColumnHistory, ColumnNature, OperationRecord, TGADomainError, Unit,
 };
 use crate::Kinetics::experimental_kinetics::splines::SplineKind;
 use crate::Kinetics::experimental_kinetics::testing_mod::{AdvancedTGAConfig, VirtualTGA};
@@ -13,6 +16,7 @@ use crate::gui::experimental_kinetics_gui::model::{Colours, PlotCurve, PlotModel
 use log::{debug, info};
 use std::collections::HashMap;
 use std::path::Path;
+
 //=========================================================================================
 #[derive(Debug, Clone)]
 pub struct SampledColumn {
@@ -284,6 +288,27 @@ impl PlotModel {
         self.reset_view();
         Ok(())
     }
+
+    pub fn create_experiment_from_columns(
+        &mut self,
+        parent_idx: usize,
+        new_id: String,
+        columns: &[&str],
+    ) -> Result<(), TGAGUIError> {
+        self.series
+            .create_experiment_from_columns(parent_idx, new_id, columns)?;
+        Ok(())
+    }
+    pub fn create_experiment_from_columns_for_experiment(
+        &mut self,
+        id: &str,
+        new_id: String,
+        columns: &[&str],
+    ) -> Result<(), TGAGUIError> {
+        let idx = self.index_by_id(id)?;
+        self.create_experiment_from_columns(idx, new_id, columns)
+    }
+
     //========================================================================
     //////////////////////////////////////////////////////////////////////////////////
     //========================================================================
@@ -449,6 +474,17 @@ impl PlotModel {
         }
         Ok(data_map)
     }
+
+    pub fn column_samples_for_all_experiment_for_plotting(
+        &mut self,
+        n_points: usize,
+    ) -> Result<(HashMap<String, Vec<f64>>, SampledColumns), TGAGUIError> {
+        let res = self
+            .series
+            .column_samples_for_all_experiment_for_plotting(n_points)?;
+        Ok(res)
+    }
+
     pub fn set_heating_rate(&mut self, id: &str, rate: f64) -> Result<(), TGAGUIError> {
         self.series.set_heating_rate(id, rate)?;
         Ok(())
@@ -461,6 +497,10 @@ impl PlotModel {
     pub fn set_experiment_temperature(&mut self, id: &str, T: f64) -> Result<(), TGAGUIError> {
         self.series.set_experiment_temperature(id, T)?;
         Ok(())
+    }
+
+    pub fn monotony_of_time_check_for_experiment(&self, id: &str) -> Result<Vec<f64>, TGAGUIError> {
+        Ok(self.series.monotony_of_time_check(id)?)
     }
     //////////////////////////////////////////////////////////////////////////////////
     //=================================================================================
@@ -780,6 +820,11 @@ impl PlotModel {
                 "No selected curve to delete".to_string(),
             ))
         }
+    }
+
+    pub fn delete_all_plots(&mut self) -> Result<(), TGAGUIError> {
+        self.plots.clear();
+        Ok(())
     }
     pub fn cut_range_x_or_y_for_experiment(
         &mut self,
@@ -1358,6 +1403,34 @@ impl PlotModel {
         self.create_plots_with_new_columns(&id, old_cols, None)?;
         Ok(())
     }
+    pub fn lowess_smooth_columns_for_selected(
+        &mut self,
+        time_col: &str,
+        columns: &[&str],
+        config: LowessConfig,
+    ) -> Result<(), TGAGUIError> {
+        let id = self.get_experiment_by_selected_curve()?;
+        let old_cols = self.list_of_columns(&id)?;
+        self.series
+            .lowess_smooth_columns(&id, time_col, columns, config)?;
+        self.create_plots_with_new_columns(&id, old_cols, Some(time_col))?;
+        Ok(())
+    }
+
+    pub fn lowess_smooth_columns_for_selected_as(
+        &mut self,
+        time_col: &str,
+        columns: &[&str],
+        out_columns: &[Option<&str>],
+        config: LowessConfig,
+    ) -> Result<(), TGAGUIError> {
+        let id = self.get_experiment_by_selected_curve()?;
+        let old_cols = self.list_of_columns(&id)?;
+        self.series
+            .lowess_smooth_columns_as(&id, time_col, columns, out_columns, config)?;
+        self.create_plots_with_new_columns(&id, old_cols, Some(time_col))?;
+        Ok(())
+    }
     // SPLINES
 
     pub fn splines_for_selected(
@@ -1430,6 +1503,190 @@ impl PlotModel {
             SolverKind::Banded,
         )?;
         self.create_plots_with_new_columns(&id, old_cols, Some(new_time_col))?;
+        Ok(())
+    }
+    //================================================================================================
+    //          RATES
+    //==================================================================================================
+
+    pub fn derive_rate(
+        &mut self,
+        id: &str,
+        source_col: &str,
+        new_col: &str,
+        new_col_nature: ColumnNature,
+    ) -> Result<(), TGAGUIError> {
+        self.series
+            .derive_rate(id, source_col, new_col, new_col_nature)?;
+        Ok(())
+    }
+
+    pub fn derive_mass_rate(&mut self, id: &str, new_col: &str) -> Result<(), TGAGUIError> {
+        self.series.derive_mass_rate(id, new_col)?;
+        Ok(())
+    }
+
+    pub fn derive_temperature_rate(&mut self, id: &str, new_col: &str) -> Result<(), TGAGUIError> {
+        self.series.derive_temperature_rate(id, new_col)?;
+        Ok(())
+    }
+
+    pub fn derive_dimensionless_rate(
+        &mut self,
+        id: &str,
+        col_name: &str,
+        out_name: &str,
+    ) -> Result<(), TGAGUIError> {
+        self.series
+            .derive_dimensionless_rate(id, col_name, out_name)?;
+        Ok(())
+    }
+
+    pub fn derive_deta_dt(&mut self, id: &str, out_name: &str) -> Result<(), TGAGUIError> {
+        self.series.derive_deta_dt(id, out_name)?;
+        Ok(())
+    }
+
+    pub fn derive_dalpha_dt(&mut self, id: &str, out_name: &str) -> Result<(), TGAGUIError> {
+        self.series.derive_dalpha_dt(id, out_name)?;
+        Ok(())
+    }
+
+    pub fn derive_rate_for_selected(
+        &mut self,
+
+        source_col: &str,
+        new_col: &str,
+        new_col_nature: ColumnNature,
+    ) -> Result<(), TGAGUIError> {
+        let id = self.get_experiment_by_selected_curve()?;
+        self.derive_rate(&id, source_col, new_col, new_col_nature)?;
+
+        Ok(())
+    }
+
+    pub fn derive_mass_rate_for_selected(&mut self, new_col: &str) -> Result<(), TGAGUIError> {
+        let id = self.get_experiment_by_selected_curve()?;
+        self.derive_mass_rate(&id, new_col)?;
+        Ok(())
+    }
+
+    pub fn derive_temperature_rate_for_selected(
+        &mut self,
+        new_col: &str,
+    ) -> Result<(), TGAGUIError> {
+        let id = self.get_experiment_by_selected_curve()?;
+        self.derive_temperature_rate(&id, new_col)?;
+        Ok(())
+    }
+
+    pub fn derive_dimensionless_rate_for_selected(
+        &mut self,
+
+        col_name: &str,
+        out_name: &str,
+    ) -> Result<(), TGAGUIError> {
+        let id = self.get_experiment_by_selected_curve()?;
+        self.derive_dimensionless_rate(&id, col_name, out_name)?;
+        Ok(())
+    }
+
+    pub fn derive_deta_dt_for_selected(&mut self, out_name: &str) -> Result<(), TGAGUIError> {
+        let id = self.get_experiment_by_selected_curve()?;
+        self.series.derive_deta_dt(&id, out_name)?;
+        Ok(())
+    }
+
+    pub fn derive_dalpha_dt_for_selected(&mut self, out_name: &str) -> Result<(), TGAGUIError> {
+        let id = self.get_experiment_by_selected_curve()?;
+        self.derive_dalpha_dt(&id, out_name)?;
+        Ok(())
+    }
+    // AVERAGES
+    /// Compute mean of `value_col` in the time interval `[from, to]`.
+    pub fn mean_on_interval(
+        &self,
+        id: &str,
+        value_col: &str,
+        time_col: &str,
+        from: f64,
+        to: f64,
+    ) -> Result<f64, TGAGUIError> {
+        let r = self
+            .series
+            .mean_on_interval(id, value_col, time_col, from, to)?;
+        Ok(r)
+    }
+
+    /// Compute mean on a column constrained by the same column's range.
+    pub fn mean_on_interval_on_own_range(
+        &self,
+        id: &str,
+        col: &str,
+        from: f64,
+        to: f64,
+    ) -> Result<f64, TGAGUIError> {
+        let r = self
+            .series
+            .mean_on_interval_on_own_range(id, col, from, to)?;
+        Ok(r)
+    }
+
+    pub fn mean_on_interval_on_own_range_for_selected(&self) -> Result<f64, TGAGUIError> {
+        let id = self.get_experiment_by_selected_curve()?;
+        let r = if let Some(range) = self.interaction.selection_rect {
+            let bounds = range.bounds();
+
+            let y_min = bounds.2;
+            let y_max = bounds.3;
+            let y_col = self.series.oneframeplot_axis_name(&id, XY::Y)?;
+            let r = self.mean_on_interval_on_own_range(&id, &y_col, y_min, y_max)?;
+            r
+        } else {
+            return Err(TGAGUIError::BindingError(
+                "No selection rectangle. Drag-select a region on the plot first.".to_string(),
+            ));
+        };
+        Ok(r)
+    }
+    /// Compute mean of all entries in a column.
+    pub fn mean_on_column(&self, id: &str, col: &str) -> Result<f64, TGAGUIError> {
+        let r = self.series.mean_on_column(id, col)?;
+        Ok(r)
+    }
+    pub fn mean_on_column_for_selected(&self) -> Result<f64, TGAGUIError> {
+        let id = self.get_experiment_by_selected_curve()?;
+        let y_col = self.series.oneframeplot_axis_name(&id, XY::Y)?;
+        let r = self.mean_on_column(&id, &y_col)?;
+        Ok(r)
+    }
+    // GOLDEN PIPELINE
+    pub fn apply_golden_pipeline(
+        &mut self,
+        id: &str,
+        config: GoldenPipelineConfig,
+    ) -> Result<(), TGAGUIError> {
+        let mut config = config;
+        let do_we_need_new_exp = config.save_to_new_experiment;
+        let line = self.settings.calibration_line().unwrap();
+        let k = line.k();
+        let b = line.b();
+        config.b = b;
+        config.k = k;
+        self.series.apply_golden_pipeline(id, config)?;
+
+        if do_we_need_new_exp {
+            self.delete_all_plots()?;
+
+            let last_exp = &self.series.experiments.last().unwrap();
+            let new_id = last_exp.meta.id.clone();
+            let deta_dt = &last_exp.dataset.schema.deta_dt.clone().unwrap();
+            let eta = &last_exp.dataset.schema.eta.clone().unwrap();
+            self.set_x(&new_id, &eta)?;
+            self.set_y(&new_id, &deta_dt)?;
+            self.create_points_for_curve(&new_id)?;
+            info!("new experiment created");
+        }
         Ok(())
     }
 }

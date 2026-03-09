@@ -1,4 +1,5 @@
 use crate::Kinetics::experimental_kinetics::LSQSplines::{SolverKind, make_lsq_univariate_spline};
+use crate::Kinetics::experimental_kinetics::lowess_wrapper::{LowessConfig, lowess_smooth_values};
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{TGADataset, TGADomainError};
 use crate::Kinetics::experimental_kinetics::savgol2::SG_filter_dyn;
 use crate::Kinetics::experimental_kinetics::splines::{
@@ -8,6 +9,7 @@ use log::info;
 use ndarray::{Array1, s};
 use polars::prelude::*;
 use std::f64;
+use std::time::Instant;
 /* TODO!:
 SG как альтернатива derive_rate
 
@@ -185,7 +187,9 @@ impl TGADataset {
                     }
                 },
 
-                SmoothStrategy::Lowess { .. } | SmoothStrategy::Spline { .. } => {
+                SmoothStrategy::Lowess { frac } => self.lowess_filter_column(col, *frac)?,
+
+                SmoothStrategy::Spline { .. } => {
                     return Err(TGADomainError::NotImplemented);
                 }
             };
@@ -451,8 +455,133 @@ impl TGADataset {
         deriv: usize,
         delta: f64,
     ) -> Result<Self, TGADomainError> {
-        self.sg_filter_column_as(col, window, poly_order, deriv, delta, Some(col))
+        let start = Instant::now();
+        let S = self.sg_filter_column_as(col, window, poly_order, deriv, delta, Some(col))?;
+        info!(
+            "SG filter completed in {:?} ms",
+            start.elapsed().as_millis()
+        );
+        Ok(S)
     }
+    //===============================================================================
+    fn lowess_reference_x(&self, df: &DataFrame) -> Result<Vec<f64>, TGADomainError> {
+        if let Some(time_col) = self.schema.time.as_deref() {
+            if df
+                .get_column_names()
+                .iter()
+                .any(|name| name.as_str() == time_col)
+            {
+                return extract_f64_column(df, time_col);
+            }
+        }
+        Ok((0..df.height()).map(|i| i as f64).collect())
+    }
+
+    pub fn lowess_filter_column(self, col: &str, frac: f64) -> Result<Self, TGADomainError> {
+        self.lowess_filter_column_as(col, frac, Some(col))
+    }
+
+    pub fn lowess_filter_column_as(
+        mut self,
+        col: &str,
+        frac: f64,
+        out_col: Option<&str>,
+    ) -> Result<Self, TGADomainError> {
+        let out_col = default_output_name("lowess_", col, out_col);
+        let mut df = self.frame.clone().collect()?;
+        let x = self.lowess_reference_x(&df)?;
+        let y = extract_f64_column(&df, col)?;
+
+        if x.len() != y.len() {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "LOWESS input length mismatch: x has {}, y has {} for column '{}'",
+                x.len(),
+                y.len(),
+                col
+            )));
+        }
+
+        let cfg = LowessConfig {
+            fraction: frac,
+            ..LowessConfig::default()
+        };
+
+        let filtered = lowess_smooth_values(&x, &y, &cfg).map_err(|e| {
+            TGADomainError::InvalidOperation(format!("LOWESS fit failed for '{}': {:?}", col, e))
+        })?;
+
+        df.with_column(Column::new(out_col.clone().into(), filtered))?;
+        self.schema.update_schema(col, &out_col);
+        self.frame = df.lazy();
+        Ok(self)
+    }
+
+    pub fn lowess_smooth_column(
+        self,
+        time_col: &str,
+        column: &str,
+        config: LowessConfig,
+    ) -> Result<Self, TGADomainError> {
+        self.lowess_smooth_column_as(time_col, column, Some(column), config)
+    }
+
+    pub fn lowess_smooth_column_as(
+        self,
+        time_col: &str,
+        column: &str,
+        out_column: Option<&str>,
+        config: LowessConfig,
+    ) -> Result<Self, TGADomainError> {
+        self.lowess_smooth_columns_as(time_col, &[column], &[out_column], config)
+    }
+
+    pub fn lowess_smooth_columns(
+        self,
+        time_col: &str,
+        columns: &[&str],
+        config: LowessConfig,
+    ) -> Result<Self, TGADomainError> {
+        let out_cols: Vec<Option<&str>> = columns.iter().map(|&col| Some(col)).collect();
+        self.lowess_smooth_columns_as(time_col, columns, &out_cols, config)
+    }
+
+    pub fn lowess_smooth_columns_as(
+        mut self,
+        time_col: &str,
+        columns: &[&str],
+        out_columns: &[Option<&str>],
+        config: LowessConfig,
+    ) -> Result<Self, TGADomainError> {
+        let mut df = self.frame.clone().collect()?;
+        let out_names = resolved_output_names("lowess_", columns, out_columns)?;
+        let x = extract_f64_column(&df, time_col)?;
+
+        for (&col, out_name) in columns.iter().zip(out_names.iter()) {
+            let y = extract_f64_column(&df, col)?;
+            if x.len() != y.len() {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "LOWESS input length mismatch for column '{}': x has {}, y has {}",
+                    col,
+                    x.len(),
+                    y.len()
+                )));
+            }
+
+            let smoothed = lowess_smooth_values(&x, &y, &config).map_err(|e| {
+                TGADomainError::InvalidOperation(format!(
+                    "LOWESS fit failed for column '{}': {:?}",
+                    col, e
+                ))
+            })?;
+
+            df.with_column(Column::new(out_name.clone().into(), smoothed))?;
+            self.schema.update_schema(col, out_name);
+        }
+
+        self.frame = df.lazy();
+        Ok(self)
+    }
+
     //===============================================================================
 
     // SPLINES
@@ -606,6 +735,7 @@ impl TGADataset {
         n_internal_knots: usize,
         solver: SolverKind,
     ) -> Result<Self, TGADomainError> {
+        let start = Instant::now();
         if n_points < 2 {
             return Err(TGADomainError::InvalidOperation(
                 "n_points must be >= 2".into(),
@@ -629,9 +759,14 @@ impl TGADataset {
         }
         for i in 1..t_old.len() {
             if t_old[i] <= t_old[i - 1] {
-                return Err(TGADomainError::InvalidOperation(
-                    "Time column must be strictly monotonic for LSQ spline resampling".into(),
-                ));
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Time column must be strictly monotonic for LSQ spline resampling:
+                     t[{}] {} is smaller than t[{}] = {} ",
+                    i,
+                    t_old[i],
+                    i - 1,
+                    t_old[i - 1]
+                )));
             }
         }
 
@@ -679,365 +814,10 @@ impl TGADataset {
         df = df.with_column(time_column)?.clone();
         self.schema.update_schema(time_col, new_time_col);
         self.frame = df.lazy();
-
-        Ok(self)
-    }
-
-    /*
-    pub fn spline_resample_columns_as(
-        mut self,
-        time_col: &str,
-        new_time_col: &str,
-        columns: &[&str],
-        out_columns: &[Option<&str>],
-        n_points: usize,
-        kind: SplineKind,
-    ) -> Result<Self, TGADomainError> {
-        let df = self.frame.clone().collect()?;
-        let out_names = resolved_output_names("spline_", columns, out_columns)?;
-
-        // --- old time ---
-        let t_old = extract_f64_column(&df, time_col)?;
-
-        // --- new grid ---
-        let t_new = uniform_grid_from(&t_old, n_points, kind)
-            .map_err(|e| TGADomainError::InvalidOperation(e))?;
-
-        let mut series: Vec<Column> = Vec::new();
-
-        // --- resample requested columns ---
-        for (&col, out_name) in columns.iter().zip(out_names.iter()) {
-            let y_old = extract_f64_column(&df, col)?;
-
-            let (_, y_new) = spline_resample(&t_old, &y_old, n_points, kind)
-                .map_err(|e| TGADomainError::InvalidOperation(e))?;
-            self.schema.update_schema(col, &out_name);
-            self.schema.drop_schema_record(col);
-            series.push(Series::new(out_name.clone().into(), y_new).into());
-        }
-
-        // --- add new time column ---
-        series.push(Series::new(new_time_col.into(), t_new).into());
-
-        let new_df = DataFrame::new(series)?;
-
-        // --- update schema ---
-       self.schema.update_schema(time_col, new_time_col );
-         self.schema.drop_schema_record(time_col);
-        let list_of_cols = &new_df.get_column_names();
-        info!("now list of columns is {:?}", list_of_cols);
-        self.frame = new_df.lazy();
         info!(
-            "new columns with splined data named {:?} have been created",
-            out_columns
+            "LSQ spline resampling completed in {:?} ms",
+            start.elapsed().as_millis()
         );
-
         Ok(self)
     }
-
-    */
-    /*
-    pub fn spline_smooth_column(
-        mut self,
-        col: &str,
-        kind: SplineKind,
-    ) -> Result<Self, TGADomainError> {
-        let time_col = self
-            .schema
-            .time
-            .as_ref()
-            .ok_or(TGADomainError::TimeNotBound)?
-            .clone();
-
-        // --- Collect ---
-        let df = self.frame.clone().collect()?;
-
-        let time = df.column(&time_col)?.f64().map_err(|_| {
-            TGADomainError::InvalidOperation(format!("Time column '{}' must be f64", time_col))
-        })?;
-
-        let values = df.column(col)?.f64().map_err(|_| {
-            TGADomainError::InvalidOperation(format!("Column '{}' must be f64", col))
-        })?;
-
-        if time.null_count() > 0 || values.null_count() > 0 {
-            return Err(TGADomainError::InvalidOperation(format!(
-                "Spline smoothing does not support nulls (column '{}')",
-                col
-            )));
-        }
-
-        let t: Vec<f64> = time.into_no_null_iter().collect();
-        let y: Vec<f64> = values.into_no_null_iter().collect();
-
-        if t.len() < 4 {
-            return Err(TGADomainError::InvalidOperation(
-                "Spline smoothing requires at least 4 points".into(),
-            ));
-        }
-
-        // --- Check monotonicity ---
-        for i in 1..t.len() {
-            if t[i] <= t[i - 1] {
-                return Err(TGADomainError::InvalidOperation(
-                    "Time column must be strictly monotonic for spline smoothing".into(),
-                ));
-            }
-        }
-
-        // --- Build spline ---
-        let interp = kind.to_interpolation();
-
-        let keys = t
-            .iter()
-            .zip(y.iter())
-            .map(|(&x, &v)| Key::<f64, f64>::new(x , v , interp))
-            .collect();
-
-        let spline = Spline::<f64, f64>::from_vec(keys);
-
-        // --- Evaluate spline at original time points ---
-        let mut smoothed = Vec::with_capacity(t.len());
-        for &x in &t {
-            match spline.sample(x ) {
-                Some(v) => smoothed.push(v as f64),
-                None => {
-                    return Err(TGADomainError::InvalidOperation(
-                        "Spline evaluation failed (out of bounds)".into(),
-                    ));
-                }
-            }
-        }
-
-        // --- Write back ---
-        let mut new_df = df.clone();
-        new_df.replace(col, Series::new(col.into(), smoothed))?;
-
-        self.frame = new_df.lazy();
-
-        Ok(self)
-    }
-
-     /// onto a uniform time grid of size `n_points`.
-    ///
-    /// This operation:
-    /// - rebuilds time column
-    /// - resamples all f64 columns
-    /// - preserves schema bindings
-    ///
-    pub fn spline_resample(
-        mut self,
-        n_points: usize,
-        kind: SplineKind,
-    ) -> Result<Self, TGADomainError> {
-        let time_col = self
-            .schema
-            .time
-            .as_ref()
-            .ok_or(TGADomainError::TimeNotBound)?
-            .clone();
-
-        let df = self.frame.clone().collect()?;
-
-        let time_series = df.column(&time_col)?;
-        let time = if matches!(time_series.dtype(), DataType::Float64) {
-            let ts = time_series.f64()?;
-            ts.clone()
-        } else {
-            let cast_series = time_series.cast(&DataType::Float64)?;
-           let ts =  cast_series.f64()?;
-           ts.clone()
-        };
-        if time.null_count() > 0 {
-            return Err(TGADomainError::InvalidOperation(
-                "Resampling does not support nulls in time column".into(),
-            ));
-        }
-
-        let t: Vec<f64> = time.into_no_null_iter().collect();
-        let t_min = *t.first().unwrap();
-        let t_max = *t.last().unwrap();
-
-        if n_points < 2 {
-            return Err(TGADomainError::InvalidOperation(
-                "n_points must be >= 2".into(),
-            ));
-        }
-
-        if t.len() < 2 {
-            return Err(TGADomainError::InvalidOperation(
-                "Spline resampling requires at least 2 points".into(),
-            ));
-        }
-
-        if matches!(kind, SplineKind::Cubic) && t.len() < 4 {
-            return Err(TGADomainError::InvalidOperation(
-                "Cubic spline resampling requires at least 4 points".into(),
-            ));
-        }
-
-        for i in 1..t.len() {
-            if t[i] <= t[i - 1] {
-                return Err(TGADomainError::InvalidOperation(
-                    "Time column must be strictly monotonic for spline resampling".into(),
-                ));
-            }
-        }
-
-        // New uniform grid
-        let new_time: Vec<f64> = (0..n_points)
-            .map(|i| {
-                t_min + (t_max - t_min) * (i as f64) / ((n_points - 1) as f64)
-            })
-            .collect();
-
-        let interp = kind.to_interpolation();
-
-        let t_f64 = t;
-        let new_time_f64: Vec<f64> = new_time.clone();
-
-        let mut new_columns: Vec<Column> = Vec::new();
-
-        for col in df.get_columns() {
-            if *col.name() == time_col {
-                new_columns.push(Series::new(col.name().clone(), &new_time).into());
-                continue;
-            }
-
-            if let Ok(values) = col.f64() {
-                if values.null_count() > 0 {
-                    return Err(TGADomainError::InvalidOperation(format!(
-                        "Resampling does not support nulls (column '{}')",
-                        col.name()
-                    )));
-                }
-
-                let y: Vec<f64> = values.into_no_null_iter().collect();
-                let y_f64: Vec<f64> = y;
-
-                let keys = t_f64
-                    .iter()
-                    .zip(y_f64.iter())
-                    .map(|(&x, &v)| Key::new(x, v, interp))
-                    .collect();
-
-                let spline = Spline::from_vec(keys);
-
-                let mut resampled = Vec::with_capacity(new_time_f64.len());
-                for &x in &new_time_f64 {
-                    match spline.sample(x) {
-                        Some(v) => resampled.push(v as f64),
-                        None => return Err(TGADomainError::InvalidOperation(
-                            "Spline evaluation failed".into(),
-                        )),
-                    }
-                }
-
-                new_columns.push(Series::new(col.name().clone(), resampled).into());
-            } else {
-                return Err(TGADomainError::InvalidOperation(format!(
-                    "Resampling only supports f64 columns (column '{}')",
-                    col.name()
-                )));
-            }
-        }
-
-        let new_df = DataFrame::new(new_columns)?;
-        self.frame = new_df.lazy();
-
-        Ok(self)
-    }
-
-
-     pub fn spline_resample2(
-        mut self,
-        n_points: usize,
-        kind: SplineKind,
-    ) -> Result<Self, TGADomainError> {
-        let time_col = self
-            .schema
-            .time
-            .as_ref()
-            .ok_or(TGADomainError::TimeNotBound)?
-            .clone();
-
-        let df = self.frame.clone().collect()?;
-
-        let time = df.column(&time_col)?.f64()?;
-        if time.null_count() > 0 {
-            return Err(TGADomainError::InvalidOperation(
-                "Resampling does not support nulls in time column".into(),
-            ));
-        }
-
-        let t: Vec<f64> = time.into_no_null_iter().collect();
-        let t_min = *t.first().unwrap();
-        let t_max = *t.last().unwrap();
-
-        if n_points < 2 {
-            return Err(TGADomainError::InvalidOperation(
-                "n_points must be >= 2".into(),
-            ));
-        }
-
-        // New uniform grid
-        let new_time: Vec<f64> = (0..n_points)
-            .map(|i| {
-                t_min + (t_max - t_min) * (i as f64) / ((n_points - 1) as f64)
-            })
-            .collect();
-
-        let interp = kind.to_interpolation();
-
-        let mut new_columns: Vec<Column> = Vec::new();
-        for col in df.get_columns() {
-            if *col.name() == time_col {
-              new_columns.push(Series::new(col.name().clone(), &new_time).into());
-                continue;
-            }
-
-            if let Ok(values) = col.f64() {
-                if values.null_count() > 0 {
-                    return Err(TGADomainError::InvalidOperation(format!(
-                        "Resampling does not support nulls (column '{}')",
-                        col.name()
-                    )));
-                }
-
-                let y: Vec<f64> = values.into_no_null_iter().collect();
-
-                let keys: Vec<Key<f64, f64>> = t
-                    .iter()
-                    .zip(y.iter())
-                    .map(|(&x, &v)| Key::new(x, v, interp))
-                    .collect();
-
-                let spline = Spline::from_vec(keys);
-
-                let resampled: Vec<f64> = new_time
-                    .iter()
-                    .map(|&x| {
-                        spline.sample(x).ok_or_else(|| {
-                            TGADomainError::InvalidOperation(
-                                "Spline evaluation failed".into(),
-                            )
-                        })
-                    })
-                    .collect::<Result<_, _>>()?;
-
-                new_columns.push(Series::new(col.name().clone(), resampled).into());
-            } else {
-             return Err(TGADomainError::InvalidOperation(format!(
-                    "Resampling only supports f64 columns (column '{}')",
-                    col.name()
-                )));
-            }
-        }
-
-        let new_df = DataFrame::new(new_columns)?;
-        self.frame = new_df.lazy();
-
-        Ok(self)
-    }
-     */
 }

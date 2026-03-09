@@ -1,13 +1,16 @@
 pub mod controller;
 pub mod controller_buttons_and_panels;
 pub mod controller_filters;
+pub mod controller_golden_pipeline;
 pub mod controller_kinetics;
 pub mod controller_table;
 pub mod experimental_kinetics_gui_main;
 pub mod gui_test;
 pub mod interaction;
+pub mod kitheplot_wrapper;
 pub mod model;
 pub mod model_handlers;
 pub mod settings;
 pub mod test_options;
+
 pub mod view;
