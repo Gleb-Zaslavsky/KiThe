@@ -74,9 +74,8 @@ impl TGASeries {
                     ))
                 })?;
 
-                select_exprs.push(
-                    col(source_col).alias(UnitedDataset::canonical_column_name(*nature)),
-                );
+                select_exprs
+                    .push(col(source_col).alias(UnitedDataset::canonical_column_name(*nature)));
             }
 
             let selected = exp

@@ -5,9 +5,11 @@ use crate::Kinetics::experimental_kinetics::experiment_series_main::{
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     ColumnNature, TGADataset, TGADomainError, TGASchema,
 };
+use crate::Kinetics::experimental_kinetics::testing_mod::{AdvancedTGAConfig, VirtualTGA};
 use polars::prelude::*;
 use std::collections::HashMap;
 //=================================================================================
+/// INTERFACE FOR KINETIC METHODS
 #[derive(Clone)]
 pub struct UnitedDataset {
     pub frame: LazyFrame,

@@ -17,4 +17,5 @@ pub mod testing_mod;
 //pub mod LSQSplines2;
 pub mod LSQSplines;
 mod LSQSplines_tests;
+pub mod kinetic_methods;
 pub mod lowess_wrapper;

@@ -112,6 +112,7 @@ pub enum TGADomainError {
     InvalidOperation(String),
     OutOfRange,
     TimeNonMonotonic(String),
+    InvalidConversionRange,
 }
 
 impl From<PolarsError> for TGADomainError {

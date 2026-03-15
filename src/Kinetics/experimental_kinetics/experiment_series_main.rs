@@ -607,7 +607,13 @@ impl TGAExperiment {
             meta: self.meta,
         })
     }
-
+    pub fn conversion_with_m0(self, m0: f64, new_col: &str) -> Result<Self, TGADomainError> {
+        let dataset = self.dataset.conversion_with_m0(m0, new_col)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
     //================================================================================================
     //      DIAGNOSTICS AND TESTING
 
@@ -2701,6 +2707,14 @@ impl TGASeries {
         self.try_transform_by_id(id, |exp| exp.conversion(from, to, new_col))
     }
 
+    pub fn conversion_with_m0(
+        &mut self,
+        id: &str,
+        m0: f64,
+        new_col: &str,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| exp.conversion_with_m0(m0, new_col))
+    }
     //================================================================================================
     //      DIAGNOSTICS AND TESTING
     pub fn create_from_synthetic_data(

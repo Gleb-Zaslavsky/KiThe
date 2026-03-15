@@ -1,6 +1,6 @@
 use polars::prelude::{DataFrame, LazyFrame, PolarsResult};
 
-use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
+use crate::Kinetics::experimental_kinetics::experiment_series_main::{ExperimentMeta, TGASeries};
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     ColumnMeta, ColumnNature, ColumnOrigin, History, TGADataset, TGADomainError, TGASchema, Unit,
 };
@@ -50,7 +50,7 @@ impl TGADataset {
             "temperature".to_string(),
             ColumnMeta {
                 name: "temperature".to_string(),
-                unit: Unit::Celsius,
+                unit: Unit::Kelvin,
                 origin: ColumnOrigin::Raw,
                 nature: ColumnNature::Temperature,
             },
@@ -341,6 +341,22 @@ impl VirtualTGA {
         }
     }
 }
+
+impl TGASeries {
+    pub fn create_series_from_synthetic_data(
+        &mut self,
+        config: &AdvancedTGAConfig,
+    ) -> Result<(), TGADomainError> {
+        let simulated = VirtualTGA::generate_series(config);
+        for exp in simulated {
+            let meta = exp.meta;
+            let vtga = exp.virtual_tga;
+            self.create_from_synthetic_data(&vtga, meta)?;
+        }
+        self.rebuild_index();
+        Ok(())
+    }
+}
 //=======================================================================================================
 // EASY EXPONENTIAL DECAY WITH NOISE AND OPTIONAL SPIKES
 //=======================================================================================================
@@ -547,9 +563,13 @@ impl PipelineInvariantTest {
 
 //===================================================================================
 #[cfg(test)]
-mod tests3 {
+pub mod tests_afvanced_config {
     use super::*;
+    use approx::assert_relative_eq;
+    use polars::chunked_array::temporal::conversion;
     const R: f64 = 8.314;
+    use crate::Kinetics::experimental_kinetics::kinetic_methods::kinetic_regression::linear_regression;
+    use ndarray::Array1;
     fn base_config_single() -> AdvancedTGAConfig {
         AdvancedTGAConfig {
             n_points: 1000,
@@ -572,6 +592,205 @@ mod tests3 {
         }
     }
 
+    pub fn base_advanced_config_non_isothermal(
+        T: f64,
+        k0: f64,
+        e: f64,
+        dt: f64,
+        n_points: usize,
+        heating_rates: Vec<f64>,
+    ) -> AdvancedTGAConfig {
+        AdvancedTGAConfig {
+            n_points,
+            dt,
+            experiment_mode: ExperimentMode::NonIsothermal {
+                t0: T,
+                heating_rates,
+            },
+            kinetic_model: KineticModel::ArrheniusSingle {
+                m0: -1.0,
+                k0,
+                e,
+                r: 8.314,
+            },
+            mass_noise: None,
+            temp_noise: None,
+            spikes: None,
+            seed: 42,
+        }
+    }
+
+    pub fn base_advanced_config_isothermal(
+        k0: f64,
+        e: f64,
+        temperatures: Vec<f64>,
+        dt: f64,
+        n_points: usize,
+    ) -> AdvancedTGAConfig {
+        AdvancedTGAConfig {
+            n_points,
+            dt,
+            experiment_mode: ExperimentMode::Isothermal { temperatures },
+            kinetic_model: KineticModel::ArrheniusSingle {
+                m0: -1.0,
+                k0,
+                e,
+                r: 8.314,
+            },
+            mass_noise: None,
+            temp_noise: None,
+            spikes: None,
+            seed: 7,
+        }
+    }
+
+    pub fn build_series_from_cfg(
+        cfg: &AdvancedTGAConfig,
+        k: f64,
+        b: f64,
+        cutoff: f64,
+    ) -> Result<TGASeries, TGADomainError> {
+        let mut series = TGASeries::new();
+        series.create_series_from_synthetic_data(cfg).unwrap();
+
+        for indx in &mut series.exp_map.values() {
+            let e = series.experiments[*indx]
+                .clone()
+                .celsius_to_kelvin()
+                .seconds_to_hours()
+                .calibrate_mass_from_voltage(k, b)
+                .conversion(0.0, cutoff, "eta")
+                .unwrap()
+                .derive_deta_dt("deta_dt")
+                .unwrap()
+                .derive_temperature_rate("dT_dt")?;
+            let b = e.dataset.get_mass()?;
+            let mass = b[0..10].as_ref();
+            println!("mass {:?}", mass);
+            let b = e.dataset.get_time()?;
+            let time = b[0..10].as_ref();
+            println!("\n time {:?}", time);
+            let conversion = e.dataset.get_eta()?;
+            println!(
+                "\n conversion: from {:?} to {:?}",
+                conversion.first(),
+                conversion.last()
+            );
+            let deta_dt = e.dataset.get_deta_dt()?;
+            println!(
+                "\n deta_dt: from {:?} to {:?}",
+                deta_dt.first(),
+                deta_dt.last()
+            );
+            series.experiments[*indx] = e;
+        }
+        Ok(series)
+    }
+
+    pub fn build_series_from_cfg_with_m0(
+        cfg: &AdvancedTGAConfig,
+        k: f64,
+        b: f64,
+        m0: f64,
+    ) -> Result<TGASeries, TGADomainError> {
+        let mut series = TGASeries::new();
+        series.create_series_from_synthetic_data(cfg).unwrap();
+
+        for indx in &mut series.exp_map.values() {
+            let e = series.experiments[*indx]
+                .clone()
+                .celsius_to_kelvin()
+                .seconds_to_hours()
+                .calibrate_mass_from_voltage(k, b)
+                .conversion_with_m0(m0, "eta")?
+                .derive_deta_dt("deta_dt")?
+                .derive_temperature_rate("dT_dt")?;
+            series.experiments[*indx] = e;
+        }
+
+        Ok(series)
+    }
+    #[test]
+    pub fn test_dm_dt_eq_k_m_isothermal() {
+        let T = vec![520.0, 540.0, 560.0, 580.0, 600.0, 620.0];
+        let cfg = base_advanced_config_isothermal(1e5, 80_000.0, T.clone(), 0.1, 10_000);
+        let series = build_series_from_cfg(&cfg, -1.0, 0.0, 1e-4).unwrap();
+        let mut k_vec = vec![];
+        for i in series.experiments.iter() {
+            let conversion = i.dataset.get_eta().unwrap();
+            let deta_dt = i.dataset.get_deta_dt().unwrap();
+            let deta_dt = Array1::from(deta_dt);
+            let conversion = Array1::from(conversion);
+            let res = linear_regression(&conversion, &deta_dt);
+            let k = res.slope;
+            let b = res.intercept;
+            let r2 = res.r2;
+            println!("\n k: {:?} b: {:?} r2: {:?}", k, b, r2);
+            // deta/dt = K*(1-eta) => deta/dt=y, eta=x, y = kx+b, k must be -b
+            k_vec.push(b);
+            //      .("\n conversion: from {:?} to {:?}", conversion.first(), conversion.last());
+            //  println!("\n deta_dt: from {:?} to {:?}", deta_dt.first(), deta_dt.last());
+        }
+        let T_inv = T.iter().map(|&t| -1.0 / t).collect::<Vec<f64>>();
+        let ln_k = k_vec.iter().map(|&k| k.abs().ln()).collect::<Vec<f64>>();
+        let T_inv = Array1::from(T_inv);
+        let ln_k = Array1::from(ln_k);
+
+        let res = linear_regression(&T_inv, &ln_k);
+
+        let k = res.slope * 8.314;
+        let b = res.intercept;
+        let r2 = res.r2;
+        println!("\n k: {:?} b: {:?} r2: {:?}", k, b, r2);
+        assert!(r2 > 0.99);
+        assert_relative_eq!(k, 80000.0, epsilon = 1000.0);
+    }
+
+    #[test]
+    pub fn test_dm_dt_eq_k_m_nonisothermal() {
+        let heating_rates = vec![0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5];
+        let cfg =
+            base_advanced_config_non_isothermal(520.0, 1e5, 77_500.0, 0.1, 10_000, heating_rates);
+        let series = build_series_from_cfg(&cfg, -1.0, 0.0, 1e-4).unwrap();
+
+        let mut all_T_inv = vec![];
+        let mut all_complex = vec![];
+
+        for i in series.experiments.iter() {
+            let conversion = i.dataset.get_eta().unwrap();
+            let deta_dt = i.dataset.get_deta_dt().unwrap();
+            let temp = i.dataset.get_temperature().unwrap();
+
+            // deta/dt = K(T(t))*(1-eta) => (deta/dt)/(1-eta) = K(T(t)) => ln((deta/dt)/(1-eta)) = ln(K(T(t)))= ln k0 - (E/R)*1/T
+            for j in 0..conversion.len() {
+                let eta = conversion[j];
+                let deta = deta_dt[j];
+                let t = temp[j];
+
+                if eta.abs() < 0.99 && deta.abs() > 1e-10 {
+                    let complex_val = (deta.abs() / (1.0 - eta.abs())).ln();
+                    let t_inv = -1.0 / t;
+
+                    if complex_val.is_finite() && t_inv.is_finite() {
+                        all_complex.push(complex_val);
+                        all_T_inv.push(t_inv);
+                    }
+                }
+            }
+        }
+
+        let T_inv = Array1::from(all_T_inv);
+        let complex = Array1::from(all_complex);
+        let res = linear_regression(&T_inv, &complex);
+        let k = res.slope * 8.314;
+        let b = res.intercept;
+        let r2 = res.r2;
+        println!("\n E: {:?} ln(k0): {:?} r2: {:?}", k, b, r2);
+        println!("k0: {:?}", b.exp());
+
+        assert!(r2 > 0.95);
+        assert_relative_eq!(k, 77_500.0, epsilon = 5000.0);
+    }
     #[test]
     fn mass_monotonic_without_noise() {
         let cfg = base_config_single();
@@ -960,7 +1179,7 @@ mod synthetic_dataset_tests {
         assert_eq!(ds.schema.columns.get("mass").unwrap().unit, Unit::Milligram);
         assert_eq!(
             ds.schema.columns.get("temperature").unwrap().unit,
-            Unit::Celsius
+            Unit::Kelvin
         );
         assert_eq!(
             ds.schema.columns.get("time").unwrap().origin,

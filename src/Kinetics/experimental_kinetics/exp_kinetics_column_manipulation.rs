@@ -236,7 +236,7 @@ impl TGADataset {
     pub fn get_deta_dt(&self) -> Result<Vec<f64>, TGADomainError> {
         let deta_dt_col = self
             .schema
-            .dm_dt
+            .deta_dt
             .as_ref()
             .ok_or(TGADomainError::DetaDtNotFound)?;
         println!("\n column: {} ", deta_dt_col);
@@ -547,6 +547,11 @@ impl TGADataset {
     pub fn celsius_to_kelvin(mut self) -> Self {
         let col_name = self.schema.temperature.as_ref().unwrap().clone();
         println!("\n column: {} ", col_name);
+        if let Some(meta) = self.schema.columns.get(&col_name) {
+            if meta.unit == Unit::Kelvin {
+                return self;
+            }
+        }
         let expr = (col(&col_name) + lit(273.15)).alias(&col_name);
         self.frame = self.frame.with_column(expr.clone());
 
@@ -1250,6 +1255,49 @@ impl TGADataset {
             "conversion completed in {:?} ms",
             start.elapsed().as_millis()
         );
+        Ok(self)
+    }
+
+    /// Conversion with a fixed reference mass `m0`.
+    /// Useful for synthetic data where the true initial mass is known.
+    pub fn conversion_with_m0(mut self, m0: f64, new_col: &str) -> Result<Self, TGADomainError> {
+        let mass = self
+            .schema
+            .mass
+            .as_ref()
+            .ok_or(TGADomainError::MassNotBound)?
+            .clone();
+        println!("\n column: {} ", mass);
+
+        if m0 <= 0.0 || !m0.is_finite() {
+            return Err(TGADomainError::InvalidReferenceMass);
+        }
+
+        let expr = (lit(1.0) - col(&mass) / lit(m0)).alias(new_col);
+        self.frame = self.frame.with_column(expr.clone());
+
+        self.schema.columns.insert(
+            new_col.into(),
+            ColumnMeta {
+                name: new_col.into(),
+                unit: Unit::Dimensionless,
+                origin: ColumnOrigin::PolarsDerived,
+                nature: ColumnNature::Conversion,
+            },
+        );
+        self.schema.eta = Some(new_col.to_string());
+
+        self.log_operation(
+            "conversion_with_m0",
+            AffectedColumns::Specific(vec![new_col.to_string()]),
+            Some(expr),
+            format!(
+                "Computed conversion {} from {} (m0={:.4})",
+                new_col, mass, m0
+            ),
+            true,
+        );
+
         Ok(self)
     }
     //================================================================================================
