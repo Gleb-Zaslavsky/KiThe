@@ -63,6 +63,7 @@ use crate::gui::experimental_kinetics_gui::controller_buttons_and_panels::{
     NewExperimentDialogState, QuickActionPanelState, TopDropDownMenues, WrightPanelControllers,
 };
 use crate::gui::experimental_kinetics_gui::controller_filters::Mathematics;
+use crate::gui::experimental_kinetics_gui::controller_methods::KineticMethodsWindowState;
 use crate::gui::experimental_kinetics_gui::controller_table::{
     ColumnManagerState, show_column_manager_window,
 };
@@ -86,6 +87,7 @@ pub struct PlotApp {
     pub new_experiment_dialog: NewExperimentDialogState,
     pub mathematics: Mathematics,
     pub test_options: TestOptions,
+    pub kinetic_methods_state: KineticMethodsWindowState,
     pub column_manager_state: ColumnManagerState,
     pub kithe_plot_window: KiThePlotWindowState,
 }
@@ -99,6 +101,7 @@ impl PlotApp {
             new_experiment_dialog: NewExperimentDialogState::new(),
             mathematics: Mathematics::new(),
             test_options: TestOptions::new(),
+            kinetic_methods_state: KineticMethodsWindowState::default(),
             column_manager_state: ColumnManagerState::new(),
             kithe_plot_window: KiThePlotWindowState::default(),
         }
@@ -125,6 +128,7 @@ impl PlotApp {
             &mut self.new_experiment_dialog,
             &mut self.test_options,
             &mut self.kithe_plot_window,
+            &mut self.kinetic_methods_state,
         );
         self.new_experiment_dialog
             .show_new_experiment_dialogue(ui.ctx(), &mut self.model);

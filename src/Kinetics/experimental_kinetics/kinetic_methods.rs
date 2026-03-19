@@ -1,7 +1,89 @@
+//! # Kinetic methods — shared infrastructure
+//!
+//! This module is the **foundation layer** for all isoconversional kinetic
+//! analysis in KiThe.  It defines the data types, the trait, the validation
+//! helpers, and the grid-building machinery that every concrete method
+//! (OFW, KAS, Starink, Friedman, Vyazovkin) builds on.
+//!
+//! ## Architecture overview
+//!
+//! ```text
+//! TGASeries / UnitedDataset
+//!        │
+//!        ▼
+//! KineticDataView          ← one ExperimentData per experiment
+//!        │
+//!        ▼
+//! ConversionGridBuilder    ← builder pattern; configures α-range,
+//!   ├─ build()             │  segment count, interpolation, extras
+//!   ├─ build_isothermal()  │
+//!   └─ build_universal()   │
+//!        │
+//!        ▼
+//! ConversionGrid           ← ndarray matrices [n_exp × n_α]
+//!        │
+//!        ▼
+//! KineticMethod::compute   ← trait implemented by every solver
+//!        │
+//!        ▼
+//! IsoconversionalResult    ← Vec<IsoLayerResult>, one per α point
+//! ```
+//!
+//! ## Sub-modules
+//! | Module | Contents |
+//! |--------|----------|
+//! | `integral_isoconversion` | OFW, KAS, Starink solvers + `VyazovkinMethod` adapter |
+//! | `Friedman` | Differential and integral Friedman solvers |
+//! | `Vyazovkin` | Non-linear Vyazovkin solver |
+//! | `isoconversion` | Unified dispatcher `IsoconversionalSolver` |
+//! | `kinetic_regression` | OLS linear regression used by all linear methods |
+//!
+//! ## Main data structures
+//! - [`KineticDataView`] — a thin, materialised view over a series of
+//!   experiments; the universal input to every `KineticMethod`.
+//! - [`ExperimentData`] — one experiment's time-series vectors plus metadata.
+//! - [`KineticRequirements`] — declarative checklist (min experiments,
+//!   needs heating rate, etc.) returned by each method.
+//! - [`ConversionGrid`] — the central ndarray structure: all experiments
+//!   resampled onto a common α grid, with `1/T` pre-cached.
+//! - [`ConversionGridBuilder`] — fluent builder that interpolates each
+//!   experiment onto the α grid and assembles `ConversionGrid`.
+//!
+//! ## Non-trivial techniques
+//!
+//! ### α-grid intersection for `auto_range`
+//! When no explicit α range is given, `calc_auto_eta_range` computes the
+//! *intersection* of all experiments' conversion ranges:
+//! `η_min = max(local_mins)`, `η_max = min(local_maxs)`.  This guarantees
+//! every experiment has data at every grid point, preventing out-of-bounds
+//! interpolation without requiring the caller to know the individual ranges.
+//!
+//! ### Single-pass linear interpolation with a sliding pointer
+//! `interpolate_linear_into` uses a single forward pointer `i` that only
+//! advances, exploiting the fact that both the source conversion vector and
+//! the target α grid are monotonically increasing.  This reduces the
+//! per-experiment interpolation from O(n·m) (naïve search) to O(n + m).
+//!
+//! ### Pre-cached `1/T` matrix
+//! `ConversionGrid::inv_temperature` stores `1/T` for every `(experiment, α)`
+//! cell at build time.  All solvers read this field directly, avoiding
+//! repeated division in the inner regression loop.
+//!
+//! ### `build_isothermal` fills temperature from metadata
+//! For isothermal experiments the measured temperature column is noisy and
+//! irrelevant to the isoconversional regression.  `build_isothermal` fills
+//! each row of the temperature matrix with the single constant value stored
+//! in `ExperimentMeta::isothermal_temperature`, giving a perfectly clean
+//! `1/T` column for the solver.
+pub mod Criado;
+pub mod Criado2;
 pub mod Friedman;
+pub mod Kissinger;
 pub mod Vyazovkin;
+pub mod combined;
 pub mod integral_isoconversion;
 mod integral_isoconversion_tests;
+pub mod is_this_a_sublimation;
 pub mod isoconversion;
 pub mod kinetic_regression;
 use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
@@ -12,10 +94,22 @@ use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
 use ndarray::{Array1, Array2};
 use splines::{Interpolation, Key, Spline};
 
+/// Materialised, read-only view over a series of TGA experiments.
+///
+/// This is the universal input type for every `KineticMethod`.  It is
+/// constructed either from a `UnitedDataset` (production path) or assembled
+/// directly in tests.  Each element of `experiments` corresponds to one
+/// experimental run (one heating rate or one isothermal temperature).
+#[derive(Debug, Clone)]
 pub struct KineticDataView {
+    /// One entry per experiment, ordered as they appear in the source dataset.
     pub experiments: Vec<ExperimentData>,
 }
 impl KineticDataView {
+    /// Constructs a `KineticDataView` by materialising all required columns
+    /// (time, temperature, conversion, conversion rate) from a `UnitedDataset`.
+    ///
+    /// Returns an error if any column is missing for any experiment.
     pub fn from_united_dataset(ds: &UnitedDataset) -> Result<Self, TGADomainError> {
         let mut experiments = Vec::new();
 
@@ -44,38 +138,117 @@ impl KineticDataView {
 
         Ok(Self { experiments })
     }
+    pub fn from_united_dataset_by_nature(
+        ds: &UnitedDataset,
+        nature: Vec<ColumnNature>,
+    ) -> Result<Self, TGADomainError> {
+        let mut experiments = Vec::new();
+
+        for meta in &ds.meta {
+            let time = if nature.contains(&ColumnNature::Time) {
+                ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::Time)?
+            } else {
+                Vec::new()
+            };
+
+            let temperature = if nature.contains(&ColumnNature::Temperature) {
+                ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::Temperature)?
+            } else {
+                Vec::new()
+            };
+
+            let conversion = if nature.contains(&ColumnNature::Conversion) {
+                ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::Conversion)?
+            } else {
+                Vec::new()
+            };
+
+            let conversion_rate = if nature.contains(&ColumnNature::ConversionRate) {
+                ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::ConversionRate)?
+            } else {
+                Vec::new()
+            };
+
+            let mass = if nature.contains(&ColumnNature::Mass) {
+                Some(ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::Mass)?)
+            } else {
+                None
+            };
+
+            let mass_rate = if nature.contains(&ColumnNature::MassRate) {
+                Some(ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::MassRate)?)
+            } else {
+                None
+            };
+            experiments.push(ExperimentData {
+                meta: meta.clone(),
+                time,
+                temperature,
+                conversion,
+                conversion_rate,
+                mass,
+                mass_rate,
+            });
+        }
+
+        Ok(Self { experiments })
+    }
 }
-/// materialized data of one experiment
+/// Materialised time-series data for a single TGA experiment.
+///
+/// All vectors are guaranteed to have the same length after construction.
+/// `mass` and `mass_rate` are optional because most kinetic methods work
+/// exclusively with the derived `conversion` and `conversion_rate` columns.
+#[derive(Debug, Clone)]
 pub struct ExperimentData {
+    /// Experiment-level metadata (id, heating rate, isothermal temperature).
     pub meta: ExperimentMeta,
-
+    /// Time axis (seconds).
     pub time: Vec<f64>,
+    /// Temperature axis (Kelvin).
     pub temperature: Vec<f64>,
-    // pub temperature_rate: Option<Vec<f64>>,
+    /// Conversion α ∈ [0, 1].
     pub conversion: Vec<f64>,
+    /// dα/dt (s⁻¹).
     pub conversion_rate: Vec<f64>,
-
+    /// Raw sample mass (optional; not used by isoconversional solvers).
     pub mass: Option<Vec<f64>>,
+    /// dm/dt (optional).
     pub mass_rate: Option<Vec<f64>>,
-    // pub relative_mass:  Option<Vec<f64>>,
-    //  pub relative_mass_rate:  Option<Vec<f64>>,
 }
-/// common trait for kinetic methods
+/// Common trait implemented by every kinetic method in this crate.
+///
+/// A method receives a [`KineticDataView`] and returns its `Output` type
+/// (typically [`IsoconversionalResult`]).  The default `check_input`
+/// implementation is a no-op; override it for method-specific validation
+/// that goes beyond the declarative [`KineticRequirements`] checks.
 pub trait KineticMethod {
+    /// The result type produced by this method.
     type Output;
 
+    /// Human-readable name of the method (e.g. `"KAS"`).
     fn name(&self) -> &'static str;
 
+    /// Core computation: build the grid and run the solver.
     fn compute(&self, data: &KineticDataView) -> Result<Self::Output, TGADomainError>;
-    // method-specific checks
+
+    /// Optional method-specific input validation, called before `compute`.
+    /// The default implementation accepts any input.
     fn check_input(&self, _data: &KineticDataView) -> Result<(), TGADomainError> {
         Ok(())
     }
 
+    /// Returns the declarative requirements for this method so that
+    /// `run_method_with_requirements` can validate the view automatically.
     fn requirements(&self) -> KineticRequirements;
+
+    fn required_columns_by_nature(&self) -> Vec<ColumnNature> {
+        Vec::new()
+    }
 }
 
 impl<O> dyn KineticMethod<Output = O> {
+    /// Convenience runner: validates input via `check_input`, then calls `compute`.
     pub fn run<M: KineticMethod<Output = O>>(
         method: &M,
         data: &KineticDataView,
@@ -86,6 +259,7 @@ impl<O> dyn KineticMethod<Output = O> {
     }
 }
 
+/// Returns an error if the view contains fewer than `n` experiments.
 pub fn require_min_experiments(data: &KineticDataView, n: usize) -> Result<(), TGADomainError> {
     if data.experiments.len() < n {
         return Err(TGADomainError::InvalidOperation(format!(
@@ -97,6 +271,8 @@ pub fn require_min_experiments(data: &KineticDataView, n: usize) -> Result<(), T
     Ok(())
 }
 
+/// Returns an error if any experiment is missing a heating rate.
+/// Required by non-isothermal methods (OFW, KAS, Starink, Differential Friedman).
 pub fn require_heating_rates(data: &KineticDataView) -> Result<(), TGADomainError> {
     for exp in &data.experiments {
         if exp.meta.heating_rate.is_none() {
@@ -109,6 +285,8 @@ pub fn require_heating_rates(data: &KineticDataView) -> Result<(), TGADomainErro
     Ok(())
 }
 
+/// Returns an error if any experiment is missing an isothermal temperature.
+/// Required by isothermal methods (Integral Friedman).
 pub fn require_isothermal(data: &KineticDataView) -> Result<(), TGADomainError> {
     for exp in &data.experiments {
         if exp.meta.isothermal_temperature.is_none() {
@@ -121,6 +299,7 @@ pub fn require_isothermal(data: &KineticDataView) -> Result<(), TGADomainError> 
     Ok(())
 }
 
+/// Returns an error if any experiment has an empty `conversion_rate` vector.
 pub fn require_conversion_rate(data: &KineticDataView) -> Result<(), TGADomainError> {
     for exp in &data.experiments {
         if exp.conversion_rate.is_empty() {
@@ -133,6 +312,7 @@ pub fn require_conversion_rate(data: &KineticDataView) -> Result<(), TGADomainEr
     Ok(())
 }
 
+/// Returns an error if any experiment has an empty `conversion` vector.
 pub fn require_conversion(data: &KineticDataView) -> Result<(), TGADomainError> {
     for exp in &data.experiments {
         if exp.conversion.is_empty() {
@@ -145,17 +325,29 @@ pub fn require_conversion(data: &KineticDataView) -> Result<(), TGADomainError> 
     Ok(())
 }
 
+/// Declarative checklist of what a kinetic method needs from the input view.
+///
+/// Returned by `KineticMethod::requirements`; consumed by
+/// `check_requirements` / `run_method_with_requirements` to validate the
+/// view before calling `compute`.
 #[derive(Default)]
 pub struct KineticRequirements {
+    /// Minimum number of experiments required (typically 3).
     pub min_experiments: usize,
+    /// Whether every experiment must have a non-empty `conversion` vector.
     needs_conversion: bool,
-
+    /// Whether every experiment must have a non-empty `conversion_rate` vector.
     needs_conversion_rate: bool,
-
+    /// Whether every experiment must have a temperature column
+    /// (used to gate `require_isothermal` for isothermal methods).
     needs_temperature: bool,
-
+    /// Whether every experiment must carry a heating rate in its metadata.
     needs_heating_rate: bool,
 }
+/// Runs all declarative checks encoded in `req` against `data`.
+///
+/// Called automatically by `run_method_with_requirements`; can also be
+/// invoked manually when composing custom pipelines.
 // declarative checks
 pub fn check_requirements(
     data: &KineticDataView,
@@ -180,6 +372,10 @@ pub fn check_requirements(
     Ok(())
 }
 
+/// Preferred entry point for running a kinetic method.
+///
+/// Calls `check_requirements`, then `check_input`, then `compute` in order,
+/// returning the first error encountered.
 pub fn run_method_with_requirements<M: KineticMethod>(
     method: &M,
     data: &KineticDataView,
@@ -195,28 +391,45 @@ pub fn run_method_with_requirements<M: KineticMethod>(
 //===============================================================================================================
 // CONVERSION GRID
 //===========================================================================================================
+/// Selects the interpolation strategy used when resampling experiments onto
+/// the common α grid.
 #[derive(Clone, Copy, Debug)]
 pub enum GridInterpolation {
+    /// Piecewise linear interpolation — fast, always stable, preferred default.
     Linear,
+    /// Catmull–Rom spline interpolation — smoother but requires ≥ 3 points;
+    /// falls back to linear automatically when fewer points are available.
     Spline,
 }
 
+/// Central data structure for isoconversional analysis.
+///
+/// All experiments are resampled onto a common α grid so that every solver
+/// can work with aligned ndarray columns instead of ragged per-experiment
+/// vectors.  Shape of all 2-D arrays is `[n_experiments × n_alpha_points]`.
+///
+/// Build via [`ConversionGridBuilder`]; do not construct directly.
 pub struct ConversionGrid {
-    /// conversion grid
+    /// The shared α (conversion) grid, shape `[n_alpha]`.
     pub eta: Array1<f64>,
-
-    /// temperature[experiment, eta]
+    /// Temperature at each `(experiment, α)` cell (K).
     pub temperature: Array2<f64>,
-    /// 1/T cached
+    /// `1/T` pre-cached to avoid repeated division in solver inner loops.
     pub inv_temperature: Array2<f64>,
-    /// time[experiment, eta]
+    /// Time at which experiment `i` reached conversion `α[j]` (seconds).
     pub time: Array2<f64>,
-    /// rate eta/dt[experiment, eta]
+    /// dα/dt at each `(experiment, α)` cell (s⁻¹).
     pub conversion_rate: Array2<f64>,
+    /// Time-step increments Δt between consecutive α layers, required by the
+    /// Vyazovkin method.  `None` unless built with `with_dt_matrix()`.
     pub dt: Option<Array2<f64>>,
+    /// Per-experiment metadata (id, heating rate, isothermal temperature).
     pub meta: Vec<ExperimentMeta>,
 }
 impl ConversionGrid {
+    /// Prints a diagnostic report to stdout: α range, per-experiment max-α
+    /// time and temperature, zero-value warnings, and array dimensions.
+    /// Useful for sanity-checking grids built from real or synthetic data.
     pub fn report(&self) {
         use tabled::{Table, Tabled, settings::Style};
 
@@ -365,13 +578,28 @@ impl ConversionGrid {
 //     .interpolation(GridInterpolation::Linear)
 //     .build(&view)?;
 
+/// Distinguishes isothermal from non-isothermal experiment series.
+/// Used by `ConversionGridBuilder::build_universal` to select the correct
+/// grid-building path.
+pub enum ExperimentKind {
+    /// All experiments run at a fixed temperature; heating rate is absent.
+    Isothermal,
+    /// Experiments run with a linear temperature ramp; heating rate is present.
+    NonIsothermal,
+}
+/// Controls how the α range of the grid is determined.
 pub enum AlphaRangeMode {
+    /// Automatically compute the intersection of all experiments' conversion
+    /// ranges so every experiment has data at every grid point.
     Auto,
-
+    /// Use an explicit `[min, max]` range supplied by the caller.
     Manual { min: f64, max: f64 },
 }
+/// Optional extras computed during grid construction.
 // delta t required for Vyazovkin
 pub struct GridExtras {
+    /// If `true`, the `dt` matrix (time-step increments between α layers) is
+    /// computed and stored in `ConversionGrid::dt`.  Required by Vyazovkin.
     pub dt_matrix: bool,
 }
 impl Default for GridExtras {
@@ -379,6 +607,16 @@ impl Default for GridExtras {
         Self { dt_matrix: false }
     }
 }
+/// Fluent builder for [`ConversionGrid`].
+///
+/// Typical usage:
+/// ```rust,ignore
+/// let grid = ConversionGridBuilder::new()
+///     .eta_range(0.05, 0.95)
+///     .segments(100)
+///     .interpolation(GridInterpolation::Linear)
+///     .build(&view)?;
+/// ```
 pub struct ConversionGridBuilder {
     eta_mode: AlphaRangeMode,
     segments: usize,
@@ -405,41 +643,52 @@ impl Default for ConversionGridBuilder {
 }
 
 impl ConversionGridBuilder {
+    /// Creates a builder with default settings: auto α range, 50 segments,
+    /// linear interpolation, no safety margins, no dt matrix.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Sets an explicit `[min, max]` α range.
     pub fn eta_range(mut self, min: f64, max: f64) -> Self {
         self.eta_mode = AlphaRangeMode::Manual { min, max };
         self
     }
 
+    /// Switches to automatic α range (intersection of all experiments).
     pub fn auto_range(mut self) -> Self {
         self.eta_mode = AlphaRangeMode::Auto;
         self
     }
 
+    /// Sets the number of uniformly-spaced α grid points.
     pub fn segments(mut self, n: usize) -> Self {
         self.segments = n;
         self
     }
 
+    /// Sets the interpolation strategy used when resampling experiments.
     pub fn interpolation(mut self, mode: GridInterpolation) -> Self {
         self.interpolation = mode;
         self
     }
+
+    /// Adds safety margins that shrink the α range inward by `left` on the
+    /// low end and `right` on the high end, avoiding edge artefacts.
     pub fn safety_margin(mut self, left: f64, right: f64) -> Self {
         self.margin_left = left;
         self.margin_right = right;
-
         self
     }
+
+    /// Enables computation of the Δt matrix required by the Vyazovkin method.
     pub fn with_dt_matrix(mut self) -> Self {
         self.extras.dt_matrix = true;
-
         self
     }
 
+    /// Conditionally enables the Δt matrix; equivalent to calling
+    /// `with_dt_matrix()` when `compute` is `true`.
     pub fn compute_dt(self, compute: bool) -> Self {
         if compute {
             return self.with_dt_matrix();
@@ -447,6 +696,9 @@ impl ConversionGridBuilder {
             return self;
         }
     }
+
+    /// Computes the Δt matrix from a time array: `dt[i, j] = time[i, j+1] - time[i, j]`.
+    /// The last column is filled by repeating the second-to-last value.
     // for Vyazovkin method
     pub fn compute_dt_matrix(time: &Array2<f64>) -> Array2<f64> {
         let (n_exp, n_alpha) = time.dim();
@@ -467,7 +719,14 @@ impl ConversionGridBuilder {
         dt
     }
 
-    fn calc_auto_eta_range(&self, data: &KineticDataView) -> Result<(f64, f64), TGADomainError> {
+    /// Computes the intersection of all experiments' conversion ranges.
+    ///
+    /// Returns `(global_min, global_max)` where `global_min = max(local_mins)`
+    /// and `global_max = min(local_maxs)`.  Errors if the intersection is empty.
+    pub fn calc_auto_eta_range(
+        &self,
+        data: &KineticDataView,
+    ) -> Result<(f64, f64), TGADomainError> {
         let mut global_min = f64::NEG_INFINITY;
         let mut global_max = f64::INFINITY;
 
@@ -487,6 +746,8 @@ impl ConversionGridBuilder {
         Ok((global_min, global_max))
     }
 
+    /// Allocating variant of the non-isothermal grid builder (Vec-based).
+    /// Prefer `build_nonisothermal` for better memory locality.
     pub fn build_withcopy(self, data: &KineticDataView) -> Result<ConversionGrid, TGADomainError> {
         let (mut eta_min, mut eta_max) = match self.eta_mode {
             AlphaRangeMode::Auto => {
@@ -552,7 +813,16 @@ impl ConversionGridBuilder {
         })
     }
 
-    pub fn build(self, data: &KineticDataView) -> Result<ConversionGrid, TGADomainError> {
+    /// Builds a `ConversionGrid` for **non-isothermal** experiments.
+    ///
+    /// Allocates the output arrays once and fills them row-by-row using
+    /// `interpolate_experiment_into`, avoiding intermediate `Vec` allocations.
+    /// This is the standard path for OFW, KAS, Starink, Differential Friedman,
+    /// and Vyazovkin.
+    pub fn build_nonisothermal(
+        self,
+        data: &KineticDataView,
+    ) -> Result<ConversionGrid, TGADomainError> {
         let (mut eta_min, mut eta_max) = match self.eta_mode {
             AlphaRangeMode::Auto => self.calc_auto_eta_range(data)?,
             AlphaRangeMode::Manual { min, max } => (min, max),
@@ -605,12 +875,15 @@ impl ConversionGridBuilder {
         })
     }
 
+    /// Builds a uniformly-spaced α grid of `n` points in `[min, max)`.
     fn build_eta_grid(min: f64, max: f64, n: usize) -> Vec<f64> {
         let step = (max - min) / n as f64;
 
         (0..n).map(|i| min + step * i as f64).collect()
     }
 
+    /// Dispatches to the correct interpolation function, returning
+    /// `(time, temperature, rate)` vectors of length `eta_grid.len()`.
     fn interpolate_experiment(
         exp: &ExperimentData,
         eta_grid: &[f64],
@@ -623,6 +896,8 @@ impl ConversionGridBuilder {
         }
     }
 
+    /// In-place variant of `interpolate_experiment`: writes directly into
+    /// pre-allocated ndarray row views, avoiding extra allocations.
     pub fn interpolate_experiment_into(
         exp: &ExperimentData,
         eta_grid: &[f64],
@@ -642,6 +917,12 @@ impl ConversionGridBuilder {
         }
     }
 
+    /// Builds a `ConversionGrid` for **isothermal** experiments.
+    ///
+    /// Only the time column is interpolated from the data; the temperature
+    /// matrix is filled with the constant `isothermal_temperature` value from
+    /// each experiment's metadata.  `conversion_rate` is left as zeros because
+    /// isothermal methods (Integral Friedman) do not use it.
     pub fn build_isothermal(
         self,
         data: &KineticDataView,
@@ -695,6 +976,8 @@ impl ConversionGridBuilder {
         })
     }
 
+    /// Dispatches to `interpolate_time_linear_only` or
+    /// `interpolate_time_spline_only` depending on `method`.
     pub fn interpolate_time_only(
         exp: &ExperimentData,
         eta_grid: &[f64],
@@ -707,9 +990,26 @@ impl ConversionGridBuilder {
             GridInterpolation::Spline => interpolate_time_spline_only(exp, eta_grid, t_out),
         }
     }
+
+    /// Unified entry point that selects `build_nonisothermal` or
+    /// `build_isothermal` based on `kind`.
+    pub fn build_universal(
+        self,
+        data: &KineticDataView,
+        kind: ExperimentKind,
+    ) -> Result<ConversionGrid, TGADomainError> {
+        match kind {
+            ExperimentKind::NonIsothermal => self.build_nonisothermal(data),
+
+            ExperimentKind::Isothermal => self.build_isothermal(data),
+        }
+    }
 }
 
-fn interpolate_linear(
+/// Linear interpolation of time, temperature, and rate onto `eta_grid`.
+///
+/// Allocating variant; used by `build_withcopy`.
+pub fn interpolate_linear(
     exp: &ExperimentData,
     eta_grid: &[f64],
 ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), TGADomainError> {
@@ -745,7 +1045,11 @@ fn interpolate_linear(
     Ok((out_t, out_T, out_r))
 }
 
-fn interpolate_spline(
+/// Catmull–Rom spline interpolation of time, temperature, and rate onto
+/// `eta_grid`.  Falls back to linear when fewer than 4 source points exist.
+///
+/// Allocating variant; used by `build_withcopy`.
+pub fn interpolate_spline(
     exp: &ExperimentData,
     eta_grid: &[f64],
 ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), TGADomainError> {
@@ -798,6 +1102,11 @@ fn interpolate_spline(
     Ok((t, T, r))
 }
 
+/// In-place linear interpolation of time, temperature, and rate.
+///
+/// Uses a single forward pointer that advances monotonically, giving O(n + m)
+/// complexity instead of the O(n·m) naïve search.  Requires the source
+/// conversion vector to be monotonically non-decreasing.
 pub fn interpolate_linear_into(
     exp: &ExperimentData,
     eta_grid: &[f64],
@@ -857,6 +1166,8 @@ pub fn interpolate_linear_into(
     Ok(())
 }
 
+/// In-place Catmull–Rom spline interpolation of time, temperature, and rate.
+/// Requires ≥ 3 source points and a monotonically non-decreasing conversion vector.
 fn interpolate_spline_into(
     exp: &ExperimentData,
     eta_grid: &[f64],
@@ -924,6 +1235,8 @@ fn interpolate_spline_into(
     Ok(())
 }
 
+/// In-place linear interpolation of the time column only.
+/// Used by `build_isothermal` where temperature is taken from metadata.
 pub fn interpolate_time_linear_only(
     exp: &ExperimentData,
     eta_grid: &[f64],
@@ -962,6 +1275,8 @@ pub fn interpolate_time_linear_only(
     Ok(())
 }
 
+/// In-place Catmull–Rom spline interpolation of the time column only.
+/// Requires ≥ 3 source points.
 fn interpolate_time_spline_only(
     exp: &ExperimentData,
     eta_grid: &[f64],
@@ -993,346 +1308,10 @@ fn interpolate_time_spline_only(
     Ok(())
 }
 
+/// Convenience enum for selecting a kinetic method by name in high-level APIs.
 pub enum KineticMethodKind {
     OFW,
     KAS,
     Starink,
     Friedman,
-}
-//=====================================================================================================
-// TESTS
-//=====================================================================================================
-
-#[cfg(test)]
-pub mod tests {
-    use super::*;
-
-    use crate::Kinetics::experimental_kinetics::testing_mod::tests_afvanced_config::{
-        base_advanced_config_isothermal, base_advanced_config_non_isothermal,
-        build_series_from_cfg, build_series_from_cfg_with_m0,
-    };
-    use crate::Kinetics::experimental_kinetics::testing_mod::{AdvancedTGAConfig, KineticModel};
-    use approx::assert_relative_eq;
-
-    fn mock_experiment() -> ExperimentData {
-        ExperimentData {
-            meta: ExperimentMeta::default(),
-            time: vec![0.0, 5.0, 10.0],
-            temperature: vec![300.0, 350.0, 400.0],
-            conversion: vec![0.0, 0.5, 1.0],
-            conversion_rate: vec![0.1, 0.2, 0.3],
-            mass: None,
-            mass_rate: None,
-        }
-    }
-
-    #[test]
-    fn interpolate_linear_matches_expected() {
-        let exp = mock_experiment();
-        let eta_grid = vec![0.25, 0.75];
-
-        let (t, temp, rate) = interpolate_linear(&exp, &eta_grid).unwrap();
-
-        assert_relative_eq!(t[0], 2.5, epsilon = 1e-12);
-        assert_relative_eq!(t[1], 7.5, epsilon = 1e-12);
-        assert_relative_eq!(temp[0], 325.0, epsilon = 1e-12);
-        assert_relative_eq!(temp[1], 375.0, epsilon = 1e-12);
-        assert_relative_eq!(rate[0], 0.15, epsilon = 1e-12);
-        assert_relative_eq!(rate[1], 0.25, epsilon = 1e-12);
-    }
-
-    #[test]
-    fn interpolate_spline_is_consistent_for_linear_data() {
-        let exp = mock_experiment();
-        let eta_grid = vec![0.25, 0.75];
-
-        let (t, temp, rate) = interpolate_spline(&exp, &eta_grid).unwrap();
-
-        assert_relative_eq!(t[0], 2.5, epsilon = 1e-8);
-        assert_relative_eq!(t[1], 7.5, epsilon = 1e-8);
-        assert_relative_eq!(temp[0], 325.0, epsilon = 1e-8);
-        assert_relative_eq!(temp[1], 375.0, epsilon = 1e-8);
-        assert_relative_eq!(rate[0], 0.15, epsilon = 1e-8);
-        assert_relative_eq!(rate[1], 0.25, epsilon = 1e-8);
-    }
-
-    pub fn build_view_from_cfg(cfg: &AdvancedTGAConfig) -> Result<KineticDataView, TGADomainError> {
-        let series = build_series_from_cfg(cfg, -1.0, 0.0, 1e-4)?;
-
-        let united = series
-            .concat_into_vertical_stack(
-                None,
-                vec![
-                    ColumnNature::Time,
-                    ColumnNature::Conversion,
-                    ColumnNature::Temperature,
-                    ColumnNature::ConversionRate,
-                ],
-            )
-            .unwrap();
-
-        KineticDataView::from_united_dataset(&united)
-    }
-
-    pub fn build_view_from_cfg_exact_m0(
-        cfg: &AdvancedTGAConfig,
-    ) -> Result<KineticDataView, TGADomainError> {
-        let m0_raw = match cfg.kinetic_model {
-            KineticModel::ArrheniusSingle { m0, .. } => m0,
-            KineticModel::ArrheniusTwoComponent { m01, m02, .. } => m01 + m02,
-        };
-        let k = -1.0;
-        let b = 0.0;
-        let m0_calibrated = (k * m0_raw + b).abs();
-
-        let series = build_series_from_cfg_with_m0(cfg, k, b, m0_calibrated)?;
-
-        let united = series
-            .concat_into_vertical_stack(
-                None,
-                vec![
-                    ColumnNature::Time,
-                    ColumnNature::Conversion,
-                    ColumnNature::Temperature,
-                    ColumnNature::ConversionRate,
-                ],
-            )
-            .unwrap();
-
-        KineticDataView::from_united_dataset(&united)
-    }
-
-    fn assert_basic_view_sanity(view: &KineticDataView, expected_experiments: usize) {
-        assert_eq!(view.experiments.len(), expected_experiments);
-        for exp in &view.experiments {
-            assert!(!exp.time.is_empty());
-            assert_eq!(exp.time.len(), exp.temperature.len());
-            assert_eq!(exp.time.len(), exp.conversion.len());
-            assert_eq!(exp.time.len(), exp.conversion_rate.len());
-            //    println!("mass {:?}", &exp.mass.unwrap()[0..10].unwrap());
-            println!("conversion {:?}", &exp.conversion[0..10]);
-            assert!(exp.conversion.iter().all(|&v| v >= -2e-2 && v <= 1.0));
-
-            for w in exp.time.windows(2) {
-                assert!(w[1] > w[0]);
-            }
-        }
-    }
-
-    #[test]
-    fn test_with_virtual_tga() {
-        let cfg = base_advanced_config_non_isothermal(
-            700.0,
-            1e5,
-            80_000.0,
-            0.1,
-            10_000,
-            vec![0.5, 3.0, 5.0],
-        );
-        let view = build_view_from_cfg(&cfg).unwrap();
-
-        assert_basic_view_sanity(&view, 3);
-
-        let grid = ConversionGridBuilder::new()
-            .eta_range(0.0, 1.0)
-            .segments(200)
-            .interpolation(GridInterpolation::Linear)
-            .build(&view)
-            .unwrap();
-
-        assert_eq!(grid.eta.len(), 200);
-        assert_eq!(grid.temperature.dim(), (3, 200));
-        assert_eq!(grid.time.dim(), (3, 200));
-        assert_eq!(grid.conversion_rate.dim(), (3, 200));
-        assert_eq!(grid.meta.len(), 3);
-        assert_relative_eq!(grid.eta[0], 0.0, epsilon = 1e-12);
-        assert!(grid.eta[199] < 1.0);
-    }
-
-    #[test]
-    fn test_with_virtual_tga_with_auto_range() {
-        let cfg = base_advanced_config_non_isothermal(
-            700.0,
-            1e5,
-            80_000.0,
-            0.1,
-            10_000,
-            vec![0.5, 3.0, 5.0],
-        );
-        let view = build_view_from_cfg(&cfg).unwrap();
-
-        assert_basic_view_sanity(&view, 3);
-
-        let grid = ConversionGridBuilder::new()
-            .auto_range()
-            .segments(200)
-            .interpolation(GridInterpolation::Linear)
-            .build(&view)
-            .unwrap();
-
-        assert_eq!(grid.eta.len(), 200);
-        assert_eq!(grid.temperature.dim(), (3, 200));
-        assert_eq!(grid.time.dim(), (3, 200));
-        assert_eq!(grid.conversion_rate.dim(), (3, 200));
-        assert_eq!(grid.meta.len(), 3);
-        assert_relative_eq!(grid.eta[0], 0.0, epsilon = 1e-1);
-        assert!(grid.eta[199] < 1.0);
-    }
-    #[test]
-    fn test_with_virtual_tga_spline_grid_isothermal() {
-        let cfg = base_advanced_config_isothermal(1e5, 80_000.0, vec![600.0, 700.0], 0.1, 10_000);
-        let view = build_view_from_cfg(&cfg).unwrap();
-
-        assert_basic_view_sanity(&view, 2);
-        for exp in &view.experiments {
-            assert!(exp.meta.isothermal_temperature.is_some());
-            assert!(exp.meta.heating_rate.is_none());
-        }
-
-        let grid = ConversionGridBuilder::new()
-            .eta_range(0.1, 0.9)
-            .segments(120)
-            .interpolation(GridInterpolation::Spline)
-            .build(&view)
-            .unwrap();
-
-        assert_eq!(grid.eta.len(), 120);
-        assert_eq!(grid.temperature.dim(), (2, 120));
-        assert_eq!(grid.time.dim(), (2, 120));
-        assert_eq!(grid.conversion_rate.dim(), (2, 120));
-        assert_relative_eq!(grid.eta[0], 0.1, epsilon = 1e-12);
-        assert!(grid.eta[119] < 0.9);
-    }
-
-    #[test]
-    fn test_with_virtual_tga_line_grid_isothermal() {
-        let cfg = base_advanced_config_isothermal(1e5, 80_000.0, vec![600.0, 700.0], 0.1, 10_000);
-        let view = build_view_from_cfg(&cfg).unwrap();
-
-        assert_basic_view_sanity(&view, 2);
-        for exp in &view.experiments {
-            assert!(exp.meta.isothermal_temperature.is_some());
-            assert!(exp.meta.heating_rate.is_none());
-        }
-
-        let grid = ConversionGridBuilder::new()
-            .eta_range(0.1, 0.9)
-            .segments(120)
-            .interpolation(GridInterpolation::Linear)
-            .build(&view)
-            .unwrap();
-
-        assert_eq!(grid.eta.len(), 120);
-        assert_eq!(grid.temperature.dim(), (2, 120));
-        assert_eq!(grid.time.dim(), (2, 120));
-        assert_eq!(grid.conversion_rate.dim(), (2, 120));
-        assert_relative_eq!(grid.eta[0], 0.1, epsilon = 1e-12);
-        assert!(grid.eta[119] < 0.9);
-    }
-    #[test]
-    fn test_with_virtual_tga_narrow_eta_grid() {
-        let cfg =
-            base_advanced_config_non_isothermal(500.0, 1e5, 80_000.0, 0.1, 10_000, vec![3.5, 4.5]);
-        let view = build_view_from_cfg(&cfg).unwrap();
-
-        assert_basic_view_sanity(&view, 2);
-
-        let grid = ConversionGridBuilder::new()
-            .eta_range(0.15, 0.75)
-            .segments(60)
-            .interpolation(GridInterpolation::Linear)
-            .build(&view)
-            .unwrap();
-
-        assert_eq!(grid.eta.len(), 60);
-        assert_eq!(grid.temperature.dim(), (2, 60));
-        assert_eq!(grid.time.dim(), (2, 60));
-        assert_eq!(grid.conversion_rate.dim(), (2, 60));
-        assert_relative_eq!(grid.eta[0], 0.15, epsilon = 1e-12);
-        assert!(grid.eta[59] < 0.75);
-        for w in grid.eta.windows(2) {
-            assert!(w[1] > w[0]);
-        }
-    }
-
-    #[test]
-    fn test_calc_auto_eta_range() {
-        // Helper to create a simple experiment with given conversion range
-        fn make_experiment(conversion: Vec<f64>) -> ExperimentData {
-            let n = conversion.len();
-            ExperimentData {
-                meta: ExperimentMeta::default(),
-                time: (0..n).map(|i| i as f64).collect(),
-                temperature: vec![300.0; n],
-                conversion,
-                conversion_rate: vec![0.1; n],
-                mass: None,
-                mass_rate: None,
-            }
-        }
-
-        // Single experiment
-        let view = KineticDataView {
-            experiments: vec![make_experiment(vec![0.1, 0.2, 0.3, 0.4])],
-        };
-        let builder = ConversionGridBuilder::new();
-        let (min, max) = builder.calc_auto_eta_range(&view).unwrap();
-        assert_relative_eq!(min, 0.1, epsilon = 1e-12);
-        assert_relative_eq!(max, 0.4, epsilon = 1e-12);
-
-        // Two experiments with overlapping ranges
-        let view = KineticDataView {
-            experiments: vec![
-                make_experiment(vec![0.2, 0.5, 0.8]),
-                make_experiment(vec![0.3, 0.6, 0.9]),
-            ],
-        };
-        let (min, max) = builder.calc_auto_eta_range(&view).unwrap();
-        assert_relative_eq!(min, 0.3, epsilon = 1e-12); // intersection min = max of mins (0.2,0.3) = 0.3
-        assert_relative_eq!(max, 0.8, epsilon = 1e-12); // intersection max = min of maxs (0.8,0.9) = 0.8
-
-        // Three experiments, one with narrower range
-        let view = KineticDataView {
-            experiments: vec![
-                make_experiment(vec![0.0, 0.5, 1.0]),
-                make_experiment(vec![0.2, 0.3, 0.4]),
-                make_experiment(vec![0.1, 0.6, 0.7]),
-            ],
-        };
-        let (min, max) = builder.calc_auto_eta_range(&view).unwrap();
-        assert_relative_eq!(min, 0.2, epsilon = 1e-12); // max of mins: max(0.0,0.2,0.1) = 0.2
-        assert_relative_eq!(max, 0.4, epsilon = 1e-12);
-
-        // Non-overlapping ranges -> error
-        let view = KineticDataView {
-            experiments: vec![
-                make_experiment(vec![0.1, 0.2]),
-                make_experiment(vec![0.5, 0.6]),
-            ],
-        };
-        let result = builder.calc_auto_eta_range(&view);
-        assert!(matches!(
-            result,
-            Err(TGADomainError::InvalidConversionRange)
-        ));
-
-        // Touching ranges (max of first equals min of second) -> intersection is a point, should error
-        let view = KineticDataView {
-            experiments: vec![
-                make_experiment(vec![0.1, 0.3]),
-                make_experiment(vec![0.3, 0.5]),
-            ],
-        };
-        let result = builder.calc_auto_eta_range(&view);
-        assert!(matches!(
-            result,
-            Err(TGADomainError::InvalidConversionRange)
-        ));
-
-        // Empty conversion vector (should not happen in practice, but test edge case)
-        // The fold will produce INFINITY and NEG_INFINITY, leading to global_min = NEG_INFINITY, global_max = INFINITY? Actually local_min = INFINITY, local_max = NEG_INFINITY.
-        // Then global_min = max(NEG_INFINITY, INFINITY) = INFINITY? Wait, global_min starts as NEG_INFINITY, then max with INFINITY yields INFINITY.
-        // global_max starts as INFINITY, then min with NEG_INFINITY yields NEG_INFINITY.
-        // At the end global_max <= global_min? INFINITY <= NEG_INFINITY? false. But we'll skip this test as it's unrealistic.
-    }
 }

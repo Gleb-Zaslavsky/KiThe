@@ -1,15 +1,93 @@
+//! # Friedman differential and integral isoconversional methods
+//!
+//! ## What this module does
+//! Implements two Friedman-family **isoconversional** methods for model-free
+//! kinetic analysis of TGA data:
+//!
+//! | Struct | Experiment type | Linearised form |
+//! |--------|-----------------|-----------------|
+//! | [`DifferentialFriedmanSolver`] / [`DifferentialFriedman`] | Non-isothermal (several heating rates) | `ln(dα/dt)` vs `1/T` |
+//! | [`FriedmanIntegralSolver`] / [`FriedmanIntegral`] | Isothermal (several constant temperatures) | `-ln(tα)` vs `1/T` |
+//!
+//! Both methods are **differential** in spirit (they work directly with
+//! measured or interpolated quantities rather than approximating the
+//! temperature integral), which makes them more sensitive to noise but
+//! free from the approximation errors of OFW/KAS/Starink.
+//!
+//! ## Pipeline
+//! ```text
+//! KineticDataView
+//!      │
+//!      ▼
+//! ConversionGridBuilder
+//!   ├─ build_nonisothermal()           ← DifferentialFriedman  (non-isothermal)
+//!   └─ build_isothermal() ← FriedmanIntegral      (isothermal)
+//!      │
+//!      ▼
+//! ConversionGrid  [n_exp × n_α]
+//!      │
+//!      ▼
+//! DifferentialFriedmanSolver / FriedmanIntegralSolver
+//!      │
+//!      ▼
+//! IsoconversionalResult
+//! ```
+//!
+//! ## Main data structures
+//! - [`DifferentialFriedmanSolver`] — stateless solver; reads
+//!   `grid.conversion_rate` and `grid.inv_temperature`.
+//! - [`FriedmanIntegralSolver`] — stateless solver; reads `grid.time` and
+//!   `grid.inv_temperature`.
+//! - [`DifferentialFriedman`] / [`FriedmanIntegral`] — zero-size marker
+//!   structs that implement `KineticMethod` and own the grid-building step.
+//!
+//! ## Math
+//!
+//! ### Differential Friedman (non-isothermal)
+//! At each fixed α the reaction rate satisfies:
+//! ```text
+//! dα/dt = A · f(α) · exp(-Eα/RT)
+//! ```
+//! Taking the natural log at constant α (so `f(α)` is constant across
+//! experiments):
+//! ```text
+//! ln(dα/dt) = const - (Eα/R) · (1/T)
+//! ```
+//! A linear regression of `ln(dα/dt)` vs `1/T` across heating rates gives
+//! slope = `-Eα/R`, hence `Eα = -slope · R`.
+//!
+//! ### Integral Friedman (isothermal)
+//! For a first-order reaction at constant temperature T the time to reach
+//! conversion α is:
+//! ```text
+//! tα = -ln(1-α) / k(T)  ⇒  ln(tα) = -ln(k₀) + (Eα/R) · (1/T) + const
+//! ```
+//! Regressing `-ln(tα)` vs `1/T` across isothermal temperatures gives
+//! slope = `-Eα/R`, hence `Eα = -slope · R`.
+//!
+//! ## Non-trivial technique
+//! Points with non-positive rate or time are silently skipped before
+//! regression (guard against log-of-zero at the tails of the conversion
+//! curve).  The regression is performed only when at least 2 valid points
+//! remain, so sparse or noisy layers degrade gracefully instead of panicking.
+
 use super::kinetic_regression::linear_regression;
 use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::{
     IsoLayerResult, IsoconversionalResult,
 };
 use crate::Kinetics::experimental_kinetics::kinetic_methods::{
     ConversionGrid, ConversionGridBuilder, GridInterpolation, KineticDataView, KineticMethod,
-    KineticRequirements, TGADomainError,
+    KineticRequirements, TGADomainError, require_isothermal,
 };
+use crate::Kinetics::experimental_kinetics::one_experiment_dataset::ColumnNature;
 use ndarray::Array1;
 //============================================================================================================
 //          DIFFERENTIAL FRIEDMAN
 //===========================================================================================================
+/// Stateless solver for the differential Friedman method (non-isothermal).
+///
+/// Operates directly on a pre-built [`ConversionGrid`]; call `solve` to
+/// obtain an [`IsoconversionalResult`].
 pub struct DifferentialFriedmanSolver;
 
 impl Default for DifferentialFriedmanSolver {
@@ -19,6 +97,10 @@ impl Default for DifferentialFriedmanSolver {
 }
 
 impl DifferentialFriedmanSolver {
+    /// Regresses `ln(dα/dt)` vs `1/T` at each α layer.
+    ///
+    /// Points with `rate ≤ 0` are skipped to avoid `ln(0)`.  Layers with
+    /// fewer than 2 valid points are omitted from the output.
     pub fn solve(&self, grid: &ConversionGrid) -> Result<IsoconversionalResult, TGADomainError> {
         let r = 8.314462618;
 
@@ -70,6 +152,10 @@ impl DifferentialFriedmanSolver {
     }
 }
 
+/// `KineticMethod` entry point for the differential Friedman method.
+///
+/// Builds a non-isothermal `ConversionGrid` (via `build()`) and delegates
+/// to [`DifferentialFriedmanSolver`].
 pub struct DifferentialFriedman;
 
 impl KineticMethod for DifferentialFriedman {
@@ -82,8 +168,11 @@ impl KineticMethod for DifferentialFriedman {
     fn compute(&self, data: &KineticDataView) -> Result<Self::Output, TGADomainError> {
         let grid = ConversionGridBuilder::new()
             .interpolation(GridInterpolation::Linear)
-            .build(data)?;
+            .build_nonisothermal(data)?;
         DifferentialFriedmanSolver.solve(&grid)
+    }
+    fn check_input(&self, data: &KineticDataView) -> Result<(), TGADomainError> {
+        require_isothermal(data)
     }
 
     fn requirements(&self) -> KineticRequirements {
@@ -95,13 +184,31 @@ impl KineticMethod for DifferentialFriedman {
             needs_heating_rate: false,
         }
     }
+
+    fn required_columns_by_nature(&self) -> Vec<ColumnNature> {
+        vec![
+            ColumnNature::Conversion,
+            ColumnNature::Temperature,
+            ColumnNature::Time,
+            ColumnNature::ConversionRate,
+        ]
+    }
 }
 //================================================================================================================================
 //              INTEGRAL FRIEDMAN
 //=======================================================================================================================
+/// Stateless solver for the integral Friedman method (isothermal).
+///
+/// Operates on a pre-built [`ConversionGrid`] where each row corresponds to
+/// one isothermal temperature; call `solve` to obtain an
+/// [`IsoconversionalResult`].
 pub struct FriedmanIntegralSolver;
 
 impl FriedmanIntegralSolver {
+    /// Regresses `-ln(tα)` vs `1/T` at each α layer.
+    ///
+    /// Points with `time ≤ 0` are skipped.  Layers with fewer than 2 valid
+    /// points are omitted from the output.
     pub fn solve(&self, grid: &ConversionGrid) -> Result<IsoconversionalResult, TGADomainError> {
         let r = 8.314462618;
 
@@ -153,6 +260,11 @@ impl FriedmanIntegralSolver {
     }
 }
 
+/// `KineticMethod` entry point for the integral Friedman method.
+///
+/// Builds an isothermal `ConversionGrid` (via `build_isothermal()`, which
+/// fills each row with the constant temperature of that experiment) and
+/// delegates to [`FriedmanIntegralSolver`].
 pub struct FriedmanIntegral;
 
 impl KineticMethod for FriedmanIntegral {
@@ -178,13 +290,22 @@ impl KineticMethod for FriedmanIntegral {
             needs_heating_rate: false,
         }
     }
+
+    fn required_columns_by_nature(&self) -> Vec<ColumnNature> {
+        vec![
+            ColumnNature::Conversion,
+            ColumnNature::Temperature,
+            ColumnNature::Time,
+            ColumnNature::ConversionRate,
+        ]
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion_tests::tests::simulate_tga_first_order_isothermal;
-    use crate::Kinetics::experimental_kinetics::kinetic_methods::tests::{
+    use crate::Kinetics::experimental_kinetics::kinetic_methods_tests::tests::{
          build_view_from_cfg_exact_m0,
     };
     use crate::Kinetics::experimental_kinetics::testing_mod::tests_afvanced_config::base_advanced_config_isothermal;
@@ -315,7 +436,7 @@ mod tests {
 mod tests_differential {
     use super::*;
     use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion_tests::tests::simulate_tga_first_order2;
-    use crate::Kinetics::experimental_kinetics::kinetic_methods::tests::build_view_from_cfg_exact_m0;
+    use crate::Kinetics::experimental_kinetics::kinetic_methods_tests::tests::build_view_from_cfg_exact_m0;
     use crate::Kinetics::experimental_kinetics::testing_mod::tests_afvanced_config::base_advanced_config_non_isothermal;
     use std::time::Instant;
 

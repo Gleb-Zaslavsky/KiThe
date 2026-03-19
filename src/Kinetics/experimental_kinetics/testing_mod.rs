@@ -286,6 +286,55 @@ impl VirtualTGA {
         }
     }
 
+    fn generate_voltage(
+        time: &[f64],
+        temperature: &[f64],
+        model: &KineticModel,
+        dt: f64,
+    ) -> Vec<f64> {
+        match model {
+            KineticModel::ArrheniusSingle { m0, k0, e, r } => {
+                let mut m = vec![*m0];
+                for i in 0..time.len() - 1 {
+                    let t = temperature[i];
+                    let k = k0 * (-e / (r * t)).exp();
+                    let next = m[i] * (-k * dt).exp();
+                    m.push(next);
+                }
+                m
+            }
+
+            KineticModel::ArrheniusTwoComponent {
+                m01,
+                k01,
+                e1,
+                m02,
+                k02,
+                e2,
+                r,
+            } => {
+                let mut m1 = *m01;
+                let mut m2 = *m02;
+
+                let mut total = vec![m1 + m2];
+
+                for i in 0..time.len() - 1 {
+                    let t = temperature[i];
+
+                    let k1 = k01 * (-e1 / (r * t)).exp();
+                    let k2 = k02 * (-e2 / (r * t)).exp();
+
+                    m1 *= (-k1 * dt).exp();
+                    m2 *= (-k2 * dt).exp();
+
+                    total.push(m1 + m2);
+                }
+
+                total
+            }
+        }
+    }
+
     fn apply_noise(data: &mut [f64], cfg: &NoiseConfig, rng: &mut StdRng) {
         match &cfg.kind {
             NoiseKind::Gaussian { sigma } => {

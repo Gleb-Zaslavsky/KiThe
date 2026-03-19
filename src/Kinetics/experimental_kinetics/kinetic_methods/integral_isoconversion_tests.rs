@@ -6,10 +6,10 @@
 pub mod tests {
     use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
     use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::*;
-    use crate::Kinetics::experimental_kinetics::kinetic_methods::tests::{
+    use crate::Kinetics::experimental_kinetics::kinetic_methods::*;
+    use crate::Kinetics::experimental_kinetics::kinetic_methods_tests::tests::{
         build_view_from_cfg, build_view_from_cfg_exact_m0,
     };
-    use crate::Kinetics::experimental_kinetics::kinetic_methods::*;
     use crate::Kinetics::experimental_kinetics::testing_mod::tests_afvanced_config::{
         base_advanced_config_isothermal, base_advanced_config_non_isothermal,
     };
@@ -786,7 +786,7 @@ pub mod tests {
             .auto_range()
             .segments(50)
             .interpolation(GridInterpolation::Linear)
-            .build(&view)
+            .build_nonisothermal(&view)
             .unwrap();
 
         let sim_grid = simulate_tga_first_order2(

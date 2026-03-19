@@ -3,6 +3,7 @@ pub mod controller_buttons_and_panels;
 pub mod controller_filters;
 pub mod controller_golden_pipeline;
 pub mod controller_kinetics;
+pub mod controller_methods;
 pub mod controller_table;
 pub mod experimental_kinetics_gui_main;
 pub mod gui_test;

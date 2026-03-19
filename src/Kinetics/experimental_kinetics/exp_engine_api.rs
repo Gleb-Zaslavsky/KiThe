@@ -723,7 +723,7 @@ impl TGADataset {
             .move_time_to_zero()? // time moved to zero
             .sg_filter_column(&mass_col, window_size, poly_degree, deriv, delta)? // smoothing
             .dimensionless_mass(0.0, averaging_time / 3600.0, "alpha")?
-            .conversion(0.0, averaging_time, "eta")?
+            .conversion(0.0, averaging_time / 3600.0, "eta")?
             .lsq_spline_resample_columns_as(
                 &time_col,
                 "time_splined",

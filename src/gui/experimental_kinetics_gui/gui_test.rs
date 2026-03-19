@@ -1,9 +1,9 @@
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
 
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
+use crate::gui::experimental_kinetics_gui::controller_methods::KineticMethodsWindowState;
 use crate::gui::experimental_kinetics_gui::controller_table::ColumnManagerState;
 use crate::gui::experimental_kinetics_gui::test_options::TestOptions;
-
 use std::path::Path;
 
 const TEST_DATA_PATH: &str = "src/assets/TGAexample.txt";
@@ -70,6 +70,7 @@ mod tests {
                 test_options: TestOptions::new(),
                 column_manager_state: ColumnManagerState::new(),
                 kithe_plot_window: KiThePlotWindowState::default(),
+                kinetic_methods_state: KineticMethodsWindowState::default(),
             }
         }
     }

@@ -131,9 +131,6 @@ impl Mathematics {
         if ui.button("LSQ Splines").clicked() {
             self.show_sql_splines_window = true;
         }
-        if ui.button("Differentiate").clicked() {
-            println!("Stub: Differentiate clicked");
-        }
 
         if ui.button("LOWESS").clicked() {
             self.show_lowess_window = true;

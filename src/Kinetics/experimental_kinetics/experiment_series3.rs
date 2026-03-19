@@ -1,10 +1,14 @@
+//! MODULE FOR I/O OPERATIONS WITH KINETIC METHODS
+use super::kinetic_methods::KineticDataView;
 use crate::Kinetics::experimental_kinetics::experiment_series_main::{TGAExperiment, TGASeries};
 use crate::Kinetics::experimental_kinetics::experiment_series2::UnitedDataset;
+use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::IsoconversionalResult;
+use crate::Kinetics::experimental_kinetics::kinetic_methods::isoconversion::IsoconversionalMethod;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    ColumnNature, TGADomainError,
+    ColumnNature, TGADomainError, Unit,
 };
+use log::info;
 use polars::prelude::*;
-
 impl TGASeries {
     /// Resolve experiment references for union operations.
     ///
@@ -130,6 +134,66 @@ impl TGASeries {
             .agg([as_struct(struct_fields).alias("data")]);
 
         Ok(UnitedDataset::new(aggregated, stacked.meta))
+    }
+    //==============================================================================================
+    /// OUTPUT
+    /// TAKING DATA FOR KINETIC METHODS
+    pub fn create_kinetic_data_view(
+        &self,
+        what_exp_to_take: Option<&[&str]>,
+        what_cols_take: Vec<ColumnNature>,
+    ) -> Result<KineticDataView, TGADomainError> {
+        let united = self.concat_into_vertical_stack(what_exp_to_take, what_cols_take.clone())?;
+        info!("United dataset created");
+        KineticDataView::from_united_dataset_by_nature(&united, what_cols_take)
+    }
+
+    pub fn create_kinetic_data_view_for_method(
+        &self,
+        what_exp_to_take: Option<&[&str]>,
+        method: &IsoconversionalMethod,
+    ) -> Result<KineticDataView, TGADomainError> {
+        let what_cols_take = method.required_columns_by_nature();
+        self.create_kinetic_data_view(what_exp_to_take, what_cols_take)
+    }
+
+    //==============================================================================================
+    /// INPUT
+    /// TAKING ISOCONVERSIONAL RESULT AND PUSHING IT INTO THE SERIES
+    /// Create a new experiment from an isoconversional result and push it into the series.
+    /// The experiment id is provided by the caller; all other meta fields are left empty.
+    pub fn push_isoconversional_result(
+        &mut self,
+        result: &IsoconversionalResult,
+        id: &str,
+    ) -> Result<(), TGADomainError> {
+        let dataset = result.to_tga_dataset()?;
+        let exp = TGAExperiment::new(dataset).with_id(id);
+        self.push(exp);
+        self.rebuild_index();
+        info!("Isoconversional method results added!");
+        Ok(())
+    }
+
+    /// Add a numeric column from Vec<f64> to a specific experiment by id.
+    ///
+    /// This is a thin series-level wrapper around `TGADataset::add_column_from_vec`.
+    pub fn add_column_from_vec(
+        &mut self,
+        id: &str,
+        name: &str,
+        unit: Unit,
+        nature: ColumnNature,
+        data: Vec<f64>,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, move |exp| {
+            let dataset = exp.dataset.add_column_from_vec(name, unit, nature, data)?;
+            Ok(TGAExperiment {
+                dataset,
+                meta: exp.meta,
+            })
+        })?;
+        Ok(())
     }
 }
 

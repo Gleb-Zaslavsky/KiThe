@@ -18,4 +18,6 @@ pub mod testing_mod;
 pub mod LSQSplines;
 mod LSQSplines_tests;
 pub mod kinetic_methods;
+pub mod kinetic_methods2;
+pub mod kinetic_methods_tests;
 pub mod lowess_wrapper;

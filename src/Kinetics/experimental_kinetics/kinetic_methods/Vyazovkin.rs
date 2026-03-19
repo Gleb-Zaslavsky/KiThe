@@ -1,15 +1,74 @@
+//! # Vyazovkin advanced isoconversional method
+//!
+//! ## What this module does
+//! Implements the **Vyazovkin non-linear isoconversional method** for estimating
+//! the activation energy Eα as a function of conversion α from non-isothermal
+//! TGA experiments run at several heating rates.
+//!
+//! Unlike the linear integral methods (KAS, OFW, Starink) which approximate the
+//! temperature integral analytically, Vyazovkin minimises a functional Φ(Eα) that
+//! contains the *exact* numerical temperature integral, making it more accurate
+//! especially when Eα varies strongly with α.
+//!
+//! ## Main data structures
+//! - [`VyazovkinSolver`] — holds the search grid bounds (`e_min`, `e_max`, `steps`)
+//!   and exposes `solve` / `solve_layer_optimized`.
+//! - [`ConversionGrid`] (from `kinetic_methods`) — the pre-built isoconversional
+//!   grid; **must** contain the `dt` matrix (time-step increments per experiment
+//!   per α-layer), computed by `ConversionGridBuilder::with_dt_matrix()`.
+//! - [`IsoconversionalResult`] / [`IsoLayerResult`] (re-exported from
+//!   `integral_isoconversion`) — the output: one `IsoLayerResult` per α-layer
+//!   carrying `eta`, `ea`, and a placeholder `LinearRegressionResult`.
+//!
+//! ## Algorithm
+//! For each α-layer k the solver minimises:
+//!
+//! ```text
+//! Φ(E) = Σᵢ Σⱼ≠ᵢ  J(E, Tᵢ) / J(E, Tⱼ)
+//! ```
+//!
+//! where `J(E, Tᵢ) = exp(-E/RT_i) · Δtᵢ` is the trapezoidal approximation of
+//! the temperature integral for experiment i at layer k.
+//!
+//! ## Non-trivial optimisation trick
+//! The naive double-loop over all experiment pairs is O(n²).  
+//! `solve_layer_optimized` rewrites the sum algebraically:
+//!
+//! ```text
+//! Σᵢ Σⱼ≠ᵢ Jᵢ/Jⱼ  =  (Σ Jᵢ)(Σ 1/Jᵢ) − n
+//! ```
+//!
+//! reducing the inner work to two O(n) passes — a significant speedup when many
+//! experiments are used.  The search over E is a simple uniform grid scan
+//! (`steps` points between `e_min` and `e_max`); no gradient information is
+//! needed, which keeps the implementation robust against flat or noisy Φ landscapes.
+
 use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::IsoLayerResult;
 use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::IsoconversionalResult;
 use crate::Kinetics::experimental_kinetics::kinetic_methods::kinetic_regression::LinearRegressionResult;
 use crate::Kinetics::experimental_kinetics::kinetic_methods::*;
+
+/// Solver for the Vyazovkin non-linear isoconversional method.
+///
+/// Searches for the activation energy Eα at each α-layer by minimising the
+/// functional Φ(E) over a uniform grid of `steps` candidate values in
+/// `[e_min, e_max]` (J/mol).
 #[derive(Clone, Debug)]
 pub struct VyazovkinSolver {
+    /// Lower bound of the Eα search range (J/mol). Default: 40 000.
     pub e_min: f64,
+    /// Upper bound of the Eα search range (J/mol). Default: 300 000.
     pub e_max: f64,
+    /// Number of uniformly-spaced candidate E values to evaluate. Default: 200.
     pub steps: usize,
 }
 
 impl VyazovkinSolver {
+    /// Run the Vyazovkin method over all α-layers in `grid`.
+    ///
+    /// Requires `grid.dt` to be populated (use `ConversionGridBuilder::with_dt_matrix()`).
+    /// Returns one [`IsoLayerResult`] per layer (starting from layer index 1,
+    /// since Δt at layer 0 is undefined).
     pub fn solve(&self, grid: &ConversionGrid) -> Result<IsoconversionalResult, TGADomainError> {
         let dt = grid.dt.as_ref().ok_or(TGADomainError::InvalidOperation(
             "Vyazovkin requires dt matrix".into(),
@@ -35,6 +94,11 @@ impl VyazovkinSolver {
         })
     }
 
+    /// Naive O(n²) reference implementation of the layer solver.
+    ///
+    /// Iterates over all ordered pairs (i, j) with i ≠ j and accumulates
+    /// `J(E,T_i) / J(E,T_j)`.  Kept for correctness verification against
+    /// `solve_layer_optimized`.
     fn solve_layer(
         &self,
         grid: &ConversionGrid,
@@ -109,6 +173,11 @@ impl VyazovkinSolver {
         Ok(best_e)
     }
 
+    /// Optimised O(n) equivalent of `solve_layer`.
+    ///
+    /// Uses the algebraic identity  Σᵢ Σⱼ≠ᵢ Jᵢ/Jⱼ = (Σ Jᵢ)(Σ 1/Jᵢ) − n
+    /// to replace the double loop with two single passes, then picks the E
+    /// that minimises the result.
     pub fn solve_layer_optimized(
         &self,
         grid: &ConversionGrid,
@@ -159,6 +228,8 @@ impl VyazovkinSolver {
 
         Ok(best_e)
     }
+    /// Low-level functional Φ(E) evaluated at a single candidate energy `e`
+    /// for layer `k`.  Used internally; exposed for debugging and plotting.
     fn functional(&self, grid: &ConversionGrid, k: usize, e: f64) -> f64 {
         let r = 8.314;
 
@@ -197,6 +268,8 @@ impl Default for VyazovkinSolver {
     }
 }
 
+/// Marker struct that wires `VyazovkinSolver` into the `KineticMethod` trait
+/// (used by the unified dispatcher in `isoconversion.rs`).
 pub struct Vyzaovkin;
 
 #[cfg(test)]
@@ -205,7 +278,7 @@ mod tests {
     use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion_tests::tests::simulate_tga_first_order_with_dt;
 
     use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::VyazovkinMethod;
-    use crate::Kinetics::experimental_kinetics::kinetic_methods::tests::build_view_from_cfg_exact_m0;
+    use crate::Kinetics::experimental_kinetics::kinetic_methods_tests::tests::build_view_from_cfg_exact_m0;
     use crate::Kinetics::experimental_kinetics::testing_mod::tests_afvanced_config::base_advanced_config_non_isothermal;
     #[test]
     fn vyazovkin_compute_with_mock_non_isothermal_data() {

@@ -227,6 +227,9 @@ pub enum ColumnNature {
     TemperatureRate,
     DimensionlessMassRate,
     Unknown,
+    ActivationEnergy,
+    PredexFactor,
+    R2,
 }
 /// Columns Origin
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -783,6 +786,52 @@ impl TGADataset {
                 columns_has_changed: Vec::new(),
             },
         })
+    }
+
+    /// Add a numeric column from a user-provided Vec<f64>.
+    ///
+    /// This is useful for fitted curves or any external numeric results.
+    /// The function checks that the vector length matches the dataset height,
+    /// then appends the column as `NumericDerived` and logs the operation.
+    pub fn add_column_from_vec(
+        mut self,
+        name: &str,
+        unit: Unit,
+        nature: ColumnNature,
+        data: Vec<f64>,
+    ) -> Result<Self, TGADomainError> {
+        let height = self.frame.clone().collect()?.height();
+        if data.len() != height {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "Column '{}' length {} does not match dataset height {}",
+                name,
+                data.len(),
+                height
+            )));
+        }
+
+        let series = Series::new(name.into(), data);
+        self.frame = self.frame.with_column(lit(series));
+
+        self.schema.columns.insert(
+            name.into(),
+            ColumnMeta {
+                name: name.into(),
+                unit,
+                origin: ColumnOrigin::NumericDerived,
+                nature,
+            },
+        );
+
+        self.log_operation(
+            "add_column_from_vec",
+            AffectedColumns::Specific(vec![name.to_string()]),
+            None,
+            format!("Added numeric column '{}' from Vec<f64>", name),
+            true,
+        );
+
+        Ok(self)
     }
 
     /// Создание TGA сущности из необработанного CSV файла

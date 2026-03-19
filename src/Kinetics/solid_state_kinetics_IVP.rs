@@ -103,6 +103,7 @@ use RustedSciThe::numerical::ODE_api2::{SolverParam, SolverType, UniversalODESol
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
+use std::env::vars;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use tabled::{Table, Tabled};
@@ -354,7 +355,7 @@ pub fn SBtp_jac(m: f64, n: f64, c: f64) -> Expr {
 ///   - Dec: 1 parameter (m)
 ///   - PTe: 2 parameters (m, n)
 ///   - SBtp: 3 parameters (m, n, c)
-#[derive(Debug, Clone, PartialEq, EnumIter)]
+#[derive(Debug, Clone, PartialEq, EnumIter, Eq, Hash, Copy)]
 pub enum KineticModelNames {
     A2,
     A3,
@@ -389,7 +390,7 @@ impl KineticModelNames {
             KineticModelNames::R3 => "(1-a)^(1/3)".to_string(),
             KineticModelNames::D1 => "a^(-1)".to_string(),
             KineticModelNames::D2 => "(-ln(1-a))^(-1)".to_string(),
-            KineticModelNames::D3 => "1.5*(1-a)^(2/3)*(1-a^(1/3))^(-1)".to_string(),
+            KineticModelNames::D3 => "1.5*(1-a)^(2/3)*(1-(1 -a)^(1/3))^(-1)".to_string(),
             KineticModelNames::D4 => "(3/2)*((1-a)^(-1/3)-1)^-1".to_string(),
             KineticModelNames::P2_3 => "a^(-0.5)".to_string(),
             KineticModelNames::P2 => "a^(1/2)".to_string(),
@@ -429,6 +430,86 @@ impl KineticModelNames {
             KineticModelNames::PTe => vec!["m".to_string(), "n".to_string()],
             KineticModelNames::SBtp => vec!["m".to_string(), "n".to_string(), "c".to_string()],
         }
+    }
+
+    pub fn from_names_to_expr(&self, vec_of_params: Vec<f64>) -> KineticModel {
+        match self {
+            KineticModelNames::A2 => KineticModel::A2,
+            KineticModelNames::A3 => KineticModel::A3,
+            KineticModelNames::A4 => KineticModel::A4,
+            KineticModelNames::R2 => KineticModel::R2,
+            KineticModelNames::R3 => KineticModel::R3,
+            KineticModelNames::D1 => KineticModel::D1,
+            KineticModelNames::D2 => KineticModel::D2,
+            KineticModelNames::D3 => KineticModel::D3,
+            KineticModelNames::D4 => KineticModel::D4,
+            KineticModelNames::P2_3 => KineticModel::P2_3,
+            KineticModelNames::P2 => KineticModel::P2,
+            KineticModelNames::P3 => KineticModel::P3,
+            KineticModelNames::F1 => KineticModel::F1,
+            KineticModelNames::F2 => KineticModel::F2,
+            KineticModelNames::F3 => KineticModel::F3,
+            KineticModelNames::SB => {
+                let (m, n, p) = (vec_of_params[0], vec_of_params[1], vec_of_params[2]);
+                KineticModel::SB(m, n, p)
+            }
+            KineticModelNames::JMA => {
+                let m = vec_of_params[0];
+                KineticModel::JMA(m)
+            }
+            KineticModelNames::Ac => {
+                let m = vec_of_params[0];
+                KineticModel::Ac(m)
+            }
+            KineticModelNames::Dec => {
+                let m = vec_of_params[0];
+                KineticModel::Dec(m)
+            }
+            KineticModelNames::PTe => {
+                let (m, n) = (vec_of_params[0], vec_of_params[1]);
+                KineticModel::PTe(m, n)
+            }
+            KineticModelNames::SBtp => {
+                let (m, n, c) = (vec_of_params[0], vec_of_params[1], vec_of_params[2]);
+                KineticModel::SBtp(m, n, c)
+            }
+        }
+    }
+    pub fn get_fn(&self) -> Box<dyn Fn(f64, Vec<f64>) -> f64 + '_> {
+        let closure_for_expr = |vec_of_params: Vec<f64>| self.from_names_to_expr(vec_of_params);
+        let func = move |a: f64, vec_of_params: Vec<f64>| {
+            let this_is_expression = closure_for_expr(vec_of_params);
+            let res = this_is_expression.get_fn();
+            res(a)
+        };
+        Box::new(func)
+    }
+    pub fn get_g(&self) -> Result<Box<dyn Fn(f64) -> f64>, String> {
+        let closure: Box<dyn Fn(f64) -> f64> = match self {
+            KineticModelNames::A2 => Box::new(|a: f64| (-(1.0 - a).ln()).powf(0.5_f64)),
+            KineticModelNames::A3 => Box::new(|a: f64| (-(1.0 - a).ln()).powf(1.0 / 3.0)),
+            KineticModelNames::A4 => Box::new(|a: f64| (-(1.0 - a).ln()).powf(1.0 / 4.0)),
+            KineticModelNames::R2 => Box::new(|a: f64| 2.0 - 2.0 * (1.0 - a).powf(0.5)),
+            KineticModelNames::R3 => Box::new(|a: f64| 3.0 * (1.0 - (1.0 - a).powf(1.0 / 3.0))),
+            KineticModelNames::D1 => Box::new(|a: f64| 0.5 * a.powf(2.0)),
+            KineticModelNames::D2 => Box::new(|a: f64| a + (1.0 - a) * (1.0 - a).ln()),
+            KineticModelNames::D3 => Box::new(|a: f64| (1.0 - (1.0 - a).powf(1.0 / 3.0)).powi(2)),
+            KineticModelNames::D4 => {
+                Box::new(|a: f64| -(2.0 / 3.0) * a - (1.0 - a).powf(2.0 / 3.0))
+            }
+            KineticModelNames::P2_3 => Box::new(|a: f64| (2.0 / 3.0) * a.powf(1.5)),
+            KineticModelNames::P2 => Box::new(|a: f64| 2.0 * a.sqrt()),
+            KineticModelNames::P3 => Box::new(|a: f64| 4.0 * a.powf(0.25)),
+            KineticModelNames::F1 => Box::new(|a: f64| -(1.0 - a).ln()),
+            KineticModelNames::F2 => Box::new(|a: f64| (1.0 / (1.0 - a)) - 1.0),
+
+            KineticModelNames::F3 => {
+                Box::new(|a: f64| (1.0 / (2.0 * (1.0 - a).powf(2.0))) - 1.0 / 2.0)
+            }
+
+            _ => return Err("no analutical integral".to_string()),
+        };
+        Ok(closure)
     }
     pub fn pretty_print() {
         #[derive(Tabled)]
@@ -608,6 +689,11 @@ impl KineticModel {
             _ => self.get_expr().diff("a"),
         }
     }
+    pub fn get_fn(&self) -> Box<dyn Fn(f64) -> f64> {
+        let expr = self.get_expr();
+        let closure = expr.lambdify1D();
+        closure
+    }
 }
 
 /// Creates a kinetic model instance and its jacobian from a model name and parameters.
@@ -686,6 +772,10 @@ pub struct KineticModelIVP {
     A: f64,
     /// Selected kinetic model with parameters
     kinmodel: Option<KineticModel>,
+    /// Selected kinetic model name (for reporting and post-processing)
+    kinmodel_name: Option<KineticModelNames>,
+    /// Stored kinetic model parameters (for reporting and post-processing)
+    kinmodel_params: Vec<f64>,
     /// Combined kinetic expression (Arrhenius × kinetic model)
     kin_expression: Expr,
     /// Jacobian of the kinetic expression
@@ -725,6 +815,8 @@ impl KineticModelIVP {
             E: 0.0,
             A: 0.0,
             kinmodel: None,
+            kinmodel_name: None,
+            kinmodel_params: Vec::new(),
             kin_expression: Expr::Const(0.0),
             jac: Expr::Const(0.0),
             solvertype: solvertype,
@@ -781,6 +873,42 @@ impl KineticModelIVP {
     pub fn set_solver_params(&mut self, params: HashMap<String, SolverParam>) {
         self.solver_params = params;
     }
+
+    pub fn set_arrhenius(&mut self, e: f64, a: f64) -> Result<(), String> {
+        if e <= 0.0 {
+            return Err("E must be positive".to_string());
+        }
+        if a <= 0.0 {
+            return Err("A must be positive".to_string());
+        }
+        self.E = e;
+        self.A = a;
+        Ok(())
+    }
+
+    pub fn set_heating_program(&mut self, T0: f64, beta: f64) -> Result<(), String> {
+        if beta <= 0.0 {
+            return Err("beta must be positive".to_string());
+        }
+        if T0 <= 0.0 {
+            return Err("T0 must be positive".to_string());
+        }
+
+        self.beta = beta;
+        self.T0 = T0;
+
+        Ok(())
+    }
+
+    pub fn set_time(&mut self, t_final: f64) -> Result<(), String> {
+        if t_final <= 0.0 {
+            return Err("t_final must be positive".to_string());
+        }
+
+        self.t_final = t_final;
+
+        Ok(())
+    }
     /// Sets the kinetic model and its parameters.
     ///
     /// This method creates the kinetic model, computes its jacobian, and combines
@@ -794,8 +922,10 @@ impl KineticModelIVP {
     /// * `Ok(())` - Model set successfully
     /// * `Err(String)` - Error message if parameters are invalid
     pub fn set_model(&mut self, name: KineticModelNames, params: Vec<f64>) -> Result<(), String> {
-        let (kinmodel, jac) = create_kinetic_model(name, params)?;
+        let (kinmodel, jac) = create_kinetic_model(name.clone(), params.clone())?;
         self.kinmodel = Some(kinmodel.clone());
+        self.kinmodel_name = Some(name);
+        self.kinmodel_params = params;
         let arrhenius = self.arrhenius();
         self.kin_expression = arrhenius * kinmodel.get_expr();
         self.jac = jac;
@@ -904,6 +1034,44 @@ impl KineticModelIVP {
             Err("no results found!".to_string())
         }
     }
+    pub fn get_solution(&self) -> Result<IVPSolution, String> {
+        let (t, a_matrix) = self.get_result()?;
+
+        let time: Vec<f64> = t.iter().copied().collect();
+        let conversion: Vec<f64> = if a_matrix.ncols() == 1 {
+            a_matrix.column(0).iter().copied().collect()
+        } else if a_matrix.nrows() == 1 {
+            a_matrix.row(0).iter().copied().collect()
+        } else {
+            return Err("conversion result is not 1D".to_string());
+        };
+
+        let temperature: Vec<f64> = time.iter().map(|ti| self.T0 + self.beta * ti).collect();
+
+        let model_name = self
+            .kinmodel_name
+            .as_ref()
+            .ok_or("kinetic model name not set")?;
+        let model_params = self.kinmodel_params.clone();
+        let model_fn = model_name.get_fn();
+        let r_gas = 8.31446261815324_f64;
+        let conversion_rate: Vec<f64> = time
+            .iter()
+            .zip(conversion.iter())
+            .map(|(ti, ai)| {
+                let temp = self.T0 + self.beta * ti;
+                let k = self.A * (-self.E / (r_gas * temp)).exp();
+                k * model_fn(*ai, model_params.clone())
+            })
+            .collect();
+
+        Ok(IVPSolution {
+            time,
+            temperature,
+            conversion,
+            conversion_rate,
+        })
+    }
     /// Saves the solution results to file.
     ///
     /// # Returns
@@ -931,6 +1099,12 @@ impl KineticModelIVP {
     }
 }
 
+pub struct IVPSolution {
+    pub time: Vec<f64>,
+    pub temperature: Vec<f64>,
+    pub conversion: Vec<f64>,
+    pub conversion_rate: Vec<f64>,
+}
 /////////////////////////////////////////TESTS/////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
@@ -1216,6 +1390,65 @@ mod kinetic_model_ivp_tests {
         println!("{:?}", ivp.kin_expression);
         assert_ne!(ivp.kin_expression, Expr::Const(0.0));
         assert_ne!(ivp.jac, Expr::Const(0.0));
+    }
+
+    #[test]
+    fn test_get_solution_vectors() {
+        let mut ivp = KineticModelIVP::new(SolverType::NonStiff("RK45".to_owned()));
+        ivp.set_problem(10.0, 5.0, 298.15, 50000.0, 1e6).unwrap();
+        ivp.set_model(KineticModelNames::F1, vec![]).unwrap();
+        ivp.check_task().unwrap();
+        ivp.solve().unwrap();
+
+        let sol = ivp.get_solution().unwrap();
+        let n = sol.time.len();
+
+        assert!(n > 2);
+        assert_eq!(sol.temperature.len(), n);
+        assert_eq!(sol.conversion.len(), n);
+        assert_eq!(sol.conversion_rate.len(), n);
+
+        for i in 0..n {
+            let expected_t = ivp.T0 + ivp.beta * sol.time[i];
+            assert!((sol.temperature[i] - expected_t).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_get_solution_conversion_rate_matches_derivative() {
+        let mut ivp = KineticModelIVP::new(SolverType::NonStiff("RK45".to_owned()));
+        ivp.set_problem(20.0, 5.0, 298.15, 40000.0, 5e5).unwrap();
+        ivp.set_model(KineticModelNames::F1, vec![]).unwrap();
+        ivp.check_task().unwrap();
+        ivp.solve().unwrap();
+
+        let sol = ivp.get_solution().unwrap();
+        let n = sol.time.len();
+        assert!(n > 2);
+
+        let mut rel_err_sum = 0.0;
+        let mut count = 0usize;
+        for i in 1..(n - 1) {
+            let dt = sol.time[i + 1] - sol.time[i - 1];
+            if dt <= 0.0 {
+                continue;
+            }
+            let da = sol.conversion[i + 1] - sol.conversion[i - 1];
+            let deriv = da / dt;
+            let rate = sol.conversion_rate[i];
+
+            let denom = rate.abs().max(1e-12);
+            let rel_err = (deriv - rate).abs() / denom;
+            rel_err_sum += rel_err;
+            count += 1;
+        }
+
+        let mean_rel_err = rel_err_sum / (count as f64);
+        assert!(
+            mean_rel_err < 0.2,
+            "mean relative error too large: {}",
+            mean_rel_err
+        );
     }
 
     #[test]

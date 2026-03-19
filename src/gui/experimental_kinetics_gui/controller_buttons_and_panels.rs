@@ -10,7 +10,10 @@ use crate::gui::experimental_kinetics_gui::model::TGAGUIError;
 
 use crate::gui::experimental_kinetics_gui::controller_filters::Mathematics;
 use crate::gui::experimental_kinetics_gui::controller_golden_pipeline::GoldenPipelineDialogState;
-use crate::gui::experimental_kinetics_gui::controller_kinetics::{DirectProblem, KineticMethods};
+use crate::gui::experimental_kinetics_gui::controller_kinetics::DirectProblem;
+use crate::gui::experimental_kinetics_gui::controller_methods::{
+    KineticMethods, KineticMethodsWindowState,
+};
 use crate::gui::experimental_kinetics_gui::kitheplot_wrapper::KiThePlotWindowState;
 
 use crate::gui::experimental_kinetics_gui::test_options::TestOptions;
@@ -34,6 +37,7 @@ impl TopDropDownMenues {
         new_experiment_dialog: &mut NewExperimentDialogState,
         test_options: &mut TestOptions,
         kithe_plot_window: &mut KiThePlotWindowState,
+        kinetic_methods: &mut KineticMethodsWindowState,
     ) {
         ui.horizontal_wrapped(|ui| {
             ui.menu_button("File Manager", |ui| {
@@ -45,7 +49,7 @@ impl TopDropDownMenues {
             });
 
             ui.menu_button("Kinetic Methods", |ui| {
-                KineticMethods::show(ui, model);
+                KineticMethods::show_menu(ui, kinetic_methods);
             });
 
             ui.menu_button("Direct Problem", |ui| {
@@ -58,6 +62,8 @@ impl TopDropDownMenues {
         });
         ui.separator();
         mathematics.show_windows(ui.ctx(), model);
+        // Show any open Kinetic Methods windows
+        let _ = KineticMethods::show_windows(ui, model, kinetic_methods);
     }
 }
 
@@ -177,6 +183,10 @@ impl WrightPanelControllers {
             "from s to h",
             "from C° to K",
             "average on column",
+            "conversion rate",
+            "dim-less mass rate",
+            "mass rate",
+            "T rate",
         ];
 
         let button_size = egui::vec2(108.0, 22.0);
@@ -413,6 +423,23 @@ impl WrightPanelControllers {
                     model.mean_on_column_for_selected()?
                 };
                 info!("AVERAGE ON COLUMN {} =  {}", column, r);
+            }
+
+            "conversion rate" => {
+                model.derive_deta_dt_for_selected(state.input_string.as_deref())?;
+                ctx.request_repaint();
+            }
+            "dim-less mass rate" => {
+                model.derive_dalpha_dt_for_selected(state.input_string.as_deref())?;
+                ctx.request_repaint();
+            }
+            "mass rate" => {
+                model.derive_mass_rate_for_selected(state.input_string.as_deref())?;
+                ctx.request_repaint();
+            }
+            "T rate" => {
+                model.derive_temperature_rate_for_selected(state.input_string.as_deref())?;
+                ctx.request_repaint();
             }
             _ => {
                 println!(

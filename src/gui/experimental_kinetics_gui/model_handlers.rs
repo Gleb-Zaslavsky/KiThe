@@ -6,6 +6,12 @@ use crate::Kinetics::experimental_kinetics::experiment_series_main::{
     ExperimentMeta, TGAExperiment, TGASeries,
 };
 use crate::Kinetics::experimental_kinetics::experiment_series2::SampledColumns;
+use crate::Kinetics::experimental_kinetics::kinetic_methods::KineticDataView;
+use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::IsoconversionalResult;
+use crate::Kinetics::experimental_kinetics::kinetic_methods::is_this_a_sublimation::{
+    SublimationMethod, SublimationResult,
+};
+use crate::Kinetics::experimental_kinetics::kinetic_methods::isoconversion::IsoconversionalMethod;
 use crate::Kinetics::experimental_kinetics::lowess_wrapper::LowessConfig;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     ColumnHistory, ColumnNature, OperationRecord, TGADomainError, Unit,
@@ -1521,12 +1527,18 @@ impl PlotModel {
         Ok(())
     }
 
-    pub fn derive_mass_rate(&mut self, id: &str, new_col: &str) -> Result<(), TGAGUIError> {
+    pub fn derive_mass_rate(&mut self, id: &str, new_col: Option<&str>) -> Result<(), TGAGUIError> {
+        let new_col = new_col.unwrap_or("dm_dt");
         self.series.derive_mass_rate(id, new_col)?;
         Ok(())
     }
 
-    pub fn derive_temperature_rate(&mut self, id: &str, new_col: &str) -> Result<(), TGAGUIError> {
+    pub fn derive_temperature_rate(
+        &mut self,
+        id: &str,
+        new_col: Option<&str>,
+    ) -> Result<(), TGAGUIError> {
+        let new_col = new_col.unwrap_or("dT_dt");
         self.series.derive_temperature_rate(id, new_col)?;
         Ok(())
     }
@@ -1542,12 +1554,18 @@ impl PlotModel {
         Ok(())
     }
 
-    pub fn derive_deta_dt(&mut self, id: &str, out_name: &str) -> Result<(), TGAGUIError> {
+    pub fn derive_deta_dt(&mut self, id: &str, out_name: Option<&str>) -> Result<(), TGAGUIError> {
+        let out_name = out_name.unwrap_or("deta_dt");
         self.series.derive_deta_dt(id, out_name)?;
         Ok(())
     }
 
-    pub fn derive_dalpha_dt(&mut self, id: &str, out_name: &str) -> Result<(), TGAGUIError> {
+    pub fn derive_dalpha_dt(
+        &mut self,
+        id: &str,
+        out_name: Option<&str>,
+    ) -> Result<(), TGAGUIError> {
+        let out_name = out_name.unwrap_or("dalpha_dt");
         self.series.derive_dalpha_dt(id, out_name)?;
         Ok(())
     }
@@ -1565,7 +1583,10 @@ impl PlotModel {
         Ok(())
     }
 
-    pub fn derive_mass_rate_for_selected(&mut self, new_col: &str) -> Result<(), TGAGUIError> {
+    pub fn derive_mass_rate_for_selected(
+        &mut self,
+        new_col: Option<&str>,
+    ) -> Result<(), TGAGUIError> {
         let id = self.get_experiment_by_selected_curve()?;
         self.derive_mass_rate(&id, new_col)?;
         Ok(())
@@ -1573,7 +1594,7 @@ impl PlotModel {
 
     pub fn derive_temperature_rate_for_selected(
         &mut self,
-        new_col: &str,
+        new_col: Option<&str>,
     ) -> Result<(), TGAGUIError> {
         let id = self.get_experiment_by_selected_curve()?;
         self.derive_temperature_rate(&id, new_col)?;
@@ -1590,14 +1611,20 @@ impl PlotModel {
         self.derive_dimensionless_rate(&id, col_name, out_name)?;
         Ok(())
     }
-
-    pub fn derive_deta_dt_for_selected(&mut self, out_name: &str) -> Result<(), TGAGUIError> {
+    // convesion rate
+    pub fn derive_deta_dt_for_selected(
+        &mut self,
+        out_name: Option<&str>,
+    ) -> Result<(), TGAGUIError> {
         let id = self.get_experiment_by_selected_curve()?;
-        self.series.derive_deta_dt(&id, out_name)?;
+        self.derive_deta_dt(&id, out_name)?;
         Ok(())
     }
-
-    pub fn derive_dalpha_dt_for_selected(&mut self, out_name: &str) -> Result<(), TGAGUIError> {
+    // dimesionless mass rate
+    pub fn derive_dalpha_dt_for_selected(
+        &mut self,
+        out_name: Option<&str>,
+    ) -> Result<(), TGAGUIError> {
         let id = self.get_experiment_by_selected_curve()?;
         self.derive_dalpha_dt(&id, out_name)?;
         Ok(())
@@ -1687,6 +1714,122 @@ impl PlotModel {
             self.create_points_for_curve(&new_id)?;
             info!("new experiment created");
         }
+        Ok(())
+    }
+    //===========================================================================================
+    //  KINETIC METHODS
+    //===========================================================================================
+    /// Build a materialized KineticDataView from a subset of experiments and selected column natures.
+    /// This is a GUI-facing wrapper around the series-layer API.
+    pub fn create_kinetic_data_view(
+        &self,
+        what_exp_to_take: Option<&[&str]>,
+        what_cols_take: Vec<ColumnNature>,
+    ) -> Result<KineticDataView, TGAGUIError> {
+        let view = self
+            .series
+            .create_kinetic_data_view(what_exp_to_take, what_cols_take)?;
+        Ok(view)
+    }
+
+    /// Build a KineticDataView using the column requirements of a selected isoconversional method.
+    /// This is a GUI-facing wrapper around the series-layer API.
+    pub fn create_kinetic_data_view_for_method(
+        &self,
+        what_exp_to_take: Option<&[&str]>,
+        method: &IsoconversionalMethod,
+    ) -> Result<KineticDataView, TGAGUIError> {
+        let view = self
+            .series
+            .create_kinetic_data_view_for_method(what_exp_to_take, method)?;
+        Ok(view)
+    }
+
+    /// Push an isoconversional result into TGASeries and build a fresh plot for it.
+    ///
+    /// Behavior:
+    /// 1. Writes a new experiment into the series under the provided `id`.
+    /// 2. Sets X = "eta" and Y = "Ea".
+    /// 3. Hides all currently shown plots.
+    /// 4. Creates a new curve in red and makes it visible.
+    pub fn push_isoconversional_result(
+        &mut self,
+        result: &IsoconversionalResult,
+        id: &str,
+    ) -> Result<(), TGAGUIError> {
+        self.series.push_isoconversional_result(result, id)?;
+
+        // Make sure the new result is the only visible curve on the screen.
+        for curve in &mut self.plots {
+            curve.shown = false;
+        }
+
+        let x_col = "eta";
+        let y_col = "Ea";
+
+        self.set_x(id, x_col)?;
+        self.set_y(id, y_col)?;
+
+        self.create_points_for_curve_with_builder(id, Colours::Red)?;
+
+        // Ensure the newly created curve is visible even if we replaced an older one.
+        let short_name = self.create_plot_short_name(id, &x_col.to_string(), &y_col.to_string());
+        if let Some(curve) = self
+            .plots
+            .iter_mut()
+            .find(|curve| curve.plot_short_name == short_name)
+        {
+            curve.shown = true;
+        }
+
+        self.reset_view();
+
+        Ok(())
+    }
+
+    /// Add a numeric column from Vec<f64> to an experiment by id.
+    ///
+    /// This is a GUI wrapper around the series-level method, which checks
+    /// length, marks the column as NumericDerived, and logs the operation.
+    pub fn add_column_from_vec(
+        &mut self,
+        id: &str,
+        name: &str,
+        unit: Unit,
+        nature: ColumnNature,
+        data: Vec<f64>,
+    ) -> Result<(), TGAGUIError> {
+        self.series
+            .add_column_from_vec(id, name, unit, nature, data)?;
+        Ok(())
+    }
+
+    /// Push fitted sublimation rates into the series and build plots for each experiment.
+    ///
+    /// For every `(conversion, fitted_conversion_rate)` pair we create a new curve:
+    /// X = conversion column, Y = fitted rate column.
+    pub fn push_sublimation_fitted_rates(
+        &mut self,
+        results: &[SublimationResult],
+    ) -> Result<(), TGAGUIError> {
+        SublimationMethod::push_fitted_rates_to_series(results, &mut self.series)?;
+
+        for res in results {
+            let conv_col = self
+                .series
+                .get_column_by_nature(&res.experiment_id, ColumnNature::Conversion)?
+                .ok_or_else(|| {
+                    TGAGUIError::BindingError(format!(
+                        "Conversion column not found for experiment '{}'",
+                        res.experiment_id
+                    ))
+                })?;
+
+            self.set_x(&res.experiment_id, &conv_col)?;
+            self.set_y(&res.experiment_id, "fitted_sublim_rate")?;
+            self.create_points_for_curve_with_builder(&res.experiment_id, Colours::Red)?;
+        }
+
         Ok(())
     }
 }

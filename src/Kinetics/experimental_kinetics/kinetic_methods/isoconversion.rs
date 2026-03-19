@@ -22,12 +22,12 @@ use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconvers
 use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::{
     IntIsoconversionalMethod, IntegralIsoconversionalSolver, IsoconversionalResult,
 };
-
 use crate::Kinetics::experimental_kinetics::kinetic_methods::{
     ConversionGrid, ConversionGridBuilder, KineticDataView, KineticMethod, KineticRequirements,
-    TGADomainError,
+    TGADomainError, check_requirements,
 };
-#[derive(Clone, Debug)]
+use crate::Kinetics::experimental_kinetics::one_experiment_dataset::ColumnNature;
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum IsoconversionalMethod {
     OFW,
     KAS,
@@ -38,7 +38,38 @@ pub enum IsoconversionalMethod {
 
     Vyazovkin,
 }
+
+impl Default for IsoconversionalMethod {
+    fn default() -> Self {
+        IsoconversionalMethod::OFW
+    }
+}
+
 impl IsoconversionalMethod {
+    /// All methods available for selection in the UI.
+    pub fn all() -> &'static [IsoconversionalMethod] {
+        &[
+            IsoconversionalMethod::OFW,
+            IsoconversionalMethod::KAS,
+            IsoconversionalMethod::Starink,
+            IsoconversionalMethod::FriedmanDifferential,
+            IsoconversionalMethod::FriedmanIntegral,
+            IsoconversionalMethod::Vyazovkin,
+        ]
+    }
+
+    /// A human-friendly name for UI display.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            IsoconversionalMethod::OFW => "Ozawa-Flynn-Wall (OFW)",
+            IsoconversionalMethod::KAS => "Kissinger-Akahira-Sunose (KAS)",
+            IsoconversionalMethod::Starink => "Starink",
+            IsoconversionalMethod::FriedmanDifferential => "Friedman (Differential)",
+            IsoconversionalMethod::FriedmanIntegral => "Friedman (Integral)",
+            IsoconversionalMethod::Vyazovkin => "Vyazovkin",
+        }
+    }
+
     pub fn into_int_isomethod(&self) -> Result<IntIsoconversionalMethod, TGADomainError> {
         match self {
             IsoconversionalMethod::KAS => Ok(IntIsoconversionalMethod::KAS),
@@ -50,6 +81,53 @@ impl IsoconversionalMethod {
             | IsoconversionalMethod::Vyazovkin => Err(TGADomainError::InvalidOperation(
                 "kinetic method mismatch".into(),
             )),
+        }
+    }
+
+    pub fn requirements(&self) -> KineticRequirements {
+        match self {
+            IsoconversionalMethod::OFW
+            | IsoconversionalMethod::KAS
+            | IsoconversionalMethod::Starink
+            | IsoconversionalMethod::Vyazovkin => KineticRequirements {
+                min_experiments: 3,
+                needs_conversion: true,
+                needs_conversion_rate: false,
+                needs_temperature: false,
+                needs_heating_rate: true,
+            },
+            IsoconversionalMethod::FriedmanDifferential => KineticRequirements {
+                min_experiments: 3,
+                needs_conversion: true,
+                needs_conversion_rate: true,
+                needs_temperature: false,
+                needs_heating_rate: false,
+            },
+            IsoconversionalMethod::FriedmanIntegral => KineticRequirements {
+                min_experiments: 3,
+                needs_conversion: true,
+                needs_conversion_rate: false,
+                needs_temperature: true,
+                needs_heating_rate: false,
+            },
+        }
+    }
+
+    pub fn required_columns_by_nature(&self) -> Vec<ColumnNature> {
+        match self {
+            IsoconversionalMethod::FriedmanIntegral => {
+                vec![ColumnNature::Conversion, ColumnNature::Time]
+            }
+            IsoconversionalMethod::OFW
+            | IsoconversionalMethod::KAS
+            | IsoconversionalMethod::Starink
+            | IsoconversionalMethod::FriedmanDifferential
+            | IsoconversionalMethod::Vyazovkin => vec![
+                ColumnNature::Conversion,
+                ColumnNature::Temperature,
+                ColumnNature::Time,
+                ColumnNature::ConversionRate,
+            ],
         }
     }
 }
@@ -108,14 +186,30 @@ impl KineticMethod for IsoconversionalKineticMethod {
     fn compute(&self, data: &KineticDataView) -> Result<Self::Output, TGADomainError> {
         let compute_dt = matches!(self.method, IsoconversionalMethod::Vyazovkin);
 
-        let grid = ConversionGridBuilder::default()
-            .compute_dt(compute_dt)
-            .build(data)?;
+        let grid = match self.method {
+            IsoconversionalMethod::FriedmanIntegral => {
+                ConversionGridBuilder::default().build_isothermal(data)?
+            }
+            _ => ConversionGridBuilder::default()
+                .compute_dt(compute_dt)
+                .build_nonisothermal(data)?,
+        };
+
+        // Use method-specific constants for OFW/KAS/Starink.
+        let integral_config = match self.method {
+            IsoconversionalMethod::OFW
+            | IsoconversionalMethod::KAS
+            | IsoconversionalMethod::Starink => {
+                let int_method = self.method.into_int_isomethod()?;
+                IntegralIsoconversionalSolver::new(int_method).config
+            }
+            _ => IntegralIsoConfig::default(),
+        };
 
         let solver = IsoconversionalSolver {
             method: self.method.clone(),
 
-            integral_config: IntegralIsoConfig::default(),
+            integral_config,
 
             vyazovkin_config: VyazovkinSolver::default(),
         };
@@ -124,16 +218,15 @@ impl KineticMethod for IsoconversionalKineticMethod {
     }
 
     fn requirements(&self) -> KineticRequirements {
-        KineticRequirements {
-            min_experiments: 3,
+        self.method.requirements()
+    }
 
-            needs_conversion: true,
+    fn required_columns_by_nature(&self) -> Vec<ColumnNature> {
+        self.method.required_columns_by_nature()
+    }
 
-            needs_conversion_rate: matches!(self.method, IsoconversionalMethod::FriedmanIntegral),
-
-            needs_temperature: true,
-
-            needs_heating_rate: true,
-        }
+    fn check_input(&self, data: &KineticDataView) -> Result<(), TGADomainError> {
+        let req = self.method.requirements();
+        check_requirements(data, &req)
     }
 }

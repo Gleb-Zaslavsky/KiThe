@@ -31,6 +31,9 @@ impl UnitedDataset {
             ColumnNature::TemperatureRate => "temperature_rate",
             ColumnNature::DimensionlessMassRate => "dimensionless_mass_rate",
             ColumnNature::Unknown => "unknown",
+            ColumnNature::ActivationEnergy => "activation_energy",
+            ColumnNature::PredexFactor => "predex_factor",
+            ColumnNature::R2 => "r2",
         }
     }
 
