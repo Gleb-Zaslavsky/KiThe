@@ -261,7 +261,7 @@ mod tests {
     use crate::Thermodynamics::User_PhaseOrSolution::{
         CustomSubstance, SubstanceSystemFactory, SubstancesContainer,
     };
-    use RustedSciThe::numerical::Nonlinear_systems::NR::Method;
+
     fn create_N_plus_O_equilibrium(T: f64) -> Thermodynamics {
         let P = 101325.0;
         let gas_subs = vec![

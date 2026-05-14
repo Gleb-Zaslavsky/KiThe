@@ -1686,6 +1686,7 @@ impl TGASeries {
                 ("deta_dt", exp.dataset.schema.deta_dt.as_ref()),
                 ("dalpha_dt", exp.dataset.schema.dalpha_dt.as_ref()),
                 ("dT_dt", exp.dataset.schema.dT_dt.as_ref()),
+                ("E", exp.dataset.schema.E.as_ref()),
             ] {
                 meta_lines.push(format!(
                     "#META\tBIND\t{}\t{}\t{}",
@@ -1884,6 +1885,8 @@ impl TGASeries {
                     deta_dt: rec.binds.get("deta_dt").cloned().unwrap_or(None),
                     dalpha_dt: rec.binds.get("dalpha_dt").cloned().unwrap_or(None),
                     dT_dt: rec.binds.get("dT_dt").cloned().unwrap_or(None),
+                    E: rec.binds.get("E").cloned().unwrap_or(None),
+                    R2: rec.binds.get("R2").cloned().unwrap_or(None),
                 },
                 oneframeplot: None,
                 history_of_operations: History {

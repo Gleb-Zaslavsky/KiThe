@@ -69,6 +69,8 @@ impl TGADataset {
                 deta_dt: None,
                 dalpha_dt: None,
                 dT_dt: None,
+                E: None,
+                R2: None,
             },
             oneframeplot: None,
             history_of_operations: History {

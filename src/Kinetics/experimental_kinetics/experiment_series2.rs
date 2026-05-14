@@ -358,6 +358,8 @@ impl TGASeries {
             deta_dt: Self::filter_semantic_field(&parent.dataset.schema.deta_dt, columns),
             dalpha_dt: Self::filter_semantic_field(&parent.dataset.schema.dalpha_dt, columns),
             dT_dt: Self::filter_semantic_field(&parent.dataset.schema.dT_dt, columns),
+            E: Self::filter_semantic_field(&parent.dataset.schema.E, columns),
+            R2: Self::filter_semantic_field(&parent.dataset.schema.R2, columns),
         };
 
         let new_dataset = TGADataset {
@@ -538,6 +540,8 @@ pub fn create_experiment_from_columns(
         deta_dt: filter_field(&parent.dataset.schema.deta_dt),
         dalpha_dt: filter_field(&parent.dataset.schema.dalpha_dt),
         dT_dt: filter_field(&parent.dataset.schema.dT_dt),
+        E: filter_field(&parent.dataset.schema.E),
+        R2: filter_field(&parent.dataset.schema.R2),
     };
 
     let new_dataset = TGADataset {
@@ -623,6 +627,8 @@ mod tests {
             deta_dt: None,
             dalpha_dt: None,
             dT_dt: None,
+            E: None,
+            R2: None,
         };
 
         TGADataset {

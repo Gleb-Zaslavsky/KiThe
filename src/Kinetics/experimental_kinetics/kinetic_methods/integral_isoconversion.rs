@@ -204,12 +204,14 @@ impl IsoconversionalResult {
             time: None,
             temperature: None,
             mass: None,
-            alpha: Some("alpha".to_string()),
+            alpha: None,
             dm_dt: None,
-            eta: None,
+            eta: Some("eta".to_string()),
             deta_dt: None,
             dalpha_dt: None,
             dT_dt: None,
+            E: Some("Ea".to_string()),
+            R2: Some("R2".to_string()),
         };
 
         let mut dataset = TGADataset {

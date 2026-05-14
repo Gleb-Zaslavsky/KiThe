@@ -212,22 +212,30 @@ impl Thermodynamics {
         // vector of elements in the initial composition
         let b = self.initial_vector_of_elements.clone();
         let mut initial_guess: Vec<f64> = Vec::new();
+        let total_initial_moles: f64 = self.map_of_concentration.values().sum();
         // Bounds for mole numbers (n) - must be non-negative
         for (i, n_var) in self.solver.n.iter().enumerate() {
             let estimation = Self::upper_estimation_of_subs_mole_number(i, &A, &b);
-            initial_guess.push(estimation / 2.0);
+            let species_name = &self.vec_of_subs[i];
+            let from_feed = *self.map_of_concentration.get(species_name).unwrap_or(&0.0);
+            let guess = if from_feed > 0.0 {
+                from_feed.min(estimation)
+            } else {
+                (estimation * 1e-12).max(1e-30)
+            };
+            initial_guess.push(guess);
             bounds.insert(n_var.to_string(), (0.0, estimation));
         }
 
         // Bounds for Lagrange multipliers (Lambda) - unbounded
         for lambda_var in &self.solver.Lambda {
-            initial_guess.push(10.0);
+            initial_guess.push(0.0);
             bounds.insert(lambda_var.to_string(), (f64::NEG_INFINITY, f64::INFINITY));
         }
 
         // Bounds for total mole numbers per phase (Np) - must be non-negative
         for np_var in &self.solver.Np {
-            initial_guess.push(1.0);
+            initial_guess.push(total_initial_moles.max(1e-30));
             bounds.insert(np_var.to_string(), (0.0, f64::INFINITY));
         }
 

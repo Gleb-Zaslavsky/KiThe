@@ -85,6 +85,8 @@ impl FileManager {
             new_experiment_dialog.last_error = None;
         }
 
+        if ui.button("Append data to experiment").clicked() {}
+
         if ui.button("Export Data").clicked() {
             Self::export_data(model);
         }
@@ -490,6 +492,7 @@ impl WrightPanelControllers {
         model: &mut PlotModel,
         manage_plot_dialog: &mut NewExperimentDialogState,
     ) {
+        model.prune_stale_plots();
         ui.separator();
 
         for curve in model.plots.iter_mut() {

@@ -1748,4 +1748,22 @@ mod error_handling_tests {
         println!("Time taken: {:?}", t.elapsed().as_secs());
         ivp.plot_in_terminal()
     }
+
+    #[test]
+    fn test_complete_error_free_workflow2() {
+        let t = Instant::now();
+        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+
+        // All operations should return Ok
+        assert!(ivp.set_problem(50.0, 2.0, 298.15, 50000.0, 1e6).is_ok());
+        let stop_condition = HashMap::from([("a".to_owned(), 0.99)]);
+        ivp.set_stop_condition(Some(stop_condition));
+        assert!(ivp.set_model(KineticModelNames::F1, vec![]).is_ok());
+        assert!(ivp.check_task().is_ok());
+        assert!(ivp.solve().is_ok());
+        assert!(ivp.plot().is_ok());
+        //  assert!(ivp.save_result().is_ok());
+        println!("Time taken: {:?}", t.elapsed().as_secs());
+        ivp.plot_in_terminal()
+    }
 }

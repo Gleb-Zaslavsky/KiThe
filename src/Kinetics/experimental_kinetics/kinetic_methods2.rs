@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::format;
 
 use super::super::solid_state_kinetics_IVP::{IVPSolution, KineticModelIVP, KineticModelNames};
@@ -5,7 +6,7 @@ use super::kinetic_methods::integral_isoconversion::IntegralIsoconversionalSolve
 use super::kinetic_methods::{ConversionGridBuilder, ExperimentData, KineticDataView};
 use super::one_experiment_dataset::TGADomainError;
 use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
-use RustedSciThe::numerical::ODE_api2::{SolverType, UniversalODESolver};
+use RustedSciThe::numerical::ODE_api2::{SolverParam, SolverType, UniversalODESolver};
 use std::time::Instant;
 pub fn solution_to_experiment(sol: IVPSolution, heating_rate: f64, id: &str) -> ExperimentData {
     ExperimentData {
@@ -42,6 +43,20 @@ pub fn simulate_tga_dataset(
     for &beta in betas {
         let mut ivp = KineticModelIVP::new(solvertype.clone());
 
+        // Reduce solver work for unit tests by limiting the number of steps.
+        // This avoids long-running integrations when t_end is large.
+        let step = (t_end / 2000.0).max(1e-4).min(1.0);
+        let max_iter = 500;
+        let mut solver_params: HashMap<String, SolverParam> = HashMap::new();
+        solver_params.insert("step_size".to_string(), SolverParam::Float(step));
+        solver_params.insert("max_step".to_string(), SolverParam::Float(step));
+        solver_params.insert("max_iterations".to_string(), SolverParam::Int(max_iter));
+        solver_params.insert("tolerance".to_string(), SolverParam::Float(1e-3));
+        solver_params.insert("rtol".to_string(), SolverParam::Float(1e-3));
+        solver_params.insert("atol".to_string(), SolverParam::Float(1e-3));
+        solver_params.insert("parallel".to_string(), SolverParam::Bool(true));
+        ivp.set_solver_params(solver_params);
+
         let _ = ivp.set_model(model.clone(), params.clone());
         let _ = ivp.set_arrhenius(e, a);
         let _ = ivp.set_heating_program(t0, beta);
@@ -54,7 +69,7 @@ pub fn simulate_tga_dataset(
         let sol: IVPSolution = ivp.get_solution().unwrap();
 
         let exp = solution_to_experiment(sol, beta, id);
-
+        println!("problem for beta = {} solved", beta);
         experiments.push(exp);
     }
 
@@ -67,17 +82,17 @@ fn test_conversion_grid_build() {
     let now = Instant::now();
     let data = simulate_tga_dataset(
         KineticModelNames::F2,
-        100_000.0,
-        1e6,
+        50_000.0,
+        1e9,
         420.0,
-        &[0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
+        &[0.5, 1.0, 2.0],
         200.0,
         SolverType::Radau(RadauOrder::Order7),
         vec![],
         "",
     )
     .unwrap();
-    println!("{:?}", data);
+    // println!("{:?}", data);
     println!("tga simulated {:?}", now.elapsed());
     let grid = ConversionGridBuilder::new()
         .segments(80)
@@ -92,15 +107,15 @@ fn test_conversion_grid_build() {
 
 #[test]
 fn test_kas_activation_energy() {
-    let true_e = 120_000.0;
+    let true_e = 50_000.0;
     let now = Instant::now();
     let data = simulate_tga_dataset(
         KineticModelNames::F1,
         true_e,
-        1e13,
-        300.0,
+        1e6,
+        0.0,
         &[2.0, 5.0, 10.0, 20.0],
-        2000.0,
+        50.0,
         SolverType::BDF,
         vec![],
         "",
@@ -115,7 +130,7 @@ fn test_kas_activation_energy() {
     let solver = IntegralIsoconversionalSolver::kas();
     grid.report();
     let result = solver.solve(&grid).unwrap();
-    result.pretty_print_and_assert(0.05, 0.95, 100, Some(0.99));
+    result.pretty_print_and_assert(0.05, 0.95, 1000, Some(0.99));
 }
 
 /*

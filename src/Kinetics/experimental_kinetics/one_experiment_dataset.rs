@@ -272,6 +272,8 @@ pub struct TGASchema {
     pub deta_dt: Option<String>,
     pub dalpha_dt: Option<String>,
     pub dT_dt: Option<String>,
+    pub E: Option<String>,
+    pub R2: Option<String>,
 }
 
 impl TGASchema {
@@ -308,6 +310,8 @@ impl TGASchema {
             deta_dt: None,
             dalpha_dt: None,
             dT_dt: None,
+            E: None,
+            R2: None,
         }
     }
 
@@ -779,6 +783,8 @@ impl TGADataset {
                 deta_dt: None,
                 dalpha_dt: None,
                 dT_dt: None,
+                E: None,
+                R2: None,
             },
             oneframeplot: None,
             history_of_operations: History {
@@ -868,6 +874,8 @@ impl TGADataset {
                 deta_dt: None,
                 dalpha_dt: None,
                 dT_dt: None,
+                E: None,
+                R2: None,
             },
             oneframeplot: None,
             history_of_operations: History {

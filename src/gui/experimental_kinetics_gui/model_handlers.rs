@@ -20,7 +20,7 @@ use crate::Kinetics::experimental_kinetics::splines::SplineKind;
 use crate::Kinetics::experimental_kinetics::testing_mod::{AdvancedTGAConfig, VirtualTGA};
 use crate::gui::experimental_kinetics_gui::model::{Colours, PlotCurve, PlotModel, TGAGUIError};
 use log::{debug, info};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 //=========================================================================================
@@ -135,13 +135,68 @@ impl PlotModel {
     // SETTERS
     //=======================================================================
     //////////////////////////////////////////////////////////////////////////////////
+    //функция prune_stale_plots() удаляет кривые, у которых больше не существует эксперимент или
+    // колонка x/y, и при необходимости сбрасывает selection/view. Э
+    pub fn prune_stale_plots(&mut self) -> bool {
+        let selected_plot = self
+            .get_selected_curve_index()
+            .and_then(|idx| self.plots.get(idx))
+            .map(|curve| curve.plot_short_name.clone());
+
+        let valid_columns_by_experiment: HashMap<String, HashSet<String>> = self
+            .list_of_experiments()
+            .into_iter()
+            .map(|experiment_id| {
+                let columns = self
+                    .list_of_columns(&experiment_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                (experiment_id, columns)
+            })
+            .collect();
+
+        let original_len = self.plots.len();
+        self.plots.retain(|curve| {
+            valid_columns_by_experiment
+                .get(&curve.experiment_id)
+                .map(|columns| columns.contains(&curve.x_name) && columns.contains(&curve.y_name))
+                .unwrap_or(false)
+        });
+
+        let changed = self.plots.len() != original_len;
+        if !changed {
+            return false;
+        }
+
+        let selected_plot_removed = selected_plot
+            .as_ref()
+            .map(|short_name| {
+                !self
+                    .plots
+                    .iter()
+                    .any(|curve| curve.plot_short_name == *short_name)
+            })
+            .unwrap_or(false);
+
+        if selected_plot_removed {
+            self.clear_selection();
+            self.clear_selection_rect();
+        }
+
+        self.reset_view();
+        true
+    }
+
     pub fn drop_experiment(&mut self, indx: usize) -> Result<(), TGAGUIError> {
         self.series.drop_experiment(indx);
+        self.prune_stale_plots();
         Ok(())
     }
 
     pub fn drop_experiment_by_id(&mut self, id: &str) -> Result<(), TGAGUIError> {
         self.series.drop_experiment_by_id(id)?;
+        self.prune_stale_plots();
         Ok(())
     }
     /// list of experiments
@@ -725,6 +780,7 @@ impl PlotModel {
         new_name: &str,
     ) -> Result<(), TGAGUIError> {
         self.series.rename_column(id, col_name, new_name)?;
+        self.prune_stale_plots();
         self.reset_view();
         Ok(())
     }
@@ -734,6 +790,7 @@ impl PlotModel {
         col_name: &str,
     ) -> Result<(), TGAGUIError> {
         self.series.drop_column(id, col_name)?;
+        self.prune_stale_plots();
         self.reset_view();
         Ok(())
     }

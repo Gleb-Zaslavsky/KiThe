@@ -395,7 +395,7 @@ impl Zeldovich {
         match sol {
             Some(y_mesh) => {
                 let dT = self.dT;
-                let x_mesh = self.L * bvp_solver.x_mesh.clone();
+                let x_mesh = self.L * bvp_solver.mesh();
                 let T_sol: DVector<f64> = dT * y_mesh.column(0).into_owned();
                 let qs_sol: DVector<f64> =
                     (self.dT / self.L) * y_mesh.column(1).into_owned() / self.Pe;

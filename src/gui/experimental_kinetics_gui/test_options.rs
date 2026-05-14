@@ -3,33 +3,10 @@ use crate::Kinetics::experimental_kinetics::testing_mod::{
     AdvancedTGAConfig, ExperimentMode, KineticModel, NoiseConfig, NoiseKind, SpikeModel,
 };
 use crate::gui::experimental_kinetics_gui::gui_test::load_model_with_one_curve;
+use crate::gui::experimental_kinetics_gui::help_view::{HelpDoc, HelpLanguage};
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
 use crate::gui::experimental_kinetics_gui::settings::{CalibrationLine, Settings};
-
-#[derive(Clone, Debug, Default)]
-struct HelpDoc {
-    sections: Vec<HelpSection>,
-}
-#[derive(Clone, Debug, Default)]
-struct HelpSection {
-    title: String,
-    paragraphs: Vec<HelpParagraph>,
-}
-#[derive(Clone, Debug, Default)]
-struct HelpParagraph {
-    title: String,
-    body: String,
-}
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum HelpLanguage {
-    Eng,
-    Rus,
-}
-impl Default for HelpLanguage {
-    fn default() -> Self {
-        HelpLanguage::Eng
-    }
-}
+use std::collections::HashSet;
 
 pub struct TestOptions {
     /// Flag to show/hide the settings window
@@ -39,10 +16,16 @@ pub struct TestOptions {
     temp_b: String,
     temp_n_points: String,
     temp_log_level: String,
-    show_help_window: bool,
-    help_lang: HelpLanguage,
-    parsed_help: HelpDoc,
-    help_error: Option<String>,
+    pub(crate) show_help_window: bool,
+    pub(crate) help_lang: HelpLanguage,
+    pub(crate) parsed_help: HelpDoc,
+    pub(crate) help_error: Option<String>,
+    pub(crate) help_status: Option<String>,
+    pub(crate) help_search_query: String,
+    pub(crate) help_selected_section: Option<usize>,
+    pub(crate) help_edit_mode: bool,
+    pub(crate) help_editor_buffer: String,
+    pub(crate) help_expanded_sections: std::collections::HashSet<usize>,
     // Synthetic data window
     show_synthetic_data: bool,
 
@@ -109,6 +92,12 @@ impl Default for TestOptions {
             help_lang: HelpLanguage::Eng,
             parsed_help: HelpDoc::default(),
             help_error: None,
+            help_status: None,
+            help_search_query: String::new(),
+            help_selected_section: None,
+            help_edit_mode: false,
+            help_editor_buffer: String::new(),
+            help_expanded_sections: HashSet::new(),
             show_synthetic_data: false,
 
             syn_n_points: "70000".to_string(),
@@ -498,7 +487,9 @@ impl TestOptions {
                 ui.horizontal(|ui| {
                     if ui.button("Generate synthetic data").clicked() {
                         match self.try_build_config() {
-                            Ok(cfg) => {
+                            Ok( cfg) => {
+                                //  cfg.k = model.settings.calibration_line().unwrap().k().clone();
+                                // cfg.b = model.settings.calibration_line().unwrap().b().clone();
                                 match model.generate_synthetic_data_from_config(&cfg) {
                                     Ok(()) => {
                                         self.syn_status =
@@ -738,6 +729,9 @@ impl TestOptions {
             temp_noise,
             spikes,
             seed,
+            //  k: 1.0,
+            //  b: 0.0,
+            // mass_or_voltage: MassOrVoltage::Mass,
         })
     }
 
@@ -799,133 +793,6 @@ impl TestOptions {
     pub fn is_settings_window_open(&self) -> bool {
         self.show_settings_window
     }
-
-    pub fn show_help_window_ui(&mut self, ctx: &egui::Context) {
-        if !self.show_help_window {
-            return;
-        }
-        let mut open = self.show_help_window;
-        egui::Window::new("Help")
-            .open(&mut open)
-            .resizable(true)
-            .vscroll(true)
-            .default_width(640.0)
-            .default_height(520.0)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Language:");
-                    let mut lang = self.help_lang;
-                    if ui
-                        .radio_value(&mut lang, HelpLanguage::Eng, "ENG")
-                        .clicked()
-                    {
-                        self.help_lang = HelpLanguage::Eng;
-                        let _ = self.reload_help();
-                    }
-                    if ui
-                        .radio_value(&mut lang, HelpLanguage::Rus, "RUS")
-                        .clicked()
-                    {
-                        self.help_lang = HelpLanguage::Rus;
-                        let _ = self.reload_help();
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Close").clicked() {
-                            self.show_help_window = false;
-                        }
-                    });
-                });
-                if let Some(err) = &self.help_error {
-                    ui.colored_label(egui::Color32::RED, err);
-                }
-                ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (si, sec) in self.parsed_help.sections.iter().enumerate() {
-                        let id = egui::Id::new(("help_sec", si));
-                        egui::CollapsingHeader::new(&sec.title)
-                            .id_salt(id)
-                            .show(ui, |ui| {
-                                for (pi, par) in sec.paragraphs.iter().enumerate() {
-                                    let pid = egui::Id::new(("help_par", si, pi));
-                                    egui::CollapsingHeader::new(&par.title).id_salt(pid).show(
-                                        ui,
-                                        |ui| {
-                                            ui.label(
-                                                egui::RichText::new(par.body.clone()).monospace(),
-                                            );
-                                        },
-                                    );
-                                }
-                            });
-                    }
-                });
-            });
-        self.show_help_window = open;
-    }
-
-    fn reload_help(&mut self) -> Result<(), String> {
-        let path = match self.help_lang {
-            HelpLanguage::Eng => "assets/help_eng.txt",
-            HelpLanguage::Rus => "assets/help_rus.txt",
-        };
-        match std::fs::read_to_string(path) {
-            Ok(contents) => {
-                self.parsed_help = parse_help(&contents);
-                self.help_error = None;
-                Ok(())
-            }
-            Err(e) => {
-                self.parsed_help = HelpDoc::default();
-                self.help_error = Some(format!("Failed to read {}: {}", path, e));
-                Err(format!("{}", e))
-            }
-        }
-    }
-}
-
-fn parse_help(src: &str) -> HelpDoc {
-    let mut doc = HelpDoc {
-        sections: Vec::new(),
-    };
-    let mut current_section: Option<HelpSection> = None;
-    let mut current_paragraph: Option<HelpParagraph> = None;
-    let finalize_paragraph = |sec: &mut Option<HelpSection>, par: &mut Option<HelpParagraph>| {
-        if let (Some(s), Some(p)) = (sec.as_mut(), par.take()) {
-            s.paragraphs.push(p);
-        }
-    };
-    let finalize_section =
-        |doc: &mut HelpDoc, sec: &mut Option<HelpSection>, par: &mut Option<HelpParagraph>| {
-            finalize_paragraph(sec, par);
-            if let Some(s) = sec.take() {
-                doc.sections.push(s);
-            }
-        };
-    for line in src.lines() {
-        let trimmed = line.trim_end_matches(['\r']);
-        if trimmed.starts_with("## ") {
-            finalize_paragraph(&mut current_section, &mut current_paragraph);
-            current_paragraph = Some(HelpParagraph {
-                title: trimmed[3..].to_string(),
-                body: String::new(),
-            });
-        } else if trimmed.starts_with("# ") {
-            finalize_section(&mut doc, &mut current_section, &mut current_paragraph);
-            current_section = Some(HelpSection {
-                title: trimmed[2..].to_string(),
-                paragraphs: Vec::new(),
-            });
-        } else {
-            if let Some(p) = current_paragraph.as_mut() {
-                if !p.body.is_empty() {
-                    p.body.push('\n');
-                }
-                p.body.push_str(trimmed);
-            }
-        }
-    }
-    finalize_section(&mut doc, &mut current_section, &mut current_paragraph);
-    doc
 }
 
 //============================================================================================

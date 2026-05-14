@@ -1,7 +1,7 @@
 use crate::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
 use crate::ReactorsBVP::task_parser_reactor_BVP::create_template;
 use crate::cli::reactor_help::{REACTOR_ENG_HELPER, REACTOR_RU_HELPER};
-use RustedSciThe::Utils::task_parser::pretty_print_map;
+use RustedSciThe::command_interpreter::task_parser::pretty_print_map;
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use std::path::PathBuf;
 

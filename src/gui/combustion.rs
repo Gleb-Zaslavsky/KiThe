@@ -38,11 +38,11 @@ use crate::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
 use crate::ReactorsBVP::task_parser_reactor_BVP::SIMPLE_BVP_TEMPLATE;
 use crate::cli::reactor_help::REACTOR_ENG_HELPER;
 use crate::gui::gui_plot::PlotWindow;
-use RustedSciThe::Utils::task_parser::{DocumentMap, DocumentParser, Value};
+use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
 use eframe::egui;
 use std::collections::HashMap;
 /*
-this is value enum from RustedSciThe::Utils::task_parser
+this is value enum from RustedSciThe::command_interpreter::task_parser
 pub enum Value {
     String(String),
     Float(f64),

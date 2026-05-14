@@ -7,11 +7,11 @@ pub mod controller_methods;
 pub mod controller_table;
 pub mod experimental_kinetics_gui_main;
 pub mod gui_test;
+pub mod help_view;
 pub mod interaction;
 pub mod kitheplot_wrapper;
 pub mod model;
 pub mod model_handlers;
 pub mod settings;
 pub mod test_options;
-
 pub mod view;

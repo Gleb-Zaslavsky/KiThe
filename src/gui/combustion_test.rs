@@ -4,7 +4,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::gui::combustion::{CombustionApp, ProblemsEnum};
-    use RustedSciThe::Utils::task_parser::{DocumentMap, Value};
+    use RustedSciThe::command_interpreter::task_parser::{DocumentMap, Value};
 
     fn create_test_document() -> DocumentMap {
         let mut section1 = HashMap::new();
@@ -292,7 +292,7 @@ mod tests2 {
     use std::collections::HashMap;
 
     use crate::gui::combustion::{CombustionApp, ProblemsEnum};
-    use RustedSciThe::Utils::task_parser::{DocumentMap, Value};
+    use RustedSciThe::command_interpreter::task_parser::{DocumentMap, Value};
     fn create_test_document() -> DocumentMap {
         let mut section1 = HashMap::new();
         section1.insert(
@@ -564,7 +564,7 @@ mod tests2 {
 mod file_reading_tests {
     use super::*;
     use crate::gui::combustion::CombustionApp;
-    use RustedSciThe::Utils::task_parser::{DocumentParser, Value};
+    use RustedSciThe::command_interpreter::task_parser::{DocumentParser, Value};
     use std::fs::File;
     use std::io::Write;
     use tempfile::tempdir;
@@ -824,7 +824,7 @@ mod file_reading_tests {
 mod deletion_tests {
     use super::*;
     use crate::gui::combustion::CombustionApp;
-    use RustedSciThe::Utils::task_parser::Value;
+    use RustedSciThe::command_interpreter::task_parser::Value;
     use std::collections::HashMap;
 
     #[test]
@@ -892,7 +892,7 @@ mod deletion_tests {
 mod saving_tests {
     use super::*;
     use crate::gui::combustion::CombustionApp;
-    use RustedSciThe::Utils::task_parser::{DocumentParser, Value};
+    use RustedSciThe::command_interpreter::task_parser::{DocumentParser, Value};
     use std::collections::HashMap;
     use std::fs::File;
     use std::io::Write;

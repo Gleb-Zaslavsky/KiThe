@@ -14,6 +14,7 @@ pub mod ClassicalThermodynamicsEquations;
 pub mod ClassicalThermodynamicsOutput;
 /// Aggregation of equations and their solution
 pub mod ClassicalThermodynamicsSolver;
+pub mod NR_Legacy;
 ///module for chemical equilibrium and classical thermodynamics
 /// # Examples
 /// ```

@@ -111,6 +111,7 @@ impl PlotApp {
     pub fn show(&mut self, ctx: &egui::Context, open: &mut bool) {
         egui::Window::new("📊 Experimental Kinetics")
             .open(open)
+            .resizable(true)
             .default_size([1000.0, 700.0])
             .min_size([600.0, 400.0])
             .show(ctx, |ui| {

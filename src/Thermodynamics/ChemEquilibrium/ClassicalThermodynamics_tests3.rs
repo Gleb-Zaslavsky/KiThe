@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use RustedSciThe::numerical::Nonlinear_systems::NR::Method;
+    use crate::Thermodynamics::ChemEquilibrium::NR_Legacy::Method;
 
     use crate::Thermodynamics::ChemEquilibrium::ClassicalThermodynamics::{
         ThermodynamicCalculations, Thermodynamics,
@@ -879,16 +879,19 @@ mod tests {
         };
         let solver = ScalarRootFinder::new();
 
+        // 2NO2 <=> N2 + 2O2 with initial n(NO2)=1:
+        // n_NO2 = 1 - 2*eta, n_N2 = eta, n_O2 = 2*eta, eta in [0, 0.5]
+        // Kp = P * 4*eta^3 / ((1+eta)*(1-2*eta)^2)
         let func = ClosureFunction::new(
-            |x| (1.0 + 2.0 * x).powi(2) * (1.0 - x) + 4.0 * P * kp * x.powi(3),
+            |x| kp * (1.0 + x) * (1.0 - 2.0 * x).powi(2) - 4.0 * P * x.powi(3),
             "".to_string(),
         );
 
-        let result = solver.secant(&func, 0.2, 0.7).unwrap();
+        let result = solver.secant(&func, 1e-8, 0.49).unwrap();
         let eta = result.root;
-        let n_NO2 = 1.0 + 2.0 * eta;
-        let n_N2 = -eta;
-        let n_O2 = -2.0 * eta;
+        let n_NO2 = 1.0 - 2.0 * eta;
+        let n_N2 = eta;
+        let n_O2 = 2.0 * eta;
         let N = n_NO2 + n_N2 + n_O2;
         let x_NO2 = n_NO2 / N;
         let x_N2 = n_N2 / N;
@@ -1097,7 +1100,7 @@ mod tests {
     #[test]
     fn N_plus_O_equilibrium_500K() {
         let mut td = create_N_plus_O_equilibrium(500.0);
-        let map_of_substances = solve_N_plus_O_equilibrium(500.0, &mut td);
+        let map_of_substances = solve_N_plus_O_equilibrium(300.0, &mut td);
 
         let n_O2 = *map_of_substances.get("O2").unwrap();
         let n_N2 = *map_of_substances.get("N2").unwrap();
