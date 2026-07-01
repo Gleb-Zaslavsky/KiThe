@@ -41,6 +41,7 @@ use ndarray_stats::CorrelationExt;
 use ndarray_stats::interpolate::Interpolate;
 use polars::prelude::*;
 use std::collections::HashMap;
+use std::fmt;
 impl TGADataset {
     /// Extract a column as Array1<f64>
     /// Contract:
@@ -408,7 +409,241 @@ impl TGADataset {
         Ok(out)
     }
 }
+//=================================================================
+//=================================================================
+// FILTER / SMOOTHING QUALITY METRICS
+//=================================================================
 
+#[derive(Debug, Clone)]
+pub struct FilterQualityReport {
+    pub column_raw: String,
+    pub column_filtered: String,
+
+    /// std(diff(filtered)) / std(diff(raw))
+    pub roughness_ratio_1st: f64,
+
+    /// std(diff2(filtered)) / std(diff2(raw))
+    pub roughness_ratio_2nd: f64,
+
+    /// sqrt(mean((raw - filtered)^2))
+    pub rmse: f64,
+
+    /// rmse / std(raw)
+    pub normalized_rmse: f64,
+
+    /// Pearson correlation between raw and filtered signal
+    pub correlation: f64,
+}
+
+impl fmt::Display for FilterQualityReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} -> {} | rough1={:.6} rough2={:.6} rmse={:.6} nrmse={:.6} corr={:.6}",
+            self.column_raw,
+            self.column_filtered,
+            self.roughness_ratio_1st,
+            self.roughness_ratio_2nd,
+            self.rmse,
+            self.normalized_rmse,
+            self.correlation
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FilterQualityThresholds {
+    pub max_roughness_ratio_1st: f64,
+    pub max_roughness_ratio_2nd: f64,
+    pub max_normalized_rmse: f64,
+    pub min_correlation: f64,
+}
+
+impl Default for FilterQualityThresholds {
+    fn default() -> Self {
+        Self {
+            max_roughness_ratio_1st: 0.70,
+            max_roughness_ratio_2nd: 0.50,
+            max_normalized_rmse: 0.10,
+            min_correlation: 0.98,
+        }
+    }
+}
+
+impl FilterQualityReport {
+    pub fn passes(&self, th: &FilterQualityThresholds) -> bool {
+        self.roughness_ratio_1st < th.max_roughness_ratio_1st
+            && self.roughness_ratio_2nd < th.max_roughness_ratio_2nd
+            && self.normalized_rmse < th.max_normalized_rmse
+            && self.correlation > th.min_correlation
+    }
+
+    pub fn pretty_print(&self) {
+        println!("\n=== Filter quality report ===");
+        println!("Raw column:      {}", self.column_raw);
+        println!("Filtered column: {}", self.column_filtered);
+        println!("Roughness 1st:   {:.6}", self.roughness_ratio_1st);
+        println!("Roughness 2nd:   {:.6}", self.roughness_ratio_2nd);
+        println!("RMSE:            {:.6}", self.rmse);
+        println!("NRMSE:           {:.6}", self.normalized_rmse);
+        println!("Correlation:     {:.6}", self.correlation);
+    }
+}
+
+pub fn first_difference(x: &Array1<f64>) -> Array1<f64> {
+    if x.len() < 2 {
+        return Array1::zeros(0);
+    }
+
+    let mut out = Array1::<f64>::zeros(x.len() - 1);
+
+    for i in 0..x.len() - 1 {
+        out[i] = x[i + 1] - x[i];
+    }
+
+    out
+}
+
+pub fn second_difference(x: &Array1<f64>) -> Array1<f64> {
+    first_difference(&first_difference(x))
+}
+
+pub fn array_mean(x: &Array1<f64>) -> f64 {
+    x.sum() / x.len() as f64
+}
+
+pub fn array_variance(x: &Array1<f64>) -> f64 {
+    let mean = array_mean(x);
+    x.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / x.len() as f64
+}
+
+pub fn array_std_dev(x: &Array1<f64>) -> f64 {
+    array_variance(x).sqrt()
+}
+
+pub fn rmse_array(x: &Array1<f64>, y: &Array1<f64>) -> Result<f64, TGADomainError> {
+    if x.len() != y.len() {
+        return Err(TGADomainError::InvalidOperation(
+            "RMSE requires arrays with equal length".into(),
+        ));
+    }
+
+    if x.is_empty() {
+        return Err(TGADomainError::InvalidOperation(
+            "RMSE requires non-empty arrays".into(),
+        ));
+    }
+
+    let mse = x
+        .iter()
+        .zip(y.iter())
+        .map(|(&a, &b)| (a - b).powi(2))
+        .sum::<f64>()
+        / x.len() as f64;
+
+    Ok(mse.sqrt())
+}
+
+pub fn pearson_array(x: &Array1<f64>, y: &Array1<f64>) -> Result<f64, TGADomainError> {
+    if x.len() != y.len() {
+        return Err(TGADomainError::InvalidOperation(
+            "Pearson correlation requires arrays with equal length".into(),
+        ));
+    }
+
+    if x.len() < 2 {
+        return Err(TGADomainError::InvalidOperation(
+            "Pearson correlation requires at least two points".into(),
+        ));
+    }
+
+    let data = {
+        let mut arr = Array2::<f64>::zeros((x.len(), 2));
+
+        for i in 0..x.len() {
+            arr[[i, 0]] = x[i];
+            arr[[i, 1]] = y[i];
+        }
+
+        arr
+    };
+
+    let corr = data
+        .t()
+        .pearson_correlation()
+        .map_err(|e| TGADomainError::InvalidOperation(format!("Correlation failed: {:?}", e)))?;
+
+    Ok(corr[[0, 1]])
+}
+
+pub fn filter_quality_from_arrays(
+    raw: &Array1<f64>,
+    filtered: &Array1<f64>,
+    raw_name: &str,
+    filtered_name: &str,
+) -> Result<FilterQualityReport, TGADomainError> {
+    if raw.len() != filtered.len() {
+        return Err(TGADomainError::InvalidOperation(
+            "Filter quality requires arrays with equal length".into(),
+        ));
+    }
+
+    if raw.len() < 3 {
+        return Err(TGADomainError::InvalidOperation(
+            "Filter quality requires at least three points".into(),
+        ));
+    }
+
+    let d1_raw = first_difference(raw);
+    let d1_filtered = first_difference(filtered);
+
+    let d2_raw = second_difference(raw);
+    let d2_filtered = second_difference(filtered);
+
+    let std_d1_raw = array_std_dev(&d1_raw);
+    let std_d2_raw = array_std_dev(&d2_raw);
+
+    if std_d1_raw <= 0.0 || std_d2_raw <= 0.0 {
+        return Err(TGADomainError::InvalidOperation(
+            "Raw curve has zero roughness; ratios are undefined".into(),
+        ));
+    }
+
+    let rmse = rmse_array(raw, filtered)?;
+
+    let std_raw = array_std_dev(raw);
+    if std_raw <= 0.0 {
+        return Err(TGADomainError::InvalidOperation(
+            "Raw curve has zero standard deviation; normalized RMSE is undefined".into(),
+        ));
+    }
+
+    Ok(FilterQualityReport {
+        column_raw: raw_name.into(),
+        column_filtered: filtered_name.into(),
+
+        roughness_ratio_1st: array_std_dev(&d1_filtered) / std_d1_raw,
+        roughness_ratio_2nd: array_std_dev(&d2_filtered) / std_d2_raw,
+
+        rmse,
+        normalized_rmse: rmse / std_raw,
+
+        correlation: pearson_array(raw, filtered)?,
+    })
+}
+
+impl TGADataset {
+    pub fn filter_quality_report(
+        &self,
+        raw_col: &str,
+        filtered_col: &str,
+    ) -> Result<FilterQualityReport, TGADomainError> {
+        let raw = self.column_as_array1(raw_col)?;
+        let filtered = self.column_as_array1(filtered_col)?;
+
+        filter_quality_from_arrays(&raw, &filtered, raw_col, filtered_col)
+    }
+}
 //=================================================================
 // TESTS
 //=================================================================
@@ -590,5 +825,34 @@ mod tests {
             .compute_statistics(&["mass", "temperature"], true)
             .unwrap();
         stats.pretty_print(); // Should not panic
+    }
+
+    #[test]
+    fn test_filter_quality_report_synthetic() {
+        let n = 1000;
+
+        let raw = Array1::from_vec(
+            (0..n)
+                .map(|i| {
+                    let x = i as f64 * 0.01;
+                    x.sin() + 0.1 * (50.0 * x).sin()
+                })
+                .collect(),
+        );
+
+        let filtered = Array1::from_vec(
+            (0..n)
+                .map(|i| {
+                    let x = i as f64 * 0.01;
+                    x.sin()
+                })
+                .collect(),
+        );
+
+        let report = filter_quality_from_arrays(&raw, &filtered, "raw", "filtered").unwrap();
+
+        assert!(report.roughness_ratio_1st < 1.0);
+        assert!(report.roughness_ratio_2nd < 1.0);
+        assert!(report.correlation > 0.9);
     }
 }

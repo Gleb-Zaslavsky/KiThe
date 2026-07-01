@@ -61,14 +61,14 @@ pub fn kin_examples(kintask: usize) {
             // collecting reaction data for library name lib
             let lib = "NUIG";
 
-            kin_instance.open_json_files(lib);
+            let _ = kin_instance.open_json_files(lib);
             // veiew all reactions in library
-            kin_instance.print_all_reactions();
+            let _ = kin_instance.print_all_reactions();
 
             let reaction1 = kin_instance.search_reactdata_by_reaction_id("1");
             println!("reaction1: {:?}", reaction1);
             // search reactions by substances
-            kin_instance.search_reaction_by_reagents_and_products(vec!["CO".to_string()]);
+            let _ = kin_instance.search_reaction_by_reagents_and_products(vec!["CO".to_string()]);
             println!(
                 "reactions where CO is product: {:?}",
                 kin_instance.FoundReactionsByProducts
@@ -86,11 +86,13 @@ pub fn kin_examples(kintask: usize) {
                 "NUIG".to_string(),
             );
 
-            let (mechanism, reactants, vec_of_reactions) = mech_search.mechfinder_api();
-
-            println!("mechanism (reaction ID's) : {:?}", mechanism);
-            println!("reactants: {:?}", reactants);
-            println!("reaction data: {:?}", vec_of_reactions);
+            let mech_result = mech_search.mechfinder_api();
+            println!("mechanism result: {:?}", mech_result);
+            if let Ok((mechanism, reactants, vec_of_reactions)) = mech_result {
+                println!("mechanism (reaction ID's) : {:?}", mechanism);
+                println!("reactants: {:?}", reactants);
+                println!("reaction data: {:?}", vec_of_reactions);
+            }
             println!(
                 "vector of ReactionData structs with parsed data: {:#?}",
                 mech_search.reactdata
@@ -105,8 +107,8 @@ pub fn kin_examples(kintask: usize) {
             // it means we want reactions from Cantera sub-librarie from number 1 to number 10
             kd.set_reactions_from_shortcut_range("C1..C10".to_string());
             // searching for reactions in data base
-            kd.get_reactions_from_shortcuts();
-            kd.kinetic_main(); // parsing reaction data into structures and stoichometric calculations under one hood
+            let _ = kd.get_reactions_from_shortcuts();
+            let _ = kd.kinetic_main(); // parsing reaction data into structures and stoichometric calculations under one hood
             kd.pretty_print_kindata();
             // kd.pretty_print_kindata_verbose();
         }
@@ -116,8 +118,8 @@ pub fn kin_examples(kintask: usize) {
             let mut kd = KinData::new();
             let task_substances = vec!["O".to_string(), "NH3".to_string(), "NO".to_string()];
             let task_library = "NUIG".to_string();
-            kd.construct_mechanism(task_substances, task_library);
-            kd.kinetic_main(); // parsing reaction data into structures and stoichometric calculations under one hood
+            let _ = kd.construct_mechanism(task_substances, task_library);
+            let _ = kd.kinetic_main(); // parsing reaction data into structures and stoichometric calculations under one hood
             kd.pretty_print_kindata();
             println!("vector of reactions \n\n {:#?}", kd.vec_of_equations);
             println!("vector of substances \n\n {:#?}", kd.substances);

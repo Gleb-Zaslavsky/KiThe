@@ -169,7 +169,7 @@ impl TGASeries {
     ) -> Result<(), TGADomainError> {
         let dataset = result.to_tga_dataset()?;
         let exp = TGAExperiment::new(dataset).with_id(id);
-        self.push(exp);
+        self.push(exp)?;
         self.rebuild_index();
         info!("Isoconversional method results added!");
         Ok(())
@@ -220,8 +220,12 @@ mod tests {
         let d1 = crate::Kinetics::experimental_kinetics::one_experiment_dataset::TGADataset::create_from_synthetic_data(&v1).unwrap();
         let d2 = crate::Kinetics::experimental_kinetics::one_experiment_dataset::TGADataset::create_from_synthetic_data(&v2).unwrap();
 
-        series.push(TGAExperiment::new(d1).with_id("exp_1"));
-        series.push(TGAExperiment::new(d2).with_id("exp_2"));
+        series
+            .push(TGAExperiment::new(d1).with_id("exp_1"))
+            .unwrap();
+        series
+            .push(TGAExperiment::new(d2).with_id("exp_2"))
+            .unwrap();
         series
     }
 

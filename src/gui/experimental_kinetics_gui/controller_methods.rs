@@ -1,8 +1,10 @@
 //! Controller code for Kinetic Methods menu and sub-windows.
 //!
-//! Each menu item opens a dedicated popup window that currently contains a placeholder
-//! for future implementation.
+//! Each menu item opens a dedicated popup window for a kinetic-analysis workflow.
 
+use crate::Kinetics::experimental_kinetics::fitting::{
+    FitColumnRequest, FitColumnResult, FittingModelName,
+};
 use crate::Kinetics::experimental_kinetics::kinetic_methods::KineticMethod;
 use crate::Kinetics::experimental_kinetics::kinetic_methods::Kissinger::Kissinger;
 use crate::Kinetics::experimental_kinetics::kinetic_methods::combined::CombinedKineticAnalysis;
@@ -45,6 +47,17 @@ pub struct KineticMethodsWindowState {
     pub combined_result_r2: Option<f64>,
     pub criado_master_curve_open: bool,
     pub fit_model_open: bool,
+    pub fit_model_experiment_id: String,
+    pub fit_model_x_col: String,
+    pub fit_model_y_col: String,
+    pub fit_model_output_col: String,
+    pub fit_model_model: FittingModelName,
+    pub fit_model_polynomial_degree: usize,
+    pub fit_model_initial_guess: String,
+    pub fit_model_tolerance: f64,
+    pub fit_model_max_iter: usize,
+    pub fit_model_status: String,
+    pub fit_model_result: Option<FitColumnResult>,
     pub sublimation_check_open: bool,
     pub sublimation_status: String,
     pub sublimation_mean_ea_kj: Option<f64>,
@@ -84,6 +97,17 @@ impl Default for KineticMethodsWindowState {
             combined_result_r2: None,
             criado_master_curve_open: false,
             fit_model_open: false,
+            fit_model_experiment_id: String::new(),
+            fit_model_x_col: String::new(),
+            fit_model_y_col: String::new(),
+            fit_model_output_col: String::new(),
+            fit_model_model: FittingModelName::DecExp,
+            fit_model_polynomial_degree: 2,
+            fit_model_initial_guess: String::new(),
+            fit_model_tolerance: 1e-6,
+            fit_model_max_iter: 300,
+            fit_model_status: String::new(),
+            fit_model_result: None,
             sublimation_check_open: false,
             sublimation_status: String::new(),
             sublimation_mean_ea_kj: None,
@@ -585,6 +609,304 @@ impl KineticMethods {
 
         Ok(())
     }
+
+    /// Show the column-fitting window.
+    pub fn show_fit_model_window(
+        ui: &mut egui::Ui,
+        model: &mut PlotModel,
+        state: &mut KineticMethodsWindowState,
+    ) -> Result<(), TGAGUIError> {
+        if !state.fit_model_open {
+            return Ok(());
+        }
+
+        egui::Window::new("Fit Model")
+            .open(&mut state.fit_model_open)
+            .default_size([620.0, 430.0])
+            .show(ui.ctx(), |ui| {
+                ui.vertical(|ui| {
+                    let exp_ids = model.list_of_experiments();
+                    if state.fit_model_experiment_id.is_empty()
+                        || !exp_ids
+                            .iter()
+                            .any(|id| id == &state.fit_model_experiment_id)
+                    {
+                        state.fit_model_experiment_id =
+                            exp_ids.first().cloned().unwrap_or_default();
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.label("Experiment:");
+                        egui::ComboBox::from_id_salt("fit_model_experiment")
+                            .selected_text(if state.fit_model_experiment_id.is_empty() {
+                                "-"
+                            } else {
+                                &state.fit_model_experiment_id
+                            })
+                            .show_ui(ui, |ui| {
+                                for id in &exp_ids {
+                                    ui.selectable_value(
+                                        &mut state.fit_model_experiment_id,
+                                        id.clone(),
+                                        id,
+                                    );
+                                }
+                            });
+                    });
+
+                    let columns = if state.fit_model_experiment_id.is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        model.list_of_columns(&state.fit_model_experiment_id)
+                    };
+
+                    match columns {
+                        Ok(columns) => {
+                            if state.fit_model_x_col.is_empty()
+                                || !columns.iter().any(|col| col == &state.fit_model_x_col)
+                            {
+                                state.fit_model_x_col = columns
+                                    .iter()
+                                    .find(|c| c.as_str() == "time")
+                                    .cloned()
+                                    .or_else(|| columns.first().cloned())
+                                    .unwrap_or_default();
+                            }
+                            if state.fit_model_y_col.is_empty()
+                                || !columns.iter().any(|col| col == &state.fit_model_y_col)
+                            {
+                                state.fit_model_y_col = columns
+                                    .iter()
+                                    .find(|c| c.as_str() == "mass")
+                                    .cloned()
+                                    .or_else(|| {
+                                        columns
+                                            .iter()
+                                            .find(|c| c.as_str() != state.fit_model_x_col)
+                                            .cloned()
+                                    })
+                                    .or_else(|| columns.first().cloned())
+                                    .unwrap_or_default();
+                            }
+
+                            ui.horizontal(|ui| {
+                                ui.label("X:");
+                                egui::ComboBox::from_id_salt("fit_model_x")
+                                    .selected_text(if state.fit_model_x_col.is_empty() {
+                                        "-"
+                                    } else {
+                                        &state.fit_model_x_col
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        for col in &columns {
+                                            ui.selectable_value(
+                                                &mut state.fit_model_x_col,
+                                                col.clone(),
+                                                col,
+                                            );
+                                        }
+                                    });
+
+                                ui.label("Y:");
+                                egui::ComboBox::from_id_salt("fit_model_y")
+                                    .selected_text(if state.fit_model_y_col.is_empty() {
+                                        "-"
+                                    } else {
+                                        &state.fit_model_y_col
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        for col in &columns {
+                                            ui.selectable_value(
+                                                &mut state.fit_model_y_col,
+                                                col.clone(),
+                                                col,
+                                            );
+                                        }
+                                    });
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Model:");
+                                egui::ComboBox::from_id_salt("fit_model_kind")
+                                    .selected_text(state.fit_model_model.display_name())
+                                    .show_ui(ui, |ui| {
+                                        for fit_model in FittingModelName::all_for_gui() {
+                                            let changed = ui
+                                                .selectable_value(
+                                                    &mut state.fit_model_model,
+                                                    fit_model,
+                                                    fit_model.display_name(),
+                                                )
+                                                .changed();
+                                            if changed {
+                                                if let Some(n) = fit_model.polynomial_degree() {
+                                                    state.fit_model_polynomial_degree = n;
+                                                }
+                                            }
+                                        }
+                                    });
+                            });
+
+                            if state.fit_model_model.polynomial_degree().is_some() {
+                                ui.horizontal(|ui| {
+                                    ui.label("Polynomial degree:");
+                                    let changed = ui
+                                        .add(
+                                            egui::DragValue::new(
+                                                &mut state.fit_model_polynomial_degree,
+                                            )
+                                            .speed(1.0)
+                                            .range(1..=12),
+                                        )
+                                        .changed();
+                                    if changed
+                                        || state.fit_model_model.polynomial_degree()
+                                            != Some(state.fit_model_polynomial_degree)
+                                    {
+                                        state.fit_model_model = FittingModelName::Polynom {
+                                            n: state.fit_model_polynomial_degree,
+                                        };
+                                    }
+                                });
+                            }
+
+                            ui.horizontal(|ui| {
+                                ui.label("Formula:");
+                                ui.monospace(state.fit_model_model.equation_str());
+                            });
+
+                            egui::CollapsingHeader::new("Model equations")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    egui::Grid::new("fit_model_equation_table")
+                                        .striped(true)
+                                        .show(ui, |ui| {
+                                            ui.strong("Model");
+                                            ui.strong("Formula");
+                                            ui.end_row();
+
+                                            for mut fit_model in FittingModelName::all_for_gui() {
+                                                if fit_model.polynomial_degree().is_some() {
+                                                    fit_model = FittingModelName::Polynom {
+                                                        n: state.fit_model_polynomial_degree,
+                                                    };
+                                                }
+                                                ui.label(fit_model.display_name());
+                                                ui.monospace(fit_model.equation_str());
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Output column:");
+                                ui.text_edit_singleline(&mut state.fit_model_output_col);
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Tolerance:");
+                                ui.add(
+                                    egui::DragValue::new(&mut state.fit_model_tolerance)
+                                        .speed(1e-7)
+                                        .range(1e-12..=1e-1),
+                                );
+                                ui.label("Max iter:");
+                                ui.add(
+                                    egui::DragValue::new(&mut state.fit_model_max_iter)
+                                        .speed(10.0)
+                                        .range(1..=100_000),
+                                );
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Initial guess:");
+                                ui.text_edit_singleline(&mut state.fit_model_initial_guess);
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Status:");
+                                ui.label(&state.fit_model_status);
+                            });
+
+                            ui.add_space(8.0);
+                            if ui.button("Fit").clicked() {
+                                let status = (|| -> Result<String, TGAGUIError> {
+                                    if state.fit_model_experiment_id.is_empty()
+                                        || state.fit_model_x_col.is_empty()
+                                        || state.fit_model_y_col.is_empty()
+                                    {
+                                        return Err(TGAGUIError::BindingError(
+                                            "Choose experiment, X and Y columns first.".to_string(),
+                                        ));
+                                    }
+
+                                    let mut request = FitColumnRequest::new(
+                                        state.fit_model_experiment_id.clone(),
+                                        state.fit_model_x_col.clone(),
+                                        state.fit_model_y_col.clone(),
+                                        state.fit_model_model,
+                                    )
+                                    .with_tolerance(state.fit_model_tolerance)
+                                    .with_max_iterations(state.fit_model_max_iter);
+
+                                    let output = state.fit_model_output_col.trim();
+                                    if !output.is_empty() {
+                                        request = request.with_output_col(output.to_string());
+                                    }
+
+                                    if let Some(initial_guess) =
+                                        parse_fit_initial_guess(&state.fit_model_initial_guess)?
+                                    {
+                                        request = request.with_initial_guess(initial_guess);
+                                    }
+
+                                    let result = model.fit_column_and_plot(request)?;
+                                    let output_col = result.output_col.clone();
+                                    state.fit_model_result = Some(result);
+                                    Ok(format!("Done. Added '{}'.", output_col))
+                                })();
+
+                                state.fit_model_status = match status {
+                                    Ok(msg) => msg,
+                                    Err(err) => format!("Error: {:?}", err),
+                                };
+                            }
+
+                            if let Some(result) = &state.fit_model_result {
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label("Backend:");
+                                    ui.label(&result.method);
+                                    ui.label("R2:");
+                                    ui.label(format!("{:.6}", result.r2));
+                                    ui.label("Output:");
+                                    ui.label(&result.output_col);
+                                });
+
+                                egui::Grid::new("fit_model_coefficients")
+                                    .striped(true)
+                                    .show(ui, |ui| {
+                                        ui.label("Coefficient");
+                                        ui.label("Value");
+                                        ui.end_row();
+                                        for (name, value) in &result.coefficients {
+                                            ui.label(name);
+                                            ui.label(format!("{:.8e}", value));
+                                            ui.end_row();
+                                        }
+                                    });
+                            }
+                        }
+                        Err(err) => {
+                            ui.label(format!("Cannot read columns: {:?}", err));
+                        }
+                    }
+                });
+            });
+
+        Ok(())
+    }
+
     //==============================================================================================
     // END OF KINETIC METHODS WINDOWS
     //==============================================================================================
@@ -601,6 +923,7 @@ impl KineticMethods {
         Self::show_kissinger_window(ui, model, state)?;
         Self::show_combined_kinetics_window(ui, model, state)?;
         Self::show_sublimation_window(ui, model, state)?;
+        Self::show_fit_model_window(ui, model, state)?;
 
         if state.criado_master_curve_open {
             egui::Window::new("Criado Master Curve")
@@ -611,15 +934,29 @@ impl KineticMethods {
                 });
         }
 
-        if state.fit_model_open {
-            egui::Window::new("Fit Model")
-                .open(&mut state.fit_model_open)
-                .default_size([480.0, 320.0])
-                .show(ui.ctx(), |ui| {
-                    ui.label("TODO: Implement model fitting.");
-                });
-        }
-
         Ok(())
     }
+}
+
+fn parse_fit_initial_guess(raw: &str) -> Result<Option<Vec<f64>>, TGAGUIError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+
+    let mut values = Vec::new();
+    for token in raw
+        .split(|ch: char| ch == ',' || ch == ';' || ch.is_whitespace())
+        .filter(|token| !token.trim().is_empty())
+    {
+        let value = token.trim().parse::<f64>().map_err(|err| {
+            TGAGUIError::BindingError(format!(
+                "Cannot parse initial guess value '{}': {}",
+                token, err
+            ))
+        })?;
+        values.push(value);
+    }
+
+    Ok(Some(values))
 }

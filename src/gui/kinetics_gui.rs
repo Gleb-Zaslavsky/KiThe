@@ -157,8 +157,8 @@ impl KineticsApp {
     /// - App is initialized
     /// - User switches to a different library via dropdown
     fn load_library_reactions(&mut self) {
-        self.kinetic_data.open_json_files(&self.selected_library);
-        self.kinetic_data.print_all_reactions();
+        let _ = self.kinetic_data.open_json_files(&self.selected_library);
+        let _ = self.kinetic_data.print_all_reactions();
         self.selected_reaction_data = None;
         self.selected_equation = None;
         self.reaction_cache.clear();
@@ -187,11 +187,12 @@ impl KineticsApp {
         }
 
         // Parse and cache if not found
-        let (_, reaction_value) = self.kinetic_data.search_reaction_by_equation(equation);
-        if let Ok(reaction_data) = serde_json::from_value::<ReactionData>(reaction_value) {
-            self.reaction_cache
-                .insert(equation.to_string(), reaction_data.clone());
-            self.selected_reaction_data = Some(reaction_data);
+        if let Ok((_, reaction_value)) = self.kinetic_data.search_reaction_by_equation(equation) {
+            if let Ok(reaction_data) = serde_json::from_value::<ReactionData>(reaction_value) {
+                self.reaction_cache
+                    .insert(equation.to_string(), reaction_data.clone());
+                self.selected_reaction_data = Some(reaction_data);
+            }
         }
     }
 
@@ -497,8 +498,9 @@ impl KineticsApp {
                             if ui.button("Taking all reactions from mechanism").clicked() {
                                 let reaction_values: Vec<serde_json::Value> =
                                     self.kinetic_data.LibKineticData.values().cloned().collect();
-                                let (parsed_reactions, _) = parse_kinetic_data_vec(reaction_values);
-                                self.added_reactions.extend(parsed_reactions);
+                                if let Ok((parsed_reactions, _)) = parse_kinetic_data_vec(reaction_values) {
+                                    self.added_reactions.extend(parsed_reactions);
+                                }
                                 println!(
                                     "Added {} reactions from mechanism {}",
                                     self.kinetic_data.LibKineticData.len(),
@@ -644,7 +646,9 @@ mod tests {
 
         let reaction_values: Vec<serde_json::Value> =
             app.kinetic_data.LibKineticData.values().cloned().collect();
-        let (parsed_reactions, _) = parse_kinetic_data_vec(reaction_values);
+        let parsed_reactions = parse_kinetic_data_vec(reaction_values)
+            .map(|(parsed_reactions, _)| parsed_reactions)
+            .unwrap_or_default();
 
         let initial_count = app.added_reactions.len();
         app.added_reactions.extend(parsed_reactions.clone());

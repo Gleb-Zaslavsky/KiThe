@@ -89,6 +89,7 @@
 
 //mod mechfinder_api;
 use crate::Kinetics::kinetics_lib_api::KineticData;
+use crate::Kinetics::error::{KineticsError, KineticsResult};
 use crate::Kinetics::mechfinder_api::{
     Mechanism_search, ReactionData, ReactionKinetics, parse_kinetic_data_vec,
 };
@@ -211,7 +212,7 @@ impl KinData {
 
     /// decifer vector of shortcuts to full reaction names and store them in map {'library':"id of reaction"} and Vec<("library, reaction_id")>
     /// then open kinetic libraries, get reaction info corresponding to the guven shortcuts and store it in structure
-    pub fn get_reactions_from_shortcuts(&mut self) -> () {
+    pub fn get_reactions_from_shortcuts(&mut self) -> KineticsResult<()> {
         if let Some(shortcut_reactions) = &self.shortcut_reactions {
             let vec: Vec<&str> = shortcut_reactions.iter().map(|s| s.as_str()).collect();
             self.map_of_reactions = Some(decipher_vector_of_shortcuts(vec.clone()));
@@ -223,10 +224,10 @@ impl KinData {
             let mut kin_instance = KineticData::new();
             for (lib, reaction_id) in vec_of_pairs.iter() {
                 // collecting reaction data for each library name
-                kin_instance.open_json_files(lib);
+                kin_instance.open_json_files(lib)?;
 
                 let reaction_data_Value =
-                    kin_instance.search_reactdata_by_reaction_id(&reaction_id);
+                    kin_instance.search_reactdata_by_reaction_id(&reaction_id)?;
 
                 vec_of_reaction_values.push(reaction_data_Value);
 
@@ -234,14 +235,20 @@ impl KinData {
                 // lets parse it to map of structures
             }
             self.vec_of_reaction_Values = Some(vec_of_reaction_values);
+            Ok(())
         } else {
             warn!("KinData::create_map_of_reactions: shortcut_reactions is None");
+            Ok(())
         }
     }
     ///construct reaction mechanism
-    pub fn construct_mechanism(&mut self, task_substances: Vec<String>, task_library: String) {
+    pub fn construct_mechanism(
+        &mut self,
+        task_substances: Vec<String>,
+        task_library: String,
+    ) -> KineticsResult<()> {
         let mut found_mech = Mechanism_search::new(task_substances, task_library.clone());
-        found_mech.mechfinder_api();
+        found_mech.mechfinder_api()?;
         self.vec_of_equations = found_mech.vec_of_reactions;
 
         //  println!("mechanism found: reaction data: \n {:?}", found_mech.reactdata);
@@ -264,6 +271,7 @@ impl KinData {
         );
         self.shortcut_reactions = Some(full_addres);
         self.substances = found_mech.reactants;
+        Ok(())
     }
     /////////////////////////////////REACTIONS MANIPULATIONS//////////////////////////////////////
     /// add manually reaction data as serde Value
@@ -320,16 +328,18 @@ impl KinData {
 
     /////////////////////////////////COMPUTING AND PARSING REACTION DATA///////////////////////////////////////////
     /// parse serde Values with kinetic info into structs and store it in KinData structure
-    pub fn reactdata_parsing(&mut self) -> () {
+    pub fn reactdata_parsing(&mut self) -> KineticsResult<()> {
         if let Some(vec_of_reaction_values) = &self.vec_of_reaction_Values {
             let (vec_ReactionData, vec_of_equations) =
-                parse_kinetic_data_vec(vec_of_reaction_values.clone());
+                parse_kinetic_data_vec(vec_of_reaction_values.clone())?;
             //  info!("map_of_reaction_data: {:?}", &vec_of_reaction_data);
             //   info!("vec_of_equations: {:?}", &vec_of_equations);
             self.vec_of_reaction_data = Some(vec_ReactionData);
             self.vec_of_equations = vec_of_equations;
+            Ok(())
         } else {
             warn!("KinData::reactdata_from_shortcuts: map_of_reactions is None");
+            Ok(())
         }
     }
     // find reaction equations in reactdata
@@ -363,9 +373,10 @@ impl KinData {
         self.stecheodata = StoichAnalyzer_instance;
     }
     /// parsing reaction data into structures and stoichometric calculations under one hood
-    pub fn kinetic_main(&mut self) {
-        self.reactdata_parsing();
+    pub fn kinetic_main(&mut self) -> KineticsResult<()> {
+        self.reactdata_parsing()?;
         self.analyze_reactions();
+        Ok(())
     }
     ///////////////////////////INPUT/OUTPUT/////////////////////////////////////////////////////////
     /// save the chosen reaction kinetic data to json
@@ -443,41 +454,49 @@ impl KinData {
                 writeln!(file, "\nKINETICS")?;
             }
         }
-        let mut hashmap_to_save: HashMap<String, HashMap<String, Value>> = HashMap::new();
-        // if got info of pairs - use pairs
-        if let Some(pairs) = self.vec_of_pairs.clone() {
-            for (i, (library_name, reaction_name)) in pairs.iter().enumerate() {
-                let reactdata = self.vec_of_reaction_Values.as_ref().unwrap()[i].clone();
-                if hashmap_to_save.contains_key(library_name) {
-                    hashmap_to_save
-                        .get_mut(library_name)
-                        .unwrap()
-                        .insert(reaction_name.clone(), reactdata);
-                } else {
-                    hashmap_to_save.insert(
-                        library_name.clone(),
-                        HashMap::from([(reaction_name.clone(), reactdata)]),
-                    );
+        let reaction_values = self.vec_of_reaction_Values.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no reaction values available",
+            )
+        })?;
+        let entries: Vec<(String, String)> = if let Some(pairs) = self.vec_of_pairs.clone() {
+            pairs
+        } else if let Some(map_of_reactions) = self.map_of_reactions.clone() {
+            let mut libraries: Vec<(String, Vec<String>)> = map_of_reactions.into_iter().collect();
+            libraries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut flattened = Vec::new();
+            for (library_name, mut reactions) in libraries {
+                reactions.sort();
+                for reaction_id in reactions {
+                    flattened.push((library_name.clone(), reaction_id));
                 }
             }
-        } else if let Some(map_of_reactions) = self.map_of_reactions.clone() {
-            for (i, (library_name, reactions)) in map_of_reactions.iter().enumerate() {
-                let reactdata = self.vec_of_reaction_Values.as_ref().unwrap()[i].clone();
-                for reaction_id in reactions.iter() {
-                    if hashmap_to_save.contains_key(library_name) {
-                        hashmap_to_save
-                            .get_mut(library_name)
-                            .unwrap()
-                            .insert(reaction_id.clone(), reactdata.clone());
-                    } else {
-                        hashmap_to_save.insert(
-                            library_name.clone(),
-                            HashMap::from([(reaction_id.clone(), reactdata.clone())]),
-                        );
-                    }
-                } // 
-            } // for library_name
-        } //else if 
+            flattened
+        } else {
+            Vec::new()
+        };
+        if !entries.is_empty() && entries.len() != reaction_values.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "reaction metadata length mismatch",
+            ));
+        }
+
+        let mut hashmap_to_save: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        for ((library_name, reaction_name), reactdata) in entries.into_iter().zip(reaction_values.iter().cloned()) {
+            if hashmap_to_save.contains_key(&library_name) {
+                hashmap_to_save
+                    .get_mut(&library_name)
+                    .unwrap()
+                    .insert(reaction_name, reactdata);
+            } else {
+                hashmap_to_save.insert(
+                    library_name,
+                    HashMap::from([(reaction_name, reactdata)]),
+                );
+            }
+        }
 
         writeln!(file, "{}", serde_json::to_string_pretty(&hashmap_to_save)?)?;
 
@@ -684,11 +703,11 @@ impl KinData {
         pres: Option<f64>,
         concentrations: Option<HashMap<String, f64>>,
         save_rearranged: Option<bool>,
-    ) -> Result<Vec<f64>, std::io::Error> {
+    ) -> KineticsResult<Vec<f64>> {
         if let Some(reactions) = &self.vec_of_reaction_data {
             let mut vec_of_K_const = Vec::new();
             for reaction in reactions.iter() {
-                let K_vec = reaction.K_const_for_T_range(T0, Tend, n, pres, concentrations.clone());
+                let K_vec = reaction.K_const_for_T_range(T0, Tend, n, pres, concentrations.clone())?;
 
                 let max_K = K_vec.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
                 vec_of_K_const.push(*max_K);
@@ -711,9 +730,8 @@ impl KinData {
             Ok(vec_of_K_const)
         } else {
             warn!("no reaction data available");
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "no vector of reaction data available",
+            Err(KineticsError::InvalidReactionData(
+                "no vector of reaction data available".to_string(),
             ))
         }
     }

@@ -8,6 +8,7 @@ use crate::gui::experimental_kinetics_gui::settings::Settings;
 use log::info;
 use simplelog::{Config, LevelFilter, SimpleLogger};
 
+use std::collections::HashMap;
 use std::sync::Once;
 use tabled::{Table, Tabled};
 /// Константа, определяющая диапазон отображения по умолчанию (от 0 до 10)
@@ -72,7 +73,7 @@ pub struct PlotCurve {
     pub shown: bool,
 }
 
-/// Типовые цвета для кривых графика / Typical preset colours for plot curves
+/// Типовые цвета для кривых графика
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Colours {
     Blue,
@@ -89,7 +90,7 @@ pub enum Colours {
 }
 
 impl Colours {
-    /// Преобразует вариант enum в RGB-массив / Converts enum variant into RGB array
+    /// Преобразует вариант enum в RGB-массив
     pub fn as_rgb(self) -> [u8; 3] {
         match self {
             Colours::Blue => [0, 0, 255],
@@ -174,12 +175,12 @@ impl PlotCurve {
         self.plot_short_name.clone()
     }
 
-    /// Устанавливает цвет по enum-варианту / Sets curve colour using enum variant
+    /// Устанавливает цвет по enum-варианту
     pub fn set_colour(&mut self, colour: Colours) {
         self.color = colour.as_rgb();
     }
 
-    /// Устанавливает цвет напрямую по RGB / Sets curve colour directly from RGB
+    /// Устанавливает цвет напрямую по RGB
     pub fn set_colour_rgb(&mut self, rgb: [u8; 3]) {
         self.color = rgb;
     }
@@ -221,6 +222,8 @@ pub struct PlotModel {
     pub reset_view_requested: bool,
     pub plot_recreation_required: bool,
     pub message: String,
+    pub active_mass_sources: HashMap<String, String>,
+    pub active_temperature_sources: HashMap<String, String>,
 }
 
 impl Default for PlotModel {
@@ -244,6 +247,99 @@ impl Default for PlotModel {
             reset_view_requested: false,
             plot_recreation_required: false,
             message: String::new(),
+            active_mass_sources: HashMap::new(),
+            active_temperature_sources: HashMap::new(),
+        }
+    }
+}
+
+impl PlotModel {
+    fn active_source_for_experiment(
+        &self,
+        id: &str,
+        map: &HashMap<String, String>,
+        fallback: impl FnOnce(&TGASeries, &str) -> Result<String, TGAGUIError>,
+    ) -> Result<String, TGAGUIError> {
+        if let Some(col) = map.get(id) {
+            if self
+                .series
+                .list_of_columns(id)
+                .map(|cols| cols.iter().any(|existing| existing == col))
+                .unwrap_or(false)
+            {
+                return Ok(col.clone());
+            }
+        }
+        fallback(&self.series, id)
+    }
+
+    pub fn active_mass_source_for_experiment(&self, id: &str) -> Result<String, TGAGUIError> {
+        self.active_source_for_experiment(id, &self.active_mass_sources, |series, exp_id| {
+            series.get_mass_col(exp_id).map_err(Into::into)
+        })
+    }
+
+    pub fn active_temperature_source_for_experiment(
+        &self,
+        id: &str,
+    ) -> Result<String, TGAGUIError> {
+        self.active_source_for_experiment(id, &self.active_temperature_sources, |series, exp_id| {
+            series.get_temperature_col(exp_id).map_err(Into::into)
+        })
+    }
+
+    pub fn set_active_mass_source_for_experiment(&mut self, id: &str, col: &str) {
+        self.active_mass_sources
+            .insert(id.to_string(), col.to_string());
+    }
+
+    pub fn set_active_temperature_source_for_experiment(&mut self, id: &str, col: &str) {
+        self.active_temperature_sources
+            .insert(id.to_string(), col.to_string());
+    }
+
+    pub fn clear_active_sources_for_experiment(&mut self, id: &str) {
+        self.active_mass_sources.remove(id);
+        self.active_temperature_sources.remove(id);
+    }
+
+    pub fn remap_active_sources_for_experiment(&mut self, id: &str, old_col: &str, new_col: &str) {
+        if self
+            .active_mass_sources
+            .get(id)
+            .map(|col| col == old_col)
+            .unwrap_or(false)
+        {
+            self.active_mass_sources
+                .insert(id.to_string(), new_col.to_string());
+        }
+        if self
+            .active_temperature_sources
+            .get(id)
+            .map(|col| col == old_col)
+            .unwrap_or(false)
+        {
+            self.active_temperature_sources
+                .insert(id.to_string(), new_col.to_string());
+        }
+    }
+
+    pub fn clear_active_sources_if_column_dropped(&mut self, id: &str, col: &str) {
+        if self
+            .active_mass_sources
+            .get(id)
+            .map(|current| current == col)
+            .unwrap_or(false)
+        {
+            self.active_mass_sources.remove(id);
+        }
+        if self
+            .active_temperature_sources
+            .get(id)
+            .map(|current| current == col)
+            .unwrap_or(false)
+        {
+            self.active_temperature_sources.remove(id);
         }
     }
 }

@@ -61,11 +61,14 @@ Dimensionless Transformations:
 
 */
 
+use crate::Kinetics::experimental_kinetics::column_provenance::{
+    ColumnProvenance, ColumnTransformKind,
+};
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     AffectedColumns, ColumnMeta, ColumnNature, ColumnOrigin, ColumnTypes, TGADataset,
-    TGADomainError, UnaryOp, Unit,
+    TGADomainError, TimeMonotonicityReport, TimeOrderViolation, UnaryOp, Unit,
 };
-use log::info;
+use log::{info, warn};
 use polars::error::PolarsResult;
 use polars::prelude::DataType;
 use polars::prelude::Expr;
@@ -255,9 +258,15 @@ impl TGADataset {
     //================================================================
     // BASIC TRANSFORMATIONS: COLUMN CUT AND FILTER
     /// Добавление новой колонки с заданным выражением
-    pub fn with_column_expr(mut self, meta: ColumnMeta, expr: Expr) -> Self {
+    pub fn with_column_expr(
+        mut self,
+        meta: ColumnMeta,
+        expr: Expr,
+    ) -> Result<Self, TGADomainError> {
         println!("\n column: {} ", meta.name);
         let col_name = meta.name.clone();
+        self.ensure_column_name_is_available(&col_name)?;
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(expr.clone().alias(&meta.name));
         self.schema.columns.insert(meta.name.clone(), meta);
 
@@ -269,7 +278,7 @@ impl TGADataset {
             true,
         );
 
-        self
+        Ok(self)
     }
     /// Works on all columns at once
     ///✔ Zero copy
@@ -278,6 +287,7 @@ impl TGADataset {
     pub fn filter_rows(mut self, predicate: Expr) -> Self {
         let pred_clone = predicate.clone();
         let frame = self.frame.clone().filter(predicate);
+        self.push_undo_snapshot();
 
         self.log_operation(
             "filter_rows",
@@ -367,6 +377,7 @@ impl TGADataset {
         let length = total.saturating_sub(left + right);
         let sliced_df = df.slice(left as i64, length);
         let frame = sliced_df.lazy();
+        self.push_undo_snapshot();
 
         self.log_operation(
             "trim_edges",
@@ -404,6 +415,7 @@ impl TGADataset {
             right = right.max(r);
         }
 
+        self.push_undo_snapshot();
         self.frame = self
             .frame
             .slice(left as i64, (df.height() - left - right) as u32);
@@ -443,6 +455,7 @@ impl TGADataset {
             }
         }
 
+        self.push_undo_snapshot();
         self.frame = self
             .frame
             .slice(left as i64, (df.height() - left - right) as u32);
@@ -466,6 +479,10 @@ impl TGADataset {
     pub fn rename_column(mut self, old: &str, new: &str) -> Result<Self, TGADomainError> {
         println!("\n column: {} ", old);
         println!("\n column: {} ", new);
+        if old != new {
+            self.ensure_column_name_is_available(new)?;
+        }
+        self.push_undo_snapshot();
         self.frame = self.frame.rename([old], [new], false);
 
         if self.schema.time == Some(old.to_string()) {
@@ -517,6 +534,7 @@ impl TGADataset {
             .filter(|&name| name != col_name)
             .map(|name| col(name.as_str()))
             .collect();
+        self.push_undo_snapshot();
         self.frame = self.frame.select(remaining_cols);
 
         self.schema.columns.remove(col_name);
@@ -544,16 +562,17 @@ impl TGADataset {
     //======================================================================
     // UNIT TRANSFORMATIONS
     /// Это не просто offset, это семантическая операция, меняющая единицы.
-    pub fn celsius_to_kelvin(mut self) -> Self {
+    pub fn celsius_to_kelvin_inplace(&mut self) {
         let col_name = self.schema.temperature.as_ref().unwrap().clone();
         println!("\n column: {} ", col_name);
         if let Some(meta) = self.schema.columns.get(&col_name) {
             if meta.unit == Unit::Kelvin {
-                return self;
+                return;
             }
         }
         let expr = (col(&col_name) + lit(273.15)).alias(&col_name);
-        self.frame = self.frame.with_column(expr.clone());
+        self.push_undo_snapshot();
+        self.frame = self.frame.clone().with_column(expr.clone());
 
         if let Some(meta) = self.schema.columns.get_mut(&col_name) {
             meta.unit = Unit::Kelvin;
@@ -567,15 +586,23 @@ impl TGADataset {
             format!("Converted {} from Celsius to Kelvin", col_name),
             true,
         );
-
+    }
+    pub fn celsius_to_kelvin(mut self) -> Self {
+        self.celsius_to_kelvin_inplace();
         self
     }
     /// Делим время на 3600 и меняем единицы на Hour
-    pub fn seconds_to_hours(mut self) -> Self {
+    pub fn seconds_to_hours_inplace(&mut self) {
         let col_name = self.schema.time.as_ref().unwrap().clone();
         println!("\n column: {} ", col_name);
+        if let Some(meta) = self.schema.columns.get(&col_name) {
+            if meta.unit == Unit::Hour {
+                return;
+            }
+        }
         let expr = (col(&col_name) / lit(3600.0)).alias(&col_name);
-        self.frame = self.frame.with_column(expr.clone());
+        self.push_undo_snapshot();
+        self.frame = self.frame.clone().with_column(expr.clone());
 
         if let Some(meta) = self.schema.columns.get_mut(&col_name) {
             meta.unit = Unit::Hour;
@@ -589,7 +616,9 @@ impl TGADataset {
             format!("Converted {} from seconds to hours", col_name),
             true,
         );
-
+    }
+    pub fn seconds_to_hours(mut self) -> Self {
+        self.seconds_to_hours_inplace();
         self
     }
     //=======================================================================
@@ -604,6 +633,7 @@ impl TGADataset {
             .iter()
             .map(|&c| (col(c) * lit(factor)).alias(c))
             .collect();
+        self.push_undo_snapshot();
 
         self.frame = self.frame.with_columns(exprs);
 
@@ -625,7 +655,8 @@ impl TGADataset {
     }
     pub fn scale_column(mut self, colmn: &str, factor: f64) -> Self {
         let expr = (col(colmn) * lit(factor)).alias(colmn);
-        self.frame = self.frame.with_column(expr.clone());
+        self.push_undo_snapshot();
+        self.frame = self.frame.clone().with_column(expr.clone());
 
         self.log_operation(
             "scale_column",
@@ -657,7 +688,8 @@ impl TGADataset {
         .then(col(target_col) * lit(factor))
         .otherwise(col(target_col))
         .alias(target_col);
-        self.frame = self.frame.with_column(expr.clone());
+        self.push_undo_snapshot();
+        self.frame = self.frame.clone().with_column(expr.clone());
 
         self.log_operation(
             "scale_column_in_range_by_reference",
@@ -680,7 +712,7 @@ impl TGADataset {
 
     //
     /// Сдвиг времени к нулю
-    pub fn move_time_to_zero(mut self) -> Result<Self, TGADomainError> {
+    pub fn move_time_to_zero_inplace(&mut self) -> Result<(), TGADomainError> {
         let time = self
             .schema
             .time
@@ -695,15 +727,20 @@ impl TGADataset {
         })?;
 
         // Offset the time column by -t0
-        self = self.offset_column(&time, -t0);
+        self.offset_column_inplace(&time, -t0);
+        Ok(())
+    }
+    pub fn move_time_to_zero(mut self) -> Result<Self, TGADomainError> {
+        self.move_time_to_zero_inplace()?;
         Ok(self)
     }
     /// прибавление константы ко всем значениям в колонке
     /// Смещение значений в колонке на константу
-    pub fn offset_column(mut self, colmn: &str, offset: f64) -> Self {
+    pub fn offset_column_inplace(&mut self, colmn: &str, offset: f64) {
         println!("\n column: {} ", colmn);
         let expr = (col(colmn) + lit(offset)).alias(colmn);
-        self.frame = self.frame.with_column(expr.clone());
+        self.push_undo_snapshot();
+        self.frame = self.frame.clone().with_column(expr.clone());
 
         self.log_operation(
             "offset_column",
@@ -712,7 +749,9 @@ impl TGADataset {
             format!("Offset column {} by {}", colmn, offset),
             true,
         );
-
+    }
+    pub fn offset_column(mut self, colmn: &str, offset: f64) -> Self {
+        self.offset_column_inplace(colmn, offset);
         self
     }
 
@@ -735,6 +774,7 @@ impl TGADataset {
         .then(col(target_col) + lit(offset))
         .otherwise(col(target_col))
         .alias(target_col);
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(expr.clone());
 
         self.log_operation(
@@ -762,6 +802,7 @@ impl TGADataset {
         println!("\n column: {} ", col_name);
 
         let expr = (col(&col_name) * lit(k) + lit(b)).alias(&col_name);
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(expr.clone());
 
         if let Some(meta) = self.schema.columns.get_mut(&col_name) {
@@ -792,24 +833,71 @@ impl TGADataset {
         let k = k.clone();
         let b = b.clone();
         let func = Box::new(move |u| k.clone() * u + b.clone());
-        self = self.unary_column_op(
-            &src,
-            new_col,
-            UnaryOp {
-                func: func,
-                output_unit: Unit::Milligram,
-                domain_check: None,
-            },
-        )?;
-        self.schema.mass = Some(new_col.into());
+        self.push_undo_snapshot();
+        if new_col == src {
+            let expr = (col(&src) * lit(k) + lit(b)).alias(&src);
+            self.frame = self.frame.with_column(expr.clone());
+            if let Some(meta) = self.schema.columns.get_mut(&src) {
+                meta.unit = Unit::Milligram;
+                meta.origin = ColumnOrigin::PolarsDerived;
+                meta.provenance.push_step(
+                    vec![src.clone()],
+                    src.clone(),
+                    ColumnTransformKind::Manual {
+                        operation: "calibrate_mass".to_string(),
+                        details: Some(format!("{}*x + {}", k, b)),
+                    },
+                    None,
+                    Some(self.history_of_operations.vector_of_operations.len()),
+                    true,
+                );
+            } else {
+                self.schema.columns.insert(
+                    src.clone(),
+                    ColumnMeta::new(
+                        src.clone(),
+                        Unit::Milligram,
+                        ColumnOrigin::PolarsDerived,
+                        ColumnNature::Mass,
+                        ColumnProvenance::manual(
+                            src.clone(),
+                            "calibrate_mass",
+                            Some(format!("{}*x + {}", k, b)),
+                        ),
+                    ),
+                );
+            }
+            self.log_operation(
+                "calibrate_mass",
+                AffectedColumns::Specific(vec![src.clone()]),
+                Some(expr),
+                format!("Calibrated mass in-place on {}: {}*x + {}", src, k, b),
+                true,
+            );
+        } else {
+            self.suppress_next_undo_snapshot();
+            let updated = self.unary_column_op(
+                &src,
+                new_col,
+                UnaryOp {
+                    func: func,
+                    output_unit: Unit::Milligram,
+                    domain_check: None,
+                },
+            );
+            self = updated?;
+            self.schema.mass = Some(new_col.into());
 
-        self.log_operation(
-            "calibrate_mass",
-            AffectedColumns::Specific(vec![new_col.to_string()]),
-            None,
-            format!("Calibrated mass to new column {}: {}*x + {}", new_col, k, b),
-            true,
-        );
+            self.log_operation(
+                "calibrate_mass",
+                AffectedColumns::Specific(vec![new_col.to_string()]),
+                None,
+                format!("Calibrated mass to new column {}: {}*x + {}", new_col, k, b),
+                true,
+            );
+        }
+
+        self.schema.mass = Some(new_col.into());
 
         Ok(self)
     }
@@ -822,6 +910,7 @@ impl TGADataset {
         op: UnaryOp,
     ) -> Result<Self, TGADomainError> {
         println!("\n column: {} ", src);
+        self.ensure_column_name_is_available(dst)?;
         if let Some(check) = op.domain_check {
             check(&self, src)?;
         }
@@ -833,6 +922,7 @@ impl TGADataset {
         let out_unit = op.output_unit;
         let func = op.func;
 
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(
             col(src)
                 .map(
@@ -848,12 +938,17 @@ impl TGADataset {
 
         self.schema.columns.insert(
             dst.to_string(),
-            ColumnMeta {
-                name: dst.to_string(),
-                unit: out_unit,
-                origin: ColumnOrigin::PolarsDerived,
-                nature: ColumnNature::Unknown,
-            },
+            ColumnMeta::new(
+                dst.to_string(),
+                out_unit,
+                ColumnOrigin::PolarsDerived,
+                ColumnNature::Unknown,
+                ColumnProvenance::manual(
+                    dst,
+                    "unary_column_op",
+                    Some(format!("applied unary op from {}", src)),
+                ),
+            ),
         );
 
         self.log_operation(
@@ -890,6 +985,8 @@ impl TGADataset {
             Ok(Field::new(field.name().clone(), DataType::Float64))
         };
         let new_name = format!("exp_{}", col_name);
+        self.ensure_column_name_is_available(&new_name)?;
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(
             col(col_name)
                 .map(
@@ -901,12 +998,17 @@ impl TGADataset {
 
         self.schema.columns.insert(
             new_name.clone(),
-            ColumnMeta {
-                name: new_name.clone(),
-                unit: Unit::Dimensionless,
-                origin: ColumnOrigin::PolarsDerived,
-                nature: ColumnNature::Unknown,
-            },
+            ColumnMeta::new(
+                new_name.clone(),
+                Unit::Dimensionless,
+                ColumnOrigin::PolarsDerived,
+                ColumnNature::Unknown,
+                ColumnProvenance::manual(
+                    new_name.clone(),
+                    "exp_column",
+                    Some(format!("exp({})", col_name)),
+                ),
+            ),
         );
 
         self.log_operation(
@@ -968,6 +1070,8 @@ impl TGADataset {
             Ok(Field::new(field.name().clone(), DataType::Float64))
         };
         let new_name = format!("ln_{}", col_name);
+        self.ensure_column_name_is_available(&new_name)?;
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(
             col(col_name)
                 .map(
@@ -979,12 +1083,17 @@ impl TGADataset {
 
         self.schema.columns.insert(
             new_name.clone(),
-            ColumnMeta {
-                name: new_name.clone(),
-                unit: Unit::Dimensionless,
-                origin: ColumnOrigin::PolarsDerived,
-                nature: ColumnNature::Unknown,
-            },
+            ColumnMeta::new(
+                new_name.clone(),
+                Unit::Dimensionless,
+                ColumnOrigin::PolarsDerived,
+                ColumnNature::Unknown,
+                ColumnProvenance::manual(
+                    new_name.clone(),
+                    "ln_column",
+                    Some(format!("ln({})", col_name)),
+                ),
+            ),
         );
 
         self.log_operation(
@@ -1055,6 +1164,9 @@ impl TGADataset {
     /// dimensionless mass
     /// Получение безразмерной массы
     pub fn derive_dimensionless_mass(mut self, from: f64, to: f64) -> Result<Self, TGADomainError> {
+        if !from.is_finite() || !to.is_finite() || to <= from {
+            return Err(TGADomainError::InvalidConversionRange);
+        }
         let mass_col = self.schema.mass.as_ref().unwrap().clone();
         println!("\n column: {} ", mass_col);
         let time_col = self.schema.time.as_ref().unwrap().clone();
@@ -1063,18 +1175,25 @@ impl TGADataset {
         let m0 = self.mean_on_interval(&mass_col, &time_col, from, to)?;
 
         let new_name = "alpha".to_string();
+        self.ensure_column_name_is_available(&new_name)?;
 
         let expr = (col(&mass_col) / lit(m0)).alias(&new_name);
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(expr.clone());
 
         self.schema.columns.insert(
             new_name.clone(),
-            ColumnMeta {
-                name: new_name.clone(),
-                unit: Unit::Dimensionless,
-                origin: ColumnOrigin::PolarsDerived,
-                nature: ColumnNature::DimensionlessMass,
-            },
+            ColumnMeta::new(
+                new_name.clone(),
+                Unit::Dimensionless,
+                ColumnOrigin::PolarsDerived,
+                ColumnNature::DimensionlessMass,
+                ColumnProvenance::manual(
+                    new_name.clone(),
+                    "derive_dimensionless_mass",
+                    Some(format!("derived from {}", mass_col)),
+                ),
+            ),
         );
 
         self.schema.alpha = Some("alpha".to_string());
@@ -1093,7 +1212,85 @@ impl TGADataset {
         Ok(self)
     }
 
-    /// Безразмерная масса
+    /// Relative mass `alpha = m / m0`.
+    /// Получение безразмерной массы.
+    /// Relative mass `alpha = m / m0` from an explicitly chosen source column.
+    /// The legacy wrapper below still uses the bound mass column.
+    pub fn dimensionless_mass_from_column(
+        mut self,
+        source_col: &str,
+        from: f64,
+        to: f64,
+        new_col: &str,
+    ) -> Result<Self, TGADomainError> {
+        let start = Instant::now();
+        let mass = source_col.to_string();
+        println!("\n column: {} ", mass);
+
+        let time = self
+            .schema
+            .time
+            .as_ref()
+            .ok_or(TGADomainError::TimeNotBound)?
+            .clone();
+        println!("\n column: {} ", time);
+
+        let m0 = self
+            .frame
+            .clone()
+            .filter(col(&time).gt_eq(lit(from)).and(col(&time).lt_eq(lit(to))))
+            .select([col(&mass).mean()])
+            .collect()?
+            .column(&mass)?
+            .f64()?
+            .get(0)
+            .unwrap();
+
+        if m0 <= 0.0 {
+            return Err(TGADomainError::InvalidReferenceMass);
+        }
+
+        self.ensure_column_name_is_available(new_col)?;
+        let expr = (col(&mass) / lit(m0)).alias(new_col);
+        self.push_undo_snapshot();
+        self.frame = self.frame.with_column(expr.clone());
+
+        self.schema.columns.insert(
+            new_col.into(),
+            ColumnMeta::new(
+                new_col.to_string(),
+                Unit::Dimensionless,
+                ColumnOrigin::PolarsDerived,
+                ColumnNature::DimensionlessMass,
+                ColumnProvenance::manual(
+                    new_col,
+                    "dimensionless_mass_from_column",
+                    Some(format!("derived from {}", mass)),
+                ),
+            ),
+        );
+
+        self.schema.alpha = Some(new_col.to_string());
+
+        self.log_operation(
+            "derive_dimensionless_mass",
+            AffectedColumns::Specific(vec!["alpha".to_string()]),
+            Some(expr),
+            format!(
+                "Computed dimensionless mass alpha from {} (m0={:.4})",
+                mass, m0
+            ),
+            true,
+        );
+
+        info!(
+            "dimensionless_mass_from_column completed in {:?} ms",
+            start.elapsed().as_millis()
+        );
+
+        Ok(self)
+    }
+
     pub fn dimensionless_mass(
         mut self,
         from: f64,
@@ -1131,18 +1328,25 @@ impl TGADataset {
         if m0 <= 0.0 {
             return Err(TGADomainError::InvalidReferenceMass);
         }
+        self.ensure_column_name_is_available(new_col)?;
 
         let expr = (col(&mass) / lit(m0)).alias(new_col);
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(expr.clone());
 
         self.schema.columns.insert(
             new_col.into(),
-            ColumnMeta {
-                name: new_col.into(),
-                unit: Unit::Dimensionless,
-                origin: ColumnOrigin::PolarsDerived,
-                nature: ColumnNature::DimensionlessMass,
-            },
+            ColumnMeta::new(
+                new_col.to_string(),
+                Unit::Dimensionless,
+                ColumnOrigin::PolarsDerived,
+                ColumnNature::DimensionlessMass,
+                ColumnProvenance::manual(
+                    new_col,
+                    "dimensionless_mass",
+                    Some(format!("derived from {}", mass)),
+                ),
+            ),
         );
         self.schema.alpha = Some(new_col.to_string());
 
@@ -1162,25 +1366,33 @@ impl TGADataset {
         );
         Ok(self)
     }
-    /// conversion = 1 - dimensionless_mass
-    /// Получение конверсии
-    pub fn derive_conversion(mut self) -> Self {
+    /// Conversion `eta = 1 - alpha`.
+    /// Получение конверсии.
+    pub fn derive_conversion(mut self) -> Result<Self, TGADomainError> {
         let src = "alpha";
         println!("\n column: {} ", src);
         let dst = "eta";
+        self.ensure_column_name_is_available(dst)?;
 
         let expr = (lit(1.0) - col(src)).alias(dst);
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(expr.clone());
 
         self.schema.columns.insert(
             dst.into(),
-            ColumnMeta {
-                name: dst.into(),
-                unit: Unit::Dimensionless,
-                origin: ColumnOrigin::PolarsDerived,
-                nature: ColumnNature::Conversion,
-            },
+            ColumnMeta::new(
+                dst.to_string(),
+                Unit::Dimensionless,
+                ColumnOrigin::PolarsDerived,
+                ColumnNature::Conversion,
+                ColumnProvenance::manual(
+                    dst,
+                    "derive_conversion",
+                    Some("eta = 1 - alpha".to_string()),
+                ),
+            ),
         );
+        self.schema.eta = Some(dst.to_string());
 
         self.log_operation(
             "derive_conversion",
@@ -1190,12 +1402,92 @@ impl TGADataset {
             true,
         );
 
-        self
+        Ok(self)
+    }
+
+    /// Conversion `eta = 1 - m/m0` from an explicitly chosen source column.
+    pub fn conversion_from_column(
+        mut self,
+        source_col: &str,
+        from: f64,
+        to: f64,
+        new_col: &str,
+    ) -> Result<Self, TGADomainError> {
+        let start = Instant::now();
+        if !from.is_finite() || !to.is_finite() || to <= from {
+            return Err(TGADomainError::InvalidConversionRange);
+        }
+        let mass = source_col.to_string();
+        println!("\n column: {} ", mass);
+
+        let time = self
+            .schema
+            .time
+            .as_ref()
+            .ok_or(TGADomainError::TimeNotBound)?
+            .clone();
+        println!("\n column: {} ", time);
+
+        let m0 = self
+            .frame
+            .clone()
+            .filter(col(&time).gt_eq(lit(from)).and(col(&time).lt_eq(lit(to))))
+            .select([col(&mass).mean()])
+            .collect()?
+            .column(&mass)?
+            .f64()?
+            .get(0)
+            .ok_or(TGADomainError::InvalidReferenceMass)?;
+
+        if m0 <= 0.0 {
+            return Err(TGADomainError::InvalidReferenceMass);
+        }
+
+        self.ensure_column_name_is_available(new_col)?;
+
+        let expr = (lit(1.0) - col(&mass) / lit(m0)).alias(new_col);
+        self.push_undo_snapshot();
+        self.frame = self.frame.with_column(expr.clone());
+
+        self.schema.columns.insert(
+            new_col.into(),
+            ColumnMeta::new(
+                new_col.to_string(),
+                Unit::Dimensionless,
+                ColumnOrigin::PolarsDerived,
+                ColumnNature::Conversion,
+                ColumnProvenance::manual(
+                    new_col,
+                    "conversion",
+                    Some(format!("derived from {}", mass)),
+                ),
+            ),
+        );
+        self.schema.eta = Some(new_col.to_string());
+
+        self.log_operation(
+            "conversion",
+            AffectedColumns::Specific(vec![new_col.to_string()]),
+            Some(expr),
+            format!(
+                "Computed conversion {} from {} (m0={:.4})",
+                new_col, mass, m0
+            ),
+            true,
+        );
+        info!(
+            "conversion_from_column completed in {:?} ms",
+            start.elapsed().as_millis()
+        );
+        Ok(self)
     }
 
     /// Конверсия
     pub fn conversion(mut self, from: f64, to: f64, new_col: &str) -> Result<Self, TGADomainError> {
         let start = Instant::now();
+        if !from.is_finite() || !to.is_finite() || to <= from {
+            return Err(TGADomainError::InvalidConversionRange);
+        }
         let mass = self
             .schema
             .mass
@@ -1228,16 +1520,22 @@ impl TGADataset {
         }
 
         let expr = (lit(1.0) - col(&mass) / lit(m0)).alias(new_col);
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(expr.clone());
 
         self.schema.columns.insert(
             new_col.into(),
-            ColumnMeta {
-                name: new_col.into(),
-                unit: Unit::Dimensionless,
-                origin: ColumnOrigin::PolarsDerived,
-                nature: ColumnNature::Conversion,
-            },
+            ColumnMeta::new(
+                new_col.to_string(),
+                Unit::Dimensionless,
+                ColumnOrigin::PolarsDerived,
+                ColumnNature::Conversion,
+                ColumnProvenance::manual(
+                    new_col,
+                    "conversion_with_m0",
+                    Some(format!("derived from {}", mass)),
+                ),
+            ),
         );
         self.schema.eta = Some(new_col.to_string());
 
@@ -1258,7 +1556,7 @@ impl TGADataset {
         Ok(self)
     }
 
-    /// Conversion with a fixed reference mass `m0`.
+    /// Conversion `eta = 1 - alpha` with a fixed reference mass `m0`.
     /// Useful for synthetic data where the true initial mass is known.
     pub fn conversion_with_m0(mut self, m0: f64, new_col: &str) -> Result<Self, TGADomainError> {
         let mass = self
@@ -1272,18 +1570,25 @@ impl TGADataset {
         if m0 <= 0.0 || !m0.is_finite() {
             return Err(TGADomainError::InvalidReferenceMass);
         }
+        self.ensure_column_name_is_available(new_col)?;
 
         let expr = (lit(1.0) - col(&mass) / lit(m0)).alias(new_col);
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(expr.clone());
 
         self.schema.columns.insert(
             new_col.into(),
-            ColumnMeta {
-                name: new_col.into(),
-                unit: Unit::Dimensionless,
-                origin: ColumnOrigin::PolarsDerived,
-                nature: ColumnNature::Conversion,
-            },
+            ColumnMeta::new(
+                new_col.to_string(),
+                Unit::Dimensionless,
+                ColumnOrigin::PolarsDerived,
+                ColumnNature::Conversion,
+                ColumnProvenance::manual(
+                    new_col,
+                    "conversion_with_m0",
+                    Some(format!("derived from {}", mass)),
+                ),
+            ),
         );
         self.schema.eta = Some(new_col.to_string());
 
@@ -1344,7 +1649,11 @@ impl TGADataset {
     /// Проверка отсутствия null значений
     /// Checks that time values are strictly increasing: t[i] > t[i-1].
     /// Returns each offending time value t[i] where monotonicity fails.
-    pub fn monotony_of_time_check(&self) -> Result<Vec<f64>, TGADomainError> {
+    /// Build a structured report for the currently bound time column.
+    ///
+    /// The report separates invalid values from ordering problems so the GUI
+    /// can render human-readable diagnostics instead of a bare `FAILED`.
+    pub fn time_monotonicity_report(&self) -> Result<TimeMonotonicityReport, TGADomainError> {
         let time_col = self
             .schema
             .time
@@ -1354,26 +1663,147 @@ impl TGADataset {
         let series = df.column(time_col)?;
         let time = series.f64()?;
 
-        let mut failures = Vec::new();
-        let mut prev: Option<f64> = None;
+        let mut null_indices = Vec::new();
+        let mut nan_indices = Vec::new();
+        let mut infinite_indices = Vec::new();
+        let mut duplicate_pairs = Vec::new();
+        let mut decreasing_pairs = Vec::new();
+        let mut prev_valid: Option<(usize, f64)> = None;
 
         for (idx, maybe_t) in time.into_iter().enumerate() {
-            let t = maybe_t.ok_or_else(|| {
-                TGADomainError::InvalidOperation(format!(
-                    "Time monotony check failed: null at index {} in column '{}'",
-                    idx, time_col
-                ))
-            })?;
-
-            if let Some(prev_t) = prev {
-                if t <= prev_t {
-                    failures.push(t);
+            match maybe_t {
+                None => null_indices.push(idx),
+                Some(t) if t.is_nan() => nan_indices.push(idx),
+                Some(t) if !t.is_finite() => infinite_indices.push(idx),
+                Some(t) => {
+                    if let Some((_, prev_t)) = prev_valid {
+                        if t == prev_t {
+                            duplicate_pairs.push(TimeOrderViolation {
+                                index: idx,
+                                previous: prev_t,
+                                current: t,
+                            });
+                        } else if t < prev_t {
+                            decreasing_pairs.push(TimeOrderViolation {
+                                index: idx,
+                                previous: prev_t,
+                                current: t,
+                            });
+                        }
+                    }
+                    prev_valid = Some((idx, t));
                 }
             }
-            prev = Some(t);
         }
 
-        Ok(failures)
+        let is_strictly_increasing = null_indices.is_empty()
+            && nan_indices.is_empty()
+            && infinite_indices.is_empty()
+            && duplicate_pairs.is_empty()
+            && decreasing_pairs.is_empty();
+        let sortable_without_data_loss =
+            null_indices.is_empty() && nan_indices.is_empty() && infinite_indices.is_empty();
+
+        Ok(TimeMonotonicityReport {
+            time_column: time_col.clone(),
+            len: time.len(),
+            null_indices,
+            nan_indices,
+            infinite_indices,
+            duplicate_pairs,
+            decreasing_pairs,
+            is_strictly_increasing,
+            sortable_without_data_loss,
+        })
+    }
+
+    pub fn monotony_of_time_check(&self) -> Result<Vec<f64>, TGADomainError> {
+        let report = self.time_monotonicity_report()?;
+        if report.has_invalid_values() {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "Time monotony check failed for '{}' because it contains null/NaN/inf values",
+                report.time_column
+            )));
+        }
+
+        let mut failures: Vec<(usize, f64)> = report
+            .duplicate_pairs
+            .iter()
+            .map(|v| (v.index, v.current))
+            .chain(report.decreasing_pairs.iter().map(|v| (v.index, v.current)))
+            .collect();
+        failures.sort_by_key(|(idx, _)| *idx);
+        Ok(failures.into_iter().map(|(_, value)| value).collect())
+    }
+
+    /// Sort the entire dataset by the currently bound time column in place.
+    ///
+    /// This keeps row alignment intact: every column follows the same row
+    /// permutation, so the operation is safe for multi-column experiments.
+    pub fn sort_by_bound_time_inplace(&mut self) -> Result<(), TGADomainError> {
+        let time_col = self
+            .schema
+            .time
+            .as_ref()
+            .ok_or(TGADomainError::TimeNotBound)?
+            .clone();
+
+        let start = Instant::now();
+        let report = self.time_monotonicity_report()?;
+
+        if !report.sortable_without_data_loss {
+            let mut problems = Vec::new();
+            if !report.null_indices.is_empty() {
+                problems.push(format!("nulls at indices {:?}", report.null_indices));
+            }
+            if !report.nan_indices.is_empty() {
+                problems.push(format!("NaNs at indices {:?}", report.nan_indices));
+            }
+            if !report.infinite_indices.is_empty() {
+                problems.push(format!(
+                    "infinities at indices {:?}",
+                    report.infinite_indices
+                ));
+            }
+            warn!(
+                "Cannot sort by bound time column '{}' because it contains {}",
+                time_col,
+                problems.join(", ")
+            );
+            return Err(TGADomainError::InvalidOperation(format!(
+                "Cannot sort by time column '{}' because it contains {}",
+                time_col,
+                problems.join(", ")
+            )));
+        }
+
+        self.push_undo_snapshot();
+        self.frame = self
+            .frame
+            .clone()
+            .sort([time_col.as_str()], Default::default());
+        self.oneframeplot = None;
+        self.log_operation(
+            "sort_by_bound_time",
+            AffectedColumns::All,
+            None,
+            format!("Sorted all rows by bound time column '{}'", time_col),
+            true,
+        );
+        info!(
+            "Dataset sorted by bound time column '{}' in {} ms",
+            time_col,
+            start.elapsed().as_millis()
+        );
+        Ok(())
+    }
+
+    /// Sort the entire dataset by the currently bound time column.
+    ///
+    /// Convenience consuming wrapper around `sort_by_bound_time_inplace`.
+    pub fn sort_by_bound_time(mut self) -> Result<Self, TGADomainError> {
+        self.sort_by_bound_time_inplace()?;
+        Ok(self)
     }
 
     pub fn assert_no_nulls(self, operation: &str) -> Result<Self, TGADomainError> {

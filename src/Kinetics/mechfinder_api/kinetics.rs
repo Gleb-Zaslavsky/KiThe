@@ -63,7 +63,7 @@ impl FalloffStruct {
             low_rate,
             high_rate,
             eff,
-            troe: None,
+            troe,
         }
     }
     pub fn K_const(&self, Temp: f64, Concentrations: HashMap<String, f64>) -> f64 {
@@ -245,7 +245,7 @@ impl ThreeBodyStruct {
         let n = Expr::Const(n);
         let E = Expr::Const(E);
         let k0 = A * (T.clone()).pow(n);
-        let k = k0 * (E / (Rsym * T)).exp();
+        let k = k0 * (-E / (Rsym * T)).exp();
         // Calculate effective concentrations, e.g., by multiplying concentrations with coefficients from self.eff
         // Hashmap {substance: concentration}
         let eff = self.eff.clone();
@@ -469,6 +469,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use approx::assert_relative_eq;
+    use RustedSciThe::symbolic::symbolic_engine::Expr;
+
+    fn eval_expr(expr: &Expr) -> f64 {
+        match expr {
+            Expr::Const(value) => *value,
+            Expr::Add(lhs, rhs) => eval_expr(lhs) + eval_expr(rhs),
+            Expr::Sub(lhs, rhs) => eval_expr(lhs) - eval_expr(rhs),
+            Expr::Mul(lhs, rhs) => eval_expr(lhs) * eval_expr(rhs),
+            Expr::Div(lhs, rhs) => eval_expr(lhs) / eval_expr(rhs),
+            Expr::Pow(base, exp) => eval_expr(base).powf(eval_expr(exp)),
+            Expr::Exp(inner) => eval_expr(inner).exp(),
+            Expr::Ln(inner) => eval_expr(inner).ln(),
+            other => panic!("unexpected symbolic node: {:?}", other),
+        }
+    }
 
     #[test]
     fn test_elementary_reaction() {
@@ -481,6 +497,7 @@ mod tests {
 
     #[test]
     fn test_falloff_reaction() {
+        let troe = Some(vec![0.5, 300.0, 1000.0]);
         let falloff_reaction = FalloffStruct::new(
             vec![1.0, 2.0, 300.0],
             vec![10.0, 1.5, 400.0],
@@ -488,13 +505,14 @@ mod tests {
                 ("H2".to_string(), 2.0),
                 ("M".to_string(), 1.0),
             ])),
-            Some(vec![0.5, 300.0, 1000.0]),
+            troe.clone(),
         );
 
         let temp = 298.0; // 298K
         let concentrations = HashMap::from([("H2".to_string(), 2.0), ("M".to_string(), 1.0)]);
         let expected_k_const = falloff_reaction.K_const(temp, concentrations);
         assert!(expected_k_const > 0.0);
+        assert_eq!(falloff_reaction.troe, troe);
     }
     /*
     #[test]
@@ -524,5 +542,30 @@ mod tests {
         let concentrations = HashMap::from([("H2".to_string(), 2.0), ("M".to_string(), 1.0)]);
         let expected_k_const = threebody_reaction.K_const(temp, concentrations);
         assert!(expected_k_const > 0.0);
+    }
+
+    #[test]
+    fn test_threebody_symbolic_matches_numeric() {
+        let threebody_reaction = ThreeBodyStruct::new(
+            vec![1.0, 2.0, 300.0],
+            HashMap::from([("H2".to_string(), 2.0), ("M".to_string(), 1.0)]),
+        );
+
+        let temp = 298.0;
+        let concentrations = HashMap::from([
+            ("H2".to_string(), Expr::Const(2.0)),
+            ("M".to_string(), Expr::Const(1.0)),
+        ]);
+
+        let expected_k_const = threebody_reaction.K_const(
+            temp,
+            HashMap::from([("H2".to_string(), 2.0), ("M".to_string(), 1.0)]),
+        );
+        let symbolic = threebody_reaction
+            .K_expr(concentrations)
+            .set_variable("T", temp);
+        let symbolic_value = eval_expr(&symbolic);
+
+        assert_relative_eq!(symbolic_value, expected_k_const, epsilon = 1e-10);
     }
 }

@@ -14,6 +14,16 @@ mod tests {
     use std::fs;
     use tempfile::NamedTempFile;
     const R: f64 = 8.314;
+
+    fn parse_kinetics_document(
+        content: &str,
+    ) -> HashMap<String, HashMap<String, serde_json::Value>> {
+        let json_start = content
+            .find('{')
+            .expect("expected JSON payload in kinetics document");
+        serde_json::from_str(&content[json_start..]).expect("expected valid kinetics JSON")
+    }
+
     #[test]
     fn test_user_reactions_new() {
         let shortcut_reactions = Some(vec![
@@ -230,17 +240,83 @@ mod tests {
 
         let content = fs::read_to_string(file_path).unwrap();
         assert!(content.contains("KINETICS"));
-        assert!(content.contains("Library1"));
-        assert!(content.contains("Library2"));
-        assert!(content.contains("Reaction1"));
-        assert!(content.contains("Reaction2"));
-        assert!(content.contains("Reaction3"));
-        assert!(content.contains("value1"));
-        assert!(content.contains("value2"));
-        assert!(content.contains("value3"));
+        let saved = parse_kinetics_document(&content);
+        assert_eq!(
+            saved["Library1"]["Reaction1"],
+            json!({"data": "value1"})
+        );
+        assert_eq!(
+            saved["Library1"]["Reaction2"],
+            json!({"data": "value2"})
+        );
+        assert_eq!(
+            saved["Library2"]["Reaction3"],
+            json!({"data": "value3"})
+        );
 
         // Test with map_of_reactions
         kin_data.vec_of_pairs = None;
+        kin_data.map_of_reactions = Some(HashMap::from([
+            (
+                "Library3".to_string(),
+                vec!["Reaction4".to_string(), "Reaction5".to_string()],
+            ),
+            ("Library4".to_string(), vec!["Reaction6".to_string()]),
+        ]));
+        kin_data.vec_of_reaction_Values =
+            Some(vec![
+                json!({"data": "value4"}),
+                json!({"data": "value5"}),
+                json!({"data": "value6"}),
+            ]);
+
+        let temp_file = NamedTempFile::new().unwrap();
+        let file_path = temp_file.path().to_str().unwrap();
+
+        let result = kin_data.create_kinetics_document(file_path);
+        assert!(result.is_ok());
+
+        let content = fs::read_to_string(file_path).unwrap();
+        assert!(content.contains("KINETICS"));
+        let saved = parse_kinetics_document(&content);
+        assert_eq!(
+            saved["Library3"]["Reaction4"],
+            json!({"data": "value4"})
+        );
+        assert_eq!(
+            saved["Library3"]["Reaction5"],
+            json!({"data": "value5"})
+        );
+        assert_eq!(
+            saved["Library4"]["Reaction6"],
+            json!({"data": "value6"})
+        );
+
+        // Test with existing file and header
+        let temp_file = NamedTempFile::new().unwrap();
+        let file_path = temp_file.path().to_str().unwrap();
+        fs::write(file_path, "KINETICS\nSome existing content\n").unwrap();
+
+        let result = kin_data.create_kinetics_document(file_path);
+        assert!(result.is_ok());
+
+        let content = fs::read_to_string(file_path).unwrap();
+        assert_eq!(content.matches("KINETICS").count(), 1);
+        assert!(content.contains("Some existing content"));
+        let saved = parse_kinetics_document(&content);
+        assert_eq!(
+            saved["Library3"]["Reaction4"],
+            json!({"data": "value4"})
+        );
+        assert_eq!(
+            saved["Library4"]["Reaction6"],
+            json!({"data": "value6"})
+        );
+    }
+
+    #[test]
+    fn test_create_kinetics_document_rejects_length_mismatch() {
+        let mut kin_data = KinData::new();
         kin_data.map_of_reactions = Some(HashMap::from([
             (
                 "Library3".to_string(),
@@ -255,31 +331,11 @@ mod tests {
         let file_path = temp_file.path().to_str().unwrap();
 
         let result = kin_data.create_kinetics_document(file_path);
-        assert!(result.is_ok());
-
-        let content = fs::read_to_string(file_path).unwrap();
-        assert!(content.contains("KINETICS"));
-        assert!(content.contains("Library3"));
-        assert!(content.contains("Library4"));
-        assert!(content.contains("Reaction4"));
-        assert!(content.contains("Reaction5"));
-        assert!(content.contains("Reaction6"));
-        assert!(content.contains("value4"));
-        assert!(content.contains("value5"));
-
-        // Test with existing file and header
-        let temp_file = NamedTempFile::new().unwrap();
-        let file_path = temp_file.path().to_str().unwrap();
-        fs::write(file_path, "KINETICS\nSome existing content\n").unwrap();
-
-        let result = kin_data.create_kinetics_document(file_path);
-        assert!(result.is_ok());
-
-        let content = fs::read_to_string(file_path).unwrap();
-        assert_eq!(content.matches("KINETICS").count(), 1);
-        assert!(content.contains("Some existing content"));
-        assert!(content.contains("Library3"));
-        assert!(content.contains("Library4"));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]

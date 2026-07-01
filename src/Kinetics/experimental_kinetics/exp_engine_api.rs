@@ -1,9 +1,9 @@
-use crate::Kinetics::experimental_kinetics::LSQSplines::SolverKind;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     OneFramePlot, TGADataset, TGADomainError,
 };
-use crate::Kinetics::experimental_kinetics::splines::SplineKind;
-use log::info;
+use RustedSciThe::numerical::data_processing::LSQSplines::SolverKind;
+use RustedSciThe::numerical::data_processing::splines::SplineKind;
+use log::{info, warn};
 use std::time::Instant;
 #[derive(Clone, Debug)]
 pub struct ViewRange {
@@ -673,16 +673,52 @@ impl TGADataset {
     // the following methods are intended to be used in a chained manner for convenient data manipulation
 
     pub fn apply_golden_pipeline(
-        self,
+        mut self,
         config: GoldenPipelineConfig,
     ) -> Result<(Self, Vec<String>), TGADomainError> {
-        let vector_of_non_monotonic_points = self.monotony_of_time_check()?;
-        if vector_of_non_monotonic_points.len() > 0 {
-            return Err(TGADomainError::TimeNonMonotonic(format!(
-                "Non-monotonic points found at indices: {:?}",
-                vector_of_non_monotonic_points
-            )));
-        }
+        let time_col = self.get_time_col()?;
+        info!(
+            "Starting golden pipeline for time='{}', temp='{}', mass='{}'",
+            time_col,
+            self.get_temperature_col()?,
+            self.get_mass_col()?
+        );
+
+        let ds = match self.monotony_of_time_check() {
+            Ok(vector_of_non_monotonic_points) if vector_of_non_monotonic_points.is_empty() => {
+                info!(
+                    "Input time column '{}' is already strictly monotonic",
+                    time_col
+                );
+                self
+            }
+            Ok(vector_of_non_monotonic_points) => {
+                warn!(
+                    "Input time column '{}' is not strictly monotonic; repairing by sorting rows. Violations at values {:?}",
+                    time_col, vector_of_non_monotonic_points
+                );
+                self.sort_by_bound_time_inplace()?;
+                let remaining = self.monotony_of_time_check()?;
+                if !remaining.is_empty() {
+                    return Err(TGADomainError::TimeNonMonotonic(format!(
+                        "Time remained non-monotonic after sorting by '{}': {:?}",
+                        time_col, remaining
+                    )));
+                }
+                info!(
+                    "Input time column '{}' repaired by sorting before golden pipeline",
+                    time_col
+                );
+                self
+            }
+            Err(err) => {
+                warn!(
+                    "Input time monotonicity check failed for '{}': {:?}",
+                    time_col, err
+                );
+                return Err(err);
+            }
+        };
         let k = config.k;
         let b = config.b;
         let time_cut_before = config.time_cut_before;
@@ -698,13 +734,12 @@ impl TGADataset {
         let n_internal_points = config.spline_config.n_internal_points;
         let degree = config.spline_config.degree;
 
-        let initial_list_columns = self.list_of_columns();
+        let initial_list_columns = ds.list_of_columns();
 
-        let time_col = self.get_time_col()?;
-        let temp_col = self.get_temperature_col()?;
-        let mass_col = self.get_mass_col()?;
+        let temp_col = ds.get_temperature_col()?;
+        let mass_col = ds.get_mass_col()?;
 
-        let ds = self.calibrate_mass(k, b, &mass_col)?; // calibration
+        let ds = ds.calibrate_mass(k, b, &mass_col)?; // calibration
         // trim startup
         let ds = if let Some(time_cut_before) = time_cut_before {
             ds.cut_before_time(time_cut_before)
@@ -734,11 +769,28 @@ impl TGADataset {
                 n_internal_points,
                 SolverKind::Banded,
             )?
-            //.trim_null_edges()
+            .trim_null_edges()
             .derive_temperature_rate("dT/dt")?
             .derive_dalpha_dt("dalpha_dt")?
             .derive_deta_dt("deta_dt")?;
-        //.trim_null_edges();
+
+        match ds.monotony_of_time_check() {
+            Ok(vector_of_non_monotonic_points) if vector_of_non_monotonic_points.is_empty() => {
+                info!(
+                    "Golden pipeline output time '{}' is strictly monotonic after resampling and trim",
+                    time_col
+                );
+            }
+            Ok(vector_of_non_monotonic_points) => {
+                return Err(TGADomainError::TimeNonMonotonic(format!(
+                    "Non-monotonic points found after golden pipeline on '{}': {:?}",
+                    time_col, vector_of_non_monotonic_points
+                )));
+            }
+            Err(err) => {
+                return Err(err);
+            }
+        }
         let modifed_list_of_columns = ds.list_of_columns();
         let start = Instant::now();
         let new_columns = modifed_list_of_columns

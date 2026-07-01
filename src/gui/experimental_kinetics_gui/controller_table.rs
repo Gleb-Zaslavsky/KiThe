@@ -33,6 +33,7 @@ pub struct ColumnManagerState {
     /// Metadata editor window state
     metadata_window_open: bool,
     selected_experiment: Option<String>,
+    selected_column: Option<(String, String)>,
     comment_input: String,
     heating_rate_input: String,
     temperature_input: String,
@@ -67,6 +68,31 @@ impl ColumnManagerState {
                 exp_cache.insert(col_name, sampled_col.col);
             }
         }
+
+        let experiments = model.list_of_experiments();
+        self.cached_samples
+            .retain(|exp_id, _| experiments.contains(exp_id));
+
+        for exp_id in experiments {
+            let columns = model
+                .list_of_columns(&exp_id)
+                .map_err(|e| format!("{:?}", e))?;
+            let exp_cache = self
+                .cached_samples
+                .entry(exp_id.clone())
+                .or_insert_with(HashMap::new);
+
+            exp_cache.retain(|col_name, _| columns.contains(col_name));
+
+            for col_name in columns {
+                if !exp_cache.contains_key(&col_name) {
+                    let sampled_col = model
+                        .sample_column(&exp_id, &col_name, None, 50)
+                        .map_err(|e| format!("{:?}", e))?;
+                    exp_cache.insert(col_name, sampled_col);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -90,8 +116,11 @@ impl ColumnManagerState {
             if ui.button("Drop experiment").clicked() {
                 self.handle_drop_experiment(model);
             }
-            if ui.button("check time monotonity").clicked() {
+            if ui.button("Check time monotonicity").clicked() {
                 self.handle_check_time_monotonity(model);
+            }
+            if ui.button("Sort by time").clicked() {
+                self.handle_sort_by_time(model);
             }
         });
 
@@ -163,6 +192,14 @@ impl ColumnManagerState {
         }
         self.column_checkboxes
             .remove(&(exp_id.clone(), old_name.clone()));
+        if self
+            .selected_column
+            .as_ref()
+            .map(|(selected_exp, selected_col)| selected_exp == exp_id && selected_col == old_name)
+            .unwrap_or(false)
+        {
+            self.selected_column = Some((exp_id.clone(), self.new_column_name.trim().to_string()));
+        }
         self.system_message = "Column renamed successfully".to_string();
         self.new_column_name.clear();
     }
@@ -211,23 +248,115 @@ impl ColumnManagerState {
         let mut per_experiment_messages = Vec::new();
 
         for exp_id in selected_experiments {
-            match model.monotony_of_time_check_for_experiment(&exp_id) {
-                Ok(failures) if failures.is_empty() => {
-                    let msg = format!("Experiment '{}': time monotony OK", exp_id);
+            match model.time_monotonicity_report_for_experiment(&exp_id) {
+                Ok(report) if report.is_strictly_increasing => {
+                    let msg = format!(
+                        "Experiment '{}': time monotonicity OK for '{}'",
+                        exp_id, report.time_column
+                    );
                     println!("{}", msg);
                     per_experiment_messages.push(msg);
                 }
-                Ok(failures) => {
+                Ok(report) => {
+                    let mut details = Vec::new();
+                    if !report.null_indices.is_empty() {
+                        details.push(format!("nulls at {:?}", report.null_indices));
+                    }
+                    if !report.nan_indices.is_empty() {
+                        details.push(format!("NaNs at {:?}", report.nan_indices));
+                    }
+                    if !report.infinite_indices.is_empty() {
+                        details.push(format!("infinities at {:?}", report.infinite_indices));
+                    }
+                    if !report.duplicate_pairs.is_empty() {
+                        details.push(format!("duplicates at {:?}", report.duplicate_pairs));
+                    }
+                    if !report.decreasing_pairs.is_empty() {
+                        details.push(format!("decreasing at {:?}", report.decreasing_pairs));
+                    }
                     let msg = format!(
-                        "Experiment '{}': time monotony FAILED at t={:?}",
-                        exp_id, failures
+                        "Experiment '{}': time monotonicity FAILED for '{}' ({})",
+                        exp_id,
+                        report.time_column,
+                        details.join("; ")
                     );
                     println!("{}", msg);
                     per_experiment_messages.push(msg);
                 }
                 Err(e) => {
                     let msg = format!(
-                        "Experiment '{}': time monotony check error: {:?}",
+                        "Experiment '{}': time monotonicity check error: {:?}",
+                        exp_id, e
+                    );
+                    println!("{}", msg);
+                    per_experiment_messages.push(msg);
+                }
+            }
+        }
+
+        self.system_message = per_experiment_messages.join(" | ");
+    }
+
+    fn handle_sort_by_time(&mut self, model: &mut PlotModel) {
+        let mut selected_experiments: Vec<_> = self
+            .column_checkboxes
+            .iter()
+            .filter(|&(_, &checked)| checked)
+            .map(|((exp_id, _), _)| exp_id.clone())
+            .collect();
+
+        selected_experiments.sort();
+        selected_experiments.dedup();
+
+        if selected_experiments.is_empty() {
+            self.system_message =
+                "Select at least one experiment (via any column checkbox)".to_string();
+            println!("{}", self.system_message);
+            return;
+        }
+
+        let mut per_experiment_messages = Vec::new();
+
+        for exp_id in selected_experiments {
+            match model.time_monotonicity_report_for_experiment(&exp_id) {
+                Ok(report) if !report.sortable_without_data_loss => {
+                    let msg = format!(
+                        "Experiment '{}': cannot sort time column '{}' because it contains null/NaN/inf values",
+                        exp_id, report.time_column
+                    );
+                    println!("{}", msg);
+                    per_experiment_messages.push(msg);
+                }
+                Ok(report) if report.is_strictly_increasing => {
+                    let msg = format!("Experiment '{}': time already monotonic", exp_id);
+                    println!("{}", msg);
+                    per_experiment_messages.push(msg);
+                }
+                Ok(report) => match model.sort_experiment_by_time(&exp_id) {
+                    Ok(()) => {
+                        let msg = if !report.duplicate_pairs.is_empty() {
+                            format!(
+                                "Experiment '{}': sorted by time; duplicate time values remain in '{}'",
+                                exp_id, report.time_column
+                            )
+                        } else {
+                            format!(
+                                "Experiment '{}': sorted by time column '{}'",
+                                exp_id, report.time_column
+                            )
+                        };
+                        println!("{}", msg);
+                        per_experiment_messages.push(msg);
+                    }
+                    Err(e) => {
+                        let msg = format!("Experiment '{}': sort by time failed: {:?}", exp_id, e);
+                        println!("{}", msg);
+                        per_experiment_messages.push(msg);
+                    }
+                },
+                Err(e) => {
+                    let msg = format!(
+                        "Experiment '{}': time monotonicity report error: {:?}",
                         exp_id, e
                     );
                     println!("{}", msg);
@@ -258,59 +387,135 @@ impl ColumnManagerState {
             }
         }
 
-        egui::ScrollArea::both().show(ui, |ui| {
-            TableBuilder::new(ui)
-                .striped(true)
-                .column(Column::auto().resizable(true))
-                .columns(Column::auto().resizable(true), all_columns.len())
-                .header(40.0, |mut header| {
-                    header.col(|ui| {
-                        ui.heading("Row");
-                    });
-                    // Each column header: checkbox + "exp_id col_name"
-                    for (exp_id, col_name) in &all_columns {
-                        header.col(|ui| {
-                            ui.vertical(|ui| {
-                                let key = (exp_id.clone(), col_name.clone());
-                                let checked = self.column_checkboxes.entry(key).or_insert(false);
-                                ui.checkbox(checked, "");
-                                ui.label(format!("{} {}", exp_id, col_name));
+        ui.push_id("column_manager_table", |ui| {
+            let table_height = (ui.available_height() * 0.42).clamp(140.0, 260.0);
+            egui::ScrollArea::both()
+                .id_salt("column_manager_table_scroll")
+                .max_height(table_height)
+                .show(ui, |ui| {
+                    TableBuilder::new(ui)
+                        .striped(true)
+                        .column(Column::auto().resizable(true))
+                        .columns(Column::auto().resizable(true), all_columns.len())
+                        .header(40.0, |mut header| {
+                            header.col(|ui| {
+                                ui.heading("Row");
                             });
-                        });
-                    }
-                })
-                .body(|mut body| {
-                    let max_rows = self
-                        .cached_samples
-                        .values()
-                        .flat_map(|cols| cols.values().map(|v| v.len()))
-                        .max()
-                        .unwrap_or(0);
-
-                    for row_idx in 0..max_rows {
-                        body.row(18.0, |mut row| {
-                            row.col(|ui| {
-                                ui.label(row_idx.to_string());
-                            });
+                            // Each column header: checkbox + clickable title.
                             for (exp_id, col_name) in &all_columns {
-                                row.col(|ui| {
-                                    if let Some(exp_cols) = self.cached_samples.get(exp_id) {
-                                        if let Some(col_data) = exp_cols.get(col_name) {
-                                            if let Some(val) = col_data.get(row_idx) {
-                                                ui.label(format!("{:.4}", val));
+                                header.col(|ui| {
+                                    ui.vertical(|ui| {
+                                        let key = (exp_id.clone(), col_name.clone());
+                                        let checked =
+                                            self.column_checkboxes.entry(key).or_insert(false);
+                                        ui.checkbox(checked, "");
+                                        let title = ui.add(
+                                            egui::Label::new(format!("{} {}", exp_id, col_name))
+                                                .sense(egui::Sense::click()),
+                                        );
+                                        if title.clicked() {
+                                            self.selected_column =
+                                                Some((exp_id.clone(), col_name.clone()));
+                                        }
+                                        if let Ok(Some(provenance)) =
+                                            model.column_provenance_for_experiment(exp_id, col_name)
+                                        {
+                                            title.on_hover_text(provenance);
+                                        }
+                                        if self
+                                            .selected_column
+                                            .as_ref()
+                                            .map(|(selected_exp, selected_col)| {
+                                                selected_exp == exp_id && selected_col == col_name
+                                            })
+                                            .unwrap_or(false)
+                                        {
+                                            ui.label(egui::RichText::new("selected").small());
+                                        }
+                                    });
+                                });
+                            }
+                        })
+                        .body(|mut body| {
+                            let max_rows = self
+                                .cached_samples
+                                .values()
+                                .flat_map(|cols| cols.values().map(|v| v.len()))
+                                .max()
+                                .unwrap_or(0);
+
+                            for row_idx in 0..max_rows {
+                                body.row(18.0, |mut row| {
+                                    row.col(|ui| {
+                                        ui.label(row_idx.to_string());
+                                    });
+                                    for (exp_id, col_name) in &all_columns {
+                                        row.col(|ui| {
+                                            if let Some(exp_cols) = self.cached_samples.get(exp_id)
+                                            {
+                                                if let Some(col_data) = exp_cols.get(col_name) {
+                                                    if let Some(val) = col_data.get(row_idx) {
+                                                        ui.label(format!("{:.4}", val));
+                                                    } else {
+                                                        ui.label("-");
+                                                    }
+                                                } else {
+                                                    ui.label("-");
+                                                }
                                             } else {
                                                 ui.label("-");
                                             }
-                                        } else {
-                                            ui.label("-");
-                                        }
-                                    } else {
-                                        ui.label("-");
+                                        });
                                     }
                                 });
                             }
                         });
-                    }
+                });
+        });
+    }
+
+    fn render_selected_column_details(&mut self, ui: &mut egui::Ui, model: &PlotModel) {
+        ui.push_id("column_manager_details", |ui| {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.heading("Column details");
+                if ui.small_button("Clear").clicked() {
+                    self.selected_column = None;
+                }
+            });
+
+            let Some((exp_id, col_name)) = self.selected_column.clone() else {
+                ui.label("Click a column title to inspect its provenance and operation history.");
+                return;
+            };
+
+            let details_height = ui.available_height().max(220.0);
+            egui::ScrollArea::vertical()
+                .id_salt(format!(
+                    "column_manager_details_scroll:{}:{}",
+                    exp_id, col_name
+                ))
+                .max_height(details_height)
+                .show(ui, |ui| {
+                    ui.label(format!("Experiment: {}", exp_id));
+                    ui.label(format!("Column: {}", col_name));
+                    ui.separator();
+
+                    let provenance = model
+                        .column_provenance_for_experiment(&exp_id, &col_name)
+                        .unwrap_or_else(|e| Some(format!("Failed to read provenance: {:?}", e)));
+                    let history = model
+                        .column_history_feed_for_experiment(&exp_id, &col_name)
+                        .unwrap_or_else(|e| format!("Failed to read history: {:?}", e));
+
+                    ui.label("Provenance");
+                    ui.monospace(
+                        provenance.unwrap_or_else(|| "No provenance available".to_string()),
+                    );
+
+                    ui.separator();
+                    ui.label("Operation history");
+                    ui.monospace(history);
                 });
         });
     }
@@ -455,6 +660,14 @@ pub fn show_column_manager_window(
                         state.cached_samples.remove(exp_id);
                         // Remove all checkboxes for this experiment
                         state.column_checkboxes.retain(|(eid, _), _| eid != exp_id);
+                        if state
+                            .selected_column
+                            .as_ref()
+                            .map(|(selected_exp, _)| selected_exp == exp_id)
+                            .unwrap_or(false)
+                        {
+                            state.selected_column = None;
+                        }
                     }
                     state.confirm_drop_experiment = None;
                 }
@@ -466,5 +679,6 @@ pub fn show_column_manager_window(
 
             state.render_controls(ui, model);
             state.render_table(ui, model);
+            state.render_selected_column_details(ui, model);
         });
 }

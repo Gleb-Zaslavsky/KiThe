@@ -1,8 +1,9 @@
-#![allow(warnings)]
+﻿#![allow(warnings)]
 pub mod kinetics;
 mod mechfinder;
 
 use RustedSciThe::symbolic::symbolic_engine::Expr;
+use crate::Kinetics::error::{KineticsError, KineticsResult};
 /// The module is equipped with a library of kinetic parameters of chemical reactions obtained as a result of parsing publicly available databases
 /// The module takes as input the name of the library and the vector of substances and then produces the following data:
 /// 1) all reactions of starting substances with each other, and all their possible products with each other.
@@ -135,17 +136,17 @@ impl ReactionData {
 
     ///function that checks if the reaction_type field matches the variant of the data field in a ReactionData instance.
     /// If they don't match, the function will panic
-    pub fn validate_reaction_type(&self) {
+    pub fn validate_reaction_type(&self) -> KineticsResult<()> {
         match (&self.reaction_type, &self.data) {
-            (ReactionType::Elem, ReactionKinetics::Elementary(_)) => {}
-            (ReactionType::Falloff, ReactionKinetics::Falloff(_)) => {}
-            (ReactionType::Pressure, ReactionKinetics::Pressure(_)) => {}
-            (ReactionType::ThreeBody, ReactionKinetics::ThreeBody(_)) => {}
-            _ => panic!(
+            (ReactionType::Elem, ReactionKinetics::Elementary(_)) => Ok(()),
+            (ReactionType::Falloff, ReactionKinetics::Falloff(_)) => Ok(()),
+            (ReactionType::Pressure, ReactionKinetics::Pressure(_)) => Ok(()),
+            (ReactionType::ThreeBody, ReactionKinetics::ThreeBody(_)) => Ok(()),
+            _ => Err(KineticsError::InvalidReactionData(format!(
                 "Mismatch between reaction_type ({:?}) and data variant ({:?})",
                 self.reaction_type,
                 std::mem::discriminant(&self.data)
-            ),
+            ))),
         }
     }
     /// function to calculate reaction rate constant (under thr hood there is a function that calculates the rate constant for each type of reaction)
@@ -174,23 +175,25 @@ impl ReactionData {
         n: usize,
         pres: Option<f64>,
         concentrations: Option<HashMap<String, f64>>,
-    ) -> Vec<f64> {
+    ) -> KineticsResult<Vec<f64>> {
         let mut K_const_values = Vec::new();
-        let T = Self::create_uniform_vector(T0, Tend, n);
+        let T = Self::create_uniform_vector(T0, Tend, n)?;
         for Ti in T {
             // println!("T, {}", Ti);
             let k = self.K_const(Ti, pres, concentrations.clone());
             K_const_values.push(k);
         }
-        K_const_values
+        Ok(K_const_values)
     }
     /// Creates a vector of n uniformly distributed numbers from T0 to Tend (inclusive)
-    pub fn create_uniform_vector(T0: f64, Tend: f64, n: usize) -> Vec<f64> {
+    pub fn create_uniform_vector(T0: f64, Tend: f64, n: usize) -> KineticsResult<Vec<f64>> {
         if n < 2 {
-            panic!("n must be at least 2 to include both boundary values");
+            return Err(KineticsError::InvalidReactionData(
+                "n must be at least 2 to include both boundary values".to_string(),
+            ));
         }
         let step = (Tend - T0) / (n - 1) as f64;
-        (0..n).map(|i| T0 + i as f64 * step).collect()
+        Ok((0..n).map(|i| T0 + i as f64 * step).collect())
     }
     /// generate the symbolic representation of the reaction rate constant
     pub fn K_sym(&self, pres: Option<f64>, concentrations: Option<HashMap<String, Expr>>) -> Expr {
@@ -220,14 +223,13 @@ impl ReactionData {
         serde_json::to_value(self).unwrap()
     }
 }
-
 ///parses each reaction data into a ReactionData struct, validates the reaction type, and stores the parsed data in a hash map (reaction_data_hash) with a unique code (react_code) as the key.
 ///  It also collects the reaction equations in a vector (equations).
 pub fn parse_kinetic_data(
     big_mech: &str,
     vec_of_reactions: &[String],
     vec_of_reaction_value: Vec<Value>,
-) -> (Map<String, Value>, Vec<String>) {
+) -> KineticsResult<(Map<String, Value>, Vec<String>)> {
     let mut reaction_data_hash = Map::new();
     let mut equations = Vec::new();
     info!("______________PARCING REACTION DATA INTO STRUCTS________");
@@ -239,21 +241,24 @@ pub fn parse_kinetic_data(
         {
             equations.push(reactiondata.eq.clone());
             // let reacttype =  &reactiondata.reaction_type;
-            reactiondata.validate_reaction_type(); //hecks if the reaction_type field matches the variant of the data field in a ReactionData instance. If they don't match, the function will panic
-            let value = serde_json::to_value(&reactiondata).unwrap();
+            reactiondata.validate_reaction_type()?; //hecks if the reaction_type field matches the variant of the data field in a ReactionData instance. If they don't match, the function will panic
+            let value = serde_json::to_value(&reactiondata)?;
             reaction_data_hash.insert(react_code, value);
         } else {
             error!("Error parsing reaction: {}", reaction_record);
-            panic!("Error parsing reaction: {}", reaction_record);
+            return Err(KineticsError::InvalidReactionData(format!(
+                "Error parsing reaction: {}",
+                reaction_record
+            )));
         }
     }
     info!("______________PARCING REACTION DATA INTO STRUCTS ENDED________");
-    (reaction_data_hash, equations)
+    Ok((reaction_data_hash, equations))
 }
 /// parse Vec of serde Values with reaction data
 pub fn parse_kinetic_data_vec(
     vec_of_reaction_value: Vec<Value>,
-) -> (Vec<ReactionData>, Vec<String>) {
+) -> KineticsResult<(Vec<ReactionData>, Vec<String>)> {
     println!("\n \n______________PARCING REACTION DATA INTO STRUCTS________");
     let mut reaction_dat = Vec::new();
     let mut equations = Vec::new();
@@ -265,15 +270,18 @@ pub fn parse_kinetic_data_vec(
         {
             equations.push(reactiondata.eq.clone());
             println!("parsed into {:#?} \n", reactiondata);
-            reactiondata.validate_reaction_type(); //hecks if the reaction_type field matches the variant of the data field in a ReactionData instance. If they don't match, the function will panic
+            reactiondata.validate_reaction_type()?; //hecks if the reaction_type field matches the variant of the data field in a ReactionData instance. If they don't match, the function will panic
             reaction_dat.push(reactiondata);
         } else {
             info!("Error parsing reaction: {}", reaction_record);
-            panic!("Error parsing reaction: {}", reaction_record);
+            return Err(KineticsError::InvalidReactionData(format!(
+                "Error parsing reaction: {}",
+                reaction_record
+            )));
         }
     }
     info!("______________PARCING REACTION DATA INTO STRUCTS ENDED________");
-    (reaction_dat, equations)
+    Ok((reaction_dat, equations))
 }
 /// struct for chemical mechanism construction
 #[derive(Debug)]
@@ -309,7 +317,7 @@ impl Mechanism_search {
         }
     }
     /// find chemical mechanism using mechfinder API
-    pub fn mechfinder_api(&mut self) -> (Vec<String>, Vec<String>, Vec<String>) {
+    pub fn mechfinder_api(&mut self) -> KineticsResult<(Vec<String>, Vec<String>, Vec<String>)> {
         /*
         let tuple = [ "O", "NH3", "NO", "O2", "N2", "N2O", "CO", "C"];
         O,NH3,NO,O2,N2,N2O,CO,C
@@ -319,24 +327,22 @@ impl Mechanism_search {
 
         let vec: Vec<&str> = self.task_substances.iter().map(|s| s.as_str()).collect();
         let big_mech = self.task_library.clone();
-        info!("задание {:?}, библиотека {:?}", &big_mech, &vec);
+        info!("Р·Р°РґР°РЅРёРµ {:?}, Р±РёР±Р»РёРѕС‚РµРєР° {:?}", &big_mech, &vec);
         let (mechanism, reactants, vec_of_reactions, vec_of_reaction_value) =
             mechfinder::mechfinder(&big_mech, vec);
         // info!("mechanism {:?}", &mechanism);
-        let (mut reactdata, vec_of_equations) =
-            parse_kinetic_data_vec(vec_of_reaction_value.clone()); // парсим данные о реакциях
+        let (mut reactdata, vec_of_equations) = parse_kinetic_data_vec(vec_of_reaction_value.clone())?;
         self.mechanism = mechanism;
         self.reactants = reactants;
         self.vec_of_reactions = vec_of_reactions;
         self.reactdata = reactdata.clone();
-        return (
+        Ok((
             self.mechanism.to_owned(),
             self.reactants.to_owned(),
             self.vec_of_reactions.to_owned(),
-        );
+        ))
     }
 }
-
 //tests
 const ELEM_TESTING_JSON: &str = r#"{"type": "elem",
                  "eq": "NAPH+C2H3<=>NAPHV+C2H4",
@@ -369,7 +375,9 @@ mod tests {
             "NUIG".to_string(),
         );
 
-        let (mechanism, reactants, vec_of_reactions) = mech_search.mechfinder_api();
+        let mech_result = mech_search.mechfinder_api();
+        assert!(mech_result.is_ok());
+        let (mechanism, reactants, vec_of_reactions) = mech_result.unwrap();
 
         assert!(!mechanism.is_empty());
         assert!(!reactants.is_empty());
@@ -400,8 +408,9 @@ mod tests {
         let vec_of_reactions = vec!["1".to_string()];
         let reaction = ELEM_TESTING_JSON;
         let vec_of_reaction_value: Vec<Value> = vec![serde_json::from_str(reaction).unwrap()];
-        let (ReactionDataHash, _) =
-            parse_kinetic_data(big_mech, &vec_of_reactions, vec_of_reaction_value);
+        let parsed = parse_kinetic_data(big_mech, &vec_of_reactions, vec_of_reaction_value);
+        assert!(parsed.is_ok());
+        let (ReactionDataHash, _) = parsed.unwrap();
 
         assert!(!ReactionDataHash.is_empty());
         //   let elem_saved_to_hash = ReactionDataHash[test_reactions_numbers[0]];
@@ -420,8 +429,9 @@ mod tests {
         let vec_of_reactions = vec!["2".to_string()];
         let reaction = THREE_BODY_TESTING_JSON;
         let vec_of_reaction_value: Vec<Value> = vec![serde_json::from_str(reaction).unwrap()];
-        let (ReactionDataHash, _) =
-            parse_kinetic_data(big_mech, &vec_of_reactions, vec_of_reaction_value);
+        let parsed = parse_kinetic_data(big_mech, &vec_of_reactions, vec_of_reaction_value);
+        assert!(parsed.is_ok());
+        let (ReactionDataHash, _) = parsed.unwrap();
 
         assert!(!ReactionDataHash.is_empty());
         println!("ReactionDataHash: {:?} \n \n", ReactionDataHash);
@@ -461,8 +471,9 @@ mod tests {
         let vec_of_reactions = vec!["3".to_string()];
         let reaction = FALOFF_TESTING_JSON;
         let vec_of_reaction_value: Vec<Value> = vec![serde_json::from_str(reaction).unwrap()];
-        let (ReactionDataHash, _) =
-            parse_kinetic_data(big_mech, &vec_of_reactions, vec_of_reaction_value);
+        let parsed = parse_kinetic_data(big_mech, &vec_of_reactions, vec_of_reaction_value);
+        assert!(parsed.is_ok());
+        let (ReactionDataHash, _) = parsed.unwrap();
         println!("ReactionDataHash: {:#?}", ReactionDataHash);
         assert!(!ReactionDataHash.is_empty());
         let key = format!("{}_{}", big_mech, &vec_of_reactions[0]);

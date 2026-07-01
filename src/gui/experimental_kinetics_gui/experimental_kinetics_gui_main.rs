@@ -63,6 +63,7 @@ use crate::gui::experimental_kinetics_gui::controller_buttons_and_panels::{
     NewExperimentDialogState, QuickActionPanelState, TopDropDownMenues, WrightPanelControllers,
 };
 use crate::gui::experimental_kinetics_gui::controller_filters::Mathematics;
+use crate::gui::experimental_kinetics_gui::controller_kinetics::DirectProblemDialogState;
 use crate::gui::experimental_kinetics_gui::controller_methods::KineticMethodsWindowState;
 use crate::gui::experimental_kinetics_gui::controller_table::{
     ColumnManagerState, show_column_manager_window,
@@ -90,6 +91,7 @@ pub struct PlotApp {
     pub kinetic_methods_state: KineticMethodsWindowState,
     pub column_manager_state: ColumnManagerState,
     pub kithe_plot_window: KiThePlotWindowState,
+    pub direct_problem_state: DirectProblemDialogState,
 }
 
 impl PlotApp {
@@ -104,6 +106,7 @@ impl PlotApp {
             kinetic_methods_state: KineticMethodsWindowState::default(),
             column_manager_state: ColumnManagerState::new(),
             kithe_plot_window: KiThePlotWindowState::default(),
+            direct_problem_state: DirectProblemDialogState::new(),
         }
     }
 
@@ -130,6 +133,7 @@ impl PlotApp {
             &mut self.test_options,
             &mut self.kithe_plot_window,
             &mut self.kinetic_methods_state,
+            &mut self.direct_problem_state,
         );
         self.new_experiment_dialog
             .show_new_experiment_dialogue(ui.ctx(), &mut self.model);
@@ -154,6 +158,8 @@ impl PlotApp {
         // Show synthetic data window if requested
         self.test_options
             .show_synthetic_data_window(ui.ctx(), &mut self.model);
+        self.test_options
+            .show_logs_window(ui.ctx(), &mut self.model);
         // Создаем две колонки для разделения графика и элементов управления
         ui.columns(2, |columns| {
             // Левая колонка: Область отображения графика
@@ -203,5 +209,6 @@ impl PlotApp {
         });
 
         self.kithe_plot_window.show(ui.ctx());
+        self.direct_problem_state.show(ui.ctx(), &mut self.model);
     }
 }

@@ -71,6 +71,7 @@ use super::super::kinetic_methods::{
 };
 use super::Vyazovkin::VyazovkinSolver;
 use super::kinetic_regression::{LinearRegressionResult, linear_regression};
+use crate::Kinetics::experimental_kinetics::column_provenance::ColumnProvenance;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     AffectedColumns, ColumnMeta, ColumnNature, ColumnOrigin, History, TGADataset, TGASchema, Unit,
 };
@@ -173,30 +174,45 @@ impl IsoconversionalResult {
         let mut columns: HashMap<String, ColumnMeta> = HashMap::new();
         columns.insert(
             "eta".to_string(),
-            ColumnMeta {
-                name: "eta".to_string(),
-                unit: Unit::Dimensionless,
-                origin: ColumnOrigin::NumericDerived,
-                nature: ColumnNature::Conversion,
-            },
+            ColumnMeta::new(
+                "eta".to_string(),
+                Unit::Dimensionless,
+                ColumnOrigin::NumericDerived,
+                ColumnNature::Conversion,
+                ColumnProvenance::manual(
+                    "eta",
+                    "create_from_isoconversional_result",
+                    Some("conversion result".to_string()),
+                ),
+            ),
         );
         columns.insert(
             "Ea".to_string(),
-            ColumnMeta {
-                name: "Ea".to_string(),
-                unit: Unit::Unknown,
-                origin: ColumnOrigin::NumericDerived,
-                nature: ColumnNature::ActivationEnergy,
-            },
+            ColumnMeta::new(
+                "Ea".to_string(),
+                Unit::Unknown,
+                ColumnOrigin::NumericDerived,
+                ColumnNature::ActivationEnergy,
+                ColumnProvenance::manual(
+                    "Ea",
+                    "create_from_isoconversional_result",
+                    Some("activation energy result".to_string()),
+                ),
+            ),
         );
         columns.insert(
             "R2".to_string(),
-            ColumnMeta {
-                name: "R2".to_string(),
-                unit: Unit::Dimensionless,
-                origin: ColumnOrigin::NumericDerived,
-                nature: ColumnNature::R2,
-            },
+            ColumnMeta::new(
+                "R2".to_string(),
+                Unit::Dimensionless,
+                ColumnOrigin::NumericDerived,
+                ColumnNature::R2,
+                ColumnProvenance::manual(
+                    "R2",
+                    "create_from_isoconversional_result",
+                    Some("regression goodness of fit".to_string()),
+                ),
+            ),
         );
 
         let schema = TGASchema {
@@ -219,7 +235,10 @@ impl IsoconversionalResult {
             schema,
             oneframeplot: None,
             history_of_operations: History::new(),
+            undo_stack: Vec::new(),
+            undo_snapshot_latch: false,
         };
+        dataset.initialize_column_provenance();
 
         dataset.log_operation(
             "create_from_isoconversional_result",
@@ -423,10 +442,13 @@ impl IntegralIsoconversionalSolver {
 
                 let val = b / t.powf(self.config.exponent);
 
-                let logv = match self.config.log_kind {
-                    LogKind::Ln => val.ln(),
-
-                    LogKind::Log10 => val.log10(),
+                let logv = if !val.is_finite() || val <= 0.0 {
+                    continue;
+                } else {
+                    match self.config.log_kind {
+                        LogKind::Ln => val.ln(),
+                        LogKind::Log10 => val.log10(),
+                    }
                 };
 
                 if !logv.is_finite() {

@@ -480,7 +480,7 @@ pub mod tests {
             simulate_tga_first_order2(t0, k0, ea, heating_rates, dt, n_steps, alpha_grid);
 
         let time = grid.time.clone();
-        let dt = ConversionGridBuilder::compute_dt_matrix(&time);
+        let dt = ConversionGridBuilder::compute_dt_matrix(&time).unwrap();
         grid.dt = Some(dt);
         grid
     }

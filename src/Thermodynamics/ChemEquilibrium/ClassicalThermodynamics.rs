@@ -5,8 +5,8 @@ use crate::Thermodynamics::User_PhaseOrSolution::{
 };
 use crate::Thermodynamics::User_PhaseOrSolution2::OnePhase;
 
-use crate::Thermodynamics::User_substances_error::SubsDataError;
 use crate::Thermodynamics::ChemEquilibrium::NR_Legacy::Method;
+use crate::Thermodynamics::User_substances_error::SubsDataError;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 use std::collections::{HashMap, HashSet};

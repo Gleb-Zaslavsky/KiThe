@@ -1,11 +1,17 @@
-use crate::Kinetics::experimental_kinetics::LSQSplines::{SolverKind, make_lsq_univariate_spline};
-use crate::Kinetics::experimental_kinetics::lowess_wrapper::{LowessConfig, lowess_smooth_values};
+use crate::Kinetics::experimental_kinetics::column_provenance::ColumnTransformKind;
+use crate::Kinetics::experimental_kinetics::ndarray_statistics::filter_quality_from_arrays;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{TGADataset, TGADomainError};
-use crate::Kinetics::experimental_kinetics::savgol2::SG_filter_dyn;
-use crate::Kinetics::experimental_kinetics::splines::{
+use RustedSciThe::numerical::data_processing::LSQSplines::{
+    SolverKind, make_lsq_univariate_spline,
+};
+use RustedSciThe::numerical::data_processing::lowess_wrapper::{
+    LowessConfig, lowess_smooth_values,
+};
+use RustedSciThe::numerical::data_processing::savgol2::SG_filter_dyn;
+use RustedSciThe::numerical::data_processing::splines::{
     SplineKind, spline_resample, uniform_grid_from,
 };
-use log::info;
+use log::{info, warn};
 use ndarray::{Array1, s};
 use polars::prelude::*;
 use std::f64;
@@ -159,6 +165,45 @@ fn resolved_output_names(
         .collect())
 }
 
+fn maybe_filter_quality(
+    raw: &[f64],
+    filtered: &[f64],
+    raw_name: &str,
+    filtered_name: &str,
+) -> Option<crate::Kinetics::experimental_kinetics::ndarray_statistics::FilterQualityReport> {
+    filter_quality_from_arrays(
+        &Array1::from_vec(raw.to_vec()),
+        &Array1::from_vec(filtered.to_vec()),
+        raw_name,
+        filtered_name,
+    )
+    .ok()
+}
+
+fn log_filter_quality(
+    method: &str,
+    raw_name: &str,
+    filtered_name: &str,
+    quality: Option<
+        &crate::Kinetics::experimental_kinetics::ndarray_statistics::FilterQualityReport,
+    >,
+) {
+    match quality {
+        Some(report) => {
+            info!(
+                "{} quality for '{}' -> '{}': {}",
+                method, raw_name, filtered_name, report
+            );
+        }
+        None => {
+            warn!(
+                "{} quality for '{}' -> '{}' could not be computed",
+                method, raw_name, filtered_name
+            );
+        }
+    }
+}
+
 impl TGADataset {
     pub fn smooth_columns(
         mut self,
@@ -167,13 +212,13 @@ impl TGADataset {
     ) -> Result<Self, TGADomainError> {
         for &col in cols {
             self = match &strategy {
-                SmoothStrategy::RollingMean { window } => self.rolling_mean(col, *window),
+                SmoothStrategy::RollingMean { window } => self.rolling_mean_as(col, *window, None),
 
                 SmoothStrategy::Hampel {
                     window,
                     n_sigma,
                     strategy,
-                } => self.hampel_filter(col, *window, *n_sigma, strategy.clone())?,
+                } => self.hampel_filter_as(col, *window, *n_sigma, strategy.clone(), None)?,
 
                 SmoothStrategy::SavitzkyGolay {
                     window,
@@ -183,11 +228,13 @@ impl TGADataset {
                     mode,
                 } => match mode {
                     SGMode::FirPadding => {
-                        self.sg_filter_column(col, *window, *poly_order, *deriv, *delta)?
+                        self.sg_filter_column_as(col, *window, *poly_order, *deriv, *delta, None)?
                     }
                 },
 
-                SmoothStrategy::Lowess { frac } => self.lowess_filter_column(col, *frac)?,
+                SmoothStrategy::Lowess { frac } => {
+                    self.lowess_filter_column_as(col, *frac, None)?
+                }
 
                 SmoothStrategy::Spline { .. } => {
                     return Err(TGADomainError::NotImplemented);
@@ -204,7 +251,14 @@ impl TGADataset {
     /// metadata (unit, origin) не меняются
     pub fn rolling_mean_as(mut self, col_name: &str, window: usize, out_col: Option<&str>) -> Self {
         let out_col = default_output_name("rolling_", col_name, out_col);
-        self.frame = self.frame.with_column(
+        let raw_values = self
+            .frame
+            .clone()
+            .collect()
+            .ok()
+            .and_then(|df| extract_f64_column(&df, col_name).ok());
+
+        let new_frame = self.frame.clone().with_column(
             col(col_name)
                 .rolling_mean(RollingOptionsFixedWindow {
                     window_size: window,
@@ -213,12 +267,30 @@ impl TGADataset {
                 })
                 .alias(&out_col),
         );
+        let filtered_values = new_frame
+            .clone()
+            .collect()
+            .ok()
+            .and_then(|df| extract_f64_column(&df, &out_col).ok());
 
         info!(
             "new column with rolling averaged data {:?} has been created",
             out_col
         );
         self.schema.update_schema(col_name, &out_col);
+        let quality = raw_values
+            .as_deref()
+            .zip(filtered_values.as_deref())
+            .and_then(|(raw, filtered)| maybe_filter_quality(raw, filtered, col_name, &out_col));
+        log_filter_quality("rolling_mean", col_name, &out_col, quality.as_ref());
+        self.record_column_transform(
+            col_name,
+            &out_col,
+            ColumnTransformKind::RollingMean { window },
+            true,
+            quality,
+        );
+        self.frame = new_frame;
 
         self
     }
@@ -240,6 +312,7 @@ impl TGADataset {
         let s = df.column(col)?.f64()?;
 
         let values: Vec<f64> = s.into_no_null_iter().collect();
+        let is_drop = matches!(&strategy, HampelStrategy::Drop);
         let n = values.len();
         let k = window / 2;
 
@@ -261,12 +334,16 @@ impl TGADataset {
             }
         }
 
-        let new_df = df.with_column(Series::new(out_col.clone().into(), out).into())?;
-
-        let new_df = if let HampelStrategy::Drop = strategy {
-            &mut new_df.filter(&BooleanChunked::from_slice("mask".into(), &mask))?
+        let mut new_df = df
+            .with_column(Series::new(out_col.clone().into(), out).into())?
+            .clone();
+        if is_drop {
+            new_df = new_df.filter(&BooleanChunked::from_slice("mask".into(), &mask))?;
+        }
+        let filtered_values = if is_drop {
+            None
         } else {
-            new_df
+            Some(extract_f64_column(&new_df, &out_col)?)
         };
         info!(
             "new column with Hampel filtered data named {:?} has been created",
@@ -275,6 +352,21 @@ impl TGADataset {
         let list_of_cols = &new_df.get_column_names();
         info!("now list of columns is {:?}", list_of_cols);
         self.schema.update_schema(col, &out_col);
+        let quality = filtered_values
+            .as_deref()
+            .and_then(|filtered| maybe_filter_quality(&values, filtered, col, &out_col));
+        log_filter_quality("hampel", col, &out_col, quality.as_ref());
+        self.record_column_transform(
+            col,
+            &out_col,
+            ColumnTransformKind::Hampel {
+                window,
+                n_sigma,
+                strategy: format!("{:?}", &strategy),
+            },
+            true,
+            quality,
+        );
         self.frame = new_df.clone().lazy();
         Ok(self)
     }
@@ -301,6 +393,8 @@ impl TGADataset {
         let s = df.column(col)?.f64()?;
 
         let values: Vec<Option<f64>> = s.into_iter().collect();
+        let raw_values: Vec<f64> = values.iter().filter_map(|v| *v).collect();
+        let is_drop = matches!(&strategy, HampelStrategy::Drop);
         let n = values.len();
         let k = window / 2;
 
@@ -339,13 +433,19 @@ impl TGADataset {
             }
         }
 
-        let new_df = df.with_column(Series::new(out_col.clone().into(), out).into())?;
-
-        let new_df = if let HampelStrategy::Drop = strategy {
+        let mut new_df = df
+            .with_column(Series::new(out_col.clone().into(), out).into())?
+            .clone();
+        let new_df = if is_drop {
             let mask = BooleanChunked::from_slice("mask".into(), &mask);
-            &mut new_df.filter(&mask)?
+            new_df.filter(&mask)?
         } else {
             new_df
+        };
+        let filtered_values = if is_drop {
+            None
+        } else {
+            Some(extract_f64_column(&new_df, &out_col)?)
         };
         info!(
             "new column with Hampel filtered data named {:?} has been created",
@@ -354,6 +454,21 @@ impl TGADataset {
         let list_of_cols = &new_df.get_column_names();
         info!("now list of columns is {:?}", list_of_cols);
         self.schema.update_schema(col, &out_col);
+        let quality = filtered_values
+            .as_deref()
+            .and_then(|filtered| maybe_filter_quality(&raw_values, filtered, col, &out_col));
+        log_filter_quality("hampel", col, &out_col, quality.as_ref());
+        self.record_column_transform(
+            col,
+            &out_col,
+            ColumnTransformKind::Hampel {
+                window,
+                n_sigma,
+                strategy: format!("{:?}", &strategy),
+            },
+            true,
+            quality,
+        );
         self.frame = new_df.clone().lazy();
         Ok(self)
     }
@@ -430,12 +545,14 @@ impl TGADataset {
         }
 
         let values: Vec<f64> = s.into_no_null_iter().collect();
+        let raw_values = values.clone();
 
         let filtered = SG_filter_dyn(values.iter(), window, poly_order, Some(deriv), Some(delta));
         let values = Column::new(out_col.clone().into(), filtered);
         let new_df = df
             .with_column(values)
             .map_err(TGADomainError::PolarsError)?;
+        let filtered_values = extract_f64_column(&new_df, &out_col)?;
 
         info!(
             "new column with SG filtered data named {:?} has been created",
@@ -445,6 +562,21 @@ impl TGADataset {
         info!("now list of columns is {:?}", list_of_cols);
         self.frame = new_df.clone().lazy();
         self.schema.update_schema(col, &out_col);
+        let quality = maybe_filter_quality(&raw_values, &filtered_values, col, &out_col);
+        log_filter_quality("savitzky_golay", col, &out_col, quality.as_ref());
+        self.record_column_transform(
+            col,
+            &out_col,
+            ColumnTransformKind::SavitzkyGolay {
+                window,
+                poly_order,
+                deriv,
+                delta,
+                mode: "FirPadding".to_string(),
+            },
+            true,
+            quality,
+        );
         Ok(self)
     }
     pub fn sg_filter_column(
@@ -491,6 +623,7 @@ impl TGADataset {
         let mut df = self.frame.clone().collect()?;
         let x = self.lowess_reference_x(&df)?;
         let y = extract_f64_column(&df, col)?;
+        let raw_values = y.clone();
 
         if x.len() != y.len() {
             return Err(TGADomainError::InvalidOperation(format!(
@@ -511,8 +644,18 @@ impl TGADataset {
         })?;
 
         df.with_column(Column::new(out_col.clone().into(), filtered))?;
+        let filtered_values = extract_f64_column(&df, &out_col)?;
         self.schema.update_schema(col, &out_col);
+        let quality = maybe_filter_quality(&raw_values, &filtered_values, col, &out_col);
+        log_filter_quality("lowess", col, &out_col, quality.as_ref());
         self.frame = df.lazy();
+        self.record_column_transform(
+            col,
+            &out_col,
+            ColumnTransformKind::Lowess { frac },
+            true,
+            quality,
+        );
         Ok(self)
     }
 
@@ -558,6 +701,7 @@ impl TGADataset {
 
         for (&col, out_name) in columns.iter().zip(out_names.iter()) {
             let y = extract_f64_column(&df, col)?;
+            let raw_values = y.clone();
             if x.len() != y.len() {
                 return Err(TGADomainError::InvalidOperation(format!(
                     "LOWESS input length mismatch for column '{}': x has {}, y has {}",
@@ -573,9 +717,20 @@ impl TGADataset {
                     col, e
                 ))
             })?;
+            let quality = maybe_filter_quality(&raw_values, &smoothed, col, out_name);
+            log_filter_quality("lowess", col, out_name, quality.as_ref());
 
             df.with_column(Column::new(out_name.clone().into(), smoothed))?;
             self.schema.update_schema(col, out_name);
+            self.record_column_transform(
+                col,
+                out_name,
+                ColumnTransformKind::Lowess {
+                    frac: config.fraction,
+                },
+                true,
+                quality,
+            );
         }
 
         self.frame = df.lazy();
@@ -638,6 +793,18 @@ impl TGADataset {
             let y_series = y_series.extend_constant(AnyValue::Null, n - n_new)?;
             df = df.with_column(y_series)?.clone();
             self.schema.update_schema(col, &out_name);
+            self.record_column_transform(
+                col,
+                out_name,
+                ColumnTransformKind::SplineResample {
+                    time_col: time_col.to_string(),
+                    new_time_col: new_time_col.to_string(),
+                    n_points,
+                    kind: format!("{:?}", kind),
+                },
+                true,
+                None,
+            );
         }
         info!("updating ");
         // --- new grid ---
@@ -650,6 +817,18 @@ impl TGADataset {
         let time_column = time_column.extend_constant(AnyValue::Null, n - n_new)?;
         df = df.clone().with_column(time_column)?.clone();
         self.schema.update_schema(time_col, new_time_col);
+        self.record_column_transform(
+            time_col,
+            new_time_col,
+            ColumnTransformKind::SplineResample {
+                time_col: time_col.to_string(),
+                new_time_col: new_time_col.to_string(),
+                n_points,
+                kind: format!("{:?}", kind),
+            },
+            true,
+            None,
+        );
         let list_of_cols = &df.get_column_names();
         info!("now list of columns is {:?}", list_of_cols);
         self.frame = df.lazy();
@@ -750,7 +929,6 @@ impl TGADataset {
         let mut df = self.frame.clone().collect()?;
         let n = df.height();
         let out_names = resolved_output_names("lsq_spline_", columns, out_columns)?;
-
         let t_old = extract_f64_column(&df, time_col)?;
         if t_old.len() < 2 {
             return Err(TGADomainError::InvalidOperation(
@@ -772,6 +950,33 @@ impl TGADataset {
 
         let t_new = uniform_grid_from(&t_old, n_points, SplineKind::Linear)
             .map_err(|e| TGADomainError::InvalidOperation(e))?;
+        if t_new.windows(2).any(|pair| pair[1] <= pair[0]) {
+            warn!(
+                "LSQ spline generated a non-monotonic grid for '{}' -> '{}'",
+                time_col, new_time_col
+            );
+            return Err(TGADomainError::InvalidOperation(
+                "LSQ spline generated a non-monotonic time grid".into(),
+            ));
+        }
+        let solver_label = match solver {
+            SolverKind::DenseQR => "DenseQR".to_string(),
+            SolverKind::Banded => "Banded".to_string(),
+        };
+        info!(
+            "Starting LSQ spline resampling '{}' -> '{}' for columns {:?} | input_rows={} target_points={} degree={} internal_knots={} solver={} | generated monotonic grid points={} spanning [{:.6}, {:.6}]",
+            time_col,
+            new_time_col,
+            columns,
+            n,
+            n_points,
+            degree,
+            n_internal_knots,
+            solver_label,
+            t_new.len(),
+            t_new.first().copied().unwrap_or(f64::NAN),
+            t_new.last().copied().unwrap_or(f64::NAN)
+        );
         let t_old_arr = Array1::from_vec(t_old.clone());
         let t_new_arr = Array1::from_vec(t_new.clone());
 
@@ -806,13 +1011,44 @@ impl TGADataset {
             let y_series = y_series.extend_constant(AnyValue::Null, n - n_new)?;
             df = df.with_column(y_series)?.clone();
             self.schema.update_schema(col, out_name);
+            self.record_column_transform(
+                col,
+                out_name,
+                ColumnTransformKind::LsqSplineResample {
+                    time_col: time_col.to_string(),
+                    new_time_col: new_time_col.to_string(),
+                    n_points,
+                    degree,
+                    n_internal_knots,
+                    solver: solver_label.clone(),
+                },
+                true,
+                None,
+            );
         }
 
         let time_column = Column::new(new_time_col.into(), t_new);
         let n_new = time_column.len();
         let time_column = time_column.extend_constant(AnyValue::Null, n - n_new)?;
         df = df.with_column(time_column)?.clone();
+        warn!(
+            "LSQ spline resampling does not compute a direct filter-quality report because the output grid differs from the input and the frame is padded to preserve alignment"
+        );
         self.schema.update_schema(time_col, new_time_col);
+        self.record_column_transform(
+            time_col,
+            new_time_col,
+            ColumnTransformKind::LsqSplineResample {
+                time_col: time_col.to_string(),
+                new_time_col: new_time_col.to_string(),
+                n_points,
+                degree,
+                n_internal_knots,
+                solver: solver_label,
+            },
+            true,
+            None,
+        );
         self.frame = df.lazy();
         info!(
             "LSQ spline resampling completed in {:?} ms",

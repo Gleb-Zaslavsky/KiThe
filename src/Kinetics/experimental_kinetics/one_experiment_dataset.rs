@@ -8,10 +8,21 @@
 //! 5. Smoothing / filtering
 //! 6. Derivatives
 //! 7. Trim invalid edges
+//!
+//! ## Русский ориентир
+//! 1. Читаем сырые данные
+//! 2. Привязываем смысловые колонки: время, масса, температура
+//! 3. При необходимости калибруем сигналы
+//! 4. Строим безразмерные величины
+//! 5. Сглаживаем и фильтруем
+//! 6. Считаем производные
+//! 7. Обрезаем некорректные края
 /// # Recommended TGA data processing pipeline
 ///
 /// KiThe follows an explicit, step-by-step processing model.
+/// KiThe использует явную пошаговую модель обработки данных.
 /// No operation implicitly removes rows or modifies unrelated columns.
+/// Ни одна операция не удаляет строки и не меняет посторонние колонки неявно.
 ///
 /// ## General principles
 ///
@@ -41,7 +52,7 @@
 ///     ↓
 /// trim_edges (to remove null introduced by smoothing)
 ///     ↓
-/// dimensionless mass / conversion
+/// relative mass α / conversion η
 ///     ↓
 /// differentiation (rates)
 ///     ↓
@@ -62,6 +73,9 @@ use polars::prelude::LazyFrame;
 use polars::prelude::*;
 use polars::series::Series;
 
+use crate::Kinetics::experimental_kinetics::column_provenance::{
+    ColumnProvenance, ColumnTransformKind, QualityReference, TransformQuality,
+};
 use log::info;
 use std::collections::HashMap;
 use std::io::Write;
@@ -108,11 +122,45 @@ pub enum TGADomainError {
     UnsupportedRateUnit,
     InvalidReferenceMass,
     InvalidUnitForConversion,
+    InvalidUnitForBinding { field: &'static str, unit: Unit },
+    ColumnAlreadyExists(String),
+    DuplicateExperimentId(String),
+    ExperimentNotFound(String),
     NotImplemented,
     InvalidOperation(String),
     OutOfRange,
     TimeNonMonotonic(String),
     InvalidConversionRange,
+}
+
+/// Detailed diagnostics for the active time column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimeOrderViolation {
+    pub index: usize,
+    pub previous: f64,
+    pub current: f64,
+}
+
+/// Structured report describing why the active time column is or is not monotonic.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimeMonotonicityReport {
+    pub time_column: String,
+    pub len: usize,
+    pub null_indices: Vec<usize>,
+    pub nan_indices: Vec<usize>,
+    pub infinite_indices: Vec<usize>,
+    pub duplicate_pairs: Vec<TimeOrderViolation>,
+    pub decreasing_pairs: Vec<TimeOrderViolation>,
+    pub is_strictly_increasing: bool,
+    pub sortable_without_data_loss: bool,
+}
+
+impl TimeMonotonicityReport {
+    pub fn has_invalid_values(&self) -> bool {
+        !self.null_indices.is_empty()
+            || !self.nan_indices.is_empty()
+            || !self.infinite_indices.is_empty()
+    }
 }
 
 impl From<PolarsError> for TGADomainError {
@@ -126,6 +174,7 @@ impl From<PolarsError> for TGADomainError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unit {
     Second,
+    Minute,
     Hour,
 
     Kelvin,
@@ -134,9 +183,17 @@ pub enum Unit {
     MilliVolt,
     Milligram,
     MilligramPerSecond,
+    MilligramPerMinute,
+    MilligramPerHour,
     KelvinPerSecond,
+    KelvinPerMinute,
+    KelvinPerHour,
     CelsiusPerSecond,
+    CelsiusPerMinute,
+    CelsiusPerHour,
     PerSecond,
+    PerMinute,
+    PerHour,
     Gram,
 
     Dimensionless,
@@ -144,20 +201,110 @@ pub enum Unit {
 }
 
 impl Unit {
+    fn is_valid_time_binding_unit(self) -> bool {
+        matches!(self, Unit::Second | Unit::Minute | Unit::Hour)
+    }
+
+    fn is_valid_temperature_binding_unit(self) -> bool {
+        matches!(self, Unit::Kelvin | Unit::Celsius)
+    }
+
+    fn is_valid_mass_binding_unit(self) -> bool {
+        matches!(self, Unit::MilliVolt | Unit::Milligram | Unit::Gram)
+    }
+
+    /// Normalize a rate unit to the time base used by the time column.
+    ///
+    /// KiThe currently supports time in seconds or hours. The numeric derivative
+    /// is computed against the stored time values, so this helper only adjusts the
+    /// semantic unit label to match the time axis.
+    pub fn for_time_base(self, time_unit: Unit) -> Result<Self, TGADomainError> {
+        match time_unit {
+            Unit::Second => match self {
+                Unit::Milligram
+                | Unit::MilligramPerSecond
+                | Unit::MilligramPerMinute
+                | Unit::MilligramPerHour => Ok(Unit::MilligramPerSecond),
+                Unit::Kelvin
+                | Unit::KelvinPerSecond
+                | Unit::KelvinPerMinute
+                | Unit::KelvinPerHour => Ok(Unit::KelvinPerSecond),
+                Unit::Celsius
+                | Unit::CelsiusPerSecond
+                | Unit::CelsiusPerMinute
+                | Unit::CelsiusPerHour => Ok(Unit::CelsiusPerSecond),
+                Unit::Dimensionless | Unit::PerSecond | Unit::PerMinute | Unit::PerHour => {
+                    Ok(Unit::PerSecond)
+                }
+                _ => Err(TGADomainError::UnsupportedRateUnit),
+            },
+            Unit::Minute => match self {
+                Unit::Milligram
+                | Unit::MilligramPerSecond
+                | Unit::MilligramPerMinute
+                | Unit::MilligramPerHour => Ok(Unit::MilligramPerMinute),
+                Unit::Kelvin
+                | Unit::KelvinPerSecond
+                | Unit::KelvinPerMinute
+                | Unit::KelvinPerHour => Ok(Unit::KelvinPerMinute),
+                Unit::Celsius
+                | Unit::CelsiusPerSecond
+                | Unit::CelsiusPerMinute
+                | Unit::CelsiusPerHour => Ok(Unit::CelsiusPerMinute),
+                Unit::Dimensionless | Unit::PerSecond | Unit::PerMinute | Unit::PerHour => {
+                    Ok(Unit::PerMinute)
+                }
+                _ => Err(TGADomainError::UnsupportedRateUnit),
+            },
+            Unit::Hour => match self {
+                Unit::Milligram
+                | Unit::MilligramPerSecond
+                | Unit::MilligramPerMinute
+                | Unit::MilligramPerHour => Ok(Unit::MilligramPerHour),
+                Unit::Kelvin
+                | Unit::KelvinPerSecond
+                | Unit::KelvinPerMinute
+                | Unit::KelvinPerHour => Ok(Unit::KelvinPerHour),
+                Unit::Celsius
+                | Unit::CelsiusPerSecond
+                | Unit::CelsiusPerMinute
+                | Unit::CelsiusPerHour => Ok(Unit::CelsiusPerHour),
+                Unit::Dimensionless | Unit::PerSecond | Unit::PerMinute | Unit::PerHour => {
+                    Ok(Unit::PerHour)
+                }
+                _ => Err(TGADomainError::UnsupportedRateUnit),
+            },
+            _ => Err(TGADomainError::UnsupportedRateUnit),
+        }
+    }
+
     pub fn parse(s: &str) -> Result<Self, PolarsError> {
         match s {
             "s" => Ok(Unit::Second),
+            "min" => Ok(Unit::Minute),
             "h" => Ok(Unit::Hour),
             "C" => Ok(Unit::Celsius),
             "K" => Ok(Unit::Kelvin),
             "mV" => Ok(Unit::MilliVolt),
             "mg" => Ok(Unit::Milligram),
             "mg/s" => Ok(Unit::MilligramPerSecond),
+            "mg/min" => Ok(Unit::MilligramPerMinute),
+            "mg/h" => Ok(Unit::MilligramPerHour),
             "K/s" => Ok(Unit::KelvinPerSecond),
+            "K/min" => Ok(Unit::KelvinPerMinute),
+            "K/h" => Ok(Unit::KelvinPerHour),
             "C/s" => Ok(Unit::CelsiusPerSecond),
+            "C/min" => Ok(Unit::CelsiusPerMinute),
+            "C/h" => Ok(Unit::CelsiusPerHour),
             "/s" => Ok(Unit::PerSecond),
+            "/min" => Ok(Unit::PerMinute),
             "1/s" => Ok(Unit::PerSecond),
+            "1/min" => Ok(Unit::PerMinute),
+            "/h" => Ok(Unit::PerHour),
+            "1/h" => Ok(Unit::PerHour),
             "g" => Ok(Unit::Gram),
+            "Dimensionless" => Ok(Unit::Dimensionless),
+            "Unknown" => Ok(Unit::Unknown),
             "-" => Ok(Unit::Dimensionless),
 
             _ => Err(PolarsError::ComputeError(
@@ -168,18 +315,27 @@ impl Unit {
     pub fn convert_to_string(&self) -> String {
         match self {
             Unit::Second => "s".to_string(),
+            Unit::Minute => "min".to_string(),
             Unit::Hour => "h".to_string(),
             Unit::Kelvin => "K".to_string(),
             Unit::Celsius => "C".to_string(),
             Unit::MilliVolt => "mV".to_string(),
             Unit::Milligram => "mg".to_string(),
             Unit::MilligramPerSecond => "mg/s".to_string(),
+            Unit::MilligramPerMinute => "mg/min".to_string(),
+            Unit::MilligramPerHour => "mg/h".to_string(),
             Unit::KelvinPerSecond => "K/s".to_string(),
+            Unit::KelvinPerMinute => "K/min".to_string(),
+            Unit::KelvinPerHour => "K/h".to_string(),
             Unit::CelsiusPerSecond => "C/s".to_string(),
+            Unit::CelsiusPerMinute => "C/min".to_string(),
+            Unit::CelsiusPerHour => "C/h".to_string(),
             Unit::PerSecond => "/s".to_string(),
+            Unit::PerMinute => "/min".to_string(),
+            Unit::PerHour => "/h".to_string(),
             Unit::Gram => "g".to_string(),
-            Unit::Dimensionless => "-".to_string(),
-            Unit::Unknown => "-".to_string(),
+            Unit::Dimensionless => "Dimensionless".to_string(),
+            Unit::Unknown => "Unknown".to_string(),
         }
     }
 }
@@ -188,18 +344,27 @@ impl std::fmt::Display for Unit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Unit::Second => write!(f, "s"),
+            Unit::Minute => write!(f, "min"),
             Unit::Hour => write!(f, "h"),
             Unit::Kelvin => write!(f, "K"),
             Unit::Celsius => write!(f, "C"),
             Unit::MilliVolt => write!(f, "mV"),
             Unit::Milligram => write!(f, "mg"),
             Unit::MilligramPerSecond => write!(f, "mg/s"),
+            Unit::MilligramPerMinute => write!(f, "mg/min"),
+            Unit::MilligramPerHour => write!(f, "mg/h"),
             Unit::KelvinPerSecond => write!(f, "K/s"),
+            Unit::KelvinPerMinute => write!(f, "K/min"),
+            Unit::KelvinPerHour => write!(f, "K/h"),
             Unit::CelsiusPerSecond => write!(f, "C/s"),
+            Unit::CelsiusPerMinute => write!(f, "C/min"),
+            Unit::CelsiusPerHour => write!(f, "C/h"),
             Unit::PerSecond => write!(f, "/s"),
+            Unit::PerMinute => write!(f, "/min"),
+            Unit::PerHour => write!(f, "/h"),
             Unit::Gram => write!(f, "g"),
-            Unit::Dimensionless => write!(f, "-"),
-            Unit::Unknown => write!(f, "-"),
+            Unit::Dimensionless => write!(f, "Dimensionless"),
+            Unit::Unknown => write!(f, "Unknown"),
         }
     }
 }
@@ -218,9 +383,9 @@ pub enum ColumnNature {
     Time,
     Temperature,
     Mass,
-    // other name eta
+    // alpha = relative mass m/m0
     Conversion,
-    // other name alpha
+    // eta = 1 - alpha
     DimensionlessMass,
     MassRate,
     ConversionRate,
@@ -230,6 +395,7 @@ pub enum ColumnNature {
     ActivationEnergy,
     PredexFactor,
     R2,
+    FittedCurve,
 }
 /// Columns Origin
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,9 +412,37 @@ pub struct ColumnMeta {
     pub unit: Unit,
     pub origin: ColumnOrigin,
     pub nature: ColumnNature,
+    pub provenance: ColumnProvenance,
 }
 
 impl ColumnMeta {
+    pub fn new(
+        name: impl Into<String>,
+        unit: Unit,
+        origin: ColumnOrigin,
+        nature: ColumnNature,
+        provenance: ColumnProvenance,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            unit,
+            origin,
+            nature,
+            provenance,
+        }
+    }
+
+    pub fn raw(name: impl Into<String>, unit: Unit, nature: ColumnNature) -> Self {
+        let name = name.into();
+        Self::new(
+            name.clone(),
+            unit,
+            ColumnOrigin::Raw,
+            nature,
+            ColumnProvenance::raw(name),
+        )
+    }
+
     pub fn set_nature(&mut self, nature: ColumnNature) {
         self.nature = nature;
     }
@@ -276,6 +470,25 @@ pub struct TGASchema {
     pub R2: Option<String>,
 }
 
+impl Default for TGASchema {
+    fn default() -> Self {
+        Self {
+            columns: HashMap::new(),
+            time: None,
+            temperature: None,
+            mass: None,
+            alpha: None,
+            dm_dt: None,
+            eta: None,
+            deta_dt: None,
+            dalpha_dt: None,
+            dT_dt: None,
+            E: None,
+            R2: None,
+        }
+    }
+}
+
 impl TGASchema {
     fn get(&self, name: &str) -> Option<&ColumnMeta> {
         self.columns.get(name)
@@ -291,12 +504,25 @@ impl TGASchema {
             };
             columns.insert(
                 name.clone(),
-                ColumnMeta {
-                    name: name.clone(),
-                    unit: units[i],
+                ColumnMeta::new(
+                    name.clone(),
+                    units[i],
                     origin,
-                    nature: ColumnNature::Unknown,
-                },
+                    ColumnNature::Unknown,
+                    match origin {
+                        ColumnOrigin::Raw => ColumnProvenance::raw(name.clone()),
+                        ColumnOrigin::Imported => {
+                            ColumnProvenance::imported(name.clone(), name.clone())
+                        }
+                        ColumnOrigin::PolarsDerived | ColumnOrigin::NumericDerived => {
+                            ColumnProvenance::manual(
+                                name.clone(),
+                                "from_columns",
+                                Some("derived during schema construction".to_string()),
+                            )
+                        }
+                    },
+                ),
             );
         }
         Self {
@@ -322,12 +548,15 @@ impl TGASchema {
     pub fn update_schema(&mut self, old_name: &str, new_name: &str) {
         // Clone the metadata of the old column if it exists
         if let Some(old_meta) = self.columns.get(old_name) {
-            let new_meta = ColumnMeta {
-                name: new_name.to_string(),
-                unit: old_meta.unit,
-                origin: old_meta.origin,
-                nature: old_meta.nature,
-            };
+            let mut provenance = old_meta.provenance.clone();
+            provenance.rename_output(new_name);
+            let new_meta = ColumnMeta::new(
+                new_name.to_string(),
+                old_meta.unit,
+                old_meta.origin,
+                old_meta.nature,
+                provenance,
+            );
             // Insert the new column metadata
             self.columns.insert(new_name.to_string(), new_meta);
         }
@@ -363,7 +592,6 @@ impl TGASchema {
     }
 
     pub fn drop_schema_record(&mut self, name: &str) {
-        // Clone the metadata of the old column if it exists
         if let Some(_) = self.columns.get(name) {
             self.columns.remove(name);
         }
@@ -406,6 +634,12 @@ pub struct History {
     pub vector_of_operations: Vec<OperationRecord>,
     pub columns_has_changed: Vec<Option<String>>,
 }
+
+impl Default for History {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl History {
     pub fn new() -> Self {
         Self {
@@ -432,6 +666,22 @@ impl History {
             None
         }
     }
+
+    pub fn feed_lines(&self) -> Vec<String> {
+        self.vector_of_operations
+            .iter()
+            .map(OperationRecord::feed_line)
+            .collect()
+    }
+
+    pub fn feed_text(&self) -> String {
+        let lines = self.feed_lines();
+        if lines.is_empty() {
+            "History is empty".to_string()
+        } else {
+            lines.join("\n")
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ColumnTypes {
@@ -455,6 +705,16 @@ pub enum AffectedColumns {
     Semantic(Vec<ColumnTypes>),
 }
 
+impl std::fmt::Display for AffectedColumns {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AffectedColumns::Specific(cols) => write!(f, "specific({})", cols.join(", ")),
+            AffectedColumns::All => write!(f, "all"),
+            AffectedColumns::Semantic(types) => write!(f, "semantic({:?})", types),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct OperationRecord {
     pub timestamp: usize,
@@ -463,6 +723,25 @@ pub struct OperationRecord {
     pub expr: Option<Expr>,
     pub description: String,
     pub reversible: bool,
+}
+
+impl OperationRecord {
+    pub fn feed_line(&self) -> String {
+        format!(
+            "[{}] {} | {} | affected: {} | reversible: {}",
+            self.timestamp,
+            self.operation_name,
+            self.description,
+            self.affected_columns,
+            self.reversible
+        )
+    }
+}
+
+impl std::fmt::Display for OperationRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.feed_line())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -490,6 +769,26 @@ impl ColumnHistory {
     pub fn has_irreversible(&self) -> bool {
         self.operations.iter().any(|op| !op.reversible)
     }
+
+    pub fn feed_text(&self) -> String {
+        if self.operations.is_empty() {
+            format!("Column '{}' has no history", self.column_name)
+        } else {
+            self.operations
+                .iter()
+                .map(OperationRecord::feed_line)
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TGADatasetSnapshot {
+    frame: LazyFrame,
+    schema: TGASchema,
+    oneframeplot: Option<OneFramePlot>,
+    columns_has_changed: Vec<Option<String>>,
 }
 
 //================================================================================
@@ -502,6 +801,21 @@ pub struct TGADataset {
     pub schema: TGASchema,
     pub oneframeplot: Option<OneFramePlot>,
     pub history_of_operations: History,
+    pub(crate) undo_stack: Vec<TGADatasetSnapshot>,
+    pub(crate) undo_snapshot_latch: bool,
+}
+
+impl Default for TGADataset {
+    fn default() -> Self {
+        Self {
+            frame: LazyFrame::default(),
+            schema: TGASchema::default(),
+            oneframeplot: None,
+            history_of_operations: History::default(),
+            undo_stack: Vec::new(),
+            undo_snapshot_latch: false,
+        }
+    }
 }
 
 impl std::fmt::Debug for TGADataset {
@@ -573,6 +887,199 @@ impl TGADataset {
                 description,
                 reversible,
             });
+    }
+
+    /// Store a pre-change snapshot so the last mutation can be reverted later.
+    /// We keep the snapshot small enough for day-to-day use by limiting the stack depth.
+    pub fn push_undo_snapshot(&mut self) {
+        if self.undo_snapshot_latch {
+            self.undo_snapshot_latch = false;
+            return;
+        }
+        const MAX_UNDO_DEPTH: usize = 20;
+        if self.undo_stack.len() == MAX_UNDO_DEPTH {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(TGADatasetSnapshot {
+            frame: self.frame.clone(),
+            schema: self.schema.clone(),
+            oneframeplot: self.oneframeplot.clone(),
+            columns_has_changed: self.history_of_operations.columns_has_changed.clone(),
+        });
+    }
+
+    /// Returns `true` when a column name is already occupied in the schema.
+    pub(crate) fn has_column_name(&self, name: &str) -> bool {
+        self.schema.columns.contains_key(name)
+    }
+
+    /// Reject duplicate names before creating a new column.
+    pub(crate) fn ensure_column_name_is_available(&self, name: &str) -> Result<(), TGADomainError> {
+        if self.has_column_name(name) {
+            Err(TGADomainError::ColumnAlreadyExists(name.to_string()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Mark the next mutation as part of a composite operation.
+    pub(crate) fn suppress_next_undo_snapshot(&mut self) {
+        self.undo_snapshot_latch = true;
+    }
+
+    /// Seed provenance for columns that are already present in the dataset.
+    ///
+    /// This keeps older construction paths working while the new metadata model
+    /// is being threaded through the codebase.
+    pub(crate) fn initialize_column_provenance(&mut self) {
+        for (name, meta) in self.schema.columns.iter_mut() {
+            if meta.provenance.steps.is_empty() {
+                meta.provenance = match meta.origin {
+                    ColumnOrigin::Raw => ColumnProvenance::raw(name.clone()),
+                    ColumnOrigin::Imported => {
+                        ColumnProvenance::imported(name.clone(), name.clone())
+                    }
+                    ColumnOrigin::PolarsDerived | ColumnOrigin::NumericDerived => {
+                        ColumnProvenance::manual(
+                            name.clone(),
+                            "initialize_column_provenance",
+                            Some("backfilled provenance".to_string()),
+                        )
+                    }
+                };
+            }
+        }
+    }
+
+    /// Return provenance for a single column if we have recorded it.
+    pub fn column_provenance(&self, column_name: &str) -> Option<&ColumnProvenance> {
+        self.schema
+            .columns
+            .get(column_name)
+            .map(|meta| &meta.provenance)
+    }
+
+    /// Human-readable provenance for GUI panels and debugging.
+    pub fn column_provenance_text(&self, column_name: &str) -> Option<String> {
+        self.column_provenance(column_name)
+            .map(ColumnProvenance::feed_text)
+    }
+
+    /// Record one transformation step for a column.
+    ///
+    /// If `source_column` and `target_column` are different, provenance is cloned
+    /// from the source and extended with the new step. If the column is modified
+    /// in place, the step is appended to the existing chain.
+    pub(crate) fn record_column_transform(
+        &mut self,
+        source_column: &str,
+        target_column: &str,
+        kind: ColumnTransformKind,
+        reversible: bool,
+        quality: Option<
+            crate::Kinetics::experimental_kinetics::ndarray_statistics::FilterQualityReport,
+        >,
+    ) {
+        let operation_id = Some(self.history_of_operations.vector_of_operations.len());
+        let input_columns = vec![source_column.to_string()];
+        let quality = quality
+            .map(|report| TransformQuality::computed(report, QualityReference::PreviousStep));
+
+        if source_column == target_column {
+            let entry = self
+                .schema
+                .columns
+                .entry(target_column.to_string())
+                .or_insert_with(|| {
+                    ColumnMeta::raw(
+                        target_column.to_string(),
+                        Unit::Unknown,
+                        ColumnNature::Unknown,
+                    )
+                });
+            entry.provenance.push_step(
+                input_columns,
+                target_column.to_string(),
+                kind,
+                quality,
+                operation_id,
+                reversible,
+            );
+            return;
+        }
+
+        let mut provenance = self
+            .schema
+            .columns
+            .get(source_column)
+            .map(|meta| meta.provenance.clone())
+            .unwrap_or_else(|| ColumnProvenance::raw(source_column));
+        provenance.rename_output(target_column);
+        provenance.push_step(
+            input_columns,
+            target_column.to_string(),
+            kind,
+            quality,
+            operation_id,
+            reversible,
+        );
+
+        if let Some(target_meta) = self.schema.columns.get_mut(target_column) {
+            target_meta.provenance = provenance;
+        } else {
+            self.schema.columns.insert(
+                target_column.to_string(),
+                ColumnMeta::new(
+                    target_column.to_string(),
+                    Unit::Unknown,
+                    ColumnOrigin::NumericDerived,
+                    ColumnNature::Unknown,
+                    provenance,
+                ),
+            );
+        }
+    }
+
+    /// Returns `true` if there is at least one saved state to undo to.
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    /// Number of saved snapshots available for undo.
+    pub fn undo_depth(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    /// Restore the last saved state and add an `undo` record to the audit trail.
+    pub fn undo_last(&mut self) -> Result<(), TGADomainError> {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            return Err(TGADomainError::InvalidOperation(
+                "No undo snapshot available".to_string(),
+            ));
+        };
+
+        let undone = self
+            .history_of_operations
+            .vector_of_operations
+            .last()
+            .cloned();
+
+        self.frame = snapshot.frame;
+        self.schema = snapshot.schema;
+        self.oneframeplot = snapshot.oneframeplot;
+        self.history_of_operations.columns_has_changed = snapshot.columns_has_changed;
+
+        let (affected, description) = if let Some(op) = undone {
+            (
+                op.affected_columns,
+                format!("Reverted operation '{}'", op.operation_name),
+            )
+        } else {
+            (AffectedColumns::All, "Reverted last operation".to_string())
+        };
+
+        self.log_operation("undo_last", affected, None, description, true);
+        Ok(())
     }
 
     fn populate_columns_has_changed(&mut self, affected: &AffectedColumns) {
@@ -697,7 +1204,7 @@ impl TGADataset {
     //=========================================================================
     // INPUT/OUTPUT
     /// Normalize txt file to csv
-    /// Преобразование txt файла в csv формат
+    /// ?????????????? txt ????? ? csv ??????
     pub fn normalize_txt_to_csv(input: &Path, output: &Path) -> std::io::Result<()> {
         let input = std::fs::read_to_string(input)?;
         let mut out = String::new();
@@ -717,7 +1224,7 @@ impl TGADataset {
         Ok(())
     }
     /// creation of TGA entity
-    /// Создание TGA сущности из CSV файла
+    /// ???????? TGA ???????? ?? CSV ?????
     pub fn from_csv(
         path: &str,
         time_col: &str,
@@ -741,36 +1248,21 @@ impl TGADataset {
         let mut columns = HashMap::new();
 
         columns.insert(
-            time_col.into(),
-            ColumnMeta {
-                name: time_col.into(),
-                unit: Unit::Second,
-                origin: ColumnOrigin::Raw,
-                nature: ColumnNature::Time,
-            },
+            time_col.to_string(),
+            ColumnMeta::raw(time_col, Unit::Second, ColumnNature::Time),
         );
 
         columns.insert(
             temp_col.into(),
-            ColumnMeta {
-                name: temp_col.into(),
-                unit: Unit::Celsius,
-                origin: ColumnOrigin::Raw,
-                nature: ColumnNature::Temperature,
-            },
+            ColumnMeta::raw(temp_col, Unit::Celsius, ColumnNature::Temperature),
         );
 
         columns.insert(
-            mass_col.into(),
-            ColumnMeta {
-                name: mass_col.into(),
-                unit: Unit::Milligram,
-                origin: ColumnOrigin::Raw,
-                nature: ColumnNature::Mass,
-            },
+            mass_col.to_string(),
+            ColumnMeta::raw(mass_col, Unit::Milligram, ColumnNature::Mass),
         );
 
-        Ok(Self {
+        let mut dataset = Self {
             frame,
             schema: TGASchema {
                 columns,
@@ -787,11 +1279,28 @@ impl TGADataset {
                 R2: None,
             },
             oneframeplot: None,
-            history_of_operations: History {
-                vector_of_operations: Vec::new(),
-                columns_has_changed: Vec::new(),
-            },
-        })
+            history_of_operations: History::new(),
+            undo_stack: Vec::new(),
+            undo_snapshot_latch: false,
+        };
+        dataset.initialize_column_provenance();
+
+        dataset.log_operation(
+            "from_csv",
+            AffectedColumns::Specific(vec![
+                time_col.to_string(),
+                temp_col.to_string(),
+                mass_col.to_string(),
+            ]),
+            None,
+            format!(
+                "Imported CSV '{}' with bound columns time='{}', temperature='{}', mass='{}'",
+                path, time_col, temp_col, mass_col
+            ),
+            false,
+        );
+
+        Ok(dataset)
     }
 
     /// Add a numeric column from a user-provided Vec<f64>.
@@ -806,6 +1315,7 @@ impl TGADataset {
         nature: ColumnNature,
         data: Vec<f64>,
     ) -> Result<Self, TGADomainError> {
+        self.ensure_column_name_is_available(name)?;
         let height = self.frame.clone().collect()?.height();
         if data.len() != height {
             return Err(TGADomainError::InvalidOperation(format!(
@@ -817,16 +1327,22 @@ impl TGADataset {
         }
 
         let series = Series::new(name.into(), data);
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(lit(series));
 
         self.schema.columns.insert(
-            name.into(),
-            ColumnMeta {
-                name: name.into(),
+            name.to_string(),
+            ColumnMeta::new(
+                name.to_string(),
                 unit,
-                origin: ColumnOrigin::NumericDerived,
+                ColumnOrigin::NumericDerived,
                 nature,
-            },
+                ColumnProvenance::manual(
+                    name,
+                    "add_column_from_vec",
+                    Some("external numeric data".to_string()),
+                ),
+            ),
         );
 
         self.log_operation(
@@ -852,16 +1368,11 @@ impl TGADataset {
         for name in schema.iter_names() {
             columns.insert(
                 name.to_string(),
-                ColumnMeta {
-                    name: name.to_string(),
-                    unit: Unit::Unknown,
-                    origin: ColumnOrigin::Raw,
-                    nature: ColumnNature::Unknown,
-                },
+                ColumnMeta::raw(name.to_string(), Unit::Unknown, ColumnNature::Unknown),
             );
         }
 
-        Ok(Self {
+        let mut dataset = Self {
             frame,
             schema: TGASchema {
                 columns,
@@ -878,15 +1389,36 @@ impl TGADataset {
                 R2: None,
             },
             oneframeplot: None,
-            history_of_operations: History {
-                vector_of_operations: Vec::new(),
-                columns_has_changed: Vec::new(),
-            },
-        })
+            history_of_operations: History::new(),
+            undo_stack: Vec::new(),
+            undo_snapshot_latch: false,
+        };
+        dataset.initialize_column_provenance();
+
+        dataset.log_operation(
+            "from_csv_raw",
+            AffectedColumns::All,
+            None,
+            format!(
+                "Imported raw CSV '{}' with {} columns",
+                path.display(),
+                dataset.schema.columns.len()
+            ),
+            false,
+        );
+
+        Ok(dataset)
     }
 
     /// Привязка временной колонки с указанием единиц измерения
-    pub fn bind_time(mut self, col: &str, unit: Unit) -> Result<Self, TGADomainError> {
+    pub fn bind_time_inplace(&mut self, col: &str, unit: Unit) -> Result<(), TGADomainError> {
+        if !unit.is_valid_time_binding_unit() {
+            return Err(TGADomainError::InvalidUnitForBinding {
+                field: "time",
+                unit,
+            });
+        }
+        self.push_undo_snapshot();
         let meta = self
             .schema
             .columns
@@ -895,6 +1427,16 @@ impl TGADataset {
 
         meta.unit = unit;
         self.schema.time = Some(col.into());
+        self.record_column_transform(
+            col,
+            col,
+            ColumnTransformKind::Binding {
+                role: "time".to_string(),
+                unit: format!("{:?}", unit),
+            },
+            true,
+            None,
+        );
 
         self.log_operation(
             "bind_time",
@@ -904,11 +1446,27 @@ impl TGADataset {
             true,
         );
 
+        Ok(())
+    }
+
+    pub fn bind_time(mut self, col: &str, unit: Unit) -> Result<Self, TGADomainError> {
+        self.bind_time_inplace(col, unit)?;
         Ok(self)
     }
 
     /// Привязка температурной колонки с указанием единиц измерения
-    pub fn bind_temperature(mut self, col: &str, unit: Unit) -> Result<Self, TGADomainError> {
+    pub fn bind_temperature_inplace(
+        &mut self,
+        col: &str,
+        unit: Unit,
+    ) -> Result<(), TGADomainError> {
+        if !unit.is_valid_temperature_binding_unit() {
+            return Err(TGADomainError::InvalidUnitForBinding {
+                field: "temperature",
+                unit,
+            });
+        }
+        self.push_undo_snapshot();
         let meta = self
             .schema
             .columns
@@ -917,6 +1475,16 @@ impl TGADataset {
 
         meta.unit = unit;
         self.schema.temperature = Some(col.into());
+        self.record_column_transform(
+            col,
+            col,
+            ColumnTransformKind::Binding {
+                role: "temperature".to_string(),
+                unit: format!("{:?}", unit),
+            },
+            true,
+            None,
+        );
 
         self.log_operation(
             "bind_temperature",
@@ -926,11 +1494,23 @@ impl TGADataset {
             true,
         );
 
+        Ok(())
+    }
+
+    pub fn bind_temperature(mut self, col: &str, unit: Unit) -> Result<Self, TGADomainError> {
+        self.bind_temperature_inplace(col, unit)?;
         Ok(self)
     }
 
     /// Привязка массовой колонки с указанием единиц измерения
-    pub fn bind_mass(mut self, col: &str, unit: Unit) -> Result<Self, TGADomainError> {
+    pub fn bind_mass_inplace(&mut self, col: &str, unit: Unit) -> Result<(), TGADomainError> {
+        if !unit.is_valid_mass_binding_unit() {
+            return Err(TGADomainError::InvalidUnitForBinding {
+                field: "mass",
+                unit,
+            });
+        }
+        self.push_undo_snapshot();
         let meta = self
             .schema
             .columns
@@ -939,6 +1519,16 @@ impl TGADataset {
 
         meta.unit = unit;
         self.schema.mass = Some(col.into());
+        self.record_column_transform(
+            col,
+            col,
+            ColumnTransformKind::Binding {
+                role: "mass".to_string(),
+                unit: format!("{:?}", unit),
+            },
+            true,
+            None,
+        );
 
         self.log_operation(
             "bind_mass",
@@ -948,27 +1538,48 @@ impl TGADataset {
             true,
         );
 
+        Ok(())
+    }
+
+    pub fn bind_mass(mut self, col: &str, unit: Unit) -> Result<Self, TGADomainError> {
+        self.bind_mass_inplace(col, unit)?;
         Ok(self)
     }
     /// Привязка колонки с указанием роли, имени и единиц измерения
-    pub fn bind_column(
-        mut self,
+    pub fn bind_column_inplace(
+        &mut self,
         role: ColumnRole,
         name: &str,
         unit: Unit,
-    ) -> Result<Self, TGADomainError> {
+    ) -> Result<(), TGADomainError> {
+        let role_label = format!("{:?}", &role);
+        let valid = match role {
+            ColumnRole::Time => unit.is_valid_time_binding_unit(),
+            ColumnRole::Temperature => unit.is_valid_temperature_binding_unit(),
+            ColumnRole::Mass => unit.is_valid_mass_binding_unit(),
+        };
+        if !valid {
+            let field = match role {
+                ColumnRole::Time => "time",
+                ColumnRole::Temperature => "temperature",
+                ColumnRole::Mass => "mass",
+            };
+            return Err(TGADomainError::InvalidUnitForBinding { field, unit });
+        }
         let nature = match role {
             ColumnRole::Time => ColumnNature::Time,
             ColumnRole::Temperature => ColumnNature::Temperature,
             ColumnRole::Mass => ColumnNature::Mass,
         };
-        let meta = ColumnMeta {
-            name: name.into(),
+        let meta = ColumnMeta::new(
+            name.to_string(),
             unit,
-            origin: ColumnOrigin::Raw,
+            ColumnOrigin::Raw,
             nature,
-        };
+            ColumnProvenance::raw(name),
+        );
 
+        self.push_undo_snapshot();
         self.schema.columns.insert(name.into(), meta);
 
         match role {
@@ -976,7 +1587,41 @@ impl TGADataset {
             ColumnRole::Temperature => self.schema.temperature = Some(name.into()),
             ColumnRole::Mass => self.schema.mass = Some(name.into()),
         }
+        self.record_column_transform(
+            name,
+            name,
+            ColumnTransformKind::Binding {
+                role: role_label,
+                unit: format!("{:?}", unit),
+            },
+            true,
+            None,
+        );
 
+        let affected = match role {
+            ColumnRole::Time => AffectedColumns::Semantic(vec![ColumnTypes::Time]),
+            ColumnRole::Temperature => AffectedColumns::Semantic(vec![ColumnTypes::Temperature]),
+            ColumnRole::Mass => AffectedColumns::Semantic(vec![ColumnTypes::Mass]),
+        };
+
+        self.log_operation(
+            "bind_column",
+            affected,
+            None,
+            format!("Bound {:?} column '{}' with unit {:?}", role, name, unit),
+            true,
+        );
+
+        Ok(())
+    }
+
+    pub fn bind_column(
+        mut self,
+        role: ColumnRole,
+        name: &str,
+        unit: Unit,
+    ) -> Result<Self, TGADomainError> {
+        self.bind_column_inplace(role, name, unit)?;
         Ok(self)
     }
 
@@ -1009,6 +1654,8 @@ impl TGADataset {
 
     /// Export selected columns to CSV with units encoded in a metadata header, similar to `to_csv_with_units`.
     /// Only the specified columns are exported, and units are taken from the schema.
+    /// ??????? ????????? ??????? ? CSV ???? ? ????????? ?????? ?????????.
+    /// ??????? ????????? ??????? ? CSV ???? ? ????????? ?????? ?????????.
     /// Экспорт выбранных колонок в CSV файл с указанием единиц измерения
     pub fn to_csv_with_units_selected(&self, path: &Path, columns: &[&str]) -> PolarsResult<()> {
         if columns.is_empty() {
@@ -1092,15 +1739,28 @@ impl TGADataset {
 
         let schema = TGASchema::from_columns(names, units);
 
-        Ok(Self {
+        let mut dataset = Self {
             frame,
             schema,
             oneframeplot: None,
-            history_of_operations: History {
-                vector_of_operations: Vec::new(),
-                columns_has_changed: Vec::new(),
-            },
-        })
+            history_of_operations: History::new(),
+            undo_stack: Vec::new(),
+            undo_snapshot_latch: false,
+        };
+        dataset.initialize_column_provenance();
+
+        dataset.log_operation(
+            "from_csv_with_units",
+            AffectedColumns::All,
+            None,
+            format!(
+                "Imported CSV '{}' with explicit units in header",
+                path.display()
+            ),
+            false,
+        );
+
+        Ok(dataset)
     }
     /// There are 2 functions to read and parse from_csv_raw a function to read raw files with no metadata and headers and
     /// from_csv_with_units. This is a wrapper function from_csv_universal which recognizes if there in the file headers and call
@@ -1158,27 +1818,41 @@ impl TGADataset {
         new_col: &str,
         out_meta: ColumnMeta,
     ) -> Result<Self, TGADomainError> {
+        self.ensure_column_name_is_available(new_col)?;
         let time = self
             .schema
             .time
             .as_ref()
             .ok_or(TGADomainError::TimeNotBound)?
             .clone();
+        let time_unit = self
+            .schema
+            .columns
+            .get(&time)
+            .map(|meta| meta.unit)
+            .ok_or(TGADomainError::ColumnNotFound(time.clone()))?;
 
         println!("\n column: {} ", source_col);
         let dv = col(source_col).shift(lit(-1)) - col(source_col).shift(lit(1));
         println!("\n column: {} ", time);
         let dt = col(&time).shift(lit(-1)) - col(time).shift(lit(1));
         let rate_expr = (dv.clone() / dt.clone()).alias(new_col);
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(rate_expr.clone());
 
+        let out_unit = out_meta.unit.for_time_base(time_unit)?;
+        let mut out_meta = out_meta;
+        out_meta.unit = out_unit;
         self.schema.columns.insert(new_col.into(), out_meta);
 
         self.log_operation(
             "derive_rate0",
             AffectedColumns::Specific(vec![new_col.to_string()]),
             Some(rate_expr),
-            format!("Computed rate {} from {}", new_col, source_col),
+            format!(
+                "Computed rate {} from {} with unit {:?}",
+                new_col, source_col, out_unit
+            ),
             true,
         );
 
@@ -1191,12 +1865,19 @@ impl TGADataset {
         new_col: &str,
         new_col_nature: ColumnNature,
     ) -> Result<Self, TGADomainError> {
+        self.ensure_column_name_is_available(new_col)?;
         let time = self
             .schema
             .time
             .as_ref()
             .ok_or(TGADomainError::TimeNotBound)?
             .clone();
+        let time_unit = self
+            .schema
+            .columns
+            .get(&time)
+            .map(|meta| meta.unit)
+            .ok_or(TGADomainError::ColumnNotFound(time.clone()))?;
 
         let src_meta = self
             .schema
@@ -1204,28 +1885,28 @@ impl TGADataset {
             .get(source_col)
             .ok_or(TGADomainError::ColumnNotFound(source_col.into()))?;
 
-        let out_unit = match src_meta.unit {
-            Unit::Milligram => Unit::MilligramPerSecond,
-            Unit::Dimensionless => Unit::PerSecond,
-            Unit::Kelvin => Unit::KelvinPerSecond,
-            Unit::Celsius => Unit::CelsiusPerSecond,
-            _ => return Err(TGADomainError::UnsupportedRateUnit),
-        };
+        let out_unit = src_meta.unit.for_time_base(time_unit)?;
         println!("\n column: {} ", source_col);
         let dv = col(source_col).shift(lit(-1)) - col(source_col).shift(lit(1));
         println!("\n column: {} ", time);
         let dt = col(&time).shift(lit(-1)) - col(time).shift(lit(1));
         let rate_expr = (dv.clone() / dt.clone()).alias(new_col);
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(rate_expr.clone());
 
         self.schema.columns.insert(
             new_col.into(),
-            ColumnMeta {
-                name: new_col.into(),
-                unit: out_unit,
-                origin: ColumnOrigin::PolarsDerived,
-                nature: new_col_nature,
-            },
+            ColumnMeta::new(
+                new_col.to_string(),
+                out_unit,
+                ColumnOrigin::PolarsDerived,
+                new_col_nature,
+                ColumnProvenance::manual(
+                    new_col,
+                    "derive_rate",
+                    Some(format!("derived from {}", source_col)),
+                ),
+            ),
         );
 
         self.log_operation(
@@ -1243,33 +1924,55 @@ impl TGADataset {
     }
 
     /// Вычисление скорости изменения массы
-    pub fn derive_mass_rate(mut self, new_col: &str) -> Result<Self, TGADomainError> {
+    pub fn derive_mass_rate_from_column(
+        mut self,
+        source_col: &str,
+        new_col: &str,
+    ) -> Result<Self, TGADomainError> {
+        self.push_undo_snapshot();
+        self.suppress_next_undo_snapshot();
+        self.schema.dm_dt = Some(new_col.to_string());
+        self.derive_rate(source_col, new_col, ColumnNature::MassRate)
+    }
+
+    /// Вычисление скорости изменения массы
+    pub fn derive_mass_rate(self, new_col: &str) -> Result<Self, TGADomainError> {
         let mass = self
             .schema
             .mass
             .as_ref()
             .ok_or(TGADomainError::MassNotBound)?
             .clone();
-        self.schema.dm_dt = Some(new_col.to_string());
-        self.derive_rate(&mass, new_col, ColumnNature::MassRate)
+        self.derive_mass_rate_from_column(&mass, new_col)
     }
 
     /// Вычисление скорости изменения температуры
-    pub fn derive_temperature_rate(mut self, new_col: &str) -> Result<Self, TGADomainError> {
+    pub fn derive_temperature_rate_from_column(
+        mut self,
+        source_col: &str,
+        new_col: &str,
+    ) -> Result<Self, TGADomainError> {
         let start = std::time::Instant::now();
+        self.push_undo_snapshot();
+        self.suppress_next_undo_snapshot();
+        self.schema.dT_dt = Some(new_col.to_string());
+        let dT_dt = self.derive_rate(source_col, new_col, ColumnNature::TemperatureRate);
+        info!(
+            "Derived temperature rate in {:?} ms",
+            start.elapsed().as_millis()
+        );
+        dT_dt
+    }
+
+    /// Вычисление скорости изменения температуры
+    pub fn derive_temperature_rate(self, new_col: &str) -> Result<Self, TGADomainError> {
         let temp = self
             .schema
             .temperature
             .as_ref()
             .ok_or(TGADomainError::TemperatureNotBound)?
             .clone();
-        self.schema.dT_dt = Some(new_col.to_string());
-        let dT_dt = self.derive_rate(&temp, new_col, ColumnNature::TemperatureRate)?;
-        info!(
-            "Derived temperature rate in {:?} ms",
-            start.elapsed().as_millis()
-        );
-        Ok(dT_dt)
+        self.derive_temperature_rate_from_column(&temp, new_col)
     }
     /// Вычисление безразмерной скорости изменения
     pub fn derive_dimensionless_rate(
@@ -1277,60 +1980,81 @@ impl TGADataset {
         col_name: &str,
         out_name: &str,
     ) -> Result<Self, TGADomainError> {
-        println!("\n column: {} ", col_name);
-        let out_meta = ColumnMeta {
-            name: out_name.into(),
-            unit: Unit::PerSecond,
-            origin: ColumnOrigin::PolarsDerived,
-            nature: ColumnNature::DimensionlessMassRate,
-        };
-        if let Some(_) = self.schema.eta {
+        let out_meta = ColumnMeta::new(
+            out_name.to_string(),
+            Unit::PerSecond,
+            ColumnOrigin::PolarsDerived,
+            ColumnNature::DimensionlessMassRate,
+            ColumnProvenance::manual(
+                out_name,
+                "derive_dimensionless_rate",
+                Some(format!("derived from {}", col_name)),
+            ),
+        );
+        self.push_undo_snapshot();
+        self.suppress_next_undo_snapshot();
+        let out = if let Some(_) = self.schema.eta {
             self.schema.deta_dt = Some(out_name.to_string());
+            self.derive_rate0(col_name, out_name, out_meta)
         } else if let Some(_) = self.schema.alpha {
             self.schema.dalpha_dt = Some(out_name.to_string());
+            self.derive_rate0(col_name, out_name, out_meta)
         } else {
-            return Err(TGADomainError::NoDimensionless);
+            Err(TGADomainError::NoDimensionless)
         };
-
-        self.derive_rate0(col_name, out_name, out_meta)
+        out
     }
 
-    /// Вычисление производной от eta
+    /// `deta/dt` for conversion `eta = 1 - alpha`.
     pub fn derive_deta_dt(mut self, out_name: &str) -> Result<Self, TGADomainError> {
         let start = Instant::now();
-        let out_meta = ColumnMeta {
-            name: out_name.into(),
-            unit: Unit::PerSecond,
-            origin: ColumnOrigin::PolarsDerived,
-            nature: ColumnNature::ConversionRate,
-        };
+        let out_meta = ColumnMeta::new(
+            out_name.to_string(),
+            Unit::PerSecond,
+            ColumnOrigin::PolarsDerived,
+            ColumnNature::ConversionRate,
+            ColumnProvenance::manual(
+                out_name,
+                "derive_deta_dt",
+                Some("derived from eta".to_string()),
+            ),
+        );
         let eta_col = self
             .schema
             .eta
             .as_ref()
             .ok_or(TGADomainError::EtaNotFound)?
             .clone();
+        self.push_undo_snapshot();
+        self.suppress_next_undo_snapshot();
         self.schema.deta_dt = Some(out_name.to_string());
         let deta_dt = self.derive_rate0(&eta_col, out_name, out_meta);
         info!("Derived deta_dt in {:?} ms", start.elapsed().as_millis());
         deta_dt
     }
 
-    /// Вычисление производной от alpha
+    /// `dalpha/dt` for relative mass `alpha = m / m0`.
     pub fn derive_dalpha_dt(mut self, out_name: &str) -> Result<Self, TGADomainError> {
         let start = Instant::now();
-        let out_meta = ColumnMeta {
-            name: out_name.into(),
-            unit: Unit::PerSecond,
-            origin: ColumnOrigin::PolarsDerived,
-            nature: ColumnNature::DimensionlessMassRate,
-        };
+        let out_meta = ColumnMeta::new(
+            out_name.to_string(),
+            Unit::PerSecond,
+            ColumnOrigin::PolarsDerived,
+            ColumnNature::DimensionlessMassRate,
+            ColumnProvenance::manual(
+                out_name,
+                "derive_dalpha_dt",
+                Some("derived from alpha".to_string()),
+            ),
+        );
         let alpha_col = self
             .schema
             .alpha
             .as_ref()
             .ok_or(TGADomainError::AlphaNotFound)?
             .clone();
+        self.push_undo_snapshot();
+        self.suppress_next_undo_snapshot();
         self.schema.dalpha_dt = Some(out_name.to_string());
         let dalpha_dt = self.derive_rate0(&alpha_col, out_name, out_meta);
         info!("Derived dalpha_dt in {:?} ms", start.elapsed().as_millis());
@@ -1338,7 +2062,15 @@ impl TGADataset {
     }
 
     pub fn drop_nulls(&mut self) -> Result<(), TGADomainError> {
+        self.push_undo_snapshot();
         self.frame = self.frame.clone().drop_nulls(None);
+        self.log_operation(
+            "drop_nulls",
+            AffectedColumns::All,
+            None,
+            "Dropped null rows from the dataset".to_string(),
+            true,
+        );
         Ok(())
     }
 
@@ -1359,6 +2091,7 @@ impl TGADataset {
 }
 //==============================================================
 //numerical layer
+#[derive(Debug)]
 pub struct NumericBlock {
     pub grid: Arc<Vec<f64>>, // time or temperature
     pub columns: HashMap<String, Arc<Vec<f64>>>,
@@ -1378,11 +2111,13 @@ impl TGADataset {
 
         let df = self.frame.clone().select(select_exprs).collect()?;
 
-        let grid = Arc::new(df.column(grid_col)?.f64()?.into_no_null_iter().collect());
+        let grid_series = df.column(grid_col)?.f64()?;
+        let grid = Arc::new(grid_series.into_no_null_iter().collect());
 
         let mut columns = HashMap::new();
         for &c in cols {
-            let data = Arc::new(df.column(c)?.f64()?.into_no_null_iter().collect());
+            let series = df.column(c)?.f64()?;
+            let data = Arc::new(series.into_no_null_iter().collect());
             columns.insert(c.to_string(), data);
         }
 
@@ -1416,17 +2151,25 @@ impl TGADataset {
         data: Arc<Vec<f64>>,
         nature: ColumnNature,
     ) -> PolarsResult<Self> {
+        self.ensure_column_name_is_available(name)
+            .map_err(|err| PolarsError::ComputeError(format!("{:?}", err).into()))?;
         let series = Series::new(name.into(), data.as_ref());
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(lit(series));
 
         self.schema.columns.insert(
             name.into(),
-            ColumnMeta {
-                name: name.into(),
+            ColumnMeta::new(
+                name.to_string(),
                 unit,
-                origin: ColumnOrigin::NumericDerived,
+                ColumnOrigin::NumericDerived,
                 nature,
-            },
+                ColumnProvenance::manual(
+                    name,
+                    "add_numeric_column",
+                    Some("external numeric data".to_string()),
+                ),
+            ),
         );
 
         self.log_operation(

@@ -10,7 +10,7 @@ use egui_plot::{Line, Plot, PlotBounds, PlotPoints, PlotUi};
 pub struct PlotView;
 
 impl PlotView {
-    /// Отображает основную область графика
+    /// Отображает основную область графика.
     ///
     /// Создает и настраивает виджет графика, отображает все графики,
     /// прямоугольник выделения и обрабатывает пользовательские взаимодействия.
@@ -119,8 +119,8 @@ impl PlotView {
         })
     }
 
-    /// ОСНОВНАЯ ФФУНКЦИЯ РИСОВАНИЯ ОТДЕЛЬНЫХ ГРАФИКОВ
-    /// Отображает отдельный график
+    /// Основная функция рисования отдельных графиков.
+    /// Отображает отдельный график.
     ///
     /// Рисует график функции с учетом его состояния (выбран/подсвечен)
     /// и параметров отображения из модели.
@@ -157,7 +157,7 @@ impl PlotView {
         }
     }
 
-    /// Отображает информационную панель
+    /// Отображает информационную панель.
     ///
     /// Показывает информацию о выбранном графике, активном выделении,
     /// текущем диапазоне отображения и инструкции по использованию.
@@ -170,28 +170,28 @@ impl PlotView {
         ui.heading("TGA Plot Information");
         ui.separator();
         // Инструкции по использованию
-        ui.label("📖 Instructions:");
-        ui.label("• Click on a curve to select it");
-        ui.label("• Drag to select area");
-        ui.label("• Scroll to zoom, drag to pan");
-        ui.label("• Double-click to reset view");
+        ui.label("Инструкция:");
+        ui.label("- Кликните по кривой, чтобы выбрать её");
+        ui.label("- Потяните мышью, чтобы выделить область");
+        ui.label("- Колесо мыши — масштаб, перетаскивание — сдвиг");
+        ui.label("- Двойной клик — сброс вида");
         ui.separator();
         // Информация о выбранном графике
         if let Some(index) = model.get_selected_curve_index() {
             // Получаем выбранный график
             let curve = &model.plots[index];
             // Отображаем имя выбранного графика
-            ui.label(format!("📌 Selected: {}", curve.get_name()));
-            ui.label(format!("📐 Plot: {} vs {}", curve.y_name, curve.x_name));
+            ui.label(format!("Выбрано: {}", curve.get_name()));
+            ui.label(format!("График: {} vs {}", curve.y_name, curve.x_name));
         } else {
             // Если график не выбран, показываем соответствующее сообщение
-            ui.label("No curve selected");
+            ui.label("График не выбран");
         }
 
         if let Some(rect) = &model.interaction.selection_rect {
             let (x_min, x_max, y_min, y_max) = rect.bounds();
             ui.label(format!(
-                "📐 Selection: x=[{:.2}, {:.2}], y=[{:.2}, {:.2}]",
+                "Выделение: x=[{:.2}, {:.2}], y=[{:.2}, {:.2}]",
                 x_min, x_max, y_min, y_max
             ));
 
@@ -203,12 +203,12 @@ impl PlotView {
                 .collect();
 
             if !highlighted.is_empty() {
-                ui.label(format!("🔴 Highlighted: {}", highlighted.join(", ")));
+                ui.label(format!("Подсвечены: {}", highlighted.join(", ")));
             }
         }
 
         ui.label(format!(
-            "👁️ View: x=[{:.2}, {:.2}], y=[{:.2}, {:.2}]",
+            "Вид: x=[{:.2}, {:.2}], y=[{:.2}, {:.2}]",
             model.interaction.view_range.0,
             model.interaction.view_range.1,
             model.interaction.view_y_range.0,

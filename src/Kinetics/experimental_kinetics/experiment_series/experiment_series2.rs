@@ -1,9 +1,11 @@
+use crate::Kinetics::experimental_kinetics::column_provenance::ColumnProvenance;
 use crate::Kinetics::experimental_kinetics::exp_engine_api::GoldenPipelineConfig;
 use crate::Kinetics::experimental_kinetics::experiment_series_main::{
     ExperimentMeta, TGAExperiment, TGASeries,
 };
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    ColumnNature, TGADataset, TGADomainError, TGASchema,
+    ColumnMeta, ColumnNature, ColumnOrigin, TGADataset, TGADomainError, TGASchema,
+    TimeMonotonicityReport, Unit,
 };
 use crate::Kinetics::experimental_kinetics::testing_mod::{AdvancedTGAConfig, VirtualTGA};
 use polars::prelude::*;
@@ -34,6 +36,7 @@ impl UnitedDataset {
             ColumnNature::ActivationEnergy => "activation_energy",
             ColumnNature::PredexFactor => "predex_factor",
             ColumnNature::R2 => "r2",
+            ColumnNature::FittedCurve => "fitted_curve",
         }
     }
 
@@ -106,11 +109,8 @@ impl UnitedDataset {
             )));
         }
 
-        let out = df
-            .column(column_name)?
-            .f64()?
-            .into_no_null_iter()
-            .collect::<Vec<f64>>();
+        let series = df.column(column_name)?.f64()?;
+        let out = series.into_no_null_iter().collect::<Vec<f64>>();
         Ok(out)
     }
 
@@ -153,7 +153,8 @@ impl UnitedDataset {
         })?;
 
         let field = struct_series.struct_()?.field_by_name(field_name)?;
-        let out = field.f64()?.into_no_null_iter().collect::<Vec<f64>>();
+        let series = field.f64()?;
+        let out = series.into_no_null_iter().collect::<Vec<f64>>();
         Ok(out)
     }
 
@@ -217,12 +218,31 @@ impl TGAExperiment {
     pub fn monotony_of_time_check(&self) -> Result<Vec<f64>, TGADomainError> {
         self.dataset.monotony_of_time_check()
     }
+
+    /// Structured diagnostics for the active time column.
+    pub fn time_monotonicity_report(&self) -> Result<TimeMonotonicityReport, TGADomainError> {
+        self.dataset.time_monotonicity_report()
+    }
 }
 
 impl TGASeries {
     /// Thin wrapper for per-experiment time monotonicity diagnostics.
     pub fn monotony_of_time_check(&self, id: &str) -> Result<Vec<f64>, TGADomainError> {
         self.try_apply_by_id(id, |exp| exp.monotony_of_time_check())
+    }
+
+    /// Structured per-experiment time diagnostics.
+    pub fn time_monotonicity_report(
+        &self,
+        id: &str,
+    ) -> Result<TimeMonotonicityReport, TGADomainError> {
+        self.try_apply_by_id(id, |exp| exp.time_monotonicity_report())
+    }
+
+    /// Sort one experiment by the active time column while preserving row alignment.
+    pub fn sort_experiment_by_time(&mut self, id: &str) -> Result<&mut Self, TGADomainError> {
+        self.try_mutate_by_id(id, |exp| exp.dataset.sort_by_bound_time_inplace())?;
+        Ok(self)
     }
 
     pub fn unite_datasets(&self) -> Result<UnitedDataset, TGADomainError> {
@@ -312,7 +332,7 @@ impl TGASeries {
         })?;
 
         let new_exp = Self::extract_columns_to_new_experiment(parent, new_id, columns)?;
-        self.push(new_exp);
+        self.push(new_exp)?;
         Ok(())
     }
 
@@ -362,13 +382,30 @@ impl TGASeries {
             R2: Self::filter_semantic_field(&parent.dataset.schema.R2, columns),
         };
 
-        let new_dataset = TGADataset {
+        let mut new_dataset = TGADataset {
             frame: new_frame,
             schema: new_schema,
             oneframeplot: None,
             history_of_operations:
                 crate::Kinetics::experimental_kinetics::one_experiment_dataset::History::new(),
+            undo_stack: Vec::new(),
+            undo_snapshot_latch: false,
         };
+        new_dataset.initialize_column_provenance();
+        new_dataset.log_operation(
+            "create_experiment_from_columns",
+            crate::Kinetics::experimental_kinetics::one_experiment_dataset::AffectedColumns::Specific(
+                columns.iter().map(|c| c.to_string()).collect(),
+            ),
+            None,
+            format!(
+                "Created experiment '{}' from parent '{}' using {} columns",
+                new_id,
+                parent.meta.id,
+                columns.len()
+            ),
+            false,
+        );
 
         let mut new_meta = parent.meta.clone();
         new_meta.id = new_id;
@@ -429,7 +466,7 @@ impl TGASeries {
             self.drop_nulls(&new_id)?;
             self.assert_no_nulls(&new_id, "final")?;
             if do_we_need_drop_old_exp {
-                self.drop_experiment(idx);
+                self.drop_experiment(idx)?;
             }
             self.rebuild_index();
         }
@@ -544,13 +581,30 @@ pub fn create_experiment_from_columns(
         R2: filter_field(&parent.dataset.schema.R2),
     };
 
-    let new_dataset = TGADataset {
+    let mut new_dataset = TGADataset {
         frame: new_frame,
         schema: new_schema,
         oneframeplot: None,
         history_of_operations:
             crate::Kinetics::experimental_kinetics::one_experiment_dataset::History::new(),
+        undo_stack: Vec::new(),
+        undo_snapshot_latch: false,
     };
+    new_dataset.initialize_column_provenance();
+    new_dataset.log_operation(
+        "create_experiment_from_columns",
+        crate::Kinetics::experimental_kinetics::one_experiment_dataset::AffectedColumns::Specific(
+            columns.iter().map(|c| c.to_string()).collect(),
+        ),
+        None,
+        format!(
+            "Created experiment '{}' from parent '{}' using {} columns",
+            new_id,
+            parent.meta.id,
+            columns.len()
+        ),
+        false,
+    );
 
     let mut new_meta = parent.meta.clone();
     new_meta.id = new_id;
@@ -581,39 +635,33 @@ mod tests {
         let mut columns = HashMap::new();
         columns.insert(
             "time".to_string(),
-            ColumnMeta {
-                name: "time".to_string(),
-                unit: Unit::Second,
-                origin: ColumnOrigin::Raw,
-                nature: ColumnNature::Time,
-            },
+            ColumnMeta::raw("time".to_string(), Unit::Second, ColumnNature::Time),
         );
         columns.insert(
             "temperature".to_string(),
-            ColumnMeta {
-                name: "temperature".to_string(),
-                unit: Unit::Kelvin,
-                origin: ColumnOrigin::Raw,
-                nature: ColumnNature::Temperature,
-            },
+            ColumnMeta::raw(
+                "temperature".to_string(),
+                Unit::Kelvin,
+                ColumnNature::Temperature,
+            ),
         );
         columns.insert(
             "mass".to_string(),
-            ColumnMeta {
-                name: "mass".to_string(),
-                unit: Unit::Milligram,
-                origin: ColumnOrigin::Raw,
-                nature: ColumnNature::Mass,
-            },
+            ColumnMeta::raw("mass".to_string(), Unit::Milligram, ColumnNature::Mass),
         );
         columns.insert(
             "mass_smooth".to_string(),
-            ColumnMeta {
-                name: "mass_smooth".to_string(),
-                unit: Unit::Milligram,
-                origin: ColumnOrigin::PolarsDerived,
-                nature: ColumnNature::Mass,
-            },
+            ColumnMeta::new(
+                "mass_smooth".to_string(),
+                Unit::Milligram,
+                ColumnOrigin::PolarsDerived,
+                ColumnNature::Mass,
+                ColumnProvenance::manual(
+                    "mass_smooth",
+                    "create_experiment_from_columns",
+                    Some("smoothed mass".to_string()),
+                ),
+            ),
         );
 
         let schema = TGASchema {
@@ -631,12 +679,16 @@ mod tests {
             R2: None,
         };
 
-        TGADataset {
+        let mut dataset = TGADataset {
             frame: df.lazy(),
             schema,
             oneframeplot: None,
             history_of_operations: History::new(),
-        }
+            undo_stack: Vec::new(),
+            undo_snapshot_latch: false,
+        };
+        dataset.initialize_column_provenance();
+        dataset
     }
 
     #[test]
@@ -653,6 +705,13 @@ mod tests {
 
         assert_eq!(new_exp.meta.id, "child");
         assert_eq!(new_exp.meta.heating_rate, Some(10.0));
+        assert!(
+            new_exp
+                .dataset
+                .history_of_operations
+                .feed_text()
+                .contains("create_experiment_from_columns")
+        );
 
         let df = new_exp.dataset.frame.collect().unwrap();
         assert_eq!(df.width(), 2);

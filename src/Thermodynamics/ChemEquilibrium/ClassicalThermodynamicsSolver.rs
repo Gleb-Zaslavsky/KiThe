@@ -10,16 +10,16 @@
 //! - Sanity checking for numerical stability
 //! - Support for both temperature-dependent and temperature-independent solving
 
+use crate::Thermodynamics::ChemEquilibrium::NR_Legacy::{Method as LegacyNRMethod, NR};
 use RustedSciThe::numerical::Nonlinear_systems::prelude::{
-    Bounds, DampedNewtonMethod, EngineLogLevel, LevenbergMarquardtMinpack, NonlinearSolverMethod,
-    NielsenLevenbergMarquardtMethod, SolveOptions, SolverEngine, SymbolicNonlinearProblem,
-    SymbolicProblemOptions, LevenbergMarquardtMethod,
+    Bounds, DampedNewtonMethod, EngineLogLevel, LevenbergMarquardtMethod,
+    LevenbergMarquardtMinpack, NielsenLevenbergMarquardtMethod, NonlinearSolverMethod,
+    SolveOptions, SolverEngine, SymbolicNonlinearProblem, SymbolicProblemOptions,
     TerminationReason,
 };
 use RustedSciThe::numerical::optimization::sym_wrapper::LM as LegacyLM;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use RustedSciThe::symbolic::symbolic_functions::Jacobian;
-use crate::Thermodynamics::ChemEquilibrium::NR_Legacy::{Method as LegacyNRMethod, NR};
 use nalgebra::{DVector, SVD};
 use std::collections::HashMap;
 
@@ -93,8 +93,6 @@ impl Default for SolverType {
 }
 /// Enum holding actual solver instances
 pub enum SolverInstance {
-    /// Legacy NR solver configuration for temperature-dependent solve
-    NRWithT(NRParams),
     /// Legacy NR solver instance
     NR(NR),
     /// Legacy optimization LM wrapper instance
@@ -225,44 +223,47 @@ impl Solver {
     ////////////////////////////////////////////NEWTON RAPHSON//////////////////////////////////////
     /// Sets up Newton-Raphson solver with temperature parameter support
     fn set_NR_solver(&mut self, params: NRParams) {
-        self.solver_instance = SolverInstance::NRWithT(params);
+        let bounds = self.bounds.clone();
+        let loglevel = if params.loglevel.is_some() {
+            params.loglevel
+        } else {
+            self.loglevel.clone()
+        };
+        let initial_guess = params
+            .initial_guess
+            .clone()
+            .unwrap_or(self.initial_guess.clone().unwrap());
+        let unknowns: Vec<String> = self.all_unknowns.iter().map(|x| x.to_string()).collect();
+        assert_eq!(
+            self.all_unknowns.len(),
+            initial_guess.len(),
+            "the number of unknowns should be equal to the number of initial guesses"
+        );
+        let mut solver = NR::new();
+        solver.set_equation_system(
+            self.full_system_sym.clone(),
+            Some(unknowns),
+            initial_guess,
+            params.tolerance,
+            params.max_iterations,
+        );
+        solver.set_solver_params(
+            loglevel,
+            None,
+            params.damping_factor,
+            bounds,
+            params.method,
+            None,
+        );
+        solver.set_eq_params(vec!["T".to_string()]);
+        solver.eq_generate();
+        self.solver_instance = SolverInstance::NR(solver);
     }
 
     /// Solves using Newton-Raphson method with specific temperature
     fn solve_NR_with_T(&mut self, T: f64) {
-        if let SolverInstance::NRWithT(ref params) = self.solver_instance {
-            let mut eqs_t = self.full_system_sym.clone();
-            for eq in &mut eqs_t {
-                *eq = eq.clone().set_variable("T", T);
-            }
-            let bounds = self.bounds.clone();
-            let loglevel = if params.loglevel.is_some() {
-                params.loglevel.clone()
-            } else {
-                self.loglevel.clone()
-            };
-            let initial_guess = params
-                .initial_guess
-                .clone()
-                .unwrap_or(self.initial_guess.clone().unwrap());
-            let unknowns: Vec<String> = self.all_unknowns.iter().map(|x| x.to_string()).collect();
-            let mut nr = NR::new();
-            nr.set_equation_system(
-                eqs_t.clone(),
-                Some(unknowns),
-                initial_guess,
-                params.tolerance,
-                params.max_iterations,
-            );
-            nr.set_solver_params(
-                loglevel.clone(),
-                None,
-                params.damping_factor,
-                bounds,
-                params.method.clone(),
-                None,
-            );
-            nr.eq_generate();
+        if let SolverInstance::NR(ref mut nr) = self.solver_instance {
+            nr.set_eq_params_values(DVector::from_vec(vec![T]));
             nr.solve();
             if let Some(solution) = nr.get_result() {
                 self.solution = solution.data.into();
@@ -273,33 +274,10 @@ impl Solver {
                     .map(|(k, v)| (k.to_string(), *v))
                     .collect();
             } else {
-                // Legacy NR may fail on some stiff cases; use legacy LM as robust fallback.
-                let mut lm = LegacyLM::new();
-                let unknowns: Vec<String> = self.all_unknowns.iter().map(|x| x.to_string()).collect();
-                let initial_guess = params
-                    .initial_guess
-                    .clone()
-                    .unwrap_or(self.initial_guess.clone().unwrap());
-                lm.set_equation_system(
-                    eqs_t.clone(),
-                    Some(unknowns),
-                    None,
-                    initial_guess,
-                    Some(params.tolerance),
-                    Some(1e-6),
-                    Some(1e-6),
-                    Some(true),
-                    Some(params.max_iterations),
+                panic!(
+                    "Failed to get result for temperature-dependent NR solve at T={}",
+                    T
                 );
-                lm.loglevel = loglevel;
-                lm.eq_generate();
-                lm.solve();
-                self.map_of_solutions = lm.map_of_solutions.unwrap_or_default();
-                self.solution = self
-                    .all_unknowns
-                    .iter()
-                    .map(|u| *self.map_of_solutions.get(&u.to_string()).unwrap_or(&0.0))
-                    .collect();
             }
         }
     }
@@ -449,10 +427,10 @@ impl Solver {
             SymbolicProblemOptions::new().with_variables(unknowns),
         )
         .expect("Failed to build symbolic nonlinear problem");
-        let method = NonlinearSolverMethod::LevenbergMarquardtMinpack(
-            LevenbergMarquardtMinpack::default(),
-        );
-        let result = Self::solve_checked(&problem, DVector::from_vec(initial_guess), options, method);
+        let method =
+            NonlinearSolverMethod::LevenbergMarquardtMinpack(LevenbergMarquardtMinpack::default());
+        let result =
+            Self::solve_checked(&problem, DVector::from_vec(initial_guess), options, method);
         self.map_of_solutions = self
             .all_unknowns
             .iter()
@@ -504,9 +482,8 @@ impl Solver {
                 .with_equation_parameters(vec!["T".to_string()]),
         )
         .expect("Failed to build symbolic nonlinear problem");
-        let method = NonlinearSolverMethod::LevenbergMarquardtMinpack(
-            LevenbergMarquardtMinpack::default(),
-        );
+        let method =
+            NonlinearSolverMethod::LevenbergMarquardtMinpack(LevenbergMarquardtMinpack::default());
         self.solver_instance = SolverInstance::Prepared {
             problem,
             method,
@@ -592,8 +569,10 @@ impl Solver {
         method: NonlinearSolverMethod,
     ) -> RustedSciThe::numerical::Nonlinear_systems::prelude::SolveResult {
         let mut attempts = vec![method];
-        attempts.push(NonlinearSolverMethod::DampedNewton(DampedNewtonMethod::default()));
-         attempts.push(NonlinearSolverMethod::LevenbergMarquardt(
+        attempts.push(NonlinearSolverMethod::DampedNewton(
+            DampedNewtonMethod::default(),
+        ));
+        attempts.push(NonlinearSolverMethod::LevenbergMarquardt(
             LevenbergMarquardtMethod::default(),
         ));
         attempts.push(NonlinearSolverMethod::LevenbergMarquardtMinpack(
@@ -632,10 +611,7 @@ impl Solver {
         result: &RustedSciThe::numerical::Nonlinear_systems::prelude::SolveResult,
         tolerance: f64,
     ) -> bool {
-        let converged = matches!(
-            result.termination,
-            TerminationReason::Converged
-        );
+        let converged = matches!(result.termination, TerminationReason::Converged);
         converged && result.residual_norm.is_finite() && result.residual_norm <= tolerance * 10.0
     }
 

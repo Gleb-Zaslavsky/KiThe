@@ -2,7 +2,8 @@ use polars::prelude::{DataFrame, LazyFrame, PolarsResult};
 
 use crate::Kinetics::experimental_kinetics::experiment_series_main::{ExperimentMeta, TGASeries};
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    ColumnMeta, ColumnNature, ColumnOrigin, History, TGADataset, TGADomainError, TGASchema, Unit,
+    AffectedColumns, ColumnMeta, ColumnNature, ColumnOrigin, History, TGADataset, TGADomainError,
+    TGASchema, Unit,
 };
 use polars::prelude::*;
 use rand::rngs::StdRng;
@@ -30,33 +31,22 @@ impl TGADataset {
         let mut columns = HashMap::new();
         columns.insert(
             "time".to_string(),
-            ColumnMeta {
-                name: "time".to_string(),
-                unit: Unit::Second,
-                origin: ColumnOrigin::Raw,
-                nature: ColumnNature::Time,
-            },
+            ColumnMeta::raw("time".to_string(), Unit::Second, ColumnNature::Time),
         );
         columns.insert(
             "mass".to_string(),
-            ColumnMeta {
-                name: "mass".to_string(),
-                unit: Unit::Milligram,
-                origin: ColumnOrigin::Raw,
-                nature: ColumnNature::Mass,
-            },
+            ColumnMeta::raw("mass".to_string(), Unit::Milligram, ColumnNature::Mass),
         );
         columns.insert(
             "temperature".to_string(),
-            ColumnMeta {
-                name: "temperature".to_string(),
-                unit: Unit::Kelvin,
-                origin: ColumnOrigin::Raw,
-                nature: ColumnNature::Temperature,
-            },
+            ColumnMeta::raw(
+                "temperature".to_string(),
+                Unit::Kelvin,
+                ColumnNature::Temperature,
+            ),
         );
 
-        Ok(Self {
+        let mut dataset = Self {
             frame,
             schema: TGASchema {
                 columns,
@@ -73,11 +63,21 @@ impl TGADataset {
                 R2: None,
             },
             oneframeplot: None,
-            history_of_operations: History {
-                vector_of_operations: Vec::new(),
-                columns_has_changed: Vec::new(),
-            },
-        })
+            history_of_operations: History::new(),
+            undo_stack: Vec::new(),
+            undo_snapshot_latch: false,
+        };
+        dataset.initialize_column_provenance();
+
+        dataset.log_operation(
+            "create_from_synthetic_data",
+            AffectedColumns::All,
+            None,
+            "Created dataset from synthetic TGA generator".to_string(),
+            false,
+        );
+
+        Ok(dataset)
     }
 }
 //==========================================================================================================
@@ -100,9 +100,24 @@ pub struct VirtualTGA {
 /// Типы шума для генерации синтетических данных
 #[derive(Clone, Debug)]
 pub enum NoiseKind {
-    Gaussian { sigma: f64 },
-    Uniform { amplitude: f64 },
-    Drift { slope: f64 },
+    Gaussian {
+        sigma: f64,
+    },
+    Uniform {
+        amplitude: f64,
+    },
+    Drift {
+        slope: f64,
+    },
+    /// Sparse impulsive spikes with a fixed probability and amplitude.
+    Impulse {
+        probability: f64,
+        amplitude: f64,
+    },
+    /// Low-frequency colored noise that behaves like a flicker-like drift.
+    Flicker {
+        amplitude: f64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -356,6 +371,32 @@ impl VirtualTGA {
             NoiseKind::Drift { slope } => {
                 for (i, v) in data.iter_mut().enumerate() {
                     *v += slope * i as f64;
+                }
+            }
+
+            NoiseKind::Impulse {
+                probability,
+                amplitude,
+            } => {
+                if *probability <= 0.0 {
+                    return;
+                }
+
+                let dist = Normal::new(0.0, *amplitude).unwrap();
+                for v in data {
+                    let r: f64 = rng.random();
+                    if r < *probability {
+                        *v += dist.sample(rng);
+                    }
+                }
+            }
+
+            NoiseKind::Flicker { amplitude } => {
+                let dist = Normal::new(0.0, *amplitude).unwrap();
+                let mut state = 0.0;
+                for v in data {
+                    state = 0.995 * state + dist.sample(rng);
+                    *v += state;
                 }
             }
         }

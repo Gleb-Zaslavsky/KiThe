@@ -117,7 +117,7 @@ impl DifferentialFriedmanSolver {
             let mut y = Vec::with_capacity(n_exp);
 
             for (&it, &r) in inv_t.iter().zip(rate.iter()) {
-                if r <= 0.0 {
+                if !it.is_finite() || !r.is_finite() || it <= 0.0 || r <= 0.0 {
                     continue;
                 }
 
@@ -225,7 +225,7 @@ impl FriedmanIntegralSolver {
             let mut y = Vec::with_capacity(n_exp);
 
             for (&it, &time) in inv_t.iter().zip(t.iter()) {
-                if time <= 0.0 {
+                if !it.is_finite() || !time.is_finite() || it <= 0.0 || time <= 0.0 {
                     continue;
                 }
 

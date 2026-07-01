@@ -1,5 +1,5 @@
-use RustedSciThe::numerical::BVP_Damp::BVP_utils::checkmem;
-use RustedSciThe::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
+use crate::numerical::BVP_Damp::BVP_utils::checkmem;
+use crate::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 /// A framework for solving system of nonlinear equations using
 /// - Newton-Raphson method;
 /// - damped Newton-Raphson method;
@@ -42,11 +42,11 @@ use RustedSciThe::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 ///     assert_eq!(solution, DVector::from(vec![3.0, -1.0] ));
 ///     println!("result = {:?} \n", NR_instanse.get_result().unwrap());
 ///  ```
-use RustedSciThe::symbolic::symbolic_engine::Expr;
-use RustedSciThe::symbolic::symbolic_functions::Jacobian;
+use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::symbolic_functions::Jacobian;
 
-use RustedSciThe::numerical::Nonlinear_systems::LM_utils::{
-    ConvergenceCriteria, ReductionRatio, ScalingMethod,
+use crate::numerical::Nonlinear_systems::LM_utils::{
+    ConvergenceCriteria, ReductionRatio, ScalingMethod, SubproblemMethod, UpdateMethod,
 };
 use log::{error, info, warn};
 use nalgebra::{DMatrix, DVector, Matrix};
@@ -57,20 +57,14 @@ use std::error::Error;
 use std::time::Instant;
 use std::vec;
 use tabled::{builder::Builder, settings::Style};
-
-#[derive(Debug, Clone, Copy)]
-pub enum SubproblemMethod {
-    Direct,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum UpdateMethod {
-    Nielsen,
-}
 #[derive(Debug, Clone)]
 pub enum Method {
     simple,
     damped,
+
+    trust_region,
+    LM,
+    LM_Nielsen,
 }
 pub struct NR {
     pub jacobian: Jacobian, // instance of Jacobian struct, contains jacobian matrix function and equation functions
@@ -84,7 +78,8 @@ pub struct NR {
     pub max_iterations: usize, // max number of iterations
 
     pub parameters: Option<HashMap<String, f64>>, // parameters
-    pub eq_params: Option<Vec<String>>,           // equations may have parameters
+
+    pub eq_params: Option<Vec<String>>, // equations may have parameters
     pub eq_params_values: Option<DVector<f64>>,
     pub max_error: f64, // max error
     pub dumping_factor: f64,
@@ -253,9 +248,52 @@ impl NR {
                 let default_parameters = HashMap::from([("maxDampIter".to_string(), 50.0)]);
                 merge_parameters!(self, parameters, default_parameters);
             } // clipping
+            Method::trust_region => {
+                let default_parameters: HashMap<String, f64> = HashMap::from([
+                    ("eta_min".to_string(), 0.25),       // C5 in original paper
+                    ("eta_max".to_string(), 8.0),        // C6 in original paper
+                    ("ro_threshold0".to_string(), 0.25), // C2 in original paper
+                    ("ro_threshold1".to_string(), 0.75), //C4 in original paper
+                    ("C0".to_string(), 1e-4),
+                    ("M".to_string(), 0.1 * 10.0 * 8.0),
+                    ("d".to_string(), 0.8),  // little delta in original paper
+                    ("mu".to_string(), 0.1), // mu0 in original paper
+                    ("m".to_string(), 1e-6), // m in original paper
+                ]);
+                merge_parameters!(self, parameters, default_parameters);
+            }
+            Method::LM => {
+                let default_parameters = HashMap::from([
+                    ("diag".to_string(), 1.0),
+                    ("increase_factor".to_string(), 3.0),
+                    ("decrease_factor".to_string(), 10.0),
+                    ("max_lambda".to_string(), 1000.0),
+                    ("min_lambda".to_string(), 1e-6),
+                ]);
+                merge_parameters!(self, parameters, default_parameters);
+            }
+            Method::LM_Nielsen => {
+                let default_parameters = HashMap::from([
+                    ("tau".to_string(), 1e-6),
+                    ("nu".to_string(), 2.0),
+                    ("factor_up".to_string(), 3.0),
+                    ("factor_down".to_string(), 2.0),
+                    ("rho_threshold".to_string(), 1e-4),
+                ]);
+                self.scaling_method = Some(ScalingMethod::Marquardt);
+                self.reduction_ratio = Some(ReductionRatio::More);
+                self.update_method = Some(UpdateMethod::Nielsen);
+                self.subproblem_method = Some(SubproblemMethod::Direct);
+                self.convergence_criteria = Some(ConvergenceCriteria::SimpleScaled);
+                self.f_tolerance = Some(1e-3);
+                self.g_tolerance = Some(1e-3);
+                merge_parameters!(self, parameters, default_parameters);
+            }
+            _ => {
+                panic!("Method not implemented")
+            }
         }
     }
-
     pub fn set_solver_params(
         &mut self,
         loglevel: Option<String>,
@@ -389,14 +427,12 @@ impl NR {
             }
         }
     }
-
     pub fn set_eq_params(&mut self, eq_params: Vec<String>) {
         self.eq_params = Some(eq_params.clone());
     }
     pub fn set_eq_params_values(&mut self, eq_params_values: DVector<f64>) {
         self.eq_params_values = Some(eq_params_values.clone());
     }
-
     pub fn implement_weights(&mut self) {
         info!("\n implementing weights!");
 
@@ -442,6 +478,7 @@ impl NR {
             Jacobian_instance.lambdify_jacobian_DMatrix_parallel();
             Jacobian_instance.lambdify_vector_funvector_DVector();
         }
+
         assert_eq!(
             Jacobian_instance.vector_of_variables.len(),
             self.initial_guess.len(),
@@ -454,6 +491,8 @@ impl NR {
     /////////////////////////////////////////////////////////////////////////////////////////////
     pub fn evaluate_function(&mut self, y: DVector<f64>) -> DVector<f64> {
         let y_data = y;
+
+        // Evaluate functions
         self.custom_timer.fun_tic();
         let residual = if let Some(eq_params_values) = &self.eq_params_values {
             let residual = &self.jacobian.lambdified_function_with_params;
@@ -462,11 +501,14 @@ impl NR {
             let residual = &self.jacobian.lambdified_function_DVector;
             residual(&y_data)
         };
+
         self.custom_timer.fun_tac();
+
         residual
     }
     pub fn evaluate_jacobian(&mut self, y: DVector<f64>) -> DMatrix<f64> {
-        let y_data = y;
+        let y_data: DVector<f64> = y;
+        // Evaluate jacobian
         self.custom_timer.jac_tic();
         let jac = if let Some(eq_params_values) = &self.eq_params_values {
             let jac = &self.jacobian.lambdified_jacobian_DMatrix_with_params;
@@ -475,54 +517,35 @@ impl NR {
             let jac = &self.jacobian.lambdified_jacobian_DMatrix;
             jac(&y_data)
         };
+
         self.custom_timer.jac_tac();
+
+        // Return cloned values to avoid borrow checker issues
         jac
     }
     pub fn step(&mut self, y: DVector<f64>) -> (DVector<f64>, DVector<f64>) {
         let method = self.linear_sys_method.clone().unwrap();
+        // let previous_step: DVector<f64> = self.step.clone();
 
-        let j_k = self.evaluate_jacobian(y.clone());
-        let f_k = self.evaluate_function(y.clone());
+        // evaluate jacobian and functions
+        let J_k = self.evaluate_jacobian(y.clone());
+        let F_k = self.evaluate_function(y.clone());
+
         self.custom_timer.linear_system_tic();
-        self.jac = j_k.clone();
-        info!("\n J_k: {}", j_k);
-        info!("\n F_k: {}", f_k);
-        for (i, el) in f_k.iter().enumerate() {
-            if el.is_nan() {
-                let issue_func = self.jacobian.vector_of_functions[i].clone();
-                let issue_value = y.clone();
-                error!(
-                    "\n \n NaN in undamped step residual function {} with valus {} \n \n",
-                    issue_func, issue_value
-                );
-                let safe_step = DVector::zeros(y.len());
-                let safe_residual = DVector::from_element(f_k.len(), 1.0e300);
-                return (safe_step, safe_residual);
-            }
-        }
-        let undamped_step_k = match solve_linear_system(method, &j_k, &f_k) {
-            Ok(step) => step,
-            Err(err) => {
-                error!(
-                    "\n \n Failed to solve linear system in Newton step: {} \n \n",
-                    err
-                );
-                return (
-                    DVector::zeros(y.len()),
-                    DVector::from_element(f_k.len(), 1.0e300),
-                );
-            }
-        };
+
+        self.jac = J_k.clone();
+
+        let undamped_step_k = solve_linear_system(method, &J_k, &F_k).unwrap();
         for el in undamped_step_k.iter() {
-            if !el.is_finite() {
+            if el.is_nan() {
                 log::error!("\n \n NaN in damped step deltaY \n \n");
-                return (
-                    DVector::zeros(y.len()),
-                    DVector::from_element(f_k.len(), 1.0e300),
-                );
+                panic!();
+                //return previous_step;
             }
         }
-        (undamped_step_k, f_k.clone())
+        //    self.step = undamped_step_k.clone();
+        self.custom_timer.linear_system_tac();
+        (undamped_step_k, F_k.clone())
     }
     pub fn simple_newton_step(&mut self) -> (i32, Option<DVector<f64>>) {
         let now = Instant::now();
@@ -564,6 +587,10 @@ impl NR {
         match self.method {
             Method::simple => self.simple_newton_step(),
             Method::damped => self.step_damped(),
+
+            Method::trust_region => self.step_trust_region(),
+            Method::LM => self.step_lm(),
+            Method::LM_Nielsen => self.step_trust_region_Nielsen(),
         }
     }
     /// main function to solve the system of equations  
@@ -800,174 +827,6 @@ impl NR {
         }
     */
 }
-
-impl NR {
-    pub fn step_damped(&mut self) -> (i32, Option<DVector<f64>>) {
-        // DAMPED NEWTON STEPS
-        // BOUNDS ARE SET
-        let maxDampIter = self.parameters.clone().unwrap()["maxDampIter"] as usize;
-        let c = 1e-4;
-        // let safeguard_factor: f64 = 1e-1;
-        // let DampFacor: f64 = 0.5;
-        let now = Instant::now();
-        let y_k_minus_1 = self.y.clone();
-
-        // Compute Newton step:
-        let undamped_step_k_minus_1 = self.step(y_k_minus_1.clone());
-        let (undamped_step_k_minus_1, F_k_minus_1) = undamped_step_k_minus_1.clone();
-        let S_k_minus_1 = F_k_minus_1.norm();
-        info!("\n \n L2 norm of undamped step = {}", S_k_minus_1);
-        self.custom_timer.linear_system_tac();
-        *self
-            .calc_statistics
-            .entry("number of solving linear systems".to_string())
-            .or_insert(0) += 1;
-
-        info!("\n \n y_k-1 = {}", y_k_minus_1,);
-        let fbound = bound_step(&y_k_minus_1, &undamped_step_k_minus_1, &self.bounds_vec);
-        if !fbound.is_finite() {
-            warn!("\n \n fbound is not finite; fallback to clipped damping \n \n");
-        }
-        // if fbound is very small, then x0 is already close to the boundary and
-        // step0 points out of the allowed domain. In this case, the Newton
-        // algorithm fails, so return an error condition.
-        let mut clipping_flag = false;
-        let mut lambda = if !fbound.is_finite() || fbound < 1e-10 {
-            log::warn!(
-                "\n  No damped step can be taken without violating solution component bounds."
-            );
-            clipping_flag = true;
-            1.0
-        } else {
-            fbound
-        };
-        // preallocate variables
-        let mut k_: usize = 0;
-        let mut S_k: Option<f64> = None;
-        let mut damped_step_result: Option<DVector<f64>> = None;
-        let mut conv: f64 = 0.0;
-
-        let mut k = 0;
-        while k < maxDampIter {
-            info!(
-                "\n____________________________________damping iteration = {}_______________________________________",
-                k
-            );
-            if k > 1 {
-                info!("\n \n damped_step number {} ", k);
-            }
-            info!("\n \n Damping coefficient = {}", lambda);
-            // Compute damped step:
-
-            let damped_step_k_minus_1 = lambda * undamped_step_k_minus_1.clone();
-            info!("damped_step {}", damped_step_k_minus_1);
-            // compute next iteration guess with current damping coefficient
-            let y_k: DVector<f64> = y_k_minus_1.clone() - damped_step_k_minus_1;
-            //dbg!(&y_k);
-            // clip the result vector i.e.
-            let y_k_clipped: DVector<f64> = if clipping_flag == true {
-                self.clip(&y_k, &self.bounds_vec)
-            } else {
-                y_k
-            };
-
-            //
-            let F_k = self.evaluate_function(y_k_clipped.clone()); // Вычисляем значение функции в новой точке
-
-            let error = F_k.norm();
-            self.max_error = error;
-            info!(
-                "\n \n L2 norm of damped step = {:3}, norm of undamped step = {:3}",
-                error, S_k_minus_1
-            );
-            let convergence_cond_for_step = self.tolerance;
-            // compute the norm of the undamped step
-            let S_k_temp = error;
-            // If the norm of S_k_plus_1 is less than the norm of S_k, then accept this
-            // damping coefficient. Also accept it if this step would result in a
-            // converged solution. Otherwise, decrease the damping coefficient and
-            // try again.
-            let elapsed = now.elapsed();
-            elapsed_time(elapsed);
-            if (S_k_temp < S_k_minus_1 * (1.0 - lambda * c))
-                || (S_k_temp < convergence_cond_for_step)
-            {
-                // The  criterion for accepting is that the undamped steps decrease in
-                // magnitude, This prevents the iteration from stepping away from the region where there is good reason to believe a solution lies
-
-                k_ = k;
-                S_k = Some(S_k_temp);
-                // update the solution vector
-                damped_step_result = Some(y_k_clipped.clone());
-                conv = convergence_cond_for_step;
-                info!(
-                    "\n \n  Damping coefficient accepted S_k_plus_1_temp < S_k {}, {},",
-                    S_k_temp, S_k_minus_1,
-                );
-                info!(
-                    "norm of undamped step = {} vs convergence criterion = {}",
-                    S_k_temp, convergence_cond_for_step
-                );
-                info!("damped step result = {:?}", &damped_step_result);
-                break;
-            }
-            // if fail this criterion we must reject it and retries the step with a reduced (often halved) damping parameter trying again until
-            // criterion is met  or max damping iterations is reached
-
-            // lambda = lambda / (2.0f64.powf(k as f64 + DampFacor));
-            lambda *= 0.5; // Simpler and more controlled decay
-            k_ = k;
-            S_k = Some(S_k_temp);
-
-            k = k + 1;
-        }
-
-        if k_ < maxDampIter {
-            // if there is a damping coefficient found (so max damp steps not exceeded)
-            if S_k.unwrap() > conv {
-                //found damping coefficient but not converged yet
-                info!("\n \n  Damping coefficient found (solution has not converged yet)");
-                info!(
-                    "\n \n  step norm =  {}, weight norm = {}, damped_step_result = {}",
-                    self.max_error,
-                    S_k.unwrap(),
-                    conv
-                );
-                assert!(damped_step_result.is_some());
-                (0, damped_step_result)
-            } else {
-                info!("\n \n  Damping coefficient found (solution has converged)");
-                info!(
-                    "\n \n step norm =  {}, weight norm = {}, convergence condition = {}",
-                    self.max_error,
-                    S_k.unwrap(),
-                    conv
-                );
-                (1, damped_step_result)
-            }
-        } else {
-            //  if we have reached max damping iterations without finding a damping coefficient we must reject the step
-            warn!("\n \n  No damping coefficient found (max damping iterations reached)");
-            return (-2, None);
-        }
-    }
-
-    pub fn clip(&self, y: &DVector<f64>, vec_of_bounds: &Vec<(f64, f64)>) -> DVector<f64> {
-        let mut clipped_y = y.clone();
-        for (i, y_i) in y.iter().enumerate() {
-            let (lower_bound, upper_bound) = vec_of_bounds[i];
-            if y_i.clone() < lower_bound {
-                info!("y[{}] to clip {} with lower bound {}", i, y_i, lower_bound);
-                clipped_y[i] = lower_bound;
-            } else if y_i.clone() > upper_bound {
-                info!("y[{}] to clip {} with upper bound {}", i, y_i, upper_bound);
-                clipped_y[i] = upper_bound;
-            }
-        }
-        clipped_y
-    }
-}
-
 //////////////////////////////////////////////////////////////////////////////////////////////
 ///                 LINEAR SYSTEM SOLVERS
 //////////////////////////////////////////////////////////////////////////////////////////////
@@ -1095,14 +954,79 @@ mod tests {
             Some(values.clone()),
             initial_guess,
             1e-6,
-            100,
+            1000,
+        );
+        NR_instanse.set_solver_params(
+            Some("info".to_string()),
+            None,
+            Some(1.0),
+            None,
+            Some(Method::simple),
+            None,
         );
         NR_instanse.eq_generate();
         NR_instanse.solve();
         let solution = NR_instanse.get_result().unwrap();
         assert_eq!(solution, DVector::from(vec![3.0, -1.0]));
     }
+    #[test]
+    fn test_NR_elem_example_simple_with_params() {
+        let vec_of_expressions = vec!["a*x^2+y^2-10", "x-b*y-4"];
 
+        let initial_guess = vec![1.0, 1.0];
+        let mut NR_instanse = NR::new();
+        let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+        let values = vec!["x".to_string(), "y".to_string()];
+        NR_instanse.set_equation_system(
+            vec_of_expr,
+            Some(values.clone()),
+            initial_guess,
+            1e-6,
+            100,
+        );
+        NR_instanse.set_eq_params(vec!["a".to_string(), "b".to_string()]);
+        NR_instanse.eq_generate();
+        NR_instanse.set_eq_params_values(DVector::from_vec(vec![1.0, 1.0]));
+        NR_instanse.solve();
+        let solution = NR_instanse.get_result().unwrap();
+        assert_eq!(solution, DVector::from(vec![3.0, -1.0]));
+    }
+
+    #[test]
+    fn test_NR_elem_example_simple_with_params_damping() {
+        let vec_of_expressions = vec!["a*x^2+y^2-10", "x-b*y-4"];
+
+        let initial_guess = vec![1.0, 1.0];
+        let mut NR_instanse = NR::new();
+        let vec_of_expr = Expr::parse_vector_expression(vec_of_expressions.clone());
+        let values = vec!["x".to_string(), "y".to_string()];
+        NR_instanse.set_equation_system(
+            vec_of_expr,
+            Some(values.clone()),
+            initial_guess,
+            1e-6,
+            1000,
+        );
+        let Bounds = HashMap::from([
+            ("x".to_string(), (-10.0, 10.0)),
+            ("y".to_string(), (-10.0, 10.0)),
+        ]);
+        NR_instanse.set_solver_params(
+            Some("info".to_string()),
+            None,
+            Some(0.1),
+            Some(Bounds),
+            Some(Method::damped),
+            None,
+        );
+        NR_instanse.set_eq_params(vec!["a".to_string(), "b".to_string()]);
+        NR_instanse.eq_generate();
+        NR_instanse.set_eq_params_values(DVector::from_vec(vec![1.0, 1.0]));
+        NR_instanse.solve();
+        let solution = NR_instanse.get_result().unwrap();
+        assert_relative_eq!(solution[0], 3.0, epsilon = 1e-5);
+        assert_relative_eq!(solution[1], -1.0, epsilon = 1e-5);
+    }
     #[test]
     fn test_NR_elem_example_simple_str() {
         let mut NR_instanse = NR::new();
@@ -1419,7 +1343,7 @@ mod tests {
             ("x".to_string(), (-10.0, 10.0)),
             ("y".to_string(), (-10.0, 10.0)),
         ]);
-        elemntary_example_test(Method::damped, Some(Bounds));
+        elemntary_example_test(Method::LM, Some(Bounds));
         let dGm0 = Expr::Const(8.314 * 450e4);
 
         let params = HashMap::from([
@@ -1437,7 +1361,7 @@ mod tests {
         ]);
         let initial_guess = vec![0.9, 0.9, 0.9, 0.6, 0.0, 0.0];
         test_solver_with_certain_method(
-            Method::damped,
+            Method::LM,
             Some(params),
             dGm0,
             Boubds,
@@ -1462,7 +1386,7 @@ mod tests {
         ]);
         let initial_guess = vec![0.9, 0.9, 0.9, 0.6, 0.0, 0.0];
         test_solver_with_certain_method(
-            Method::damped,
+            Method::LM_Nielsen,
             None,
             dGm0,
             Boubds,

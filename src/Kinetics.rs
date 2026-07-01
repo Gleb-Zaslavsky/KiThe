@@ -2,6 +2,8 @@
 ///  So you define what reactions you need by using the constructor of mechanism from the mechfinder_api module or
 /// manually with help of kinetics_lib_api module.
 #[allow(non_snake_case)]
+pub mod error;
+#[allow(non_snake_case)]
 pub mod User_reactions;
 /// eng
 /// The module is equipped with a library of kinetic parameters of chemical reactions obtained as a result of parsing publicly available databases

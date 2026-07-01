@@ -10,7 +10,7 @@ use crate::gui::experimental_kinetics_gui::model::TGAGUIError;
 
 use crate::gui::experimental_kinetics_gui::controller_filters::Mathematics;
 use crate::gui::experimental_kinetics_gui::controller_golden_pipeline::GoldenPipelineDialogState;
-use crate::gui::experimental_kinetics_gui::controller_kinetics::DirectProblem;
+use crate::gui::experimental_kinetics_gui::controller_kinetics::DirectProblemDialogState;
 use crate::gui::experimental_kinetics_gui::controller_methods::{
     KineticMethods, KineticMethodsWindowState,
 };
@@ -38,6 +38,7 @@ impl TopDropDownMenues {
         test_options: &mut TestOptions,
         kithe_plot_window: &mut KiThePlotWindowState,
         kinetic_methods: &mut KineticMethodsWindowState,
+        direct_problem_state: &mut DirectProblemDialogState,
     ) {
         ui.horizontal_wrapped(|ui| {
             ui.menu_button("File Manager", |ui| {
@@ -53,7 +54,10 @@ impl TopDropDownMenues {
             });
 
             ui.menu_button("Direct Problem", |ui| {
-                DirectProblem::show(ui, model);
+                if ui.button("Solve IVP").clicked() {
+                    direct_problem_state.open();
+                    ui.close_menu();
+                }
             });
 
             ui.menu_button("Test Options", |ui| {
@@ -178,6 +182,7 @@ impl WrightPanelControllers {
             "Zoom To Selection",
             "move time to zero",
             "Delete Plot",
+            "Reverse",
             // moved arithmetic buttons to be near input field below
             "calc relative mass",
             "calc conversion",
@@ -237,9 +242,9 @@ impl WrightPanelControllers {
 
             ui.separator();
 
-            // New column input bound to state.input_string
+            // Optional output column name for transforms that materialize a derived column.
             let mut tmp = state.input_string.clone().unwrap_or_default();
-            ui.label("new column:");
+            ui.label("output column:");
             if ui.text_edit_singleline(&mut tmp).changed() {
                 if tmp.trim().is_empty() {
                     state.input_string = None;
@@ -250,7 +255,68 @@ impl WrightPanelControllers {
         });
 
         ui.add_space(4.0);
-        // Arithmetic operation buttons below "new column:" in a 2x3 grid.
+        if let Ok(id) = model.get_experiment_by_selected_curve() {
+            if let Ok(columns) = model.list_of_columns(&id) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Mass source:");
+                    let mut mass_source = model
+                        .active_mass_source_for_experiment(&id)
+                        .unwrap_or_else(|_| String::new());
+                    egui::ComboBox::from_id_salt("exp_kinetics_mass_source")
+                        .selected_text(if mass_source.is_empty() {
+                            "choose".to_string()
+                        } else {
+                            mass_source.clone()
+                        })
+                        .show_ui(ui, |ui| {
+                            for col in &columns {
+                                ui.selectable_value(&mut mass_source, col.clone(), col);
+                            }
+                        });
+                    if !mass_source.is_empty()
+                        && model
+                            .active_mass_sources
+                            .get(&id)
+                            .map(|current| current != &mass_source)
+                            .unwrap_or(true)
+                    {
+                        model.set_active_mass_source_for_experiment(&id, &mass_source);
+                        ui.ctx().request_repaint();
+                    }
+
+                    ui.separator();
+
+                    ui.label("Temperature source:");
+                    let mut temperature_source = model
+                        .active_temperature_source_for_experiment(&id)
+                        .unwrap_or_else(|_| String::new());
+                    egui::ComboBox::from_id_salt("exp_kinetics_temperature_source")
+                        .selected_text(if temperature_source.is_empty() {
+                            "choose".to_string()
+                        } else {
+                            temperature_source.clone()
+                        })
+                        .show_ui(ui, |ui| {
+                            for col in &columns {
+                                ui.selectable_value(&mut temperature_source, col.clone(), col);
+                            }
+                        });
+                    if !temperature_source.is_empty()
+                        && model
+                            .active_temperature_sources
+                            .get(&id)
+                            .map(|current| current != &temperature_source)
+                            .unwrap_or(true)
+                    {
+                        model
+                            .set_active_temperature_source_for_experiment(&id, &temperature_source);
+                        ui.ctx().request_repaint();
+                    }
+                });
+            }
+        }
+
+        // Arithmetic operation buttons below the optional output column field.
         egui::Grid::new("exp_kinetics_arith_grid")
             .num_columns(3)
             .spacing([4.0, 4.0])
@@ -346,6 +412,10 @@ impl WrightPanelControllers {
             }
             "Delete Plot" => {
                 model.delete_selected_curve()?;
+                ctx.request_repaint();
+            }
+            "Reverse" => {
+                model.reverse_selected()?;
                 ctx.request_repaint();
             }
             "calc relative mass" => {
@@ -606,22 +676,16 @@ impl NewExperimentDialogState {
         }
     }
 
-    fn unit_options() -> &'static [Unit] {
-        &[
-            Unit::Second,
-            Unit::Hour,
-            Unit::Kelvin,
-            Unit::Celsius,
-            Unit::MilliVolt,
-            Unit::Milligram,
-            Unit::MilligramPerSecond,
-            Unit::KelvinPerSecond,
-            Unit::CelsiusPerSecond,
-            Unit::PerSecond,
-            Unit::Gram,
-            Unit::Dimensionless,
-            Unit::Unknown,
-        ]
+    fn time_unit_options() -> &'static [Unit] {
+        &[Unit::Second, Unit::Minute, Unit::Hour]
+    }
+
+    fn temperature_unit_options() -> &'static [Unit] {
+        &[Unit::Kelvin, Unit::Celsius]
+    }
+
+    fn mass_unit_options() -> &'static [Unit] {
+        &[Unit::MilliVolt, Unit::Milligram, Unit::Gram]
     }
 
     fn show_bind_input_block(
@@ -630,6 +694,7 @@ impl NewExperimentDialogState {
         input: &mut String,
         unit: &mut Unit,
         combo_id: &str,
+        options: &[Unit],
     ) {
         ui.vertical(|ui| {
             ui.label(label);
@@ -637,12 +702,22 @@ impl NewExperimentDialogState {
             egui::ComboBox::from_id_salt(combo_id)
                 .selected_text(unit.to_string())
                 .show_ui(ui, |ui| {
-                    for option in Self::unit_options() {
+                    for option in options {
                         ui.selectable_value(unit, *option, option.to_string());
                     }
                 });
         });
     }
+
+    fn first_matching_column(columns: &[String], candidates: &[&str]) -> Option<String> {
+        candidates.iter().find_map(|candidate| {
+            columns
+                .iter()
+                .find(|col| col.as_str() == *candidate)
+                .cloned()
+        })
+    }
+
     /// 1) label "bind m" - under it an entry field for text input and under it a drop down menu field with Unit enum one_experiment_dataset.rs
     ///  with Unit::mV as default 2) a label "bind T" - under it an entry field for text input and under it a drop down menu field with Unit
     /// enum with Unit::Celsius as default 3) a label "bind t" - under it an entry field for text input and under it a drop down menu field with
@@ -655,6 +730,7 @@ impl NewExperimentDialogState {
                 &mut self.bind_mass_input,
                 &mut self.bind_mass_unit,
                 "bind_m_unit",
+                Self::mass_unit_options(),
             );
 
             Self::show_bind_input_block(
@@ -663,6 +739,7 @@ impl NewExperimentDialogState {
                 &mut self.bind_temperature_input,
                 &mut self.bind_temperature_unit,
                 "bind_t_unit",
+                Self::temperature_unit_options(),
             );
             Self::show_bind_input_block(
                 ui,
@@ -670,8 +747,34 @@ impl NewExperimentDialogState {
                 &mut self.bind_time_input,
                 &mut self.bind_time_unit,
                 "bind_time_unit",
+                Self::time_unit_options(),
             );
         });
+    }
+
+    fn autofill_bind_inputs_from_last_experiment(&mut self, model: &PlotModel) {
+        let Some(last_exp) = model.series.experiments.last() else {
+            return;
+        };
+        let Ok(columns) = model.list_of_columns(&last_exp.meta.id) else {
+            return;
+        };
+
+        if self.bind_time_input.trim().is_empty() {
+            if let Some(col) = Self::first_matching_column(&columns, &["t", "time"]) {
+                self.bind_time_input = col;
+            }
+        }
+        if self.bind_temperature_input.trim().is_empty() {
+            if let Some(col) = Self::first_matching_column(&columns, &["T", "temperature"]) {
+                self.bind_temperature_input = col;
+            }
+        }
+        if self.bind_mass_input.trim().is_empty() {
+            if let Some(col) = Self::first_matching_column(&columns, &["m", "mass"]) {
+                self.bind_mass_input = col;
+            }
+        }
     }
 
     fn apply_bindings_to_last_experiment(
@@ -738,6 +841,52 @@ impl NewExperimentDialogState {
                     )));
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    fn create_default_plots_for_last_experiment(
+        &self,
+        model: &mut PlotModel,
+    ) -> Result<(), TGAGUIError> {
+        let Some(last_exp) = model.series.experiments.last() else {
+            return Ok(());
+        };
+        let exp_id = last_exp.meta.id.clone();
+
+        let time_col = model.series.get_time_col(&exp_id).or_else(|_| {
+            model
+                .list_of_columns(&exp_id)
+                .ok()
+                .and_then(|columns| Self::first_matching_column(&columns, &["t", "time"]))
+                .ok_or_else(|| {
+                    TGAGUIError::BindingError(format!(
+                        "no time column is bound or inferable for '{}'",
+                        exp_id
+                    ))
+                })
+        })?;
+
+        let mut created_any = false;
+        for y_col in [
+            model.series.get_temperature_col(&exp_id).ok(),
+            model.series.get_mass_col(&exp_id).ok(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if y_col == time_col {
+                continue;
+            }
+            model.set_x(&exp_id, &time_col)?;
+            model.set_y(&exp_id, &y_col)?;
+            model.create_points_for_curve(&exp_id)?;
+            created_any = true;
+        }
+
+        if created_any {
+            model.reset_view();
         }
 
         Ok(())
@@ -885,7 +1034,12 @@ impl NewExperimentDialogState {
                             for (idx, exp) in model.series.experiments.iter().enumerate() {
                                 model.series.exp_map.insert(exp.meta.id.clone(), idx);
                             }
+                            self.autofill_bind_inputs_from_last_experiment(model);
                             if let Err(e) = self.apply_bindings_to_last_experiment(model) {
+                                self.last_error = Some(format!("{:?}", e));
+                                return;
+                            }
+                            if let Err(e) = self.create_default_plots_for_last_experiment(model) {
                                 self.last_error = Some(format!("{:?}", e));
                                 return;
                             }
@@ -1276,5 +1430,68 @@ impl NewExperimentDialogState {
             });
 
         self.manage_plot_open = dialog_open;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
+    use std::path::Path;
+
+    fn fixture_model() -> PlotModel {
+        let mut model = PlotModel::new();
+        model
+            .push_from_file(Path::new("src/assets/TGAexample.txt"))
+            .expect("failed to load fixture");
+        model
+    }
+
+    #[test]
+    fn new_experiment_autofills_common_bindings_from_column_names() {
+        let model = fixture_model();
+        let mut dialog = NewExperimentDialogState::new();
+
+        dialog.autofill_bind_inputs_from_last_experiment(&model);
+
+        assert_eq!(dialog.bind_time_input, "t");
+        assert_eq!(dialog.bind_temperature_input, "T");
+        assert_eq!(dialog.bind_mass_input, "m");
+        assert_eq!(dialog.bind_time_unit, Unit::Second);
+        assert_eq!(dialog.bind_temperature_unit, Unit::Celsius);
+        assert_eq!(dialog.bind_mass_unit, Unit::MilliVolt);
+    }
+
+    #[test]
+    fn new_experiment_select_creates_standard_plots_automatically() {
+        let mut model = fixture_model();
+        let mut dialog = NewExperimentDialogState::new();
+
+        dialog.autofill_bind_inputs_from_last_experiment(&model);
+        dialog
+            .apply_bindings_to_last_experiment(&mut model)
+            .expect("binding should succeed");
+        dialog
+            .create_default_plots_for_last_experiment(&mut model)
+            .expect("plot creation should succeed");
+
+        let exp_id = model.list_of_experiments()[0].clone();
+        let curves = model
+            .plots
+            .iter()
+            .filter(|curve| curve.experiment_id == exp_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(curves.len(), 2);
+        assert!(
+            curves
+                .iter()
+                .any(|curve| curve.x_name == "t" && curve.y_name == "T")
+        );
+        assert!(
+            curves
+                .iter()
+                .any(|curve| curve.x_name == "t" && curve.y_name == "m")
+        );
     }
 }

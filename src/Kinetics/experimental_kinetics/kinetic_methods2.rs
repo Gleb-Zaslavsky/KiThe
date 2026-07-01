@@ -78,23 +78,46 @@ pub fn simulate_tga_dataset(
 
 #[test]
 fn test_conversion_grid_build() {
-    use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
-    let now = Instant::now();
-    let data = simulate_tga_dataset(
-        KineticModelNames::F2,
-        50_000.0,
-        1e9,
-        420.0,
-        &[0.5, 1.0, 2.0],
-        200.0,
-        SolverType::Radau(RadauOrder::Order7),
-        vec![],
-        "",
-    )
-    .unwrap();
-    // println!("{:?}", data);
-    println!("tga simulated {:?}", now.elapsed());
+    fn synthetic_experiment(id: &str, beta: f64) -> ExperimentData {
+        let mut time = Vec::with_capacity(101);
+        let mut temperature = Vec::with_capacity(101);
+        let mut conversion = Vec::with_capacity(101);
+        let mut conversion_rate = Vec::with_capacity(101);
+
+        for i in 0..=100 {
+            let t = i as f64;
+            time.push(t);
+            temperature.push(420.0 + beta * t);
+            conversion.push(i as f64 / 100.0);
+            conversion_rate.push(0.01);
+        }
+
+        ExperimentData {
+            meta: ExperimentMeta {
+                id: id.to_string(),
+                heating_rate: Some(beta),
+                isothermal_temperature: None,
+                comment: None,
+            },
+            time,
+            temperature,
+            conversion,
+            conversion_rate,
+            mass: None,
+            mass_rate: None,
+        }
+    }
+
+    let data = KineticDataView {
+        experiments: vec![
+            synthetic_experiment("exp_a", 0.5),
+            synthetic_experiment("exp_b", 1.0),
+            synthetic_experiment("exp_c", 2.0),
+        ],
+    };
+
     let grid = ConversionGridBuilder::new()
+        .eta_range(0.05, 0.95)
         .segments(80)
         .build_nonisothermal(&data)
         .unwrap();

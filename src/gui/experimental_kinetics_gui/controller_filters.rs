@@ -1,7 +1,7 @@
 use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy;
-use crate::Kinetics::experimental_kinetics::lowess_wrapper::LowessConfig;
-use crate::Kinetics::experimental_kinetics::splines::SplineKind;
 use crate::gui::experimental_kinetics_gui::model::{PlotModel, TGAGUIError};
+use RustedSciThe::numerical::data_processing::lowess_wrapper::LowessConfig;
+use RustedSciThe::numerical::data_processing::splines::SplineKind;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -26,6 +26,7 @@ pub struct TestOptions {
     pub(crate) help_edit_mode: bool,
     pub(crate) help_editor_buffer: String,
     pub(crate) help_expanded_sections: std::collections::HashSet<usize>,
+    show_logs_window: bool,
     // Synthetic data window
     show_synthetic_data: bool,
 
@@ -98,6 +99,7 @@ impl Default for TestOptions {
             help_edit_mode: false,
             help_editor_buffer: String::new(),
             help_expanded_sections: HashSet::new(),
+            show_logs_window: false,
             show_synthetic_data: false,
 
             syn_n_points: "70000".to_string(),
@@ -161,7 +163,7 @@ impl TestOptions {
         }
 
         if ui.button("Show Logs").clicked() {
-            println!("Stub: Show Logs");
+            test_options.show_logs_window = true;
         }
 
         ui.separator();
@@ -487,7 +489,7 @@ impl TestOptions {
                 ui.horizontal(|ui| {
                     if ui.button("Generate synthetic data").clicked() {
                         match self.try_build_config() {
-                            Ok( cfg) => {
+                            Ok(cfg) => {
                                 //  cfg.k = model.settings.calibration_line().unwrap().k().clone();
                                 // cfg.b = model.settings.calibration_line().unwrap().b().clone();
                                 match model.generate_synthetic_data_from_config(&cfg) {
@@ -513,6 +515,40 @@ impl TestOptions {
                 });
             });
         self.show_synthetic_data = open;
+    }
+
+    /// Show the history feed for the currently selected experiment.
+    pub fn show_logs_window(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
+        if !self.show_logs_window {
+            return;
+        }
+
+        let mut open = self.show_logs_window;
+        let mut feed = model
+            .history_feed_for_selected()
+            .unwrap_or_else(|err| format!("No history available: {:?}", err));
+
+        egui::Window::new("Operation History")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(760.0)
+            .default_height(420.0)
+            .show(ctx, |ui| {
+                ui.label("Selected experiment history");
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut feed)
+                                .code_editor()
+                                .desired_rows(20)
+                                .interactive(false),
+                        );
+                    });
+            });
+
+        self.show_logs_window = open;
     }
 
     fn parse_csv_f64(s: &str) -> Result<Vec<f64>, String> {

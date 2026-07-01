@@ -1,5 +1,6 @@
 #[cfg(test)]
 pub mod tests {
+    use crate::Kinetics::experimental_kinetics::column_provenance::ColumnProvenance;
     use crate::Kinetics::experimental_kinetics::exp_engine_api::XY;
     use crate::Kinetics::experimental_kinetics::one_experiment_dataset::*;
 
@@ -66,6 +67,112 @@ pub mod tests {
         assert!(df.column("time").is_ok());
         assert!(df.column("mass").is_ok());
         assert!(df.column("temperature").is_ok());
+    }
+
+    #[test]
+    fn sort_by_bound_time_keeps_row_alignment() {
+        let csv = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            csv.path(),
+            "time,mass,temperature\n0.0,10.0,100.0\n2.0,20.0,200.0\n1.0,15.0,150.0\n",
+        )
+        .unwrap();
+
+        let ds = ds_from_csv(&csv)
+            .bind_time("time", Unit::Second)
+            .unwrap()
+            .bind_mass("mass", Unit::Milligram)
+            .unwrap()
+            .bind_temperature("temperature", Unit::Celsius)
+            .unwrap()
+            .sort_by_bound_time()
+            .unwrap();
+
+        let df = ds.frame.collect().unwrap();
+        let time: Vec<f64> = df
+            .column("time")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        let mass: Vec<f64> = df
+            .column("mass")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        let temp: Vec<f64> = df
+            .column("temperature")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+
+        assert_eq!(time, vec![0.0, 1.0, 2.0]);
+        assert_eq!(mass, vec![10.0, 15.0, 20.0]);
+        assert_eq!(temp, vec![100.0, 150.0, 200.0]);
+    }
+
+    #[test]
+    fn time_monotonicity_report_detects_decrease_and_preserves_old_contract() {
+        let csv = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            csv.path(),
+            "time,mass,temperature\n0.0,10.0,100.0\n2.0,20.0,200.0\n1.0,15.0,150.0\n",
+        )
+        .unwrap();
+
+        let ds = ds_from_csv(&csv)
+            .bind_time("time", Unit::Second)
+            .unwrap()
+            .bind_mass("mass", Unit::Milligram)
+            .unwrap()
+            .bind_temperature("temperature", Unit::Celsius)
+            .unwrap();
+
+        let report = ds.time_monotonicity_report().unwrap();
+        assert_eq!(report.time_column, "time");
+        assert_eq!(report.len, 3);
+        assert!(report.sortable_without_data_loss);
+        assert!(!report.is_strictly_increasing);
+        assert!(report.null_indices.is_empty());
+        assert!(report.nan_indices.is_empty());
+        assert!(report.infinite_indices.is_empty());
+        assert_eq!(report.decreasing_pairs.len(), 1);
+        assert_eq!(report.decreasing_pairs[0].index, 2);
+        assert_eq!(report.decreasing_pairs[0].previous, 2.0);
+        assert_eq!(report.decreasing_pairs[0].current, 1.0);
+        assert_eq!(ds.monotony_of_time_check().unwrap(), vec![1.0]);
+    }
+
+    #[test]
+    fn sort_by_bound_time_rejects_invalid_time_values() {
+        let csv = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            csv.path(),
+            "time,mass,temperature\n0.0,10.0,100.0\nNaN,20.0,200.0\n1.0,15.0,150.0\n",
+        )
+        .unwrap();
+
+        let ds = ds_from_csv(&csv)
+            .bind_time("time", Unit::Second)
+            .unwrap()
+            .bind_mass("mass", Unit::Milligram)
+            .unwrap()
+            .bind_temperature("temperature", Unit::Celsius)
+            .unwrap();
+
+        let err = ds.sort_by_bound_time().unwrap_err();
+        match err {
+            TGADomainError::InvalidOperation(msg) => {
+                assert!(msg.contains("NaNs"));
+                assert!(msg.contains("time"));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
     }
 
     #[test]
@@ -226,6 +333,18 @@ pub mod tests {
     }
 
     #[test]
+    fn seconds_to_hours_is_idempotent_when_time_is_already_in_hours() {
+        let csv = make_csv(400, 12);
+        let ds_hr = ds_from_csv(&csv).seconds_to_hours();
+        let once = df_collect_col(&ds_hr, "time");
+        let twice = ds_hr.clone().seconds_to_hours();
+        let after = df_collect_col(&twice, "time");
+
+        assert_eq!(twice.schema.columns.get("time").unwrap().unit, Unit::Hour);
+        assert_eq!(once, after);
+    }
+
+    #[test]
     fn calibrate_mass_from_voltage_applies_linear_transform_and_updates_meta() {
         let csv = make_csv(350, 13);
         let ds_base = ds_from_csv(&csv);
@@ -343,13 +462,20 @@ pub mod tests {
     fn with_column_expr_adds_and_computes_column() {
         let csv = make_csv(250, 99);
         let ds = ds_from_csv(&csv);
-        let meta = ColumnMeta {
-            name: "temp_plus10".into(),
-            unit: Unit::Celsius,
-            origin: ColumnOrigin::PolarsDerived,
-            nature: ColumnNature::Temperature,
-        };
-        let ds2 = ds.with_column_expr(meta.clone(), col("temperature") + lit(10.0));
+        let meta = ColumnMeta::new(
+            "temp_plus10",
+            Unit::Celsius,
+            ColumnOrigin::PolarsDerived,
+            ColumnNature::Temperature,
+            ColumnProvenance::manual(
+                "temp_plus10",
+                "with_column_expr",
+                Some("temperature + 10".to_string()),
+            ),
+        );
+        let ds2 = ds
+            .with_column_expr(meta.clone(), col("temperature") + lit(10.0))
+            .unwrap();
         // schema contains the derived column
         assert!(ds2.schema.columns.contains_key("temp_plus10"));
 
@@ -590,7 +716,8 @@ pub mod tests {
         let ds_dim = ds
             .derive_dimensionless_mass(0.0, 5.0)
             .unwrap()
-            .derive_conversion();
+            .derive_conversion()
+            .unwrap();
 
         // check schema has both
         assert!(ds_dim.schema.columns.contains_key("alpha"));
@@ -613,7 +740,33 @@ pub mod tests {
             .collect();
         for (z, c) in m_dim.iter().zip(conv.iter()) {
             assert!((c - (1.0 - z)).abs() < 1e-12);
+            assert!((*z + *c - 1.0).abs() < 1e-12);
         }
+        assert_eq!(
+            ds_dim.schema.columns.get("alpha").unwrap().unit,
+            Unit::Dimensionless
+        );
+        assert_eq!(
+            ds_dim.schema.columns.get("eta").unwrap().unit,
+            Unit::Dimensionless
+        );
+    }
+
+    #[test]
+    fn dimensionless_mass_rejects_empty_reference_window() {
+        let csv = make_csv(200, 33);
+        let ds = ds_from_csv(&csv);
+        let err = ds.derive_dimensionless_mass(0.0, 0.0).unwrap_err();
+        assert!(matches!(err, TGADomainError::InvalidConversionRange));
+    }
+
+    #[test]
+    fn conversion_rejects_empty_reference_window() {
+        let csv = make_csv(200, 34);
+        let ds = ds_from_csv(&csv);
+        let ds_dim = ds.derive_dimensionless_mass(0.0, 20.0).unwrap();
+        let err = ds_dim.conversion(0.0, 0.0, "conv").unwrap_err();
+        assert!(matches!(err, TGADomainError::InvalidConversionRange));
     }
 
     #[test]
@@ -621,6 +774,10 @@ pub mod tests {
         let csv = make_csv(600, 789);
         let ds = ds_from_csv(&csv);
         let ds = ds.derive_temperature_rate("dT_dt").unwrap();
+        assert_eq!(
+            ds.schema.columns.get("dT_dt").unwrap().unit,
+            Unit::CelsiusPerSecond
+        );
         let df = ds.frame.collect().unwrap();
         let dTdt = df.column("dT_dt").unwrap().f64().unwrap();
         let dTdt_mean_polars = dTdt.mean().unwrap();
@@ -630,6 +787,79 @@ pub mod tests {
         println!("dTdt mean ={}", dTdt_mean_polars);
         //  assert!( (dTdt_mean_custom - dTdt_mean_polars).abs() <1e-4);
         // temperature should not increase because there is isothermic regime
+    }
+
+    #[test]
+    fn derive_conversion_rate_uses_time_unit_in_metadata() {
+        let csv = make_csv(600, 790);
+        let ds_alpha = ds_from_csv(&csv)
+            .seconds_to_hours()
+            .derive_dimensionless_mass(0.0, 5.0)
+            .unwrap()
+            .derive_dalpha_dt("dalpha_dt")
+            .unwrap();
+        assert_eq!(
+            ds_alpha.schema.columns.get("dalpha_dt").unwrap().unit,
+            Unit::PerHour
+        );
+        assert_eq!(
+            ds_alpha.schema.columns.get("dalpha_dt").unwrap().nature,
+            ColumnNature::DimensionlessMassRate
+        );
+
+        let ds_eta = ds_from_csv(&csv)
+            .seconds_to_hours()
+            .derive_dimensionless_mass(0.0, 5.0)
+            .unwrap()
+            .derive_conversion()
+            .unwrap()
+            .derive_deta_dt("deta_dt")
+            .unwrap();
+        assert_eq!(
+            ds_eta.schema.columns.get("deta_dt").unwrap().unit,
+            Unit::PerHour
+        );
+        assert_eq!(
+            ds_eta.schema.columns.get("deta_dt").unwrap().nature,
+            ColumnNature::ConversionRate
+        );
+
+        let dalpha_dt: Vec<f64> = ds_alpha
+            .frame
+            .clone()
+            .collect()
+            .unwrap()
+            .column("dalpha_dt")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect();
+        let deta_dt: Vec<f64> = ds_eta
+            .frame
+            .clone()
+            .collect()
+            .unwrap()
+            .column("deta_dt")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect();
+
+        let max_sign_gap = dalpha_dt
+            .iter()
+            .zip(deta_dt.iter())
+            .filter(|(a, b)| a.is_finite() && b.is_finite())
+            .map(|(a, b)| (a + b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_sign_gap < 1e-10,
+            "deta_dt should be the negation of dalpha_dt, got max gap {}",
+            max_sign_gap
+        );
     }
 
     #[test]
@@ -818,6 +1048,187 @@ pub mod tests {
     }
 
     #[test]
+    fn binding_rejects_physically_invalid_units() {
+        let csv = make_csv(120, 777);
+
+        let time_err = ds_from_csv(&csv)
+            .bind_time("time", Unit::Milligram)
+            .unwrap_err();
+        assert!(matches!(
+            time_err,
+            TGADomainError::InvalidUnitForBinding {
+                field: "time",
+                unit: Unit::Milligram
+            }
+        ));
+
+        let temp_err = ds_from_csv(&csv)
+            .bind_temperature("temperature", Unit::Hour)
+            .unwrap_err();
+        assert!(matches!(
+            temp_err,
+            TGADomainError::InvalidUnitForBinding {
+                field: "temperature",
+                unit: Unit::Hour
+            }
+        ));
+
+        let mass_err = ds_from_csv(&csv)
+            .bind_mass("mass", Unit::Celsius)
+            .unwrap_err();
+        assert!(matches!(
+            mass_err,
+            TGADomainError::InvalidUnitForBinding {
+                field: "mass",
+                unit: Unit::Celsius
+            }
+        ));
+
+        let generic_err = ds_from_csv(&csv)
+            .bind_column(ColumnRole::Time, "time", Unit::Gram)
+            .unwrap_err();
+        assert!(matches!(
+            generic_err,
+            TGADomainError::InvalidUnitForBinding {
+                field: "time",
+                unit: Unit::Gram
+            }
+        ));
+    }
+
+    #[test]
+    fn bind_time_accepts_minute_and_roundtrips_units() {
+        let csv = make_csv(180, 778);
+        let ds = ds_from_csv(&csv).bind_time("time", Unit::Minute).unwrap();
+        assert_eq!(ds.schema.columns.get("time").unwrap().unit, Unit::Minute);
+
+        let out = tempfile::NamedTempFile::new().unwrap();
+        ds.to_csv_with_units(out.path()).unwrap();
+
+        let content = std::fs::read_to_string(out.path()).unwrap();
+        assert!(content.contains("time [min]"));
+
+        let ds2 = TGADataset::from_csv_with_units(out.path()).unwrap();
+        assert_eq!(ds2.schema.columns.get("time").unwrap().unit, Unit::Minute);
+    }
+
+    #[test]
+    fn csv_roundtrip_distinguishes_unknown_and_dimensionless() {
+        let csv = make_csv(90, 779);
+        let ds = ds_from_csv(&csv)
+            .add_numeric_column(
+                "aux_unknown",
+                Unit::Unknown,
+                vec![1.0; 90].into(),
+                ColumnNature::Unknown,
+            )
+            .unwrap()
+            .add_numeric_column(
+                "aux_dimensionless",
+                Unit::Dimensionless,
+                vec![2.0; 90].into(),
+                ColumnNature::Unknown,
+            )
+            .unwrap();
+
+        let out = tempfile::NamedTempFile::new().unwrap();
+        ds.to_csv_with_units(out.path()).unwrap();
+
+        let content = std::fs::read_to_string(out.path()).unwrap();
+        assert!(content.contains("aux_unknown [Unknown]"));
+        assert!(content.contains("aux_dimensionless [Dimensionless]"));
+
+        let ds2 = TGADataset::from_csv_with_units(out.path()).unwrap();
+        assert_eq!(
+            ds2.schema.columns.get("aux_unknown").unwrap().unit,
+            Unit::Unknown
+        );
+        assert_eq!(
+            ds2.schema.columns.get("aux_dimensionless").unwrap().unit,
+            Unit::Dimensionless
+        );
+    }
+
+    #[test]
+    fn duplicate_column_name_is_rejected_for_creation() {
+        let csv = make_csv(60, 782);
+        let ds = ds_from_csv(&csv);
+
+        let err = ds
+            .clone()
+            .add_numeric_column(
+                "time",
+                Unit::Dimensionless,
+                vec![0.0; 60].into(),
+                ColumnNature::Unknown,
+            )
+            .unwrap_err();
+        assert!(matches!(err, PolarsError::ComputeError(_)));
+
+        let err = ds
+            .clone()
+            .with_column_expr(
+                ColumnMeta::new(
+                    "mass",
+                    Unit::Milligram,
+                    ColumnOrigin::PolarsDerived,
+                    ColumnNature::Mass,
+                    ColumnProvenance::manual(
+                        "mass",
+                        "with_column_expr",
+                        Some("attempted rename collision".to_string()),
+                    ),
+                ),
+                col("mass") + lit(1.0),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            TGADomainError::ColumnAlreadyExists(name) if name == "mass"
+        ));
+    }
+
+    #[test]
+    fn rename_column_rejects_existing_target_name() {
+        let csv = make_csv(60, 783);
+        let ds = ds_from_csv(&csv);
+
+        let err = ds.rename_column("mass", "time").unwrap_err();
+        assert!(matches!(
+            err,
+            TGADomainError::ColumnAlreadyExists(name) if name == "time"
+        ));
+    }
+
+    #[test]
+    fn imported_dataset_writes_history_feed() {
+        let csv = make_csv(40, 780);
+        let ds = ds_from_csv(&csv);
+        let feed = ds.history_of_operations.feed_text();
+
+        assert!(feed.contains("from_csv"));
+        assert!(feed.contains("Imported CSV"));
+        assert!(!feed.trim().is_empty());
+    }
+
+    #[test]
+    fn undo_last_restores_dropped_column_and_logs_reverse() {
+        let csv = make_csv(60, 781);
+        let ds = ds_from_csv(&csv);
+        let mut ds = ds.drop_column("temperature").unwrap();
+
+        assert!(!ds.schema.columns.contains_key("temperature"));
+        assert!(ds.can_undo());
+
+        ds.undo_last().unwrap();
+
+        assert!(ds.schema.columns.contains_key("temperature"));
+        let feed = ds.history_of_operations.feed_text();
+        assert!(feed.contains("drop_column"));
+        assert!(feed.contains("undo_last"));
+    }
+
+    #[test]
     fn calibrate_mass_creates_new_column_and_updates_schema() {
         let csv = make_csv(200, 444);
         let ds = ds_from_csv(&csv);
@@ -897,6 +1308,115 @@ pub mod tests {
     }
 
     #[test]
+    fn explicit_source_column_is_used_for_dimensionless_mass_and_conversion() {
+        let csv = make_csv(500, 667);
+        let ds = ds_from_csv(&csv);
+
+        let mut shifted_meta = ds.schema.columns.get("mass").unwrap().clone();
+        shifted_meta.name = "mass_shifted".to_string();
+        shifted_meta.origin = ColumnOrigin::PolarsDerived;
+        shifted_meta.nature = ColumnNature::Mass;
+
+        let ds = ds
+            .with_column_expr(shifted_meta, col("mass") + lit(1.0))
+            .unwrap();
+
+        let alpha_raw = ds
+            .clone()
+            .dimensionless_mass(0.0, 5.0, "alpha_raw")
+            .unwrap();
+        let alpha_shifted = ds
+            .clone()
+            .dimensionless_mass_from_column("mass_shifted", 0.0, 5.0, "alpha_shifted")
+            .unwrap();
+        let eta_raw = ds.clone().conversion(0.0, 5.0, "eta_raw").unwrap();
+        let eta_shifted = ds
+            .clone()
+            .conversion_from_column("mass_shifted", 0.0, 5.0, "eta_shifted")
+            .unwrap();
+
+        let raw_df = alpha_raw.frame.collect().unwrap();
+        let shifted_df = alpha_shifted.frame.collect().unwrap();
+        let raw_alpha = raw_df.column("alpha_raw").unwrap().f64().unwrap();
+        let shifted_alpha = shifted_df.column("alpha_shifted").unwrap().f64().unwrap();
+        let sample = 30;
+        assert!(
+            (raw_alpha.get(sample).unwrap() - shifted_alpha.get(sample).unwrap()).abs() > 1e-6,
+            "explicit mass source should change alpha values"
+        );
+
+        let raw_eta_df = eta_raw.frame.collect().unwrap();
+        let shifted_eta_df = eta_shifted.frame.collect().unwrap();
+        let raw_eta = raw_eta_df.column("eta_raw").unwrap().f64().unwrap();
+        let shifted_eta = shifted_eta_df.column("eta_shifted").unwrap().f64().unwrap();
+        assert!(
+            (raw_eta.get(sample).unwrap() - shifted_eta.get(sample).unwrap()).abs() > 1e-6,
+            "explicit mass source should change conversion values"
+        );
+    }
+
+    #[test]
+    fn explicit_source_column_is_used_for_mass_and_temperature_rates() {
+        let csv = make_csv(500, 668);
+        let ds = ds_from_csv(&csv);
+
+        let mut mass_meta = ds.schema.columns.get("mass").unwrap().clone();
+        mass_meta.name = "mass_scaled".to_string();
+        mass_meta.origin = ColumnOrigin::PolarsDerived;
+        mass_meta.nature = ColumnNature::Mass;
+
+        let mut temp_meta = ds.schema.columns.get("temperature").unwrap().clone();
+        temp_meta.name = "temperature_scaled".to_string();
+        temp_meta.origin = ColumnOrigin::PolarsDerived;
+        temp_meta.nature = ColumnNature::Temperature;
+
+        let ds = ds
+            .with_column_expr(mass_meta, col("mass") * lit(2.0))
+            .unwrap()
+            .with_column_expr(temp_meta, col("temperature") * lit(2.0))
+            .unwrap();
+
+        let mass_rate_raw = ds.clone().derive_mass_rate("dm_dt_raw").unwrap();
+        let mass_rate_scaled = ds
+            .clone()
+            .derive_mass_rate_from_column("mass_scaled", "dm_dt_scaled")
+            .unwrap();
+        let temp_rate_raw = ds.clone().derive_temperature_rate("dT_dt_raw").unwrap();
+        let temp_rate_scaled = ds
+            .clone()
+            .derive_temperature_rate_from_column("temperature_scaled", "dT_dt_scaled")
+            .unwrap();
+
+        let raw_mass_df = mass_rate_raw.frame.collect().unwrap();
+        let scaled_mass_df = mass_rate_scaled.frame.collect().unwrap();
+        let raw_mass = raw_mass_df.column("dm_dt_raw").unwrap().f64().unwrap();
+        let scaled_mass = scaled_mass_df
+            .column("dm_dt_scaled")
+            .unwrap()
+            .f64()
+            .unwrap();
+
+        let sample = 30;
+        assert!(
+            (scaled_mass.get(sample).unwrap() - raw_mass.get(sample).unwrap() * 2.0).abs() < 1e-6,
+            "mass rate should follow the explicit source column"
+        );
+
+        let raw_temp_df = temp_rate_raw.frame.collect().unwrap();
+        let scaled_temp_df = temp_rate_scaled.frame.collect().unwrap();
+        let raw_temp = raw_temp_df.column("dT_dt_raw").unwrap().f64().unwrap();
+        let scaled_temp = scaled_temp_df
+            .column("dT_dt_scaled")
+            .unwrap()
+            .f64()
+            .unwrap();
+        assert!(
+            (scaled_temp.get(sample).unwrap() - raw_temp.get(sample).unwrap() * 2.0).abs() < 1e-6,
+            "temperature rate should follow the explicit source column"
+        );
+    }
+
+    #[test]
     fn move_time_to_zero_shifts_time_start() {
         let csv = make_csv(123, 2024);
         let ds = ds_from_csv(&csv);
@@ -933,17 +1453,24 @@ pub mod tests {
         let ds = ds_from_csv(&csv);
 
         // Add a column with some nulls by creating a derived column
-        let ds_with_nulls = ds.with_column_expr(
-            ColumnMeta {
-                name: "test_nulls".into(),
-                unit: Unit::Dimensionless,
-                origin: ColumnOrigin::PolarsDerived,
-                nature: ColumnNature::Unknown,
-            },
-            when(col("time").lt(lit(5.0)))
-                .then(lit(1.0))
-                .otherwise(lit(NULL)),
-        );
+        let ds_with_nulls = ds
+            .with_column_expr(
+                ColumnMeta::new(
+                    "test_nulls",
+                    Unit::Dimensionless,
+                    ColumnOrigin::PolarsDerived,
+                    ColumnNature::Unknown,
+                    ColumnProvenance::manual(
+                        "test_nulls",
+                        "with_column_expr",
+                        Some("null injection test".to_string()),
+                    ),
+                ),
+                when(col("time").lt(lit(5.0)))
+                    .then(lit(1.0))
+                    .otherwise(lit(NULL)),
+            )
+            .unwrap();
 
         // This should print null counts for all columns
         let _ds_checked = ds_with_nulls.check_nulls();
@@ -957,15 +1484,22 @@ pub mod tests {
         let csv = make_csv(50, 2025);
         // Drop a non-role column: create a derived column then drop it
         let ds = ds_from_csv(&csv);
-        let ds2 = ds.with_column_expr(
-            ColumnMeta {
-                name: "aux".into(),
-                unit: Unit::Dimensionless,
-                origin: ColumnOrigin::PolarsDerived,
-                nature: ColumnNature::Unknown,
-            },
-            col("time") * lit(0.0),
-        );
+        let ds2 = ds
+            .with_column_expr(
+                ColumnMeta::new(
+                    "aux",
+                    Unit::Dimensionless,
+                    ColumnOrigin::PolarsDerived,
+                    ColumnNature::Unknown,
+                    ColumnProvenance::manual(
+                        "aux",
+                        "with_column_expr",
+                        Some("auxiliary derived column".to_string()),
+                    ),
+                ),
+                col("time") * lit(0.0),
+            )
+            .unwrap();
         let df2 = ds2.frame.clone().collect().unwrap();
         assert!(df2.column("aux").is_ok());
         let ds3 = ds2.drop_column("aux").unwrap();

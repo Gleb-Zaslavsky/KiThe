@@ -1,4 +1,3 @@
-use crate::Kinetics::experimental_kinetics::LSQSplines::SolverKind;
 use crate::Kinetics::experimental_kinetics::exp_engine_api::GoldenPipelineConfig;
 use crate::Kinetics::experimental_kinetics::exp_engine_api::{PlotSeries, Ranges, ViewRange, XY};
 use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy;
@@ -6,19 +5,22 @@ use crate::Kinetics::experimental_kinetics::experiment_series_main::{
     ExperimentMeta, TGAExperiment, TGASeries,
 };
 use crate::Kinetics::experimental_kinetics::experiment_series2::SampledColumns;
+use crate::Kinetics::experimental_kinetics::fitting::{FitColumnRequest, FitColumnResult};
 use crate::Kinetics::experimental_kinetics::kinetic_methods::KineticDataView;
 use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::IsoconversionalResult;
 use crate::Kinetics::experimental_kinetics::kinetic_methods::is_this_a_sublimation::{
     SublimationMethod, SublimationResult,
 };
 use crate::Kinetics::experimental_kinetics::kinetic_methods::isoconversion::IsoconversionalMethod;
-use crate::Kinetics::experimental_kinetics::lowess_wrapper::LowessConfig;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    ColumnHistory, ColumnNature, OperationRecord, TGADomainError, Unit,
+    ColumnHistory, ColumnNature, OperationRecord, TGADomainError, TimeMonotonicityReport, Unit,
 };
-use crate::Kinetics::experimental_kinetics::splines::SplineKind;
+use RustedSciThe::numerical::data_processing::LSQSplines::SolverKind;
+use RustedSciThe::numerical::data_processing::lowess_wrapper::LowessConfig;
+
 use crate::Kinetics::experimental_kinetics::testing_mod::{AdvancedTGAConfig, VirtualTGA};
 use crate::gui::experimental_kinetics_gui::model::{Colours, PlotCurve, PlotModel, TGAGUIError};
+use RustedSciThe::numerical::data_processing::splines::SplineKind;
 use log::{debug, info};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -30,14 +32,14 @@ pub struct SampledColumn {
     pub name: String,
 }
 //===========================================================================================
-/// Builder для пошагового создания PlotCurve / Builder for step-by-step PlotCurve construction
+/// Буилдер для пошагового создания PlotCurve
 
 pub struct PlotCurveBuilder {
     curve: PlotCurve,
 }
 
 impl PlotCurveBuilder {
-    /// Создает builder из сырых данных графика / Creates builder from raw plot data
+    /// Создает builder из сырых данных графика
     pub fn new_from_plot(
         plot: PlotSeries,
         id: &str,
@@ -66,43 +68,70 @@ impl PlotCurveBuilder {
         Self { curve }
     }
 
-    /// Устанавливает цвет через enum / Sets colour via enum
+    /// Устанавливает цвет через enum
     pub fn with_colour(mut self, colour: Colours) -> Self {
         self.curve.set_colour(colour);
         self
     }
 
-    /// Устанавливает цвет напрямую RGB / Sets colour directly as RGB
+    /// Устанавливает цвет напрямую RGB
     pub fn with_colour_rgb(mut self, rgb: [u8; 3]) -> Self {
         self.curve.set_colour_rgb(rgb);
         self
     }
 
-    /// Устанавливает флаг видимости / Sets visibility flag
+    /// Устанавливает флаг видимости
     pub fn with_shown(mut self, shown: bool) -> Self {
         self.curve.shown = shown;
         self
     }
 
-    /// Устанавливает флаг выбора / Sets selection flag
+    /// Устанавливает флаг выбора
     pub fn with_selected(mut self, selected: bool) -> Self {
         self.curve.selected = selected;
         self
     }
 
-    /// Устанавливает флаг подсветки / Sets highlight flag
+    /// Устанавливает флаг подсветки
     pub fn with_highlighted(mut self, highlighted: bool) -> Self {
         self.curve.highlighted = highlighted;
         self
     }
 
-    /// Завершает сборку и возвращает кривую / Finalizes and returns the curve
+    /// Завершает сборку и возвращает кривую
     pub fn finish(self) -> PlotCurve {
         self.curve
     }
 }
 ///===============================================================================================
 impl PlotModel {
+    fn is_time_already_in_hours(&self, id: &str) -> Result<bool, TGAGUIError> {
+        Ok(self.experiment_column_unit(id, self.series.get_time_col(id)?)? == Unit::Hour)
+    }
+
+    fn is_temperature_already_kelvin(&self, id: &str) -> Result<bool, TGAGUIError> {
+        Ok(self.experiment_column_unit(id, self.series.get_temperature_col(id)?)? == Unit::Kelvin)
+    }
+
+    fn is_mass_already_milligram(&self, id: &str) -> Result<bool, TGAGUIError> {
+        Ok(self.experiment_column_unit(id, self.series.get_mass_col(id)?)? == Unit::Milligram)
+    }
+
+    fn experiment_column_unit(&self, id: &str, column: String) -> Result<Unit, TGAGUIError> {
+        let exp = self.series.get_experiment_by_id(id)?;
+        exp.dataset
+            .schema
+            .columns
+            .get(&column)
+            .map(|meta| meta.unit)
+            .ok_or_else(|| {
+                TGAGUIError::BindingError(format!(
+                    "failed to read unit for column '{}' in experiment '{}'",
+                    column, id
+                ))
+            })
+    }
+
     pub fn push_message(&mut self, message: &str) -> Result<(), TGAGUIError> {
         self.message = message.to_string();
         Ok(())
@@ -189,13 +218,18 @@ impl PlotModel {
     }
 
     pub fn drop_experiment(&mut self, indx: usize) -> Result<(), TGAGUIError> {
-        self.series.drop_experiment(indx);
+        let id = self.series.ids().get(indx).cloned().ok_or_else(|| {
+            TGAGUIError::BindingError(format!("invalid experiment index {}", indx))
+        })?;
+        self.series.drop_experiment(indx)?;
+        self.clear_active_sources_for_experiment(&id);
         self.prune_stale_plots();
         Ok(())
     }
 
     pub fn drop_experiment_by_id(&mut self, id: &str) -> Result<(), TGAGUIError> {
         self.series.drop_experiment_by_id(id)?;
+        self.clear_active_sources_for_experiment(id);
         self.prune_stale_plots();
         Ok(())
     }
@@ -233,6 +267,7 @@ impl PlotModel {
         unit: Unit,
     ) -> Result<(), TGAGUIError> {
         self.series.bind_temperature(id, col, unit)?;
+        self.set_active_temperature_source_for_experiment(id, col);
         Ok(())
     }
 
@@ -243,6 +278,7 @@ impl PlotModel {
         unit: Unit,
     ) -> Result<(), TGAGUIError> {
         self.series.bind_mass(id, col, unit)?;
+        self.set_active_mass_source_for_experiment(id, col);
         Ok(())
     }
 
@@ -370,6 +406,26 @@ impl PlotModel {
         self.create_experiment_from_columns(idx, new_id, columns)
     }
 
+    pub fn push_experiment_and_create_plot(
+        &mut self,
+        experiment: TGAExperiment,
+        colour: Colours,
+    ) -> Result<(), TGAGUIError> {
+        let id = experiment.meta.id.clone();
+        self.series.push(experiment)?;
+        // IVP output is standardized to time/conversion, so wire the axes
+        // immediately and let the newly created curve appear without forcing
+        // the user through Manage Plot first.
+        self.series.set_oneframeplot_x(&id, "time")?;
+        self.series.set_oneframeplot_y(&id, "conversion")?;
+        self.create_points_for_curve_with_builder(&id, colour)?;
+        if let Some(index) = self.plots.len().checked_sub(1) {
+            self.select_curve(index);
+        }
+        self.reset_view();
+        Ok(())
+    }
+
     //========================================================================
     //////////////////////////////////////////////////////////////////////////////////
     //========================================================================
@@ -453,6 +509,32 @@ impl PlotModel {
         Ok(h)
     }
 
+    pub fn history_feed_for_selected(&self) -> Result<String, TGAGUIError> {
+        let id = self.get_experiment_by_selected_curve()?;
+        let exp = self.series.get_experiment_by_id(&id)?;
+        Ok(exp.dataset.history_of_operations.feed_text())
+    }
+
+    pub fn history_feed_for_experiment(&self, id: &str) -> Result<String, TGAGUIError> {
+        let exp = self.series.get_experiment_by_id(id)?;
+        Ok(exp.dataset.history_of_operations.feed_text())
+    }
+
+    /// Reverse the last mutating dataset operation for the selected experiment.
+    pub fn reverse_selected(&mut self) -> Result<(), TGAGUIError> {
+        let id = self.get_experiment_by_selected_curve()?;
+        self.series.undo_last(&id)?;
+        self.prune_stale_plots();
+        Ok(())
+    }
+
+    /// Reverse the last mutating dataset operation for a specific experiment id.
+    pub fn reverse_experiment(&mut self, id: &str) -> Result<(), TGAGUIError> {
+        self.series.undo_last(id)?;
+        self.prune_stale_plots();
+        Ok(())
+    }
+
     pub fn operations_on_column_for_experiment(
         &mut self,
         id: &str,
@@ -471,6 +553,25 @@ impl PlotModel {
     ) -> Result<ColumnHistory, TGAGUIError> {
         let r = self.series.get_column_history(id, col)?;
         Ok(r)
+    }
+
+    /// Returns the human-readable history of a column in one experiment.
+    /// This is convenient for GUI detail panels that only need to display text.
+    pub fn column_history_feed_for_experiment(
+        &self,
+        id: &str,
+        col: &str,
+    ) -> Result<String, TGAGUIError> {
+        Ok(self.series.get_column_history(id, col)?.feed_text())
+    }
+
+    /// Returns a human-readable provenance chain for a column in one experiment.
+    pub fn column_provenance_for_experiment(
+        &self,
+        id: &str,
+        col: &str,
+    ) -> Result<Option<String>, TGAGUIError> {
+        Ok(self.series.column_provenance_text(id, col)?)
     }
     /// takes from vector of changed column names Vec<Option<String>> a name leaving None
     pub fn take_column(&mut self, id: &str, col: &str) -> Result<Option<String>, TGAGUIError> {
@@ -562,6 +663,19 @@ impl PlotModel {
 
     pub fn monotony_of_time_check_for_experiment(&self, id: &str) -> Result<Vec<f64>, TGAGUIError> {
         Ok(self.series.monotony_of_time_check(id)?)
+    }
+
+    pub fn time_monotonicity_report_for_experiment(
+        &self,
+        id: &str,
+    ) -> Result<TimeMonotonicityReport, TGAGUIError> {
+        Ok(self.series.time_monotonicity_report(id)?)
+    }
+
+    pub fn sort_experiment_by_time(&mut self, id: &str) -> Result<(), TGAGUIError> {
+        self.series.sort_experiment_by_time(id)?;
+        self.rebuild_plots_for_experiment(id)?;
+        Ok(())
     }
     //////////////////////////////////////////////////////////////////////////////////
     //=================================================================================
@@ -663,7 +777,79 @@ impl PlotModel {
         Ok(())
     }
 
-    /// Альтернативный путь: создание кривой через builder с выбором цвета / Alternative path: create curve via builder with colour selection
+    /// Rebuild all visible curves belonging to one experiment after the
+    /// underlying data changed. This is stricter than updating a single curve
+    /// and keeps cut/undo-style operations visually honest.
+    fn rebuild_plots_for_experiment(&mut self, id: &str) -> Result<(), TGAGUIError> {
+        let selected_plot = self
+            .get_selected_curve_index()
+            .and_then(|idx| self.plots.get(idx))
+            .filter(|curve| curve.experiment_id == id)
+            .map(|curve| curve.plot_short_name.clone());
+
+        let preserved_curves: Vec<(String, String, [u8; 3], bool, bool, bool)> = self
+            .plots
+            .iter()
+            .filter(|curve| curve.experiment_id == id)
+            .map(|curve| {
+                (
+                    curve.x_name.clone(),
+                    curve.y_name.clone(),
+                    curve.color,
+                    curve.selected,
+                    curve.highlighted,
+                    curve.shown,
+                )
+            })
+            .collect();
+
+        if preserved_curves.is_empty() {
+            return Ok(());
+        }
+
+        self.plots.retain(|curve| curve.experiment_id != id);
+
+        let mut selected_index = None;
+        for (x_name, y_name, color, selected, highlighted, shown) in preserved_curves {
+            self.set_x(id, &x_name)?;
+            self.set_y(id, &y_name)?;
+            self.create_points_for_curve(id)?;
+
+            let curve_index = self.plots.len().checked_sub(1).ok_or_else(|| {
+                TGAGUIError::BindingError("Failed to rebuild plot curve".to_string())
+            })?;
+            if let Some(curve) = self.plots.get_mut(curve_index) {
+                curve.color = color;
+                curve.selected = selected;
+                curve.highlighted = highlighted;
+                curve.shown = shown;
+                if selected_plot
+                    .as_ref()
+                    .map(|name| name == &curve.plot_short_name)
+                    .unwrap_or(false)
+                {
+                    selected_index = Some(curve_index);
+                }
+            }
+        }
+
+        if let Some(index) = selected_index {
+            self.select_curve(index);
+        }
+        self.reset_view();
+        Ok(())
+    }
+
+    /// Rebuild plots for an experiment after an in-place mutation.
+    ///
+    /// This keeps existing curve bindings and simply re-samples them from the
+    /// updated dataset. It is the right path for same-column transforms such as
+    /// Hampel or in-place Savitzky-Golay.
+    fn refresh_plots_after_in_place_mutation(&mut self, id: &str) -> Result<(), TGAGUIError> {
+        self.rebuild_plots_for_experiment(id)
+    }
+
+    /// Альтернативный путь: создание кривой через builder с выбором цвета
     pub fn create_points_for_curve_with_builder(
         &mut self,
         id: &str,
@@ -671,7 +857,7 @@ impl PlotModel {
     ) -> Result<(), TGAGUIError> {
         debug!("calculating points for curve via builder");
         let ranges = self.give_ranges_to_plot(id)?;
-        // Всегда берём полный диапазон кривой / Always use full curve range.
+        // Всегда берём полный диапазон кривой
         let x_range = [ranges.x_min, ranges.x_max];
         let plot = self.calculate_samplepoints_for_plot(id, x_range)?;
         let index = self.index_by_id(id)?;
@@ -679,7 +865,7 @@ impl PlotModel {
         Ok(())
     }
 
-    /// Альтернативный путь для выбранной кривой / Alternative builder path for selected curve
+    /// Альтернативный путь для выбранной кривой
     pub fn create_points_for_selected_curve_with_builder(
         &mut self,
         colour: Colours,
@@ -736,7 +922,7 @@ impl PlotModel {
         Ok(())
     }
 
-    /// Альтернативный push через builder / Alternative push path via builder
+    /// Альтернативный push через builder
     pub fn push_to_vec_of_curves_with_builder(
         &mut self,
         plot: PlotSeries,
@@ -750,7 +936,7 @@ impl PlotModel {
         let configured_builder = base_builder.with_colour(colour);
         let mut new_curve = configured_builder.finish();
 
-        // При замене сохраняем UI-состояние старой кривой / Preserve old UI state on replacement.
+        // При замене сохраняем UI-состояние старой кривой
         if let Some(existing) = self
             .plots
             .iter()
@@ -780,6 +966,7 @@ impl PlotModel {
         new_name: &str,
     ) -> Result<(), TGAGUIError> {
         self.series.rename_column(id, col_name, new_name)?;
+        self.remap_active_sources_for_experiment(id, col_name, new_name);
         self.prune_stale_plots();
         self.reset_view();
         Ok(())
@@ -790,6 +977,7 @@ impl PlotModel {
         col_name: &str,
     ) -> Result<(), TGAGUIError> {
         self.series.drop_column(id, col_name)?;
+        self.clear_active_sources_if_column_dropped(id, col_name);
         self.prune_stale_plots();
         self.reset_view();
         Ok(())
@@ -804,8 +992,7 @@ impl PlotModel {
 
     pub fn move_time_to_zero_for_experiment(&mut self, id: &str) -> Result<(), TGAGUIError> {
         self.series.move_time_to_zero(id)?;
-        self.create_points_for_curve(&id)?;
-        self.reset_view();
+        self.rebuild_plots_for_experiment(id)?;
         Ok(())
     }
 
@@ -821,9 +1008,12 @@ impl PlotModel {
     //=====================================
     #[allow(non_snake_case)]
     pub fn from_C_to_K_for_experiment(&mut self, id: &str) -> Result<(), TGAGUIError> {
+        if self.is_temperature_already_kelvin(id)? {
+            let _ = self.push_message("Temperature is already in Kelvin; conversion skipped.");
+            return Ok(());
+        }
         self.series.celsius_to_kelvin(id)?;
-        self.create_points_for_curve(&id)?;
-        self.reset_view();
+        self.rebuild_plots_for_experiment(id)?;
         Ok(())
     }
     #[allow(non_snake_case)]
@@ -838,14 +1028,17 @@ impl PlotModel {
 
     pub fn from_s_to_h_for_experiment(&mut self, id: &str) -> Result<(), TGAGUIError> {
         self.series.seconds_to_hours(id)?;
-        self.create_points_for_curve(&id)?;
-        self.reset_view();
+        self.rebuild_plots_for_experiment(id)?;
         Ok(())
     }
 
     pub fn from_s_to_h_of_selected(&mut self) -> Result<(), TGAGUIError> {
         let id = self.get_experiment_by_selected_curve()?;
         debug!("selected experiment {}", id);
+        if self.is_time_already_in_hours(&id)? {
+            let _ = self.push_message("Time is already in hours; conversion skipped.");
+            return Ok(());
+        }
         info!("time turned from seconds to hours");
         self.from_s_to_h_for_experiment(&id)?;
         Ok(())
@@ -857,8 +1050,7 @@ impl PlotModel {
         debug!("selected experiment {}", id);
         info!("cut all data before time {}", time);
         self.series.cut_before_time(&id, time)?;
-        self.create_points_for_curve(&id)?;
-        self.reset_view();
+        self.rebuild_plots_for_experiment(&id)?;
         Ok(())
     }
     /// эта функция должна удалять выбранный график
@@ -912,8 +1104,7 @@ impl PlotModel {
                         .cut_range_inverse_x_or_y(id, XY::Y, y_min, y_max)?;
                 }
             }
-            self.create_points_for_curve(&id)?;
-            self.reset_view();
+            self.rebuild_plots_for_experiment(id)?;
         } else {
             return Err(TGAGUIError::BindingError(
                 "No selection rectangle. Drag-select a region on the plot first.".to_string(),
@@ -940,18 +1131,47 @@ impl PlotModel {
         Ok(())
     }
 
+    pub fn dimensionless_mass_from_source_for_experiment(
+        &mut self,
+        id: &str,
+        source_col: &str,
+        t_end: f64,
+        new_col: &str,
+    ) -> Result<(), TGAGUIError> {
+        self.series
+            .dimensionless_mass_from_column(id, source_col, 0.0, t_end, new_col)?;
+        Ok(())
+    }
+
     pub fn relative_mass_for_selected(
         &mut self,
         t_end: f64,
         new_col: Option<&str>,
     ) -> Result<(), TGAGUIError> {
+        if !t_end.is_finite() || t_end <= 0.0 {
+            let _ = self.push_message(
+                "Baseline end time must be greater than 0.0; 0.0 would use only one point.",
+            );
+            return Ok(());
+        }
         let id = self.get_experiment_by_selected_curve()?;
+        let source_col = self.active_mass_source_for_experiment(&id)?;
         match new_col {
             Some(new_col) => {
-                self.dimensionless_mass_for_experiment(id, t_end, new_col)?;
+                self.dimensionless_mass_from_source_for_experiment(
+                    &id,
+                    &source_col,
+                    t_end,
+                    new_col,
+                )?;
             }
             None => {
-                self.dimensionless_mass_for_experiment(id, t_end, "relative_mass")?;
+                self.dimensionless_mass_from_source_for_experiment(
+                    &id,
+                    &source_col,
+                    t_end,
+                    "relative_mass",
+                )?;
             }
         }
         Ok(())
@@ -967,18 +1187,37 @@ impl PlotModel {
         Ok(())
     }
 
+    pub fn conversion_from_source_for_experiment(
+        &mut self,
+        id: &str,
+        source_col: &str,
+        t_end: f64,
+        new_col: &str,
+    ) -> Result<(), TGAGUIError> {
+        self.series
+            .conversion_from_column(id, source_col, 0.0, t_end, new_col)?;
+        Ok(())
+    }
+
     pub fn conversion_for_selected(
         &mut self,
         t_end: f64,
         new_col: Option<&str>,
     ) -> Result<(), TGAGUIError> {
+        if !t_end.is_finite() || t_end <= 0.0 {
+            let _ = self.push_message(
+                "Baseline end time must be greater than 0.0; 0.0 would use only one point.",
+            );
+            return Ok(());
+        }
         let id = self.get_experiment_by_selected_curve()?;
+        let source_col = self.active_mass_source_for_experiment(&id)?;
         match new_col {
             Some(new_col) => {
-                self.conversion_for_experiment(id, t_end, new_col)?;
+                self.conversion_from_source_for_experiment(&id, &source_col, t_end, new_col)?;
             }
             None => {
-                self.conversion_for_experiment(id, t_end, "conversion")?;
+                self.conversion_from_source_for_experiment(&id, &source_col, t_end, "conversion")?;
             }
         }
         Ok(())
@@ -986,6 +1225,10 @@ impl PlotModel {
     // CALIBRATION: MASS FROM VOLTAGE
     //===========================================================================
     pub fn calibrate_mass_from_voltage(&mut self, id: &str) -> Result<(), TGAGUIError> {
+        if self.is_mass_already_milligram(id)? {
+            let _ = self.push_message("Mass is already in milligrams; conversion skipped.");
+            return Ok(());
+        }
         let set = self.settings.calibration_line().unwrap();
         let k = set.k();
         let b = set.b();
@@ -994,8 +1237,10 @@ impl PlotModel {
             k, b
         );
         self.series.calibrate_mass_from_voltage(id, k, b)?;
-        self.create_points_for_curve(&id)?;
-        self.reset_view();
+        if let Ok(mass_col) = self.series.get_mass_col(id) {
+            self.set_active_mass_source_for_experiment(id, &mass_col);
+        }
+        self.rebuild_plots_for_experiment(id)?;
         Ok(())
     }
 
@@ -1011,12 +1256,16 @@ impl PlotModel {
         id: &str,
         col: &str,
     ) -> Result<(), TGAGUIError> {
+        if self.is_mass_already_milligram(id)? {
+            let _ = self.push_message("Mass is already in milligrams; conversion skipped.");
+            return Ok(());
+        }
         let set = self.settings.calibration_line().unwrap();
         let k = set.k();
         let b = set.b();
         self.series.calibrate_mass(id, k, b, col)?;
-        self.create_points_for_curve(&id)?;
-        self.reset_view();
+        self.set_active_mass_source_for_experiment(id, col);
+        self.rebuild_plots_for_experiment(id)?;
         Ok(())
     }
 
@@ -1387,7 +1636,11 @@ impl PlotModel {
         let old_cols = self.list_of_columns(&id)?;
         self.series
             .hampel_filter(&id, col_name, window, sigma, strategy)?;
-        self.create_plots_with_new_columns(&id, old_cols, None)?;
+        if old_cols.iter().any(|name| name == col_name) {
+            self.refresh_plots_after_in_place_mutation(&id)?;
+        } else {
+            self.create_plots_with_new_columns(&id, old_cols, None)?;
+        }
         Ok(())
     }
     pub fn hampel_filter_for_selected_as(
@@ -1402,7 +1655,16 @@ impl PlotModel {
         let old_cols = self.list_of_columns(&id)?;
         self.series
             .hampel_filter_as(&id, col_name, window, sigma, strategy, out_col)?;
-        self.create_plots_with_new_columns(&id, old_cols, None)?;
+        if let Some(produced) = out_col {
+            if produced == col_name {
+                self.refresh_plots_after_in_place_mutation(&id)?;
+            } else {
+                self.remap_active_sources_for_experiment(&id, col_name, produced);
+                self.create_plots_with_new_columns(&id, old_cols, None)?;
+            }
+        } else {
+            self.create_plots_with_new_columns(&id, old_cols, None)?;
+        }
         Ok(())
     }
     // Savitzky Golay
@@ -1418,7 +1680,11 @@ impl PlotModel {
         let old_cols = self.list_of_columns(&id)?;
         self.series
             .sg_filter_column(&id, col, window, poly_order, deriv, delta)?;
-        self.create_plots_with_new_columns(&id, old_cols, None)?;
+        if old_cols.iter().any(|name| name == col) {
+            self.refresh_plots_after_in_place_mutation(&id)?;
+        } else {
+            self.create_plots_with_new_columns(&id, old_cols, None)?;
+        }
 
         Ok(())
     }
@@ -1435,7 +1701,16 @@ impl PlotModel {
         let old_cols = self.list_of_columns(&id)?;
         self.series
             .sg_filter_column_as(&id, col, window, poly_order, deriv, delta, out_col)?;
-        self.create_plots_with_new_columns(&id, old_cols, None)?;
+        if let Some(produced) = out_col {
+            if produced == col {
+                self.refresh_plots_after_in_place_mutation(&id)?;
+            } else {
+                self.remap_active_sources_for_experiment(&id, col, produced);
+                self.create_plots_with_new_columns(&id, old_cols, None)?;
+            }
+        } else {
+            self.create_plots_with_new_columns(&id, old_cols, None)?;
+        }
         Ok(())
     }
     // rolling mean
@@ -1448,7 +1723,11 @@ impl PlotModel {
         let old_cols = self.list_of_columns(&id)?;
         self.series.rolling_mean(&id, col_name, window)?;
         self.series.trim_null_edges(&id)?;
-        self.create_plots_with_new_columns(&id, old_cols, None)?;
+        if old_cols.iter().any(|name| name == col_name) {
+            self.refresh_plots_after_in_place_mutation(&id)?;
+        } else {
+            self.create_plots_with_new_columns(&id, old_cols, None)?;
+        }
         Ok(())
     }
 
@@ -1463,7 +1742,16 @@ impl PlotModel {
         self.series
             .rolling_mean_as(&id, col_name, window, out_col)?;
         self.series.trim_null_edges(&id)?;
-        self.create_plots_with_new_columns(&id, old_cols, None)?;
+        if let Some(produced) = out_col {
+            if produced != col_name {
+                self.remap_active_sources_for_experiment(&id, col_name, produced);
+            }
+            self.create_plots_with_new_columns(&id, old_cols, None)?;
+            self.refresh_plots_after_in_place_mutation(&id)?;
+        } else {
+            self.create_plots_with_new_columns(&id, old_cols, None)?;
+            self.refresh_plots_after_in_place_mutation(&id)?;
+        }
         Ok(())
     }
     pub fn lowess_smooth_columns_for_selected(
@@ -1491,6 +1779,11 @@ impl PlotModel {
         let old_cols = self.list_of_columns(&id)?;
         self.series
             .lowess_smooth_columns_as(&id, time_col, columns, out_columns, config)?;
+        for (source, produced) in columns.iter().zip(out_columns.iter()) {
+            if let Some(produced) = produced {
+                self.remap_active_sources_for_experiment(&id, source, produced);
+            }
+        }
         self.create_plots_with_new_columns(&id, old_cols, Some(time_col))?;
         Ok(())
     }
@@ -1519,8 +1812,15 @@ impl PlotModel {
     ) -> Result<(), TGAGUIError> {
         let id = self.get_experiment_by_selected_curve()?;
         let old_cols = self.list_of_columns(&id)?;
+        let selected_y = self
+            .get_selected_curve_index()
+            .and_then(|idx| self.plots.get(idx))
+            .map(|curve| curve.y_name.clone());
         self.series
             .spline_resample_oneframeplot_as(&id, new_time_col, n_points, kind, new_col)?;
+        if let (Some(selected_y), Some(produced)) = (selected_y, new_col) {
+            self.remap_active_sources_for_experiment(&id, &selected_y, produced);
+        }
         self.create_plots_with_new_columns(&id, old_cols, Some(new_time_col))?;
         Ok(())
     }
@@ -1554,6 +1854,10 @@ impl PlotModel {
     ) -> Result<(), TGAGUIError> {
         let id = self.get_experiment_by_selected_curve()?;
         let old_cols = self.list_of_columns(&id)?;
+        let selected_y = self
+            .get_selected_curve_index()
+            .and_then(|idx| self.plots.get(idx))
+            .map(|curve| curve.y_name.clone());
         self.series.lsq_spline_resample_columns_as(
             &id,
             time_col,
@@ -1565,6 +1869,11 @@ impl PlotModel {
             n_internal_knots,
             SolverKind::Banded,
         )?;
+        if let (Some(selected_y), Some(produced)) =
+            (selected_y, out_columns.first().and_then(|o| *o))
+        {
+            self.remap_active_sources_for_experiment(&id, &selected_y, produced);
+        }
         self.create_plots_with_new_columns(&id, old_cols, Some(new_time_col))?;
         Ok(())
     }
@@ -1645,7 +1954,10 @@ impl PlotModel {
         new_col: Option<&str>,
     ) -> Result<(), TGAGUIError> {
         let id = self.get_experiment_by_selected_curve()?;
-        self.derive_mass_rate(&id, new_col)?;
+        let source_col = self.active_mass_source_for_experiment(&id)?;
+        let new_col = new_col.unwrap_or("dm_dt");
+        self.series
+            .derive_rate(&id, &source_col, new_col, ColumnNature::MassRate)?;
         Ok(())
     }
 
@@ -1654,7 +1966,10 @@ impl PlotModel {
         new_col: Option<&str>,
     ) -> Result<(), TGAGUIError> {
         let id = self.get_experiment_by_selected_curve()?;
-        self.derive_temperature_rate(&id, new_col)?;
+        let source_col = self.active_temperature_source_for_experiment(&id)?;
+        let new_col = new_col.unwrap_or("dT_dt");
+        self.series
+            .derive_rate(&id, &source_col, new_col, ColumnNature::TemperatureRate)?;
         Ok(())
     }
 
@@ -1861,6 +2176,33 @@ impl PlotModel {
         Ok(())
     }
 
+    /// Fit one `(x, y)` column pair, publish fitted y, and create its plot.
+    ///
+    /// The domain layer owns fitting semantics and provenance. The GUI layer only
+    /// asks for the operation, then wires `x` vs `fitted_y` into the normal plot
+    /// machinery so the result is immediately visible.
+    pub fn fit_column_and_plot(
+        &mut self,
+        request: FitColumnRequest,
+    ) -> Result<FitColumnResult, TGAGUIError> {
+        let result = self.series.fit_column(request)?;
+        self.set_x(&result.experiment_id, &result.x_col)?;
+        self.set_y(&result.experiment_id, &result.output_col)?;
+        self.create_points_for_curve_with_builder(&result.experiment_id, Colours::Red)?;
+
+        let short_name =
+            self.create_plot_short_name(&result.experiment_id, &result.x_col, &result.output_col);
+        if let Some(curve) = self
+            .plots
+            .iter_mut()
+            .find(|curve| curve.plot_short_name == short_name)
+        {
+            curve.shown = true;
+        }
+        self.reset_view();
+        Ok(result)
+    }
+
     /// Push fitted sublimation rates into the series and build plots for each experiment.
     ///
     /// For every `(conversion, fitted_conversion_rate)` pair we create a new curve:
@@ -1888,5 +2230,68 @@ impl PlotModel {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fitting_gui_model_tests {
+    use super::*;
+    use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
+    use crate::Kinetics::experimental_kinetics::fitting::FittingModelName;
+    use crate::Kinetics::experimental_kinetics::testing_mod::VirtualTGA;
+
+    fn linspace(start: f64, end: f64, len: usize) -> Vec<f64> {
+        let step = if len > 1 {
+            (end - start) / (len - 1) as f64
+        } else {
+            0.0
+        };
+        (0..len).map(|idx| start + idx as f64 * step).collect()
+    }
+
+    #[test]
+    fn fit_column_and_plot_adds_visible_fitted_curve() {
+        let time = linspace(0.0, 5.0, 80);
+        let mass = time
+            .iter()
+            .map(|&t| 2.0 * (-0.6 * t).exp())
+            .collect::<Vec<_>>();
+        let virtual_tga = VirtualTGA {
+            temperature: vec![500.0; time.len()],
+            time,
+            mass,
+        };
+
+        let mut model = PlotModel::default();
+        model
+            .series
+            .create_from_synthetic_data(
+                &virtual_tga,
+                ExperimentMeta {
+                    id: "fit_gui".to_string(),
+                    heating_rate: None,
+                    isothermal_temperature: Some(500.0),
+                    comment: Some("fit gui model test".to_string()),
+                },
+            )
+            .unwrap();
+
+        let result = model
+            .fit_column_and_plot(
+                FitColumnRequest::new("fit_gui", "time", "mass", FittingModelName::DecExp)
+                    .with_output_col("fit_mass"),
+            )
+            .unwrap();
+
+        assert_eq!(result.output_col, "fit_mass");
+        let exp = model.series.get_experiment_by_id("fit_gui").unwrap();
+        assert!(exp.dataset.schema.columns.contains_key("fit_mass"));
+        assert!(model.plots.iter().any(|curve| {
+            curve.experiment_id == "fit_gui"
+                && curve.x_name == "time"
+                && curve.y_name == "fit_mass"
+                && curve.shown
+                && !curve.points.is_empty()
+        }));
     }
 }

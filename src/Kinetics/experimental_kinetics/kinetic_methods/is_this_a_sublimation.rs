@@ -472,7 +472,7 @@ mod tests {
                 mass: vec![1.0; n],
             };
             let ds = TGADataset::create_from_synthetic_data(&v).unwrap();
-            series.push(TGAExperiment::new(ds).with_id(id));
+            series.push(TGAExperiment::new(ds).with_id(id)).unwrap();
         }
 
         SublimationMethod::push_fitted_rates_to_series(&results, &mut series).unwrap();

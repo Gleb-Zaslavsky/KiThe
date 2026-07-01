@@ -89,7 +89,9 @@ mod tests {
         let csv = make_csv(500, 789);
         let ds = ds_from_csv(&csv);
         let mut series = TGASeries::new();
-        series.push(TGAExperiment::new(ds.clone()).with_id("a"));
+        series
+            .push(TGAExperiment::new(ds.clone()).with_id("a"))
+            .unwrap();
         let _ = series
             .mean_on_interval("a", "mass", "time", 0.0, 100.0)
             .unwrap();
@@ -97,6 +99,43 @@ mod tests {
             .mean_on_interval_on_own_range("a", "mass", 0.0, 100.0)
             .unwrap();
         let _ = series.mean_on_column("a", "mass").unwrap();
+    }
+
+    #[test]
+    fn undo_last_via_series_restores_renamed_column() {
+        let csv = make_csv(400, 790);
+        let ds = ds_from_csv(&csv);
+        let mut series = TGASeries::new();
+        series.push(TGAExperiment::new(ds).with_id("a")).unwrap();
+
+        series
+            .rename_column("a", "temperature", "temperature_renamed")
+            .unwrap();
+        assert!(
+            series
+                .get_experiment_by_id("a")
+                .unwrap()
+                .dataset
+                .schema
+                .columns
+                .contains_key("temperature_renamed")
+        );
+
+        series.undo_last("a").unwrap();
+        let exp = series.get_experiment_by_id("a").unwrap();
+        assert!(exp.dataset.schema.columns.contains_key("temperature"));
+        assert!(
+            !exp.dataset
+                .schema
+                .columns
+                .contains_key("temperature_renamed")
+        );
+        assert!(
+            exp.dataset
+                .history_of_operations
+                .feed_text()
+                .contains("undo_last")
+        );
     }
 
     fn golden_cfg(save_to_new_experiment: bool, del_old_experiment: bool) -> GoldenPipelineConfig {
@@ -128,7 +167,7 @@ mod tests {
         let ds = ds_from_csv(&csv);
         let exp = TGAExperiment::new(ds).with_id("exp1");
         let mut series = TGASeries::new();
-        series.push(exp);
+        series.push(exp).unwrap();
 
         series
             .apply_golden_pipeline("exp1", golden_cfg(true, false))
@@ -145,7 +184,7 @@ mod tests {
         let ds = ds_from_csv(&csv);
         let exp = TGAExperiment::new(ds).with_id("exp1");
         let mut series = TGASeries::new();
-        series.push(exp);
+        series.push(exp).unwrap();
 
         series
             .apply_golden_pipeline("exp1", golden_cfg(true, true))
@@ -154,5 +193,64 @@ mod tests {
         assert_eq!(series.len(), 1);
         assert!(series.index_by_id("exp1").is_err());
         assert!(series.index_by_id("proceeded_exp1").is_ok());
+    }
+
+    #[test]
+    fn series_csv_roundtrip_preserves_minute_unknown_and_dimensionless_units() {
+        let csv = make_csv(200, 555003);
+        let ds = ds_from_csv(&csv)
+            .bind_time("time", Unit::Minute)
+            .unwrap()
+            .add_numeric_column(
+                "aux_unknown",
+                Unit::Unknown,
+                vec![1.0; 200].into(),
+                ColumnNature::Unknown,
+            )
+            .unwrap()
+            .add_numeric_column(
+                "aux_dimensionless",
+                Unit::Dimensionless,
+                vec![2.0; 200].into(),
+                ColumnNature::Unknown,
+            )
+            .unwrap();
+
+        let mut series = TGASeries::new();
+        series.push(TGAExperiment::new(ds).with_id("exp1")).unwrap();
+
+        let out = tempfile::NamedTempFile::new().unwrap();
+        series.to_csv_series(out.path()).unwrap();
+
+        let content = std::fs::read_to_string(out.path()).unwrap();
+        assert!(content.contains("Minute"));
+        assert!(content.contains("Unknown"));
+        assert!(content.contains("Dimensionless"));
+
+        let restored = TGASeries::from_csv_series(out.path()).unwrap();
+        let exp = &restored.experiments[0];
+        assert!(
+            exp.dataset
+                .history_of_operations
+                .feed_text()
+                .contains("from_csv_series")
+        );
+        assert_eq!(
+            exp.dataset.schema.columns.get("time").unwrap().unit,
+            Unit::Minute
+        );
+        assert_eq!(
+            exp.dataset.schema.columns.get("aux_unknown").unwrap().unit,
+            Unit::Unknown
+        );
+        assert_eq!(
+            exp.dataset
+                .schema
+                .columns
+                .get("aux_dimensionless")
+                .unwrap()
+                .unit,
+            Unit::Dimensionless
+        );
     }
 }

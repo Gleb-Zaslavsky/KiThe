@@ -207,9 +207,9 @@ pub struct ExperimentData {
     pub time: Vec<f64>,
     /// Temperature axis (Kelvin).
     pub temperature: Vec<f64>,
-    /// Conversion α ∈ [0, 1].
+    /// Conversion η ∈ [0, 1].
     pub conversion: Vec<f64>,
-    /// dα/dt (s⁻¹).
+    /// dη/dt (reciprocal of the stored time unit).
     pub conversion_rate: Vec<f64>,
     /// Raw sample mass (optional; not used by isoconversional solvers).
     pub mass: Option<Vec<f64>>,
@@ -416,9 +416,9 @@ pub struct ConversionGrid {
     pub temperature: Array2<f64>,
     /// `1/T` pre-cached to avoid repeated division in solver inner loops.
     pub inv_temperature: Array2<f64>,
-    /// Time at which experiment `i` reached conversion `α[j]` (seconds).
+    /// Time at which experiment `i` reached conversion `η[j]` (stored time unit).
     pub time: Array2<f64>,
-    /// dα/dt at each `(experiment, α)` cell (s⁻¹).
+    /// dη/dt at each `(experiment, η)` cell (reciprocal of the stored time unit).
     pub conversion_rate: Array2<f64>,
     /// Time-step increments Δt between consecutive α layers, required by the
     /// Vyazovkin method.  `None` unless built with `with_dt_matrix()`.
@@ -563,7 +563,7 @@ impl ConversionGrid {
             .cloned()
             .fold(f64::NEG_INFINITY, f64::max);
         println!(
-            "   Conversion rate range: {:.6} - {:.6} s⁻¹",
+            "   Conversion rate range: {:.6} - {:.6} 1/t",
             rate_min, rate_max
         );
 
@@ -700,8 +700,14 @@ impl ConversionGridBuilder {
     /// Computes the Δt matrix from a time array: `dt[i, j] = time[i, j+1] - time[i, j]`.
     /// The last column is filled by repeating the second-to-last value.
     // for Vyazovkin method
-    pub fn compute_dt_matrix(time: &Array2<f64>) -> Array2<f64> {
+    pub fn compute_dt_matrix(time: &Array2<f64>) -> Result<Array2<f64>, TGADomainError> {
         let (n_exp, n_alpha) = time.dim();
+
+        if n_alpha < 2 {
+            return Err(TGADomainError::InvalidOperation(
+                "dt matrix requires at least two alpha points".to_string(),
+            ));
+        }
 
         let mut dt = Array2::<f64>::zeros((n_exp, n_alpha));
 
@@ -709,14 +715,21 @@ impl ConversionGridBuilder {
             let row = time.row(i);
 
             for j in 0..n_alpha - 1 {
-                dt[[i, j]] = row[j + 1] - row[j];
+                let value = row[j + 1] - row[j];
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Non-positive dt at row {}, col {}: {}",
+                        i, j, value
+                    )));
+                }
+                dt[[i, j]] = value;
             }
 
             // последнюю колонку можно повторить
             dt[[i, n_alpha - 1]] = dt[[i, n_alpha - 2]];
         }
 
-        dt
+        Ok(dt)
     }
 
     /// Computes the intersection of all experiments' conversion ranges.
@@ -734,6 +747,10 @@ impl ConversionGridBuilder {
             let local_min = eta.iter().cloned().fold(f64::INFINITY, f64::min);
 
             let local_max = eta.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+            if !local_min.is_finite() || !local_max.is_finite() {
+                return Err(TGADomainError::InvalidConversionRange);
+            }
 
             global_min = global_min.max(local_min);
             global_max = global_max.min(local_max);
@@ -763,7 +780,7 @@ impl ConversionGridBuilder {
             return Err(TGADomainError::InvalidConversionRange);
         }
 
-        let eta_grid = Self::build_eta_grid(eta_min, eta_max, self.segments);
+        let eta_grid = Self::build_eta_grid(eta_min, eta_max, self.segments)?;
 
         let n_exp = data.experiments.len();
         let n_eta = eta_grid.len();
@@ -795,9 +812,9 @@ impl ConversionGridBuilder {
         let conversion_rate = Array2::from_shape_vec((n_exp, n_eta), rate)
             .map_err(|e| TGADomainError::InvalidOperation(format!("Invalid rate grid: {}", e)))?;
 
-        let inv_temperature = temperature.mapv(|t| 1.0 / t);
+        let inv_temperature = Self::inverse_temperature_matrix(&temperature)?;
         let dt = if self.extras.dt_matrix {
-            Some(Self::compute_dt_matrix(&time))
+            Some(Self::compute_dt_matrix(&time)?)
         } else {
             None
         };
@@ -831,7 +848,7 @@ impl ConversionGridBuilder {
         eta_min += self.margin_left;
         eta_max -= self.margin_right;
 
-        let eta_grid = Self::build_eta_grid(eta_min, eta_max, self.segments);
+        let eta_grid = Self::build_eta_grid(eta_min, eta_max, self.segments)?;
 
         let n_exp = data.experiments.len();
         let n_eta = eta_grid.len();
@@ -856,10 +873,10 @@ impl ConversionGridBuilder {
             )?;
         }
 
-        let inv_temperature = temperature.mapv(|t| 1.0 / t);
+        let inv_temperature = Self::inverse_temperature_matrix(&temperature)?;
 
         let dt = if self.extras.dt_matrix {
-            Some(Self::compute_dt_matrix(&time))
+            Some(Self::compute_dt_matrix(&time)?)
         } else {
             None
         };
@@ -876,10 +893,34 @@ impl ConversionGridBuilder {
     }
 
     /// Builds a uniformly-spaced α grid of `n` points in `[min, max)`.
-    fn build_eta_grid(min: f64, max: f64, n: usize) -> Vec<f64> {
+    fn build_eta_grid(min: f64, max: f64, n: usize) -> Result<Vec<f64>, TGADomainError> {
+        if n < 2 {
+            return Err(TGADomainError::InvalidOperation(
+                "Conversion grid requires at least 2 segments".to_string(),
+            ));
+        }
+        if !min.is_finite() || !max.is_finite() || max <= min {
+            return Err(TGADomainError::InvalidConversionRange);
+        }
         let step = (max - min) / n as f64;
 
-        (0..n).map(|i| min + step * i as f64).collect()
+        Ok((0..n).map(|i| min + step * i as f64).collect())
+    }
+
+    fn inverse_temperature_matrix(
+        temperature: &Array2<f64>,
+    ) -> Result<Array2<f64>, TGADomainError> {
+        let mut inv = temperature.clone();
+        for ((i, j), t) in temperature.indexed_iter() {
+            if !t.is_finite() || *t <= 0.0 {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Non-physical temperature at row {}, col {}: {}",
+                    i, j, t
+                )));
+            }
+            inv[[i, j]] = 1.0 / *t;
+        }
+        Ok(inv)
     }
 
     /// Dispatches to the correct interpolation function, returning
@@ -935,7 +976,7 @@ impl ConversionGridBuilder {
         eta_min += self.margin_left;
         eta_max -= self.margin_right;
 
-        let eta_grid = Self::build_eta_grid(eta_min, eta_max, self.segments);
+        let eta_grid = Self::build_eta_grid(eta_min, eta_max, self.segments)?;
 
         let n_exp = data.experiments.len();
         let n_eta = eta_grid.len();
@@ -958,7 +999,7 @@ impl ConversionGridBuilder {
             }
         }
 
-        let inv_temperature = temperature.mapv(|t| 1.0 / t);
+        let inv_temperature = Self::inverse_temperature_matrix(&temperature)?;
 
         Ok(ConversionGrid {
             eta: Array1::from(eta_grid),
