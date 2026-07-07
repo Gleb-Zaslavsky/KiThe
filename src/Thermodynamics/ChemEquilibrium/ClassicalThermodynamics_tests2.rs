@@ -346,8 +346,8 @@ mod tests {
         subdata.substances = subs.clone();
 
         // Calculate molar masses
-        let (h2o_mass, _h2o_comp) = calculate_molar_mass("H2O".to_string(), None);
-        let (co2_mass, _co2_comp) = calculate_molar_mass("CO2".to_string(), None);
+        let (h2o_mass, _h2o_comp) = calculate_molar_mass("H2O".to_string(), None).unwrap();
+        let (co2_mass, _co2_comp) = calculate_molar_mass("CO2".to_string(), None).unwrap();
 
         subdata
             .hasmap_of_molar_mass

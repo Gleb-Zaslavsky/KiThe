@@ -504,7 +504,9 @@ impl CombustionApp {
             ProblemsEnum::BVPSimple => {
                 println!("Starting BVP Simple calculation...");
                 let mut reactor = SimpleReactorTask::new();
-                let _ = reactor.solve_from_parsed(self.document.clone());
+                if let Err(err) = reactor.solve_from_parsed(self.document.clone()) {
+                    println!("Failed to solve reactor task: {}", err);
+                }
                 let postproc = &self.document.get("postprocessing").cloned().unwrap();
                 let gui_plot = if let Some(gui_plot_) = postproc.get("gui_plot") {
                     gui_plot_.clone().unwrap()[0]

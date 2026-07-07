@@ -498,7 +498,9 @@ impl KineticsApp {
                             if ui.button("Taking all reactions from mechanism").clicked() {
                                 let reaction_values: Vec<serde_json::Value> =
                                     self.kinetic_data.LibKineticData.values().cloned().collect();
-                                if let Ok((parsed_reactions, _)) = parse_kinetic_data_vec(reaction_values) {
+                                if let Ok((parsed_reactions, _)) =
+                                    parse_kinetic_data_vec(reaction_values)
+                                {
                                     self.added_reactions.extend(parsed_reactions);
                                 }
                                 println!(

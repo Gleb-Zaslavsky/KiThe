@@ -9,8 +9,8 @@ pub fn kin_examples(kintask: usize) {
             let reactions_: Vec<&str> = vec!["A=2BM)", "B=>A + 3C_DUP", "2B+A=D**0.5"];
             let reaction = reactions_.iter().map(|s| s.to_string()).collect();
             StoichAnalyzer_instance.reactions = reaction;
-            StoichAnalyzer_instance.search_substances();
-            StoichAnalyzer_instance.analyse_reactions();
+            StoichAnalyzer_instance.search_substances().unwrap();
+            StoichAnalyzer_instance.analyse_reactions().unwrap();
 
             let stecheo_matrx = StoichAnalyzer_instance.stecheo_matrx;
 
@@ -31,18 +31,19 @@ pub fn kin_examples(kintask: usize) {
                 create_elem_composition_matrix, parse_formula,
             };
             let formula = "C6H8O6";
-            let (molar_mass, element_composition) = calculate_molar_mass(formula.to_string(), None);
+            let (molar_mass, element_composition) =
+                calculate_molar_mass(formula.to_string(), None).unwrap();
             println!("Element counts: {:?}", element_composition);
             println!("Molar mass: {:?} g/mol", molar_mass);
 
             let formula = "Na(NO3)2".to_string();
-            let atomic_composition = parse_formula(formula, None);
+            let atomic_composition = parse_formula(formula, None).unwrap();
             println!("{:?}", atomic_composition);
 
             let vec_of_formulae = vec!["H2O", "NaCl", "C6H8O6", "Ca(NO3)2"];
             let expected_molar_masses = [18.01528, 58.44316, 176.12, 164.093];
             let calculated_molar_masses =
-                calculate_molar_mass_of_vector_of_subs(vec_of_formulae, None);
+                calculate_molar_mass_of_vector_of_subs(vec_of_formulae, None).unwrap();
 
             for (i, &expected_molar_mass) in expected_molar_masses.iter().enumerate() {
                 println!("molar mass: {:?} g/mol", calculated_molar_masses[i]);
@@ -50,7 +51,8 @@ pub fn kin_examples(kintask: usize) {
             }
 
             let vec_of_formulae = vec!["H2O", "NaCl", "C3H8", "CH4"]; // 5 elements
-            let (matrix, vec_of_formulae) = create_elem_composition_matrix(vec_of_formulae, None);
+            let (matrix, vec_of_formulae) =
+                create_elem_composition_matrix(vec_of_formulae, None).unwrap();
             println!("{}", matrix);
             println!("{:?}", vec_of_formulae);
         }
@@ -105,11 +107,11 @@ pub fn kin_examples(kintask: usize) {
             let mut kd = KinData::new();
             // set the shortcut reactions for our KineticData instance
             // it means we want reactions from Cantera sub-librarie from number 1 to number 10
-            kd.set_reactions_from_shortcut_range("C1..C10".to_string());
+            let _ = kd.set_reactions_from_shortcut_range("C1..C10".to_string());
             // searching for reactions in data base
             let _ = kd.get_reactions_from_shortcuts();
             let _ = kd.kinetic_main(); // parsing reaction data into structures and stoichometric calculations under one hood
-            kd.pretty_print_kindata();
+            let _ = kd.pretty_print_kindata();
             // kd.pretty_print_kindata_verbose();
         }
         5 => {
@@ -120,7 +122,7 @@ pub fn kin_examples(kintask: usize) {
             let task_library = "NUIG".to_string();
             let _ = kd.construct_mechanism(task_substances, task_library);
             let _ = kd.kinetic_main(); // parsing reaction data into structures and stoichometric calculations under one hood
-            kd.pretty_print_kindata();
+            let _ = kd.pretty_print_kindata();
             println!("vector of reactions \n\n {:#?}", kd.vec_of_equations);
             println!("vector of substances \n\n {:#?}", kd.substances);
         }

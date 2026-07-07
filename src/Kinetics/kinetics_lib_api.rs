@@ -37,10 +37,73 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::Kinetics::error::{KineticsError, KineticsResult};
 use crate::library_manager::with_library_manager;
 use serde_json::Value;
+
+type LibraryReactbase = HashMap<String, HashMap<String, Value>>;
+type LibraryReactionDb = HashMap<String, HashMap<String, HashMap<String, HashSet<String>>>>;
+
+static REACTBASE_CACHE: OnceLock<Mutex<Option<Arc<LibraryReactbase>>>> = OnceLock::new();
+static REACTION_DB_CACHE: OnceLock<Mutex<Option<Arc<LibraryReactionDb>>>> = OnceLock::new();
+
+fn cache_lock_error(cache_name: &str) -> KineticsError {
+    KineticsError::InvalidReactionData(format!("failed to lock {} cache", cache_name))
+}
+
+/// Load and cache the reaction parameter library once per process.
+pub(crate) fn cached_reactbase() -> KineticsResult<Arc<LibraryReactbase>> {
+    let cache = REACTBASE_CACHE.get_or_init(|| Mutex::new(None));
+    {
+        let guard = cache.lock().map_err(|_| cache_lock_error("Reactbase"))?;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+    }
+
+    let mut file = with_library_manager(|manager| File::open(manager.reactbase_path()))?;
+    let mut file_contents = String::new();
+    file.read_to_string(&mut file_contents)?;
+    let parsed: LibraryReactbase = serde_json::from_str(&file_contents)?;
+    let parsed = Arc::new(parsed);
+
+    let mut guard = cache.lock().map_err(|_| cache_lock_error("Reactbase"))?;
+    if let Some(existing) = guard.as_ref() {
+        return Ok(existing.clone());
+    }
+    *guard = Some(parsed.clone());
+    Ok(parsed)
+}
+
+/// Load and cache the reagent/product relationship database once per process.
+pub(crate) fn cached_reaction_db() -> KineticsResult<Arc<LibraryReactionDb>> {
+    let cache = REACTION_DB_CACHE.get_or_init(|| Mutex::new(None));
+    {
+        let guard = cache
+            .lock()
+            .map_err(|_| cache_lock_error("reaction database"))?;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+    }
+
+    let mut file = with_library_manager(|manager| File::open(manager.dict_reaction_path()))?;
+    let mut file_contents = String::new();
+    file.read_to_string(&mut file_contents)?;
+    let parsed: LibraryReactionDb = serde_json::from_str(&file_contents)?;
+    let parsed = Arc::new(parsed);
+
+    let mut guard = cache
+        .lock()
+        .map_err(|_| cache_lock_error("reaction database"))?;
+    if let Some(existing) = guard.as_ref() {
+        return Ok(existing.clone());
+    }
+    *guard = Some(parsed.clone());
+    Ok(parsed)
+}
 #[derive(Debug, Clone)]
 pub struct KineticData {
     pub HashMapOfReactantsAndProducts: HashMap<String, HashMap<String, HashSet<String>>>, // {'reaction ID':{'reagent'/"product": HashSet[substance]}}
@@ -72,26 +135,13 @@ impl KineticData {
     /// Load the reaction library from a JSON file by the name of the reaction library
     pub fn open_json_files(&mut self, big_mech: &str) -> KineticsResult<()> {
         self.lib_name = big_mech.to_owned();
-        let mut file =
-            with_library_manager(|manager| File::open(manager.reactbase_path()))?;
-        let mut file_contents = String::new();
-        file.read_to_string(&mut file_contents)?;
-        // библиотека:{ номер реакции :{ данные реакции }}
-        let reactlibrary: HashMap<String, HashMap<String, Value>> =
-            serde_json::from_str::<HashMap<String, HashMap<String, _>>>(&file_contents)?;
+        let reactlibrary = cached_reactbase()?;
         self.AllLibraries = reactlibrary.keys().map(|k| k.to_string()).collect();
         let library_of_kinetic_parameters = reactlibrary
             .get(big_mech)
             .ok_or_else(|| KineticsError::MissingLibrary(big_mech.to_string()))?;
         self.LibKineticData = library_of_kinetic_parameters.to_owned();
-        //
-        let mut file =
-            with_library_manager(|manager| File::open(manager.dict_reaction_path()))?;
-        let mut file_contents = String::new();
-        file.read_to_string(&mut file_contents)?;
-        // библиотека:{ номер реакции :{ "reagents"/"products":{}: }}
-        let reaction_db: HashMap<String, HashMap<String, HashMap<String, HashSet<String>>>> =
-            serde_json::from_str(&file_contents)?;
+        let reaction_db = cached_reaction_db()?;
         let library_of_reagents_and_products: &HashMap<String, HashMap<String, HashSet<String>>> =
             reaction_db
                 .get(big_mech)
@@ -126,7 +176,10 @@ impl KineticData {
         Ok(())
     } //end print_all_reactions
     /// returns reaction ID and reaction data (parsed from json) for given reaction equation
-    pub fn search_reaction_by_equation(&mut self, equation: &str) -> KineticsResult<(String, Value)> {
+    pub fn search_reaction_by_equation(
+        &mut self,
+        equation: &str,
+    ) -> KineticsResult<(String, Value)> {
         let reaction_id = self
             .EquationReactionMap
             .get(equation)
@@ -146,28 +199,31 @@ impl KineticData {
     ) -> KineticsResult<Vec<String>> {
         let substances: HashSet<String> = substances.iter().cloned().collect();
         let mut found_reactions: Vec<String> = Vec::new();
-        let db_object = &self.HashMapOfReactantsAndProducts;
-        let db_object_mut = &mut db_object.clone();
-        let all_reaction_ID: Vec<&str> = self.LibKineticData.keys().map(|k| k.as_str()).collect();
-        for r_id in all_reaction_ID {
-            let base_substances: &mut HashSet<String> = db_object_mut
-                .get_mut(r_id)
-                .ok_or_else(|| KineticsError::MissingReaction(r_id.to_string()))?
-                .get_mut(SubstanceType)
-                .ok_or_else(|| KineticsError::MissingReaction(r_id.to_string()))?;
-            if substances.is_subset(&base_substances) {
+        for (r_id, reaction_parts) in &self.HashMapOfReactantsAndProducts {
+            let Some(base_substances) = reaction_parts.get(SubstanceType) else {
+                return Err(KineticsError::MissingReaction(r_id.to_string()));
+            };
+            if base_substances
+                .iter()
+                .filter(|subs| !matches!(subs.as_str(), "M" | "M)" | "(M" | "(M)"))
+                .all(|subs| substances.contains(subs))
+            {
                 found_reactions.push(r_id.to_string());
             }
         }
-        return Ok(found_reactions);
+        Ok(found_reactions)
     }
     /// search reactions where these substances are reagents/products
-    pub fn search_reaction_by_reagents_and_products(&mut self, reagents: Vec<String>) -> KineticsResult<()> {
+    pub fn search_reaction_by_reagents_and_products(
+        &mut self,
+        reagents: Vec<String>,
+    ) -> KineticsResult<()> {
         let found_reactions_by_reagents =
             self.search_reaction_by_substances(reagents.clone(), "reagents")?;
-        self.FoundReactionsByReagents = found_reactions_by_reagents.clone();
-        let found_reactions_by_products = self.search_reaction_by_substances(reagents, "products")?;
-        self.FoundReactionsByProducts = found_reactions_by_products.clone();
+        self.FoundReactionsByReagents = found_reactions_by_reagents;
+        let found_reactions_by_products =
+            self.search_reaction_by_substances(reagents, "products")?;
+        self.FoundReactionsByProducts = found_reactions_by_products;
         Ok(())
     }
     /// get concrete reaction data
@@ -179,7 +235,10 @@ impl KineticData {
         return Ok(reaction.clone());
     }
     /// get concrete reaction data for vector of IDs
-    pub fn search_reactdata_for_vector_of_IDs(&mut self, reaction_ids: Vec<String>) -> KineticsResult<Vec<Value>> {
+    pub fn search_reactdata_for_vector_of_IDs(
+        &mut self,
+        reaction_ids: Vec<String>,
+    ) -> KineticsResult<Vec<Value>> {
         let mut vec_of_reactions: Vec<Value> = Vec::new();
         for r_id in reaction_ids {
             let reaction = self
@@ -189,7 +248,7 @@ impl KineticData {
             vec_of_reactions.push(reaction.clone());
         }
         self.FoundReactionDatasByIDs = vec_of_reactions.clone();
-        return Ok(vec_of_reactions);
+        Ok(vec_of_reactions)
     }
     //TODO! test
     /// get reaction data for a certain value of json field
@@ -221,17 +280,17 @@ impl KineticData {
         if reaction_ids.len() == 0 {
             return Ok(HashMap::new());
         }
-        let mut hash_map = HashMap::new();
-        let mut hash_map_id_data = HashMap::new();
+        let mut hash_map_id_data = HashMap::with_capacity(reaction_ids.len());
         for r_id in reaction_ids {
             let reaction = self
                 .LibKineticData
                 .get(&r_id)
                 .ok_or_else(|| KineticsError::MissingReaction(r_id.clone()))?;
-            hash_map_id_data.insert(r_id.clone(), reaction.clone());
+            hash_map_id_data.insert(r_id, reaction.clone());
         }
-        hash_map.insert(big_mech.clone(), hash_map_id_data.clone());
-        return Ok(hash_map);
+        let mut hash_map = HashMap::with_capacity(1);
+        hash_map.insert(big_mech, hash_map_id_data);
+        Ok(hash_map)
     }
     ///
     #[allow(dead_code)]
@@ -253,6 +312,7 @@ pub enum SearchVariants {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_kinetic_data_new() {
@@ -289,9 +349,7 @@ mod tests {
             .unwrap()
             .to_string();
         // returns reaction ID and reaction data (parsed from json) for given reaction equation
-        let (reaction_id, reaction) = kin_instance
-            .search_reaction_by_equation(&equation)
-            .unwrap();
+        let (reaction_id, reaction) = kin_instance.search_reaction_by_equation(&equation).unwrap();
         assert_eq!(reaction_id, "1".to_string());
         assert_eq!(reaction.get("eq").unwrap().as_str().unwrap(), equation);
         let substances: Vec<String> = vec!["CO".to_string(), "O".to_string()];
@@ -305,6 +363,65 @@ mod tests {
             .search_reactdata_for_vector_of_IDs(vec!["1".to_string(), "2".to_string()])
             .unwrap();
         assert_eq!(kin_instance.FoundReactionDatasByIDs.is_empty(), false);
+    }
+
+    #[test]
+    fn test_open_json_files_rejects_unknown_library() {
+        let mut kin_instance = KineticData::new();
+        let err = kin_instance.open_json_files("NotARealLibrary").unwrap_err();
+
+        assert!(matches!(
+            err,
+            KineticsError::MissingLibrary(library) if library == "NotARealLibrary"
+        ));
+    }
+
+    #[test]
+    fn test_search_reactdata_by_reaction_id_rejects_missing_reaction() {
+        let mut kin_instance = KineticData::new();
+        kin_instance.open_json_files("NUIG").unwrap();
+
+        let err = kin_instance
+            .search_reactdata_by_reaction_id("definitely_missing_id")
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            KineticsError::MissingReaction(reaction_id)
+                if reaction_id == "definitely_missing_id"
+        ));
+    }
+
+    #[test]
+    fn test_search_reaction_by_equation_rejects_missing_equation() {
+        let mut kin_instance = KineticData::new();
+        kin_instance.open_json_files("NUIG").unwrap();
+        kin_instance.print_all_reactions().unwrap();
+
+        let err = kin_instance
+            .search_reaction_by_equation("A + B => C")
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            KineticsError::MissingReaction(equation) if equation == "A + B => C"
+        ));
+    }
+
+    #[test]
+    fn test_search_reactdata_for_vector_of_ids_rejects_missing_reaction() {
+        let mut kin_instance = KineticData::new();
+        kin_instance.open_json_files("NUIG").unwrap();
+
+        let err = kin_instance
+            .search_reactdata_for_vector_of_IDs(vec!["definitely_missing_id".to_string()])
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            KineticsError::MissingReaction(reaction_id)
+                if reaction_id == "definitely_missing_id"
+        ));
     }
 
     #[test]
@@ -355,10 +472,10 @@ mod tests {
         // Test with FoundReactionsByReagents and specified mechanism name
         let result = kin_instance
             .form_user_chosen_data(
-            SearchVariants::FoundReactionsByReagents,
-            Some("CustomMech".to_string()),
-        )
-        .unwrap();
+                SearchVariants::FoundReactionsByReagents,
+                Some("CustomMech".to_string()),
+            )
+            .unwrap();
         assert_eq!(result.len(), 1);
         assert!(result.contains_key("CustomMech"));
         let custom_mech_data = result.get("CustomMech").unwrap();
@@ -400,6 +517,22 @@ mod tests {
                 kin_instance.LibKineticData.get(reaction_id).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn test_cached_reactbase_reuses_same_allocation() {
+        let first = cached_reactbase().unwrap();
+        let second = cached_reactbase().unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn test_cached_reaction_db_reuses_same_allocation() {
+        let first = cached_reaction_db().unwrap();
+        let second = cached_reaction_db().unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
     }
     /*
     #[test]

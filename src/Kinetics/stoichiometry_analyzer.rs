@@ -27,9 +27,9 @@
 //! use KiThe::Kinetics::stoichiometry_analyzer::StoichAnalyzer;
 //! let mut analyzer = StoichAnalyzer::new();
 //! analyzer.reactions = vec!["A=2B".to_string(), "B->A + 3C".to_string()];
-//! analyzer.search_substances();  // Find all unique substances
-//! analyzer.analyse_reactions();  // Generate stoichiometric matrices
-//! analyzer.create_matrix_of_elements();  // Generate elemental composition
+//! analyzer.search_substances().unwrap();  // Find all unique substances
+//! analyzer.analyse_reactions().unwrap();  // Generate stoichiometric matrices
+//! analyzer.create_matrix_of_elements().unwrap();  // Generate elemental composition
 //! ```
 //!
 //! ## Interesting Features
@@ -40,6 +40,7 @@
 //! - **Dual Matrix System**: Separate tracking of stoichiometric vs kinetic power coefficients
 //! - **Integrated Molecular Data**: Combines with molmass module for complete substance characterization
 
+use crate::Kinetics::error::{KineticsError, KineticsResult};
 use crate::Kinetics::molmass::{
     calculate_molar_mass_of_vector_of_subs, create_elem_composition_matrix,
 };
@@ -89,12 +90,12 @@ use regex::Regex;
 /// let reactions_: Vec<&str> = vec!["A=2BM)", "B->A + 3C_DUP", "2B+A=D"];
 /// let reaction = reactions_.iter().map(|s| s.to_string()).collect();
 /// ReactionAnalyzer_instance.reactions = reaction;
-/// ReactionAnalyzer_instance.search_substances();
+/// ReactionAnalyzer_instance.search_substances().unwrap();
 /// println!("substances: {:?}", ReactionAnalyzer_instance.substances);
 /// let substancses_ = vec!["A", "B", "C", "D"];
 /// let substancses = substancses_.iter().map(|s| s.to_string()).collect();
 /// ReactionAnalyzer_instance.substances = substancses ;
-/// ReactionAnalyzer_instance.analyse_reactions();
+/// ReactionAnalyzer_instance.analyse_reactions().unwrap();
 /// println!("{:?}", ReactionAnalyzer_instance);
 /// ```
 use std::collections::HashMap;
@@ -130,52 +131,91 @@ fn clean_off_artifacts(item: &mut String) -> &mut String {
     }
 }
 ///   half_reaction` - A string representing a half-reaction.
-pub fn analyse_substances(half_reaction: &str) -> (Vec<String>, Vec<f64>, Vec<f64>) {
+pub fn analyse_substances(
+    half_reaction: &str,
+) -> KineticsResult<(Vec<String>, Vec<f64>, Vec<f64>)> {
     let mut s_list = Vec::new();
     let mut g_list = Vec::new();
     let mut subs: Vec<String> = Vec::new();
 
-    let re_coeff = Regex::new(r"(\d+(\.\d*)?)\*?").unwrap();
+    let re_coeff = Regex::new(r"(\d+(\.\d*)?)\*?").map_err(|e| {
+        KineticsError::InvalidReactionData(format!("invalid coefficient regex: {e}"))
+    })?;
     //let re_power = Regex::new(r"\^\ *(\d+(\.\d*)?)").unwrap();
-    let re_power = Regex::new(r"\^(\d+(\.\d*)?)").unwrap();
+    let re_power = Regex::new(r"\^(\d+(\.\d*)?)")
+        .map_err(|e| KineticsError::InvalidReactionData(format!("invalid power regex: {e}")))?;
 
     for s in half_reaction.split('+') {
         let mut s = s.trim();
-        print!("half reaction is:  {:#?}   ", s);
         let mut stec_coeff = 1.0;
-        let mut power_coeff = 1.0;
         let _end_of_stoichiometric: usize = 0;
         //  captures.get(1) is used to access the first capture group in the regular expression match.
         if let Some(captures) = re_coeff.captures(s) {
             // refers to the first capture group in the regular expression match, example: Match { start: 0, end: 1, string: "2" }
-            let regmatch = captures.get(0).unwrap();
-            print!(" regmatch stoichiometric:  {:?}   ", regmatch);
+            let regmatch = captures.get(0).ok_or_else(|| {
+                KineticsError::InvalidReactionData(format!(
+                    "invalid stoichiometric prefix in `{}`",
+                    half_reaction
+                ))
+            })?;
             let start_of_stoichiometric = regmatch.start();
             let end_of_stoichiometric = regmatch.end();
             // стехиометрический коэффициент должен быть перед формулой вещества, т.е. номер его позиции должен начинаться с нуля
             if start_of_stoichiometric == 0 {
                 s = &s[end_of_stoichiometric..];
-                stec_coeff = captures.get(1).unwrap().as_str().parse().unwrap();
-                print!(" stoichioemtric coeff:  {}   ", &stec_coeff);
+                stec_coeff = captures
+                    .get(1)
+                    .ok_or_else(|| {
+                        KineticsError::InvalidReactionData(format!(
+                            "missing stoichiometric coefficient in `{}`",
+                            half_reaction
+                        ))
+                    })?
+                    .as_str()
+                    .parse()
+                    .map_err(|_| {
+                        KineticsError::InvalidReactionData(format!(
+                            "invalid stoichiometric coefficient in `{}`",
+                            half_reaction
+                        ))
+                    })?;
             }
         }
+        // Default the kinetic power to the stoichiometric coefficient until
+        // we see an explicit power override in the reaction text.
+        let mut power_coeff = stec_coeff;
 
         if let Some(captures) = re_power.captures(s) {
-            let regmatch = captures.get(0).unwrap();
-            print!(" regmatch power:  {:?}   ", regmatch);
-            power_coeff = captures.get(1).unwrap().as_str().parse().unwrap();
-            print!(" power coeff:  {}   ", &power_coeff);
-            let start = captures.get(0).unwrap().start();
+            let regmatch = captures.get(0).ok_or_else(|| {
+                KineticsError::InvalidReactionData(format!(
+                    "invalid kinetic power in `{}`",
+                    half_reaction
+                ))
+            })?;
+            power_coeff = captures
+                .get(1)
+                .ok_or_else(|| {
+                    KineticsError::InvalidReactionData(format!(
+                        "missing kinetic power in `{}`",
+                        half_reaction
+                    ))
+                })?
+                .as_str()
+                .parse()
+                .map_err(|_| {
+                    KineticsError::InvalidReactionData(format!(
+                        "invalid kinetic power in `{}`",
+                        half_reaction
+                    ))
+                })?;
+            let start = regmatch.start();
             #[allow(unused_variables)]
-            let end = captures.get(0).unwrap().end();
-            // println!("start: {} end: {}", start, end);
+            let end = regmatch.end();
             s = &s[..start];
-        } else {
-            power_coeff == stec_coeff;
         }
 
         s = s.trim();
-        if (s == "M") | (s == "(M)") {
+        if (s == "M") || (s == "(M)") {
             continue;
         } // "M" means "third body" it is not a real substance
         let s_to_filter: &mut String = &mut s.to_string();
@@ -186,7 +226,7 @@ pub fn analyse_substances(half_reaction: &str) -> (Vec<String>, Vec<f64>, Vec<f6
         subs.push(s);
     }
 
-    (subs, s_list, g_list)
+    Ok((subs, s_list, g_list))
 }
 
 // #  некоторые записи уравнения реакции содержат последние символы '_dup' или '_DUP' (то есть дублирующие)
@@ -233,10 +273,7 @@ impl StoichAnalyzer {
         }
     }
 
-    pub fn analyse_reactions(&mut self) {
-        println!(
-            "\n______________ANALYSING REACTIONS________________________________________________________ \n"
-        );
+    pub fn analyse_reactions(&mut self) -> KineticsResult<()> {
         let reactions_trimmed = self
             .reactions
             .iter()
@@ -258,11 +295,11 @@ impl StoichAnalyzer {
             // номер реакции
             if let Some(i) = self.reactions.iter().position(|s| s == reaction) {
                 let reaction_: &mut String = &mut reaction.to_string();
-                println!("\n \n \n parsing reaction number: {}, {}", i, reaction_);
                 reaction = clean_off_DUP(reaction_);
-                println!("Reaction after dup: {}", &reaction);
                 // разделяем уравнение реакции на половины относящиеся к реагентам и продуктам по соответствующему знаку = или -> или =>
-                let re = Regex::new(r"<= >|< =>|<=>|=>|->|=").unwrap();
+                let re = Regex::new(r"<= >|< =>|<=>|=>|->|=").map_err(|e| {
+                    KineticsError::InvalidReactionData(format!("invalid reaction split regex: {e}"))
+                })?;
                 let sides: Vec<String> = re // divide reaction ino products and reagents
                     .split(reaction) // reaction.split(|s| s == '=' )
                     .map(|s| s.trim())
@@ -275,72 +312,44 @@ impl StoichAnalyzer {
                 let mut s_list_r = Vec::new();
                 let mut g_list_r: Vec<f64> = Vec::new();
                 // left side of reaction equation
-                println!("direct reaction  {:?}", &sides[0]);
-                let (left_subs, mut left_s_list, mut left_g_list) = analyse_substances(&sides[0]);
-                println!(
-                    "\n back to the reaction analyzer: \n s_list: {:?},\n g_list: {:?}",
-                    left_s_list, left_g_list
-                );
+                let (left_subs, mut left_s_list, mut left_g_list) = analyse_substances(&sides[0])?;
                 let mut left_subs = left_subs.iter().map(|s| s.as_str()).collect();
                 subs.append(&mut left_subs);
                 s_list.append(&mut left_s_list);
                 g_list.append(&mut left_g_list);
-                println!(
-                    "direct reaction substances: {:?} of lengh {}",
-                    subs,
-                    &subs.len()
-                );
-                println!("iterating over substances in direct reaction");
 
                 for j in 0..subs.len() {
                     let subs_j = subs[j];
                     if let Some(k) = self.substances.iter().position(|s| s == subs_j) {
-                        println!("Index of substance '{}' in list of substances of this react is: {}, in general list is {},
-                     lengh of gen. list is {}", subs_j, j, k,  &self.substances.len());
                         self.stecheo_matrx[i][k] -= s_list[j];
                         self.stecheo_reags[i][k] = s_list[j];
                         self.G_matrix_reag[i][k] = g_list[j];
-                    } else {
-                        println!("'{}' not found in the vector", subs_j);
                     }
                 }
 
-                println!("reverse reaction {:?}", &sides[1]);
                 let (right_subs, mut right_s_list, mut right_g_list) =
-                    analyse_substances(&sides[1]);
+                    analyse_substances(&sides[1])?;
                 let mut right_subs = right_subs.iter().map(|s| s.as_str()).collect();
                 subs_r.append(&mut right_subs);
                 s_list_r.append(&mut right_s_list);
                 g_list_r.append(&mut right_g_list);
-                println!("reverse reaction substances: {:?}", subs_r);
-                println!("iterating over substances in reverse reaction");
-                println!("lengh of substance list found in reaction {}", &subs.len());
                 for j in 0..subs_r.len() {
                     let subs_j = subs_r[j];
                     // индекс реагента в векторе реагентов
                     if let Some(k) = self.substances.iter().position(|s| s == subs_j) {
-                        println!("Index of substance '{}' in list of substanced of this react is: {}, in general list is {},
-                    lengh of gen. list is {}", subs_j, j, k,  &self.substances.len());
                         self.stecheo_matrx[i][k] += s_list_r[j];
                         self.stecheo_prods[i][k] = s_list_r[j];
                         self.G_matrix_prod[i][k] = g_list_r[j];
-                    } else {
-                        println!("'{}' not found in the vector", subs_j);
                     }
                 }
                 // Add code to populate self.stecheo_matrx, self.G_matrix_reag, self.G_matrix_prod,
                 // self.stecheo_reags, and self.stecheo_prods with the appropriate values.
             }
         } // end of for reaction in &self.reactions {
-        println!(
-            "\n______________ANALYSING REACTIONS: END________________________________________________________ \n"
-        );
+        Ok(())
     }
 
-    pub fn search_substances(&mut self) {
-        println!(
-            "\n______________SEARCH SUBSTANCES________________________________________________________ \n"
-        );
+    pub fn search_substances(&mut self) -> KineticsResult<()> {
         let reactions_trimmed = self
             .reactions
             .iter()
@@ -350,55 +359,50 @@ impl StoichAnalyzer {
         let mut found_substances: Vec<String> = Vec::new();
         for mut reaction in &self.reactions {
             // номер реакции
-            if let Some(i) = self.reactions.iter().position(|s| s == reaction) {
-                println!("reaction number: {}", i);
+            if let Some(_i) = self.reactions.iter().position(|s| s == reaction) {
                 let reaction_: &mut String = &mut reaction.to_string();
                 reaction = clean_off_DUP(reaction_);
-                println!("Reaction after dup: {}", &reaction);
                 // разделяем уравнение реакции на половины относящиеся к реагентам и продуктам по соответствующему знаку = или -> или =>
                 // let re = Regex::new(r"=|->|=>").unwrap();
-                let re = Regex::new(r"<= >|< =>|<=>|=>|->|=").unwrap();
+                let re = Regex::new(r"<= >|< =>|<=>|=>|->|=").map_err(|e| {
+                    KineticsError::InvalidReactionData(format!("invalid reaction split regex: {e}"))
+                })?;
                 let sides: Vec<String> = re
                     .split(reaction) // reaction.split(|s| s == '=' )
                     .map(|s| s.trim())
                     .map(|s| s.to_string())
                     .collect();
                 let mut subs = Vec::new();
-                println!("direct reaction  {:?}", &sides[0]);
-                let (left_subs, _, _) = analyse_substances(&sides[0]);
+                let (left_subs, _, _) = analyse_substances(&sides[0])?;
                 let mut left_subs = left_subs.iter().map(|s| s.as_str()).collect();
                 subs.append(&mut left_subs);
-                println!("direct reaction substances: {:?}", &left_subs);
 
-                println!("reverse reaction {:?}", &sides[1]);
-                let (right_subs, _, _) = analyse_substances(&sides[1]);
+                let (right_subs, _, _) = analyse_substances(&sides[1])?;
                 let mut right_subs = right_subs.iter().map(|s| s.as_str()).collect();
                 subs.append(&mut right_subs);
-                println!("reverse  reaction substances: {:?}", &left_subs);
                 let subs_mut = &mut subs.clone();
                 subs_mut.retain(|s| !found_substances.contains(&s.to_string())); // remove duplicates
                 found_substances.extend(subs_mut.iter().map(|s| s.to_string()).collect::<Vec<_>>());
             } // end of if let
         } // end of for reaction in &self.reactions {
-        println!(
-            "\n______________SEARCH SUBSTANCES ENDED________________________________________________________ \n"
-        );
         self.substances = found_substances;
+        Ok(())
     }
-    pub fn create_matrix_of_elements(&mut self) {
+    pub fn create_matrix_of_elements(&mut self) -> KineticsResult<()> {
         // Only calculate molar masses if they haven't been set manually
         if self.vec_of_molmasses.is_none() {
             self.vec_of_molmasses = Some(calculate_molar_mass_of_vector_of_subs(
                 self.substances.iter().map(|s| s.as_str()).collect(),
                 self.groups.clone(),
-            ));
+            )?);
         }
         let (matrix, vec_of_elems) = create_elem_composition_matrix(
             self.substances.iter().map(|s| s.as_str()).collect(),
             self.groups.clone(),
-        );
+        )?;
         self.matrix_of_elements = Some(matrix);
         self.unique_vec_of_elems = Some(vec_of_elems);
+        Ok(())
     }
 } // end of impl ReactionAnalyzer
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -411,10 +415,19 @@ mod tests {
     #[test]
     fn test_analyse_substances() {
         let half_reaction = "5H2O + 10O2";
-        let (subs, s_list, g_list) = analyse_substances(half_reaction);
+        let (subs, s_list, g_list) = analyse_substances(half_reaction).unwrap();
         assert_eq!(subs, vec!["H2O".to_string(), "O2".to_string()]);
         assert_eq!(s_list, vec![5.0, 10.0]);
-        assert_eq!(g_list, vec![1.0, 1.0]);
+        assert_eq!(g_list, vec![5.0, 10.0]);
+    }
+
+    #[test]
+    fn test_analyse_substances_prefers_explicit_powers() {
+        let half_reaction = "2H2O^3 + 4O2";
+        let (subs, s_list, g_list) = analyse_substances(half_reaction).unwrap();
+        assert_eq!(subs, vec!["H2O".to_string(), "O2".to_string()]);
+        assert_eq!(s_list, vec![2.0, 4.0]);
+        assert_eq!(g_list, vec![3.0, 4.0]);
     }
 
     #[test]
@@ -428,7 +441,7 @@ mod tests {
         let substancses_ = vec!["HMX", "HMXprod"];
         let substancses = substancses_.iter().map(|s| s.to_string()).collect();
         ReactionAnalyzer_instance.substances = substancses;
-        ReactionAnalyzer_instance.analyse_reactions();
+        ReactionAnalyzer_instance.analyse_reactions().unwrap();
         let stecheo_matrx = ReactionAnalyzer_instance.stecheo_matrx;
         let result = [[-1.0, 7.0]];
         let result: Vec<Vec<f64>> = result.iter().map(|row| row.to_vec()).collect();
@@ -451,7 +464,7 @@ mod tests {
         let reactions_: Vec<&str> = vec!["A=2BM)", "B->A + 3C_DUP"];
         let reaction = reactions_.iter().map(|s| s.to_string()).collect();
         ReactionAnalyzer_instance.reactions = reaction;
-        ReactionAnalyzer_instance.search_substances();
+        ReactionAnalyzer_instance.search_substances().unwrap();
         assert_eq!(
             ReactionAnalyzer_instance.substances,
             vec!["A".to_string(), "B".to_string(), "C".to_string()]
@@ -468,7 +481,7 @@ mod tests {
         let substancses_ = vec!["A", "B", "C", "D"];
         let substancses = substancses_.iter().map(|s| s.to_string()).collect();
         ReactionAnalyzer_instance.substances = substancses;
-        ReactionAnalyzer_instance.analyse_reactions();
+        ReactionAnalyzer_instance.analyse_reactions().unwrap();
         let stecheo_matrx = ReactionAnalyzer_instance.stecheo_matrx;
         let result = [
             [-1.0, 2.0, 0.0, 0.0],

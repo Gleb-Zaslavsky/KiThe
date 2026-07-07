@@ -23,7 +23,7 @@
 //!
 //! ### Conversion Methods
 //! - **`from_mass_to_molar_fractions()`** - Converts mass fractions to molar fractions using molecular weights
-//! - **`from_mass_fractions_to_molar_conentration()`** - Converts mass fractions to molar concentrations
+//! - **`from_mass_fractions_to_molar_concentration()`** - Converts mass fractions to molar concentrations
 //! - **`get_only_concentrations()`** - Extracts concentration data from full solution matrix
 //!
 //! ### I/O and Visualization
@@ -86,99 +86,304 @@
 //! Module includes extensive tests covering edge cases, error conditions, and numerical accuracy
 //! validation against analytical solutions.
 
-use super::SimpleReactorBVP::SimpleReactorTask;
+use super::SimpleReactorBVP::{ReactorError, SimpleReactorTask};
 use RustedSciThe::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
 use RustedSciThe::Utils::plots::{plots, plots_gnulot, plots_terminal};
 use log::{info, warn};
 use nalgebra::{DMatrix, DVector};
 pub struct AfterSolution {}
+
+/// Snapshot of balance-check results for display and testing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BalanceReport {
+    pub energy_balane_error_abs: f64,
+    pub energy_balane_error_rel: f64,
+    pub sum_of_mass_fractions: Vec<(usize, f64)>,
+    pub atomic_mass_balance_error: Vec<(usize, f64)>,
+}
+
+/// Snapshot of the quick estimation helper.
+///
+/// Keeping the arithmetic in a data-returning helper makes the UX easier to test
+/// and avoids coupling the estimate logic to logging side effects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EstimateValuesReport {
+    pub reaction_count: usize,
+    pub single_reaction_adiabatic_temperature: Option<f64>,
+}
+
+/// Owned snapshot of the postprocessed solver state.
+///
+/// The wrapper method can apply this snapshot back to the solver, while tests can
+/// inspect the transformed values without mutating the reactor.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PostprocessingReport {
+    pub x_mesh: DVector<f64>,
+    pub solution: DMatrix<f64>,
+}
+
+/// Owned snapshot of solved reactor data for plotting and export.
+///
+/// Keeping this in one helper makes the side-effecting methods thin wrappers.
+#[derive(Debug, Clone)]
+pub(crate) struct SolutionRenderData {
+    pub x_mesh: DVector<f64>,
+    pub solution: DMatrix<f64>,
+    pub unknowns: Vec<String>,
+    pub arg_name: String,
+}
+
 impl SimpleReactorTask {
+    /// Returns the solved matrix if the reactor has already been solved.
+    ///
+    /// A dedicated helper keeps all runtime checks for solution availability in one place.
+    fn solution_ref(&self) -> Result<&DMatrix<f64>, ReactorError> {
+        self.solver.solution.as_ref().ok_or_else(|| {
+            ReactorError::MissingData(
+                "Solver solution is not available; run the BVP solve first".to_string(),
+            )
+        })
+    }
+
+    /// Returns the x-mesh if the solver has already produced one.
+    ///
+    /// This avoids repeating the same `Option` handling in every post-processing helper.
+    fn x_mesh_ref(&self) -> Result<&DVector<f64>, ReactorError> {
+        self.solver.x_mesh.as_ref().ok_or_else(|| {
+            ReactorError::MissingData(
+                "Solver x mesh is not available; run the BVP solve first".to_string(),
+            )
+        })
+    }
+
+    /// Returns the molecular weights used by the concentration conversion helpers.
+    ///
+    /// The conversion code needs a consistent molar-mass vector and should fail explicitly
+    /// instead of assuming the kinetic preprocessing already populated it.
+    fn molar_masses_ref(&self) -> Result<&[f64], ReactorError> {
+        self.kindata
+            .stecheodata
+            .vec_of_molmasses
+            .as_deref()
+            .ok_or_else(|| {
+                ReactorError::MissingData(
+                    "Molar masses are not available in stecheodata".to_string(),
+                )
+            })
+    }
+
+    /// Returns the index of a solver variable by name.
+    ///
+    /// Using a typed error here keeps downstream balance code from panicking if a variable name
+    /// is missing after a future model change.
+    fn unknown_index(&self, name: &str) -> Result<usize, ReactorError> {
+        self.solver
+            .unknowns
+            .iter()
+            .position(|value| value == name)
+            .ok_or_else(|| {
+                ReactorError::MissingData(format!(
+                    "Solver variable `{}` is not present in the current state",
+                    name
+                ))
+            })
+    }
+
     /// Performs comprehensive balance validation for the reactor solution.
     ///
     /// Calls both energy and material balance checking methods to validate
     /// the numerical solution against conservation laws.
-    pub fn check_balances(&mut self) {
-        self.check_energy_balance();
-        self.check_material_balance();
+    pub fn check_balances(&mut self) -> Result<(), ReactorError> {
+        self.check_energy_balance()?;
+        self.check_material_balance()?;
+        Ok(())
+    }
+
+    /// Return the current balance metrics as a plain data snapshot.
+    ///
+    /// This keeps the reporting layer testable without parsing log output.
+    pub fn balance_report(&self) -> BalanceReport {
+        let quality = &self.solver.quality;
+        BalanceReport {
+            energy_balane_error_abs: quality.energy_balane_error_abs,
+            energy_balane_error_rel: quality.energy_balane_error_rel,
+            sum_of_mass_fractions: quality.sum_of_mass_fractions.clone(),
+            atomic_mass_balance_error: quality.atomic_mass_balance_error.clone(),
+        }
+    }
+
+    /// Compute the quick estimate data without printing anything.
+    ///
+    /// The helper validates the thermal inputs and returns the adiabatic
+    /// temperature estimate only for the single-reaction case.
+    pub fn estimate_values_report(&self) -> Result<EstimateValuesReport, ReactorError> {
+        let reaction_count = self.kindata.vec_of_equations.len();
+        let single_reaction_adiabatic_temperature = if reaction_count == 1 {
+            let q = *self.thermal_effects.first().ok_or_else(|| {
+                ReactorError::MissingData(
+                    "Single-reaction estimate requires one thermal effect value".to_string(),
+                )
+            })?;
+            if !q.is_finite() {
+                return Err(ReactorError::InvalidNumericValue(
+                    "Thermal effect must be finite for quick estimates".to_string(),
+                ));
+            }
+
+            let cp = self.Cp;
+            if !cp.is_finite() || cp <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(
+                    "Heat capacity must be finite and positive for quick estimates".to_string(),
+                ));
+            }
+
+            let t0 = *self.boundary_condition.get("T").ok_or_else(|| {
+                ReactorError::MissingData("Boundary condition does not contain `T`".to_string())
+            })?;
+            if !t0.is_finite() {
+                return Err(ReactorError::InvalidNumericValue(
+                    "Boundary temperature must be finite for quick estimates".to_string(),
+                ));
+            }
+
+            Some(t0 + q / cp)
+        } else {
+            None
+        };
+
+        Ok(EstimateValuesReport {
+            reaction_count,
+            single_reaction_adiabatic_temperature,
+        })
+    }
+
+    /// Build an owned snapshot of the solved state for plotting and export.
+    ///
+    /// This keeps all solution availability checks in one place and lets tests
+    /// validate the snapshot without invoking file or plotting backends.
+    pub(crate) fn solution_render_data(&self) -> Result<SolutionRenderData, ReactorError> {
+        Ok(SolutionRenderData {
+            x_mesh: self.x_mesh_ref()?.clone(),
+            solution: self.solution_ref()?.clone(),
+            unknowns: self.solver.unknowns.clone(),
+            arg_name: self.solver.arg_name.clone(),
+        })
+    }
+
+    /// Build a postprocessed snapshot without mutating the solver state.
+    ///
+    /// This helper keeps the scaling rules in one place and lets tests check the
+    /// transformed values before they are written back to the solver snapshot.
+    pub(crate) fn postprocessing_report(&self) -> Result<PostprocessingReport, ReactorError> {
+        let mut x_mesh = self.x_mesh_ref()?.clone();
+        let mut solution = self.solution_ref()?.clone();
+        let unknowns = &self.solver.unknowns;
+
+        if unknowns.len() != solution.ncols() {
+            return Err(ReactorError::CalculationError(format!(
+                "Solution has {} columns but {} unknowns are tracked",
+                solution.ncols(),
+                unknowns.len()
+            )));
+        }
+
+        let dT = self.scaling.dT;
+        let T_scale = self.scaling.T_scale;
+        let L = self.L;
+
+        x_mesh.iter_mut().for_each(|xi| *xi *= L);
+        for (i, mut sol_for_var) in solution.column_iter_mut().enumerate() {
+            if unknowns[i] == "Teta" {
+                sol_for_var
+                    .iter_mut()
+                    .for_each(|Teta_i| *Teta_i = *Teta_i * T_scale + dT);
+            }
+            if unknowns[i] == "q" {
+                sol_for_var
+                    .iter_mut()
+                    .for_each(|q_i| *q_i = *q_i * T_scale / L);
+            }
+            if unknowns[i].starts_with("J") {
+                sol_for_var.iter_mut().for_each(|J_i| *J_i = *J_i / L);
+            }
+        }
+
+        Ok(PostprocessingReport { x_mesh, solution })
     }
     /// Validates energy conservation using integral heat balance equations.
     ///
     /// Checks the energy balance equation: -∇q - ∫F dx + ṁCₚΔT = 0
     /// where F is the heat release function. Calculates both absolute and
     /// relative errors and stores them in solver quality metrics.
-    pub fn check_energy_balance(&mut self) {
+    pub fn check_energy_balance(&mut self) -> Result<(), ReactorError> {
         let L = self.L;
         let T_scale = self.scaling.T_scale;
 
-        let i = self.solver.unknowns.iter().position(|x| x == "q").unwrap();
-        let q: Vec<f64> = self
-            .solver
-            .solution
-            .as_ref()
-            .unwrap()
-            .column(i)
-            .iter()
-            .cloned()
-            .collect::<Vec<f64>>();
+        let solution = self.solution_ref()?;
+        let q_index = self.unknown_index("q")?;
+        let q_profile: Vec<f64> = solution.column(q_index).iter().copied().collect();
         // return from dimensionless heat flow to dimension
-        let q_f = q.last().unwrap() * T_scale / L;
-        let q_0 = q.first().unwrap() * T_scale / L;
+        let q_f = q_profile.last().ok_or_else(|| {
+            ReactorError::CalculationError("Heat flux column is empty".to_string())
+        })? * T_scale
+            / L;
+        let q_0 = q_profile.first().ok_or_else(|| {
+            ReactorError::CalculationError("Heat flux column is empty".to_string())
+        })? * T_scale
+            / L;
         // Lambda (dT/dx)_last_ploint - Lambda (dT/dx)_first_ploint
         let dq = q_f - q_0;
-        let i = self
-            .solver
-            .unknowns
-            .iter()
-            .position(|x| x == "Teta")
-            .unwrap();
-        let T = self
-            .solver
-            .solution
-            .as_ref()
-            .unwrap()
-            .column(i)
-            .iter()
-            .cloned()
-            .collect::<Vec<f64>>();
+        let t_index = self.unknown_index("Teta")?;
+        let T_profile: Vec<f64> = solution.column(t_index).iter().copied().collect();
         let dT = self.scaling.dT;
         // return from dimensionless T to dimension
-        let T_f = T.last().unwrap() * T_scale + dT;
-        let T_0 = T.first().unwrap() * T_scale + dT;
+        let T_f = T_profile.last().ok_or_else(|| {
+            ReactorError::CalculationError("Temperature column is empty".to_string())
+        })? * T_scale
+            + dT;
+        let T_0 = T_profile.first().ok_or_else(|| {
+            ReactorError::CalculationError("Temperature column is empty".to_string())
+        })? * T_scale
+            + dT;
         let m = self.m;
         let Cp = self.Cp;
         let dT = m * Cp * (T_f - T_0);
-        let unknowns = self.solver.unknowns.clone();
-        let heat_release = self.heat_release.clone();
+        // Keep the solver snapshot borrowed so the balance check stays cheap.
+        let unknowns: Vec<&str> = self
+            .solver
+            .unknowns
+            .iter()
+            .map(|unknown| unknown.as_str())
+            .collect();
+        let heat_release = &self.heat_release;
         // compare heat release profiles calculated by 2 methods
         // via lambdify
-        let unknowns_: Vec<&str> = unknowns.iter().map(|x| x.as_str()).collect();
-        let heat_release_fun = heat_release.lambdify_borrowed_thread_safe(unknowns_.as_slice());
+        let heat_release_fun = heat_release.lambdify_borrowed_thread_safe(unknowns.as_slice());
         let mut heat_releas_val_via_lambdify = Vec::new();
-        for solution_for_timestep in self.solver.solution.as_ref().unwrap().row_iter() {
+        for solution_for_timestep in solution.row_iter() {
             let solution_for_timestep = solution_for_timestep.iter().cloned().collect::<Vec<f64>>();
             heat_releas_val_via_lambdify.push(heat_release_fun(solution_for_timestep.as_slice()));
         }
-        // via evalustion
+        // via evaluation
         let mut heat_releas_val = Vec::new();
-        for solution_for_timestep in self.solver.solution.as_ref().unwrap().row_iter() {
+        for solution_for_timestep in solution.row_iter() {
             let solution_for_timestep = solution_for_timestep.iter().cloned().collect::<Vec<f64>>();
             let heat_release_for_timestep =
-                heat_release.eval_expression(unknowns_.clone().as_slice(), &solution_for_timestep);
+                heat_release.eval_expression(unknowns.as_slice(), &solution_for_timestep);
             heat_releas_val.push(heat_release_for_timestep);
         }
         let heat_rel_2_methods_difference = DVector::from_vec(heat_releas_val_via_lambdify.clone())
             - DVector::from_vec(heat_releas_val.clone());
         let heat_rel_2_methods_difference_error = heat_rel_2_methods_difference.norm();
         // return from dimensionless x to dimension
-        let x_mesh = self.solver.x_mesh.clone().unwrap() * L;
-        let x_mesh = x_mesh.data.as_vec().clone();
+        let x_mesh: Vec<f64> = self.x_mesh_ref()?.iter().map(|x| x * L).collect();
         // Q = Integral_0_f (F)dx where F - is heat release function - source of the energy balance eq
         let (total_heat_release, heat_release_error) =
-            estimate_error_simpsons_richardson(&x_mesh.clone(), &heat_releas_val);
+            estimate_error_simpsons_richardson(&x_mesh, &heat_releas_val)?;
         let heat_release_integration_rel_error =
             100.0 * (heat_release_error / total_heat_release).abs();
         let (integrated_q, error_integrated_q) =
-            estimate_error_simpsons_richardson(&x_mesh.clone(), &q);
+            estimate_error_simpsons_richardson(&x_mesh, &q_profile)?;
         let integrated_q = integrated_q * T_scale / L;
         let error_integrated_q = error_integrated_q * T_scale / L;
         let integrated_q_rel_error = 100.0 * (error_integrated_q / integrated_q).abs();
@@ -212,6 +417,7 @@ impl SimpleReactorTask {
             100.0 * T_discrete_error / (T_f - T_0),
             integrated_q_rel_error
         );
+        Ok(())
     }
 
     /// Extracts concentration variables from the full solution matrix.
@@ -221,8 +427,8 @@ impl SimpleReactorTask {
     ///
     /// # Returns
     /// Matrix containing only concentration data with dimensions (n_points, n_species)
-    fn get_only_concentrations(&mut self) -> DMatrix<f64> {
-        let solution = self.solver.solution.clone().unwrap();
+    fn get_only_concentrations(&self) -> Result<DMatrix<f64>, ReactorError> {
+        let solution = self.solution_ref()?;
         let mut concentration_indices = Vec::new();
         for (i, unknown) in self.solver.unknowns.iter().enumerate() {
             if unknown.starts_with("C") {
@@ -235,7 +441,7 @@ impl SimpleReactorTask {
         for (j, &col_idx) in concentration_indices.iter().enumerate() {
             only_concentrations.set_column(j, &solution.column(col_idx));
         }
-        only_concentrations
+        Ok(only_concentrations)
     }
     /// Converts mass fractions to molar fractions using molecular weights.
     ///
@@ -250,8 +456,13 @@ impl SimpleReactorTask {
     pub fn from_mass_to_molar_fractions(
         &self,
         matrix_of_mass_fractions: DMatrix<f64>,
-    ) -> DMatrix<f64> {
-        let Mi = self.kindata.stecheodata.vec_of_molmasses.clone().unwrap();
+    ) -> Result<DMatrix<f64>, ReactorError> {
+        let Mi = self.molar_masses_ref()?;
+        if Mi.iter().any(|m| !m.is_finite() || *m <= 0.0) {
+            return Err(ReactorError::InvalidNumericValue(
+                "Molar masses must be finite and positive for fraction conversion".to_string(),
+            ));
+        }
         let Mi: Vec<f64> = Mi.iter().map(|m| *m / 1000.0).collect();
         let Mi = DVector::from_vec(Mi).transpose();
         let mut matrix_of_molar_fractions = DMatrix::zeros(
@@ -269,7 +480,7 @@ impl SimpleReactorTask {
             let row_new = DVector::from_vec(row_new).transpose();
             matrix_of_molar_fractions.set_row(i, &row_new);
         }
-        matrix_of_molar_fractions
+        Ok(matrix_of_molar_fractions)
     }
 
     /// Converts mass fractions to molar concentrations.
@@ -282,11 +493,16 @@ impl SimpleReactorTask {
     ///
     /// # Returns
     /// Matrix of molar concentrations with same dimensions
-    pub fn from_mass_fractions_to_molar_conentration(
+    pub fn from_mass_fractions_to_molar_concentration(
         &self,
         matrix_of_mass_fractions: DMatrix<f64>,
-    ) -> DMatrix<f64> {
-        let Mi = self.kindata.stecheodata.vec_of_molmasses.clone().unwrap();
+    ) -> Result<DMatrix<f64>, ReactorError> {
+        let Mi = self.molar_masses_ref()?;
+        if Mi.iter().any(|m| !m.is_finite() || *m <= 0.0) {
+            return Err(ReactorError::InvalidNumericValue(
+                "Molar masses must be finite and positive for concentration conversion".to_string(),
+            ));
+        }
         let Mi: Vec<f64> = Mi.iter().map(|m| *m / 1000.0).collect();
         let Mi = DVector::from_vec(Mi).transpose();
         let mut matrix_of_molar_fractions = DMatrix::zeros(
@@ -302,24 +518,45 @@ impl SimpleReactorTask {
             let row_new = DVector::from_vec(row_new).transpose();
             matrix_of_molar_fractions.set_row(i, &row_new);
         }
-        matrix_of_molar_fractions
+        Ok(matrix_of_molar_fractions)
+    }
+
+    /// Backward-compatible wrapper for the legacy misspelled API name.
+    ///
+    /// The corrected method name should be preferred by new code, but this
+    /// wrapper keeps existing callers working while the public API is cleaned up.
+    pub fn from_mass_fractions_to_molar_conentration(
+        &self,
+        matrix_of_mass_fractions: DMatrix<f64>,
+    ) -> Result<DMatrix<f64>, ReactorError> {
+        self.from_mass_fractions_to_molar_concentration(matrix_of_mass_fractions)
     }
     /// Verifies atomic mass conservation throughout the reactor.
     ///
     /// Checks that elemental composition is conserved by multiplying
     /// the elemental composition matrix with molar concentrations.
     /// Validates that sum of mass fractions equals 1.0 at each point.
-    fn check_material_balance(&mut self) {
-        let matrix_of_elements = &self
+    fn check_material_balance(&mut self) -> Result<(), ReactorError> {
+        let matrix_of_elements = self
             .kindata
             .stecheodata
-            .clone()
             .matrix_of_elements
-            .unwrap()
+            .as_ref()
+            .ok_or_else(|| {
+                ReactorError::MissingData(
+                    "Element matrix is not available for material balance checks".to_string(),
+                )
+            })?
             .transpose();
         // let us check if sum of mass fractions is close to 1 in each step
-        let concentrations = self.get_only_concentrations();
-        assert_eq!(concentrations.ncols(), self.kindata.substances.len());
+        let concentrations = self.get_only_concentrations()?;
+        if concentrations.ncols() != self.kindata.substances.len() {
+            return Err(ReactorError::CalculationError(format!(
+                "Concentration matrix has {} columns but {} substances are tracked",
+                concentrations.ncols(),
+                self.kindata.substances.len()
+            )));
+        }
         let mut vec_of_sums_of_mass_fractions_at_each_step: Vec<(usize, f64)> = Vec::new();
         for (i, row) in concentrations.row_iter().enumerate() {
             let mut sum = 0.0;
@@ -334,19 +571,18 @@ impl SimpleReactorTask {
                 vec_of_sums_of_mass_fractions_at_each_step.push((i, sum));
             }
         }
-        self.solver.quality.sum_of_mass_fractions =
-            vec_of_sums_of_mass_fractions_at_each_step.clone();
-        let molar_concentrations = self.from_mass_to_molar_fractions(concentrations);
+        self.solver.quality.sum_of_mass_fractions = vec_of_sums_of_mass_fractions_at_each_step;
+        let molar_concentrations = self.from_mass_to_molar_fractions(concentrations)?;
         //    dbg!(&molar_concentrations.column(1).transpose().data.as_slice());
 
         let initial_concentrations: DVector<f64> = molar_concentrations.row(0).transpose().into();
-        let initial_vector_of_elemnts = matrix_of_elements * initial_concentrations;
+        let initial_vector_of_elemnts = &matrix_of_elements * initial_concentrations;
         let final_concentrations: DVector<f64> = molar_concentrations
             .row(molar_concentrations.nrows() - 1)
             .transpose()
             .into();
-        let final_vector_of_elemnts = matrix_of_elements * final_concentrations;
-        if (initial_vector_of_elemnts.clone() - final_vector_of_elemnts.clone()).norm() > 0.01 {
+        let final_vector_of_elemnts = &matrix_of_elements * final_concentrations;
+        if (&initial_vector_of_elemnts - &final_vector_of_elemnts).norm() > 0.01 {
             warn!("ATTENTION! Initial and final vectors of elements are not the same");
         }
         //(initial_vector_of_elemnts.clone().data.as_slice(), &final_vector_of_elemnts.as_slice());
@@ -355,10 +591,10 @@ impl SimpleReactorTask {
         for i in 0..molar_concentrations.nrows() {
             let concentrations_at_step: DVector<f64> =
                 molar_concentrations.row(i).transpose().into();
-            let vector_of_elemnts = matrix_of_elements * concentrations_at_step;
+            let vector_of_elemnts = &matrix_of_elements * concentrations_at_step;
 
             let mass_balance_error_for_step =
-                (initial_vector_of_elemnts.clone() - vector_of_elemnts).norm();
+                (&initial_vector_of_elemnts - &vector_of_elemnts).norm();
             if mass_balance_error_for_step > 0.01 {
                 atomic_mass_balance_error_vec.push((i, mass_balance_error_for_step));
                 warn!(
@@ -368,6 +604,7 @@ impl SimpleReactorTask {
             }
         }
         self.solver.quality.atomic_mass_balance_error = atomic_mass_balance_error_vec;
+        Ok(())
     }
     /////////////////////////////////////////POSTPROCESSING///////////////////////////////////////////
     // solver returns scaled variables - now we must return them from dimensionless to dimension form
@@ -378,128 +615,117 @@ impl SimpleReactorTask {
     /// - Temperature: T = Teta * T_scale + dT
     /// - Heat flux: q = q_dimensionless * T_scale / L
     /// - Mass flux: J = J_dimensionless / L
-    pub fn postprocessing(&mut self) {
-        if let Some(x_mesh) = self.solver.x_mesh.as_mut() {
-            let L = self.L;
-            x_mesh.iter_mut().for_each(|xi| *xi *= L);
-        }
-        if let Some(y) = self.solver.solution.as_mut() {
-            let unknowns = &self.solver.unknowns;
-            assert_eq!(unknowns.len(), y.ncols());
-            let dT = self.scaling.dT;
-            let T_scale = self.scaling.T_scale;
-            let L = self.L;
-            for (i, mut sol_for_var) in y.column_iter_mut().enumerate() {
-                if &unknowns[i] == "Teta" {
-                    sol_for_var
-                        .iter_mut()
-                        .for_each(|Teta_i| *Teta_i = *Teta_i * T_scale + dT);
-                }
-                if &unknowns[i] == "q" {
-                    sol_for_var
-                        .iter_mut()
-                        .for_each(|q_i| *q_i = *q_i * T_scale / L);
-                }
-                if unknowns[i].starts_with("J") {
-                    sol_for_var.iter_mut().for_each(|J_i| *J_i = *J_i / L);
-                }
-            }
-        }
+    pub fn postprocessing(&mut self) -> Result<(), ReactorError> {
+        let report = self.postprocessing_report()?;
+        self.solver.x_mesh = Some(report.x_mesh);
+        self.solver.solution = Some(report.solution);
+        Ok(())
     }
     ////////////////////////////////////////////////I/O/////////////////////////////////////////////////////
     /// Generates plots of the solution using the default plotting backend.
     ///
     /// Creates visualization of all solution variables vs spatial coordinate.
-    pub fn plot(&self) {
-        let y = self.solver.solution.clone().unwrap();
-        let x_mesh = self.solver.x_mesh.clone().unwrap();
-        let arg = "x".to_owned();
-        let values = self.solver.unknowns.clone();
-        plots(arg, values, x_mesh, y);
+    pub fn plot(&self) -> Result<(), ReactorError> {
+        let render_data = self.solution_render_data()?;
+        plots(
+            render_data.arg_name,
+            render_data.unknowns,
+            render_data.x_mesh,
+            render_data.solution,
+        );
+        Ok(())
     }
     /// Generates plots using gnuplot backend.
     ///
     /// Creates gnuplot-compatible output files for solution visualization.
-    pub fn gnuplot(&self) {
-        let y = self.solver.solution.clone().unwrap();
-        let x_mesh = self.solver.x_mesh.clone().unwrap();
-        let arg = "x".to_owned();
-        let values = self.solver.unknowns.clone();
-        plots_gnulot(arg, values, x_mesh, y);
+    pub fn gnuplot(&self) -> Result<(), ReactorError> {
+        let render_data = self.solution_render_data()?;
+        plots_gnulot(
+            render_data.arg_name,
+            render_data.unknowns,
+            render_data.x_mesh,
+            render_data.solution,
+        );
+        Ok(())
     }
     /// Displays plots directly in the terminal.
     ///
     /// Creates ASCII-based plots for quick visualization without external tools.
-    pub fn plot_in_terminal(&self) {
-        let y = self.solver.solution.clone().unwrap();
-        let x_mesh = self.solver.x_mesh.clone().unwrap();
-        let arg = "x".to_owned();
-        let values = self.solver.unknowns.clone();
-        plots_terminal(arg, values, x_mesh, y);
+    pub fn plot_in_terminal(&self) -> Result<(), ReactorError> {
+        let render_data = self.solution_render_data()?;
+        plots_terminal(
+            render_data.arg_name,
+            render_data.unknowns,
+            render_data.x_mesh,
+            render_data.solution,
+        );
+        Ok(())
     }
     /// Saves solution data to a text file.
     ///
     /// # Arguments
     /// * `filename` - Optional filename prefix. Defaults to "result" if None.
-    pub fn save_to_file(&self, filename: Option<String>) {
+    pub fn save_to_file(&self, filename: Option<String>) -> Result<(), ReactorError> {
         let name = if let Some(name) = filename {
             format!("{}.txt", name)
         } else {
             "result.txt".to_string()
         };
 
-        let y = self.solver.solution.clone().unwrap();
-        let x_mesh = self.solver.x_mesh.clone().unwrap();
-        let _ = save_matrix_to_file(
-            &y,
-            &self.solver.unknowns,
+        let render_data = self.solution_render_data()?;
+        save_matrix_to_file(
+            &render_data.solution,
+            &render_data.unknowns,
             &name,
-            &x_mesh,
-            &self.solver.arg_name,
-        );
+            &render_data.x_mesh,
+            &render_data.arg_name,
+        )
+        .map_err(|err| ReactorError::CalculationError(format!("{}", err)))?;
+        Ok(())
     }
     /// Saves solution data to CSV format.
     ///
     /// # Arguments
     /// * `filename` - Optional filename prefix. Defaults to "result_table" if None.
-    pub fn save_to_csv(&self, filename: Option<String>) {
+    pub fn save_to_csv(&self, filename: Option<String>) -> Result<(), ReactorError> {
         let name = if let Some(name) = filename {
             name
         } else {
             "result_table".to_string()
         };
-        let y = self.solver.solution.clone().unwrap();
-        let x_mesh = self.solver.x_mesh.clone().unwrap();
-        let _ = save_matrix_to_csv(
-            &y,
-            &self.solver.unknowns,
+
+        let render_data = self.solution_render_data()?;
+        save_matrix_to_csv(
+            &render_data.solution,
+            &render_data.unknowns,
             &name,
-            &x_mesh,
-            &self.solver.arg_name,
-        );
+            &render_data.x_mesh,
+            &render_data.arg_name,
+        )
+        .map_err(|err| ReactorError::CalculationError(format!("{}", err)))?;
+        Ok(())
     }
 
     /// Provides quick estimates and prints balance validation results.
     ///
     /// For single-reaction systems, estimates adiabatic temperature rise.
     /// Always calls pretty_print_balances() to display validation results.
-    pub fn estimate_values(&self) {
-        if self.kindata.vec_of_equations.len() == 1 {
-            let Q = self.thermal_effects[0];
-            let C_p = self.Cp;
-            let T0 = self
-                .boundary_condition
-                .get("T")
-                .expect("No T in boundary condition");
-            let T_fin = T0 + Q / C_p;
-            println!(
-                " if there will be an adiabatic reactor of ideal mixing the temperature
-            will be equal to {:?}",
-                T_fin
+    pub fn estimate_values(&self) -> Result<(), ReactorError> {
+        let report = self.estimate_values_report()?;
+
+        if let Some(t_fin) = report.single_reaction_adiabatic_temperature {
+            info!(
+                "If the reactor behaves like an ideal mixed adiabatic reactor, the temperature will be {:?}",
+                t_fin
             );
         }
+        info!(
+            "Quick estimate prepared for {} reaction(s)",
+            report.reaction_count
+        );
 
         self.pretty_print_balances();
+        Ok(())
     }
 
     /// Displays balance validation results in a formatted table.
@@ -508,28 +734,27 @@ impl SimpleReactorTask {
     /// atomic balance violations in a readable tabular format.
     fn pretty_print_balances(&self) {
         use prettytable::{Table, row};
-        let quality = self.solver.quality.clone();
-        let energy_balane_error_abs = quality.energy_balane_error_abs;
-        let energy_balane_error_rel = quality.energy_balane_error_rel;
-        let sum_of_mass_fractions_len = quality.sum_of_mass_fractions.len();
-        let mass_balance_error_vec = quality.atomic_mass_balance_error.len();
+        let report = self.balance_report();
 
         let mut table = Table::new();
         table.add_row(row!["Parameter", "Value"]);
-        table.add_row(row!["Abs.error of energy balance", energy_balane_error_abs]);
         table.add_row(row![
-            "Rel.error of energy balance, %",
-            energy_balane_error_rel
+            "Absolute energy balance error",
+            report.energy_balane_error_abs
         ]);
         table.add_row(row![
-            "Sum of mass fractions deviated from 1 at points",
-            sum_of_mass_fractions_len
+            "Relative energy balance error, %",
+            report.energy_balane_error_rel
+        ]);
+        table.add_row(row![
+            "Points where mass fractions deviated from 1",
+            report.sum_of_mass_fractions.len()
         ]);
         table.add_row(row![
             "Atomic balance violated in points",
-            mass_balance_error_vec
+            report.atomic_mass_balance_error.len()
         ]);
-        table.printstd();
+        info!("{}", table);
     }
 }
 
@@ -649,9 +874,9 @@ pub fn simpsons(y: &Vec<f64>, x: &Vec<f64>) -> Result<f64, String> {
 /// This is done by comparing the result from the full dataset (fine) with the result
 /// from a dataset with every second point removed (coarse).
 /// Returns a tuple (integral_fine, error_estimate)
-fn estimate_error_richardson(x: &Vec<f64>, y: &Vec<f64>) -> (f64, f64) {
+fn estimate_error_richardson(x: &Vec<f64>, y: &Vec<f64>) -> Result<(f64, f64), ReactorError> {
     // Calculate the integral with the full (fine) dataset
-    let i_fine = trapezoidal(y, x).unwrap();
+    let i_fine = trapezoidal(y, x).map_err(ReactorError::CalculationError)?;
 
     // Create coarse datasets by taking every second point (starting from index 0).
     // This is valid for both even and odd-length vectors.
@@ -660,10 +885,10 @@ fn estimate_error_richardson(x: &Vec<f64>, y: &Vec<f64>) -> (f64, f64) {
 
     // If the coarse dataset has less than 2 points, Richardson is not possible.
     if x_coarse.len() < 2 {
-        return (i_fine, 0.0); // Can't estimate error, return 0.
+        return Ok((i_fine, 0.0)); // Can't estimate error, return 0.
     }
 
-    let i_coarse = trapezoidal(&y_coarse, &x_coarse).unwrap();
+    let i_coarse = trapezoidal(&y_coarse, &x_coarse).map_err(ReactorError::CalculationError)?;
 
     // The error estimate for the FINE solution is (I_coarse - I_fine) / 3.
     // The theory: I_true = I_fine + E_fine, I_true = I_coarse + E_coarse
@@ -671,24 +896,33 @@ fn estimate_error_richardson(x: &Vec<f64>, y: &Vec<f64>) -> (f64, f64) {
     // So: I_fine + E_fine = I_coarse + 4*E_fine -> E_fine = (I_coarse - I_fine)/3
     let error_estimate = (i_coarse - i_fine) / 3.0;
 
-    (i_fine, error_estimate)
+    Ok((i_fine, error_estimate))
 }
 
 /// Estimates the error of the trapezoidal integration by approximating the second derivative.
 /// This method assumes the function is smooth and the data is not too noisy.
 /// Returns a tuple (integral, error_estimate)
 #[allow(dead_code)]
-fn estimate_error_second_derivative(x: &Vec<f64>, y: &Vec<f64>) -> (f64, f64) {
-    let integral = trapezoidal(y, x).unwrap();
+fn estimate_error_second_derivative(
+    x: &Vec<f64>,
+    y: &Vec<f64>,
+) -> Result<(f64, f64), ReactorError> {
+    let integral = trapezoidal(y, x).map_err(ReactorError::CalculationError)?;
     let n = x.len();
 
     if n < 3 {
-        return (integral, 0.0); // Need at least 3 points to calculate a 2nd derivative.
+        return Ok((integral, 0.0)); // Need at least 3 points to calculate a 2nd derivative.
     }
 
     // Calculate an average spacing `h_avg` for the entire dataset.
     // This is a heuristic since the mesh is non-uniform.
-    let total_interval = x.last().unwrap() - x.first().unwrap();
+    let first = *x.first().ok_or_else(|| {
+        ReactorError::CalculationError("At least 2 points required for integration".to_string())
+    })?;
+    let last = *x.last().ok_or_else(|| {
+        ReactorError::CalculationError("At least 2 points required for integration".to_string())
+    })?;
+    let total_interval = last - first;
     let h_avg = total_interval / (n - 1) as f64;
 
     // Calculate the second finite difference for each interior point i.
@@ -713,8 +947,7 @@ fn estimate_error_second_derivative(x: &Vec<f64>, y: &Vec<f64>) -> (f64, f64) {
     // Find the maximum value of the absolute second derivative approximation.
     let max_f2 = second_derivatives
         .into_iter()
-        .max_by(|a, b| a.partial_cmp(b).unwrap())
-        .unwrap_or(0.0);
+        .fold(0.0_f64, |acc, value| acc.max(value));
 
     // The error formula for the composite trapezoidal rule is:
     // E = - ( (b-a) * h^2 / 12 ) * f''(ξ)
@@ -722,7 +955,7 @@ fn estimate_error_second_derivative(x: &Vec<f64>, y: &Vec<f64>) -> (f64, f64) {
     // This gives us an UPPER BOUND estimate for the error magnitude.
     let error_estimate = (total_interval * h_avg.powi(2) / 12.0) * max_f2;
 
-    (integral, error_estimate)
+    Ok((integral, error_estimate))
 }
 
 use std::f64;
@@ -731,9 +964,12 @@ use std::f64;
 /// Returns a tuple (integral_fine, error_estimate)
 /// For Simpson's method with O(h⁴) error: E ≈ (I_fine - I_coarse) / 15
 #[allow(dead_code)]
-fn estimate_error_simpsons_richardson(x: &Vec<f64>, y: &Vec<f64>) -> (f64, f64) {
+fn estimate_error_simpsons_richardson(
+    x: &Vec<f64>,
+    y: &Vec<f64>,
+) -> Result<(f64, f64), ReactorError> {
     // Calculate the integral with the full (fine) dataset
-    let i_fine = simpsons(y, x).unwrap();
+    let i_fine = simpsons(y, x).map_err(ReactorError::CalculationError)?;
 
     // Create coarse datasets by taking every second point
     let x_coarse: Vec<f64> = x.iter().step_by(2).cloned().collect();
@@ -741,15 +977,15 @@ fn estimate_error_simpsons_richardson(x: &Vec<f64>, y: &Vec<f64>) -> (f64, f64) 
 
     // Simpson's rule needs at least 3 points
     if x_coarse.len() < 3 {
-        return (i_fine, 0.0); // Can't estimate error meaningfully
+        return Ok((i_fine, 0.0)); // Can't estimate error meaningfully
     }
 
-    let i_coarse = simpsons(&y_coarse, &x_coarse).unwrap();
+    let i_coarse = simpsons(&y_coarse, &x_coarse).map_err(ReactorError::CalculationError)?;
 
     // Richardson extrapolation for O(h⁴) methods: E = (I_fine - I_coarse) / 15
     let error_estimate = (i_coarse - i_fine) / 15.0;
 
-    (i_fine, error_estimate)
+    Ok((i_fine, error_estimate))
 }
 
 #[cfg(test)] // This attribute tells Rust to compile this code only when running tests
@@ -802,7 +1038,7 @@ mod tests_trapezoide {
         let x = generate_uniform_mesh(0.0, 5.0, 11); // 11 points
         let y = x.iter().map(|x_val| 2.0 * x_val + 3.0).collect(); // f(x)=2x+3
 
-        let (integral, error_estimate) = estimate_error_richardson(&x, &y);
+        let (integral, error_estimate) = estimate_error_richardson(&x, &y).unwrap();
 
         // The integral should be exact: ∫(2x+3)dx from 0 to 5 = (x^2 + 3x)|_0^5 = 25 + 15 = 40
         assert_abs_diff_eq!(integral, 40.0, epsilon = 1e-10);
@@ -821,7 +1057,7 @@ mod tests_trapezoide {
         let x = generate_uniform_mesh(0.0, 5.0, 11);
         let y = x.iter().map(|x_val| 2.0 * x_val + 3.0).collect(); // f(x)=2x+3
 
-        let (integral, error_estimate) = estimate_error_second_derivative(&x, &y);
+        let (integral, error_estimate) = estimate_error_second_derivative(&x, &y).unwrap();
 
         assert_abs_diff_eq!(integral, 40.0, epsilon = 1e-10);
         assert_abs_diff_eq!(error_estimate, 0.0, epsilon = 1e-10);
@@ -839,7 +1075,7 @@ mod tests_trapezoide {
 
         let true_integral = (end.powi(3) - start.powi(3)) / 3.0; // 64/3 ≈ 21.333...
 
-        let (integral, error_estimate) = estimate_error_richardson(&x, &y);
+        let (integral, error_estimate) = estimate_error_richardson(&x, &y).unwrap();
 
         // Check that the actual error (integral - true_integral) and the
         // Richardson estimate are reasonably close. For a smooth function like
@@ -857,7 +1093,7 @@ mod tests_trapezoide {
         let x = generate_uniform_mesh(start, end, n_points);
         let y = x.iter().map(|x_val| x_val * x_val).collect();
 
-        let (integral, error_estimate) = estimate_error_second_derivative(&x, &y);
+        let (integral, error_estimate) = estimate_error_second_derivative(&x, &y).unwrap();
         let true_integral = (end.powi(3) - start.powi(3)) / 3.0; // 64/3
 
         // The theoretical error bound for uniform mesh is:
@@ -870,7 +1106,7 @@ mod tests_trapezoide {
         // but for a uniform mesh it should be very close.
         assert_abs_diff_eq!(error_estimate, theoretical_error_bound, epsilon = 1e-3);
         // The actual error should be less than this bound
-        println!("{}", (integral - true_integral).abs());
+        info!("{}", (integral - true_integral).abs());
         assert!((integral - true_integral).abs() < 10.0 * error_estimate);
     }
 
@@ -880,8 +1116,8 @@ mod tests_trapezoide {
         let x = generate_nonuniform_mesh(0.0, 3.0, 15);
         let y = x.iter().map(|x_val| x_val.sin()).collect();
 
-        let (integral_rich, error_rich) = estimate_error_richardson(&x, &y);
-        let (integral_sec, error_sec) = estimate_error_second_derivative(&x, &y);
+        let (integral_rich, error_rich) = estimate_error_richardson(&x, &y).unwrap();
+        let (integral_sec, error_sec) = estimate_error_second_derivative(&x, &y).unwrap();
 
         // Both methods should complete without panicking and return values
         assert!(integral_rich.is_finite());
@@ -895,44 +1131,36 @@ mod tests_trapezoide {
     }
 
     #[test]
-    #[should_panic(expected = "At least 2 points required for integration")] // Test that a panic occurs
     fn test_richardson_with_too_few_points() {
         // Test behavior with a very small dataset
         let x = vec![0.0, 1.0]; // Only 2 points -> coarse mesh will have 1 point
         let y = vec![1.0, 2.0];
 
-        // This should  panic
-        let (integral, error_estimate) = estimate_error_richardson(&x, &y);
-        assert_abs_diff_eq!(integral, 1.5); // (1.0+2.0)/2 * (1.0-0.0)
-        assert_abs_diff_eq!(error_estimate, 0.0);
+        let result = estimate_error_richardson(&x, &y);
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic(expected = "At least 2 points required for integration")] // Test that a panic occurs
     fn test_second_derivative_with_too_few_points() {
         // Test behavior with a very small dataset
         let x = vec![0.0, 1.0]; // Only 2 points -> can't calculate 2nd derivative
         let y = vec![1.0, 2.0];
 
-        // This should not panic and should return a 0 error estimate
-        let (integral, error_estimate) = estimate_error_second_derivative(&x, &y);
-        assert_abs_diff_eq!(integral, 1.5);
-        assert_abs_diff_eq!(error_estimate, 0.0);
+        let result = estimate_error_second_derivative(&x, &y);
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic(expected = "At least 2 points required for integration")] // Test that a panic occurs
     fn test_trapezoidal_panic_with_one_point() {
         let x = vec![1.0];
         let y = vec![5.0];
-        trapezoidal(&y, &x).unwrap();
+        assert!(trapezoidal(&y, &x).is_err());
     }
 
     #[test]
-    #[should_panic(expected = "x and y must have the same length")]
     fn test_trapezoidal_panic_with_mismatched_lengths() {
         let x = vec![1.0, 2.0];
         let y = vec![5.0];
-        trapezoidal(&x, &y).unwrap();
+        assert!(trapezoidal(&x, &y).is_err());
     }
 }

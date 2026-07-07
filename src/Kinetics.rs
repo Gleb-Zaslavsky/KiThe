@@ -1,10 +1,10 @@
+#[allow(non_snake_case)]
+pub mod User_reactions;
 /// processing of user-chosen reactions.
 ///  So you define what reactions you need by using the constructor of mechanism from the mechfinder_api module or
 /// manually with help of kinetics_lib_api module.
 #[allow(non_snake_case)]
 pub mod error;
-#[allow(non_snake_case)]
-pub mod User_reactions;
 /// eng
 /// The module is equipped with a library of kinetic parameters of chemical reactions obtained as a result of parsing publicly available databases
 /// The module takes as input the name of the library and the vector of substances and then produces the following data:
@@ -105,12 +105,12 @@ pub mod experimental_kinetics;
 /// ```
 /// use KiThe::Kinetics::molmass::calculate_molar_mass;
 /// let formula = "C6H8O6";
-/// let (molar_mass, element_composition) = calculate_molar_mass(formula.to_string(), None);
+/// let (molar_mass, element_composition) = calculate_molar_mass(formula.to_string(), None).unwrap();
 /// println!("Element counts: {:?}", element_composition);
 /// println!("Molar mass: {:?} g/mol", molar_mass);
 /// use KiThe::Kinetics::molmass::parse_formula;
 ///  let formula = "Na(NO3)2".to_string();
-///  let atomic_composition = parse_formula(formula, None) ;
+///  let atomic_composition = parse_formula(formula, None).unwrap() ;
 ///   println!("{:?}", atomic_composition);
 /// ```
 ///

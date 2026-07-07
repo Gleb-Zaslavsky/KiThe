@@ -30,11 +30,414 @@
 //! - **Mass-weighted rates**: Properly accounts for molecular weight differences
 //! - **Boundary condition mapping**: Automatically maps physical BCs to mathematical variables
 
-use super::SimpleReactorBVP::{ReactorError, SimpleReactorTask};
+use super::SimpleReactorBVP::{ReactorError, SimpleReactorTask, SymbolicRhsAssemblyPolicy};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
+use rayon::prelude::*;
 use std::collections::HashMap;
 
+const AUTO_PARALLEL_ASSEMBLY_THRESHOLD: usize = 20;
+
+#[derive(Debug)]
+struct BvpEquationAssemblyContext<'a> {
+    substances: &'a [String],
+    equations: &'a [String],
+    k_sym_vec: &'a [Expr],
+    stoich_reags: &'a [Vec<f64>],
+    stoich_matrix: &'a [Vec<f64>],
+    thermal_effects: &'a [f64],
+    pe_d: &'a [f64],
+    d_ro_values: Vec<f64>,
+    molar_masses_kg: Vec<f64>,
+    ci_expr: Vec<Expr>,
+    ci_names: Vec<String>,
+    ji_expr: Vec<Expr>,
+    ji_names: Vec<String>,
+    ro_m: Expr,
+    qm: Expr,
+    qc: Expr,
+    pe_q: f64,
+}
+
+#[derive(Debug)]
+struct SpeciesEquationAssembly {
+    index: usize,
+    substance: String,
+    ci_name: String,
+    ji_name: String,
+    ci_rhs: Expr,
+    ji_rhs: Expr,
+}
+
 impl SimpleReactorTask {
+    /// Build a normalized snapshot of the kinetic state used by BVP assembly.
+    fn build_bvp_equation_context(&self) -> Result<BvpEquationAssemblyContext<'_>, ReactorError> {
+        let substances = &self.kindata.substances;
+        let n = substances.len();
+        if n == 0 {
+            return Err(ReactorError::MissingData(
+                "No substances found in kinetic data".to_string(),
+            ));
+        }
+
+        let equations = &self.kindata.vec_of_equations;
+        let k = equations.len();
+        if k == 0 {
+            return Err(ReactorError::MissingData(
+                "No reactions found in kinetic data".to_string(),
+            ));
+        }
+
+        let k_sym_vec = self.kindata.K_sym_vec.as_ref().ok_or_else(|| {
+            ReactorError::MissingData("Symbolic rate constants not calculated".to_string())
+        })?;
+        if k_sym_vec.len() != k {
+            return Err(ReactorError::InvalidConfiguration(
+                "Mismatch between number of reactions and rate constants".to_string(),
+            ));
+        }
+
+        let stoich_reags = &self.kindata.stecheodata.stecheo_reags;
+        let stoich_matrix = &self.kindata.stecheodata.stecheo_matrx;
+        if stoich_reags.len() != k || stoich_matrix.len() != k {
+            return Err(ReactorError::InvalidConfiguration(
+                "Stoichiometric reaction data size mismatch".to_string(),
+            ));
+        }
+        for (idx, row) in stoich_reags.iter().enumerate() {
+            if row.len() != n {
+                return Err(ReactorError::InvalidConfiguration(format!(
+                    "stoicheodata.stecheo_reags[{}] length {} != substances {}",
+                    idx,
+                    row.len(),
+                    n
+                )));
+            }
+        }
+        for (idx, row) in stoich_matrix.iter().enumerate() {
+            if row.len() != n {
+                return Err(ReactorError::InvalidConfiguration(format!(
+                    "stoicheodata.stecheo_matrx[{}] length {} != substances {}",
+                    idx,
+                    row.len(),
+                    n
+                )));
+            }
+        }
+
+        let thermal_effects = self.thermal_effects.as_slice();
+        if thermal_effects.len() != k {
+            return Err(ReactorError::InvalidConfiguration(
+                "Thermal effects vector size mismatch".to_string(),
+            ));
+        }
+
+        let pe_d = self.Pe_D.as_slice();
+        if pe_d.len() != n {
+            return Err(ReactorError::InvalidConfiguration(
+                "Peclet numbers vector size mismatch".to_string(),
+            ));
+        }
+
+        for substance in substances.iter() {
+            if !self.D_ro_map.contains_key(substance) {
+                return Err(ReactorError::MissingData(format!(
+                    "Transport coefficient for `{}` is missing from the normalized snapshot",
+                    substance
+                )));
+            }
+        }
+        let mut d_ro_values = Vec::with_capacity(n);
+        for substance in substances.iter() {
+            let d_ro = *self.D_ro_map.get(substance).ok_or_else(|| {
+                ReactorError::MissingData(format!(
+                    "Transport coefficient for `{}` is missing from the normalized snapshot",
+                    substance
+                ))
+            })?;
+            if !d_ro.is_finite() || d_ro <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Transport coefficient for `{}` must be finite and positive, got {}",
+                    substance, d_ro
+                )));
+            }
+            d_ro_values.push(d_ro);
+        }
+
+        let molar_masses = self
+            .kindata
+            .stecheodata
+            .vec_of_molmasses
+            .as_ref()
+            .ok_or_else(|| ReactorError::MissingData("Molar masses not calculated".to_string()))?;
+        if molar_masses.len() != n {
+            return Err(ReactorError::InvalidConfiguration(
+                "Molar masses vector size mismatch".to_string(),
+            ));
+        }
+
+        let mut molar_masses_kg = Vec::with_capacity(n);
+        for (idx, mass) in molar_masses.iter().enumerate() {
+            if !mass.is_finite() || *mass <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Molar mass at index {} must be finite and positive, got {}",
+                    idx, mass
+                )));
+            }
+            molar_masses_kg.push(*mass / 1000.0);
+        }
+
+        let (ci_expr, ci_names_raw) = Expr::IndexedVars(n, "C");
+        let (ji_expr, ji_names_raw) = Expr::IndexedVars(n, "J");
+        let ci_names: Vec<String> = ci_names_raw
+            .iter()
+            .map(|var| var.replace("_", ""))
+            .collect();
+        let ji_names: Vec<String> = ji_names_raw
+            .iter()
+            .map(|var| var.replace("_", ""))
+            .collect();
+
+        Ok(BvpEquationAssemblyContext {
+            substances,
+            equations,
+            k_sym_vec,
+            stoich_reags,
+            stoich_matrix,
+            thermal_effects,
+            pe_d,
+            d_ro_values,
+            molar_masses_kg,
+            ci_expr,
+            ci_names,
+            ji_expr,
+            ji_names,
+            ro_m: Expr::Const(self.ideal_gas_density()?),
+            qm: Expr::Const(self.L.powi(2) / self.scaling.T_scale),
+            qc: Expr::Const(self.L.powi(2)),
+            pe_q: self.Pe_q,
+        })
+    }
+
+    /// Resolve the effective symbolic assembly policy.
+    fn resolve_symbolic_rhs_assembly_policy(
+        &self,
+        equation_count: usize,
+    ) -> SymbolicRhsAssemblyPolicy {
+        match self.symbolic_rhs_assembly_policy {
+            SymbolicRhsAssemblyPolicy::Auto => {
+                if equation_count < AUTO_PARALLEL_ASSEMBLY_THRESHOLD {
+                    SymbolicRhsAssemblyPolicy::Sequential
+                } else {
+                    SymbolicRhsAssemblyPolicy::Parallel
+                }
+            }
+            policy => policy,
+        }
+    }
+
+    /// Build the symbolic reaction rate for a single reaction.
+    fn build_rate_expression(
+        context: &BvpEquationAssemblyContext<'_>,
+        reaction_index: usize,
+    ) -> Result<Expr, ReactorError> {
+        let mut rate_expr = context
+            .k_sym_vec
+            .get(reaction_index)
+            .ok_or_else(|| {
+                ReactorError::IndexOutOfBounds(format!(
+                    "k_sym_vec[{}] out of bounds",
+                    reaction_index
+                ))
+            })?
+            .clone();
+
+        let reaction_powers = context.stoich_reags.get(reaction_index).ok_or_else(|| {
+            ReactorError::IndexOutOfBounds(format!(
+                "stoich_reags[{}] out of bounds",
+                reaction_index
+            ))
+        })?;
+
+        for species_index in 0..context.substances.len() {
+            let power = reaction_powers.get(species_index).ok_or_else(|| {
+                ReactorError::IndexOutOfBounds(format!(
+                    "stoich_reags[{}][{}] out of bounds",
+                    reaction_index, species_index
+                ))
+            })?;
+            let ci_expr = context.ci_expr.get(species_index).ok_or_else(|| {
+                ReactorError::IndexOutOfBounds(format!("ci_expr[{}] out of bounds", species_index))
+            })?;
+            let molar_mass = context.molar_masses_kg.get(species_index).ok_or_else(|| {
+                ReactorError::IndexOutOfBounds(format!(
+                    "molar_masses_kg[{}] out of bounds",
+                    species_index
+                ))
+            })?;
+            rate_expr = rate_expr
+                * (context.ro_m.clone() * ci_expr.clone() / Expr::Const(*molar_mass))
+                    .pow(Expr::Const(*power));
+        }
+
+        Ok(rate_expr.simplify_())
+    }
+
+    /// Build ordered rate expressions and the rate lookup map.
+    fn build_rate_expressions(
+        &self,
+        context: &BvpEquationAssemblyContext<'_>,
+        policy: SymbolicRhsAssemblyPolicy,
+    ) -> Result<(HashMap<String, Expr>, Vec<Expr>), ReactorError> {
+        let reaction_count = context.equations.len();
+        let mut rate_entries: Vec<(usize, String, Expr)> = match policy {
+            SymbolicRhsAssemblyPolicy::Sequential => {
+                let mut entries = Vec::with_capacity(reaction_count);
+                for reaction_index in 0..reaction_count {
+                    let rate_expr = Self::build_rate_expression(context, reaction_index)?;
+                    entries.push((
+                        reaction_index,
+                        context.equations[reaction_index].clone(),
+                        rate_expr,
+                    ));
+                }
+                entries
+            }
+            SymbolicRhsAssemblyPolicy::Parallel => (0..reaction_count)
+                .into_par_iter()
+                .map(|reaction_index| {
+                    Self::build_rate_expression(context, reaction_index).map(|rate_expr| {
+                        (
+                            reaction_index,
+                            context.equations[reaction_index].clone(),
+                            rate_expr,
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, ReactorError>>()?,
+            SymbolicRhsAssemblyPolicy::Auto => {
+                unreachable!("Auto policy should be resolved before assembly")
+            }
+        };
+
+        rate_entries.sort_by_key(|entry| entry.0);
+        let mut map_eq_rate = HashMap::with_capacity(rate_entries.len());
+        let mut rates = Vec::with_capacity(rate_entries.len());
+        for (_, equation, rate_expr) in rate_entries {
+            map_eq_rate.insert(equation, rate_expr.clone());
+            rates.push(rate_expr);
+        }
+        Ok((map_eq_rate, rates))
+    }
+
+    /// Build the symbolic equation block for one species.
+    fn build_species_equation(
+        context: &BvpEquationAssemblyContext<'_>,
+        rates: &[Expr],
+        species_index: usize,
+    ) -> Result<SpeciesEquationAssembly, ReactorError> {
+        let substance = context
+            .substances
+            .get(species_index)
+            .ok_or_else(|| {
+                ReactorError::IndexOutOfBounds(format!(
+                    "substances[{}] out of bounds",
+                    species_index
+                ))
+            })?
+            .clone();
+        let ci_name = context
+            .ci_names
+            .get(species_index)
+            .ok_or_else(|| {
+                ReactorError::IndexOutOfBounds(format!("ci_names[{}] out of bounds", species_index))
+            })?
+            .clone();
+        let ji_name = context
+            .ji_names
+            .get(species_index)
+            .ok_or_else(|| {
+                ReactorError::IndexOutOfBounds(format!("ji_names[{}] out of bounds", species_index))
+            })?
+            .clone();
+        let ji_expr = context
+            .ji_expr
+            .get(species_index)
+            .ok_or_else(|| {
+                ReactorError::IndexOutOfBounds(format!("ji_expr[{}] out of bounds", species_index))
+            })?
+            .clone();
+
+        let d_ro = *context.d_ro_values.get(species_index).ok_or_else(|| {
+            ReactorError::IndexOutOfBounds(format!("d_ro_values[{}] out of bounds", species_index))
+        })?;
+        let ci_rhs = ji_expr.clone() / Expr::Const(d_ro);
+
+        let mut wi = Expr::Const(0.0);
+        for reaction_index in 0..rates.len() {
+            let stoich_coeff = context
+                .stoich_matrix
+                .get(reaction_index)
+                .and_then(|row| row.get(species_index))
+                .ok_or_else(|| {
+                    ReactorError::IndexOutOfBounds(format!(
+                        "stoich_matrix[{}][{}] out of bounds",
+                        reaction_index, species_index
+                    ))
+                })?;
+            let molar_mass = context.molar_masses_kg.get(species_index).ok_or_else(|| {
+                ReactorError::IndexOutOfBounds(format!(
+                    "molar_masses_kg[{}] out of bounds",
+                    species_index
+                ))
+            })?;
+            wi = wi
+                + rates[reaction_index].clone()
+                    * Expr::Const(*stoich_coeff)
+                    * Expr::Const(*molar_mass);
+        }
+
+        let ji_rhs = (ji_expr.clone() * Expr::Const(context.pe_d[species_index])
+            - wi * context.qc.clone())
+        .simplify_();
+
+        Ok(SpeciesEquationAssembly {
+            index: species_index,
+            substance,
+            ci_name,
+            ji_name,
+            ci_rhs,
+            ji_rhs,
+        })
+    }
+
+    /// Build all species equation blocks using the selected policy.
+    fn build_species_equations(
+        &self,
+        context: &BvpEquationAssemblyContext<'_>,
+        rates: &[Expr],
+        policy: SymbolicRhsAssemblyPolicy,
+    ) -> Result<Vec<SpeciesEquationAssembly>, ReactorError> {
+        let species_count = context.substances.len();
+        let mut blocks: Vec<SpeciesEquationAssembly> = match policy {
+            SymbolicRhsAssemblyPolicy::Sequential => {
+                let mut entries = Vec::with_capacity(species_count);
+                for species_index in 0..species_count {
+                    entries.push(Self::build_species_equation(context, rates, species_index)?);
+                }
+                entries
+            }
+            SymbolicRhsAssemblyPolicy::Parallel => (0..species_count)
+                .into_par_iter()
+                .map(|species_index| Self::build_species_equation(context, rates, species_index))
+                .collect::<Result<Vec<_>, ReactorError>>()?,
+            SymbolicRhsAssemblyPolicy::Auto => {
+                unreachable!("Auto policy should be resolved before assembly")
+            }
+        };
+        blocks.sort_by_key(|block| block.index);
+        Ok(blocks)
+    }
+
     /////////////////////////CREATING SYMBOLIC EQUATIONS///////////////////////////////////
 
     /// Create the complete system of dimensionless BVP equations
@@ -76,176 +479,59 @@ impl SimpleReactorTask {
     /// - `self.map_of_equations`: Mapping from physical quantities to mathematical variables
     /// - `self.map_eq_rate`: Reaction rate expressions for each reaction
     pub fn create_bvp_equations(&mut self) -> Result<(), ReactorError> {
-        let substances = &self.kindata.substances;
-        let n = substances.len();
+        let context = self.build_bvp_equation_context()?;
+        let policy = self.resolve_symbolic_rhs_assembly_policy(context.equations.len());
+        let (map_eq_rate, rates) = self.build_rate_expressions(&context, policy)?;
+        let species_blocks = self.build_species_equations(&context, &rates, policy)?;
+        let substance_count = context.substances.len();
+        // Keep the normalized snapshot borrowed here so we do not duplicate
+        // reaction metadata before the backend assembly starts.
+        let thermal_effects = context.thermal_effects;
+        let pe_q = context.pe_q;
+        let qm = &context.qm;
 
-        if n == 0 {
-            return Err(ReactorError::MissingData(
-                "No substances found in kinetic data".to_string(),
-            ));
+        let mut vec_of_unknowns: Vec<String> = Vec::with_capacity(2 + 2 * substance_count);
+        let mut vec_of_equations: Vec<Expr> = Vec::with_capacity(2 + 2 * substance_count);
+        let mut map_of_equations: HashMap<String, (String, Expr)> =
+            HashMap::with_capacity(2 + 2 * substance_count);
+
+        let q = Expr::Var("q".to_string());
+        let rhs_teta = q.clone() / Expr::Const(self.Lambda);
+        vec_of_unknowns.push("Teta".to_string());
+        vec_of_equations.push(rhs_teta.clone());
+        map_of_equations.insert("Teta".to_string(), ("Teta".to_string(), rhs_teta));
+
+        let mut heat_release = Expr::Const(0.0);
+        for (reaction_index, rate_expr) in rates.iter().enumerate() {
+            heat_release = (heat_release
+                + Expr::Const(thermal_effects[reaction_index]) * rate_expr.clone())
+            .simplify_();
         }
+        self.heat_release = heat_release.clone();
 
-        let equations = self.kindata.vec_of_equations.clone();
-        let k = equations.len();
+        let rhs_q = q * Expr::Const(pe_q) - heat_release * qm.clone();
+        vec_of_unknowns.push("q".to_string());
+        vec_of_equations.push(rhs_q.clone());
+        map_of_equations.insert("q".to_string(), ("q".to_string(), rhs_q));
 
-        if k == 0 {
-            return Err(ReactorError::MissingData(
-                "No reactions found in kinetic data".to_string(),
-            ));
-        }
+        for block in species_blocks {
+            vec_of_unknowns.push(block.ci_name.clone());
+            vec_of_equations.push(block.ci_rhs.clone());
+            map_of_equations.insert(block.substance.clone(), (block.ci_name, block.ci_rhs));
 
-        // Extract scaling parameters for dimensionless transformation
-        let T_scale = self.scaling.T_scale;
-        // Scaling factors for energy and mass equations
-        let qm = Expr::Const(self.L.powi(2) / T_scale); // Energy source term scaling: L²/dT
-        let qc = Expr::Const(self.L.powi(2)); // Mass source term scaling: L²
-
-        let (Ci_expr, Ci) = Expr::IndexedVars(n, "C");
-        let (Ji_expr, Ji) = Expr::IndexedVars(n, "J");
-        let Ci: Vec<String> = Ci.iter().map(|var| var.replace("_", "")).collect();
-        let Ji: Vec<String> = Ji.iter().map(|var| var.replace("_", "")).collect();
-        let k_sym_vec = self.kindata.K_sym_vec.as_ref().ok_or_else(|| {
-            ReactorError::MissingData("Symbolic rate constants not calculated".to_string())
-        })?;
-
-        if k_sym_vec.len() != k {
-            return Err(ReactorError::InvalidConfiguration(
-                "Mismatch between number of reactions and rate constants".to_string(),
-            ));
-        }
-        // vector pf vectors for powers of reagents in each reaction
-        let G_react = &self.kindata.stecheodata.stecheo_reags;
-        let stoich_matrix = &self.kindata.stecheodata.stecheo_matrx;
-
-        if stoich_matrix.len() != k {
-            return Err(ReactorError::InvalidConfiguration(
-                "Stoichiometric matrix size mismatch".to_string(),
-            ));
-        }
-
-        let Q: Vec<f64> = self.thermal_effects.clone();
-        if Q.len() != k {
-            return Err(ReactorError::InvalidConfiguration(
-                "Thermal effects vector size mismatch".to_string(),
-            ));
-        }
-
-        let Pe_q = self.Pe_q;
-        let Pe_D = &self.Pe_D;
-
-        if Pe_D.len() != n {
-            return Err(ReactorError::InvalidConfiguration(
-                "Peclet numbers vector size mismatch".to_string(),
-            ));
-        }
-        let Mi = self.kindata.stecheodata.vec_of_molmasses.clone().unwrap();
-        let Mi: Vec<f64> = Mi.iter().map(|m| *m / 1000.0).collect();
-        let D_ro_map = self.D_ro_map.clone();
-        let ro_m = Expr::Const(self.ideal_gas_density());
-        let mut map_eq_rate: HashMap<String, Expr> = HashMap::new();
-        let mut Rates: Vec<Expr> = Vec::new();
-
-        for j in 0..k {
-            let K_j = k_sym_vec[j].clone();
-            let mut rate_expr = K_j.clone();
-            //  println!("rate expr {}", &rate_expr);
-            for i in 0..n {
-                let powers_ji = G_react.get(j).and_then(|row| row.get(i)).ok_or_else(|| {
-                    ReactorError::IndexOutOfBounds(format!("G_react[{}][{}] out of bounds", j, i))
-                })?;
-                let Powers_ji = Expr::Const(*powers_ji);
-                let ci_expr = Ci_expr.get(i).ok_or_else(|| {
-                    ReactorError::IndexOutOfBounds(format!("Ci_expr[{}] out of bounds", i))
-                })?;
-                let Mi = Expr::Const(Mi[i].clone());
-                rate_expr = rate_expr * (ro_m.clone() * ci_expr.clone() / Mi).pow(Powers_ji);
-            }
-            rate_expr = rate_expr.simplify_();
-            map_eq_rate.insert(equations[j].clone(), rate_expr.clone());
-            Rates.push(rate_expr);
+            vec_of_unknowns.push(block.ji_name.clone());
+            vec_of_equations.push(block.ji_rhs.clone());
+            map_of_equations.insert(
+                format!("{}_flux", block.substance),
+                (block.ji_name, block.ji_rhs),
+            );
         }
 
         self.map_eq_rate = map_eq_rate;
-        let mut vec_of_unknowns: Vec<String> = Vec::new();
-        let mut vec_of_equations = Vec::new();
-        let mut map_of_equations: HashMap<String, (String, Expr)> = HashMap::new();
-        // creating RHS for energy balance equations
-        // unknown q (heat fux) in the LHS = dq/dx
-        let q = Expr::Var("q".to_string());
-        // unknown Teta in the left side = dTeta/dx...
-        vec_of_unknowns.push("Teta".to_string());
-        // is equal to RHS q/Lambda
-        let lambda = Expr::Const(self.Lambda);
-
-        let RHS_Teta = q.clone() / lambda;
-        vec_of_equations.push(RHS_Teta.clone());
-        map_of_equations.insert("Teta".to_string(), ("Teta".to_string(), RHS_Teta));
-
-        vec_of_unknowns.push("q".to_string());
-        let mut Heat_prod = Expr::Const(0.0);
-        for j in 0..k {
-            let Qj = Expr::Const(Q[j]); //  
-            Heat_prod = (Heat_prod + Qj * Rates[j].clone()).simplify_();
-        }
-        self.heat_release = Heat_prod.clone();
-        let Pe_q_expr = Expr::Const(Pe_q);
-        let RHS_q = q * Pe_q_expr - Heat_prod * qm;
-        vec_of_equations.push(RHS_q.clone());
-        map_of_equations.insert("q".to_string(), ("q".to_string(), RHS_q));
-        // STEP 3: Create mass balance equations for each substance
-        // For each substance i: dCᵢ/dz = Jᵢ/(D·ρ), dJᵢ/dz = Pe_D·Jᵢ - L²·Wᵢ
-        for i in 0..n {
-            let ci = Ci.get(i).ok_or_else(|| {
-                ReactorError::IndexOutOfBounds(format!("Ci[{}] out of bounds", i))
-            })?;
-            let ji_expr = Ji_expr.get(i).ok_or_else(|| {
-                ReactorError::IndexOutOfBounds(format!("Ji_expr[{}] out of bounds", i))
-            })?;
-            let ji = Ji.get(i).ok_or_else(|| {
-                ReactorError::IndexOutOfBounds(format!("Ji[{}] out of bounds", i))
-            })?;
-
-            // First mass equation: dCᵢ/dz = Jᵢ/(D·ρ) (Fick's law in dimensionless form)
-            vec_of_unknowns.push(ci.clone());
-            let D_ro = *D_ro_map.get(&substances[i]).unwrap(); // Transport coefficient D·ρ
-            let RHS_Ci = ji_expr.clone() / Expr::Const(D_ro); // dCᵢ/dz = Jᵢ/(D·ρ)
-            vec_of_equations.push(RHS_Ci);
-            map_of_equations.insert(substances[i].clone(), (ci.clone(), ji_expr.clone()));
-
-            // Calculate mass production rate: Wᵢ = ∑ⱼ(νᵢⱼ·Rⱼ·Mᵢ)
-            let mut Wi = Expr::Const(0.0); // Mass production rate for substance i
-            for j in 0..k {
-                let stoich_coeff_val =
-                    stoich_matrix
-                        .get(j)
-                        .and_then(|row| row.get(i))
-                        .ok_or_else(|| {
-                            ReactorError::IndexOutOfBounds(format!(
-                                "stoich_matrix[{}][{}] out of bounds",
-                                j, i
-                            ))
-                        })?; // Stoichiometric coefficient νᵢⱼ
-
-                let stoich_coeff = Expr::Const(*stoich_coeff_val);
-                let rate_j = Rates[j].clone(); // Reaction rate Rⱼ
-                let Mi = Expr::Const(Mi[i]); // Molecular weight Mᵢ
-
-                // Add contribution from reaction j: νᵢⱼ·Rⱼ·Mᵢ
-                Wi = Wi + rate_j * stoich_coeff * Mi;
-            }
-
-            // Second mass equation: dJᵢ/dz = Pe_D·Jᵢ - L²·Wᵢ (mass conservation)
-            let Pe_Di = Expr::Const(Pe_D[i]); // Mass Peclet number for substance i
-            let RHS_i = (ji_expr.clone() * Pe_Di - Wi * qc.clone()).simplify_(); // Convection - production
-            vec_of_equations.push(RHS_i.clone());
-            vec_of_unknowns.push(ji.clone());
-            map_of_equations.insert(format!("{}_flux", substances[i]), (ji.clone(), RHS_i));
-        }
-
         self.solver.eq_system = vec_of_equations;
         self.solver.unknowns = vec_of_unknowns;
         self.map_of_equations = map_of_equations;
-        Ok(())
+        return Ok(());
     }
     /////////////////////////////////CREATING BC///////////////////////////////////////////////////////////////
 
@@ -266,40 +552,29 @@ impl SimpleReactorTask {
     /// Physical temperature T is converted to dimensionless form:
     /// Θ = (T - dT)/dT, where dT is the temperature scaling parameter
     pub fn set_solver_BC(&mut self) -> Result<(), ReactorError> {
-        let border_conditions: HashMap<String, f64> = self.boundary_condition.clone();
-        let map_of_equstions: HashMap<String, (String, Expr)> = self.map_of_equations.clone();
+        let border_conditions = &self.boundary_condition;
+        let substances = &self.kindata.substances;
+        let expected_len = 2 * substances.len() + 2;
+        if self.solver.unknowns.len() != expected_len {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Unknowns length {} does not match expected canonical size {}",
+                self.solver.unknowns.len(),
+                expected_len
+            )));
+        }
+        if self.map_of_equations.len() != expected_len {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "map_of_equations length {} does not match expected canonical size {}",
+                self.map_of_equations.len(),
+                expected_len
+            )));
+        }
 
         // Boundary condition format: {variable → (boundary_index, value)}
         // boundary_index: 0 = left boundary (inlet, z=0), 1 = right boundary (outlet, z=1)
         // variable: solver variable name ("Teta", "q", "C0", "J0", etc.)
-        let mut BorderConditions: HashMap<String, (usize, f64)> = HashMap::new();
-
-        // Process substance boundary conditions
-        // Concentrations → left boundary (inlet conditions)
-        // Fluxes → right boundary (outlet conditions, typically zero)
-        for (key, (variable, _)) in map_of_equstions.iter() {
-            if key.ends_with("_flux") {
-                // Flux variable: set at outlet (right boundary)
-                let substance = key.strip_suffix("_flux").unwrap();
-                match border_conditions.get(&format!("{}_flux", substance)) {
-                    Some(condition_value) => {
-                        BorderConditions.insert(variable.clone(), (1, *condition_value));
-                    }
-                    None => {
-                        // Default: zero flux at outlet (closed boundary)
-                        BorderConditions.insert(variable.clone(), (1, 1e-10));
-                    }
-                }
-            } else if !key.starts_with("Teta") && !key.starts_with("q") {
-                // Concentration variable: set at inlet (left boundary)
-                match border_conditions.get(key) {
-                    Some(condition_value) => {
-                        BorderConditions.insert(variable.clone(), (0, *condition_value));
-                    }
-                    None => {}
-                }
-            }
-        }
+        let mut border_conditions_map: HashMap<String, (usize, f64)> =
+            HashMap::with_capacity(expected_len);
 
         // Process temperature boundary condition with dimensionless scaling
         let dT = self.scaling.dT;
@@ -307,8 +582,14 @@ impl SimpleReactorTask {
         // Convert physical temperature to dimensionless form: Θ = (T - dT)/dT
         match border_conditions.get("T") {
             Some(T0) => {
+                if !T0.is_finite() || *T0 <= 0.0 {
+                    return Err(ReactorError::InvalidNumericValue(format!(
+                        "Boundary temperature must be finite and positive, got {}",
+                        T0
+                    )));
+                }
                 let Teta = (*T0 - dT) / T_scale; // Dimensionless temperature at inlet
-                BorderConditions.insert("Teta".to_string(), (0, Teta)); // Set at left boundary
+                border_conditions_map.insert("Teta".to_string(), (0, Teta)); // Set at left boundary
             }
             None => {
                 return Err(ReactorError::MissingData(
@@ -320,16 +601,67 @@ impl SimpleReactorTask {
         // Process heat flux boundary condition
         match border_conditions.get("q") {
             Some(q_final) => {
-                BorderConditions.insert("q".to_string(), (1, *q_final)); // Set at outlet
+                if !q_final.is_finite() {
+                    return Err(ReactorError::InvalidNumericValue(format!(
+                        "Boundary heat flux must be finite, got {}",
+                        q_final
+                    )));
+                }
+                border_conditions_map.insert("q".to_string(), (1, *q_final)); // Set at outlet
             }
             None => {
                 // Default: zero heat flux at outlet (adiabatic boundary)
-                BorderConditions.insert("q".to_string(), (1, 1e-10));
+                border_conditions_map.insert("q".to_string(), (1, 1e-10));
+            }
+        }
+
+        for (index, substance) in substances.iter().enumerate() {
+            let ci_name = self.solver.unknowns.get(2 + 2 * index).ok_or_else(|| {
+                ReactorError::IndexOutOfBounds(format!(
+                    "unknowns[{}] out of bounds while building concentration boundary conditions",
+                    2 + 2 * index
+                ))
+            })?;
+            let ji_name = self.solver.unknowns.get(2 + 2 * index + 1).ok_or_else(|| {
+                ReactorError::IndexOutOfBounds(format!(
+                    "unknowns[{}] out of bounds while building flux boundary conditions",
+                    2 + 2 * index + 1
+                ))
+            })?;
+
+            let concentration = border_conditions.get(substance).ok_or_else(|| {
+                ReactorError::MissingData(format!("Missing boundary condition for `{}`", substance))
+            })?;
+            if !concentration.is_finite() || *concentration < 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Boundary fraction for `{}` must be finite and non-negative, got {}",
+                    substance, concentration
+                )));
+            }
+            border_conditions_map.insert(ci_name.clone(), (0, *concentration));
+
+            let mut flux_key = String::with_capacity(substance.len() + 5);
+            flux_key.push_str(substance);
+            flux_key.push_str("_flux");
+            match border_conditions.get(&flux_key) {
+                Some(condition_value) => {
+                    if !condition_value.is_finite() {
+                        return Err(ReactorError::InvalidNumericValue(format!(
+                            "Boundary flux for `{}` must be finite, got {}",
+                            substance, condition_value
+                        )));
+                    }
+                    border_conditions_map.insert(ji_name.clone(), (1, *condition_value));
+                }
+                None => {
+                    // Default: zero flux at outlet (closed boundary).
+                    border_conditions_map.insert(ji_name.clone(), (1, 1e-10));
+                }
             }
         }
 
         // Store boundary conditions in solver
-        self.solver.BorderConditions = BorderConditions;
+        self.solver.BorderConditions = border_conditions_map;
         Ok(())
     }
 }

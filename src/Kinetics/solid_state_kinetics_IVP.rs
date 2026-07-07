@@ -824,6 +824,11 @@ impl KineticModelIVP {
         }
     }
 
+    /// Convenience constructor for the default LSODE2 workflow.
+    pub fn new_lsode2() -> Self {
+        Self::new(SolverType::LSODE2)
+    }
+
     pub fn set_stop_condition(&mut self, condition: Option<HashMap<String, f64>>) {
         self.stop_condition = condition;
     }
@@ -997,7 +1002,7 @@ impl KineticModelIVP {
         }
 
         ode.initialize();
-        ode.solve();
+        ode.try_solve().map_err(|err| err.to_string())?;
 
         self.solver = Some(ode);
         Ok(())
@@ -1017,17 +1022,18 @@ impl KineticModelIVP {
     }
 
     pub fn plot_in_terminal(&self) {
-        let (t, a) = self.solver.as_ref().unwrap().get_result();
-        plots_terminal(
-            "t".to_string(),
-            vec!["a".to_string()],
-            t.unwrap(),
-            a.unwrap(),
-        )
+        // Skip terminal plotting when the solver has not produced a result yet.
+        if let Ok((t, a)) = self.get_result() {
+            plots_terminal("t".to_string(), vec!["a".to_string()], t, a)
+        }
     }
 
     pub fn get_result(&self) -> Result<(DVector<f64>, DMatrix<f64>), String> {
-        let (t, a) = self.solver.as_ref().unwrap().get_result();
+        let ode = self
+            .solver
+            .as_ref()
+            .ok_or("Solver not initialized. Call solve() first.")?;
+        let (t, a) = ode.get_result();
         if let (Some(t), Some(a)) = (t, a) {
             Ok((t, a))
         } else {
@@ -1096,6 +1102,13 @@ impl KineticModelIVP {
         let t = Expr::Var("t".to_string());
         let k = A * Expr::Exp(Box::new(-E / (R_sym * (T0 + t * beta))));
         k
+    }
+}
+
+impl Default for KineticModelIVP {
+    /// Uses LSODE2 as the ergonomic default IVP solver.
+    fn default() -> Self {
+        Self::new_lsode2()
     }
 }
 
@@ -1355,6 +1368,22 @@ mod kinetic_model_ivp_tests {
     }
 
     #[test]
+    fn test_new_lsode2_uses_lsode2_solver_type() {
+        let ivp = KineticModelIVP::new_lsode2();
+
+        assert!(matches!(ivp.solvertype, SolverType::LSODE2));
+        assert!(ivp.solver.is_none());
+    }
+
+    #[test]
+    fn test_default_uses_lsode2_solver_type() {
+        let ivp = KineticModelIVP::default();
+
+        assert!(matches!(ivp.solvertype, SolverType::LSODE2));
+        assert!(ivp.solver.is_none());
+    }
+
+    #[test]
     fn test_set_problem() {
         let mut ivp = KineticModelIVP::new(SolverType::BDF);
 
@@ -1412,6 +1441,163 @@ mod kinetic_model_ivp_tests {
             let expected_t = ivp.T0 + ivp.beta * sol.time[i];
             assert!((sol.temperature[i] - expected_t).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn test_lsode2_smoke_solve_for_f1() {
+        let mut ivp = KineticModelIVP::new_lsode2();
+        ivp.set_problem(10.0, 5.0, 298.15, 50000.0, 1e6).unwrap();
+        ivp.set_model(KineticModelNames::F1, vec![]).unwrap();
+        ivp.check_task().unwrap();
+        ivp.solve().unwrap();
+
+        let sol = ivp.get_solution().unwrap();
+        assert!(!sol.time.is_empty());
+        assert_eq!(sol.temperature.len(), sol.time.len());
+        assert_eq!(sol.conversion.len(), sol.time.len());
+        assert_eq!(sol.conversion_rate.len(), sol.time.len());
+    }
+
+    /// Interpolates a solution value at `t` on a monotonic time grid.
+    fn interpolate_solution(times: &[f64], values: &[f64], t: f64) -> Option<f64> {
+        if times.len() != values.len() || times.len() < 2 {
+            return None;
+        }
+
+        if t <= times[0] {
+            return Some(values[0]);
+        }
+
+        let last_time = *times.last()?;
+        if t >= last_time {
+            return Some(*values.last()?);
+        }
+
+        let upper = times.partition_point(|&time| time < t);
+        if upper == 0 || upper >= times.len() {
+            return None;
+        }
+
+        let lower = upper - 1;
+        let t0 = times[lower];
+        let t1 = times[upper];
+        let y0 = values[lower];
+        let y1 = values[upper];
+        let span = t1 - t0;
+        if span.abs() < f64::EPSILON {
+            return Some(y1);
+        }
+
+        let weight = (t - t0) / span;
+        Some(y0 + weight * (y1 - y0))
+    }
+
+    #[test]
+    fn test_lsode2_matches_bdf_for_f1() {
+        let mut lsode2 = KineticModelIVP::new_lsode2();
+        let mut bdf = KineticModelIVP::new(SolverType::BDF);
+
+        for ivp in [&mut lsode2, &mut bdf] {
+            ivp.set_problem(10.0, 5.0, 298.15, 50000.0, 1e6).unwrap();
+            ivp.set_model(KineticModelNames::F1, vec![]).unwrap();
+            ivp.check_task().unwrap();
+            ivp.solve().unwrap();
+        }
+
+        let lsode2_sol = lsode2.get_solution().unwrap();
+        let bdf_sol = bdf.get_solution().unwrap();
+
+        let shared_end = lsode2_sol
+            .time
+            .last()
+            .copied()
+            .unwrap_or_default()
+            .min(bdf_sol.time.last().copied().unwrap_or_default());
+        let sample_count = 10usize;
+        let mut max_abs_diff = 0.0_f64;
+
+        for sample_idx in 0..sample_count {
+            let fraction = (sample_idx + 1) as f64 / sample_count as f64;
+            let t = shared_end * fraction;
+            let lsode2_value = interpolate_solution(&lsode2_sol.time, &lsode2_sol.conversion, t)
+                .expect("LSODE2 solution should interpolate on the shared grid");
+            let bdf_value = interpolate_solution(&bdf_sol.time, &bdf_sol.conversion, t)
+                .expect("BDF solution should interpolate on the shared grid");
+            max_abs_diff = max_abs_diff.max((lsode2_value - bdf_value).abs());
+        }
+
+        // Adaptive solvers may land on slightly different trajectories while still
+        // agreeing on the chemistry in practice, so keep the envelope modest.
+        assert!(
+            max_abs_diff < 1e-2,
+            "LSODE2 and BDF diverged too much: max abs diff = {}",
+            max_abs_diff
+        );
+    }
+
+    #[test]
+    fn test_solve_returns_error_without_model() {
+        let mut ivp = KineticModelIVP::new_lsode2();
+        ivp.set_problem(10.0, 5.0, 298.15, 50000.0, 1e6).unwrap();
+
+        let result = ivp.solve();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err, "kinetic model not set");
+    }
+
+    #[test]
+    fn test_get_result_returns_error_without_solve() {
+        let mut ivp = KineticModelIVP::new_lsode2();
+        ivp.set_problem(10.0, 5.0, 298.15, 50000.0, 1e6).unwrap();
+        ivp.set_model(KineticModelNames::F1, vec![]).unwrap();
+
+        let result = ivp.get_result();
+        assert!(result.is_err());
+        match result {
+            Err(err) => assert_eq!(err, "Solver not initialized. Call solve() first."),
+            Ok(_) => panic!("get_result should require solve() first"),
+        }
+    }
+
+    #[test]
+    fn test_get_solution_returns_error_without_solve() {
+        let mut ivp = KineticModelIVP::new_lsode2();
+        ivp.set_problem(10.0, 5.0, 298.15, 50000.0, 1e6).unwrap();
+        ivp.set_model(KineticModelNames::F1, vec![]).unwrap();
+
+        let result = ivp.get_solution();
+        assert!(result.is_err());
+        match result {
+            Err(err) => assert_eq!(err, "Solver not initialized. Call solve() first."),
+            Ok(_) => panic!("get_solution should require solve() first"),
+        }
+    }
+
+    #[test]
+    fn test_plot_in_terminal_does_not_panic_before_solve() {
+        let mut ivp = KineticModelIVP::new_lsode2();
+        ivp.set_problem(10.0, 5.0, 298.15, 50000.0, 1e6).unwrap();
+        ivp.set_model(KineticModelNames::F1, vec![]).unwrap();
+
+        // Terminal plotting should become a no-op instead of panicking when no result exists.
+        ivp.plot_in_terminal();
+    }
+
+    #[test]
+    fn test_lsode2_handles_stiffer_d3_case() {
+        let mut ivp = KineticModelIVP::new_lsode2();
+        ivp.set_problem(10.0, 10.0, 298.15, 50000.0, 1e6).unwrap();
+        ivp.set_model(KineticModelNames::D3, vec![]).unwrap();
+        ivp.check_task().unwrap();
+        ivp.solve().unwrap();
+
+        let sol = ivp.get_solution().unwrap();
+        assert!(sol.time.len() > 2);
+        assert_eq!(sol.temperature.len(), sol.time.len());
+        assert_eq!(sol.conversion.len(), sol.time.len());
+        assert_eq!(sol.conversion_rate.len(), sol.time.len());
+        assert!(sol.conversion.last().unwrap() >= sol.conversion.first().unwrap());
     }
 
     #[test]

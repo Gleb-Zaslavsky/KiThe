@@ -582,9 +582,11 @@ impl SimpleReactorTask {
     pub fn kinetic_processing(&mut self) -> Result<(), ReactorError> {
         let kd = &mut self.kindata;
         // stoichiometry and element matrix
-        kd.analyze_reactions();
+        kd.analyze_reactions()
+            .map_err(|err| ReactorError::CalculationError(err.to_string()))?;
         // in elementary reactions there are only Arrhenius parameters - no concentration or pressure dependencies
-        kd.calc_sym_constants(None, None, Some(self.T_scaling.clone()));
+        kd.calc_sym_constants(None, None, Some(self.T_scaling.clone()))
+            .map_err(|err| ReactorError::CalculationError(err.to_string()))?;
         Ok(())
     }
 

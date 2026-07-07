@@ -295,8 +295,8 @@ mod tests {
         // we need only elementaty reactions
         let mut kd2 = KinData::new();
         kd2.vec_of_reaction_data = kd.vec_of_reaction_data;
-        kd2.equations_from_reactdata();
-        kd2.analyze_reactions();
+        kd2.equations_from_reactdata().unwrap();
+        kd2.analyze_reactions().unwrap();
 
         let mut reactor = SimpleReactorTask::new();
 
@@ -599,7 +599,7 @@ mod tests {
         ]));
 
         let vec_of_formulae = vec!["HMX", "HMXprod"];
-        let molar_masses = calculate_molar_mass_of_vector_of_subs(vec_of_formulae, groups);
+        let molar_masses = calculate_molar_mass_of_vector_of_subs(vec_of_formulae, groups).unwrap();
         println!("Test result: {:?}", molar_masses);
 
         // Expected: HMX should be much larger than HMXprod

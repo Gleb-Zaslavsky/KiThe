@@ -22,6 +22,8 @@ pub enum KineticsError {
         left: usize,
         right: usize,
     },
+    #[error("invalid KinData state: {0}")]
+    InvalidState(String),
     #[error("solver error: {0}")]
     Solver(String),
 }

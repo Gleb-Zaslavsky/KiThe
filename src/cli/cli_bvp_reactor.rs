@@ -27,10 +27,10 @@ pub fn reactor_menu() {
         match selection {
             0 => solve_from_file(),
             1 => auto_solve_problems(),
-            2 => {
-                create_template();
-                println!("Template generated successfully!");
-            }
+            2 => match create_template() {
+                Ok(()) => println!("Template generated successfully!"),
+                Err(err) => eprintln!("Failed to generate template: {}", err),
+            },
             3 => show_help_english(),
             4 => show_help_russian(),
             5 => break,
@@ -102,7 +102,9 @@ pub fn solve_from_file_dialog(path: std::path::PathBuf) {
                 .unwrap();
 
             if start {
-                reactor.solve_from_map(parser);
+                if let Err(err) = reactor.solve_from_map(parser) {
+                    println!("Failed to solve reactor task: {}", err);
+                }
             } else {
                 println!("Calculation cancelled. Returning to menu.");
             }

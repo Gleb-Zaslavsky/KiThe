@@ -1,15 +1,87 @@
 #[cfg(test)]
 mod tests {
     use super::super::SimpleReactorBVP::*;
+    use crate::ReactorsBVP::solver_backend::ReactorBvpSolverConfig;
     use RustedSciThe::symbolic::symbolic_engine::Expr;
     use nalgebra::DMatrix;
 
     use crate::ReactorsBVP::reactor_BVP_utils::ScalingConfig;
+    use crate::ReactorsBVP::reactor_BVP_utils::{BoundsConfig, ToleranceConfig};
     use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{
         AdaptiveGridConfig, SolverParams,
     };
     use RustedSciThe::numerical::BVP_Damp::grid_api::GridRefinementMethod;
+    use log::info;
     use std::{collections::HashMap, vec};
+
+    /// Build a damped-solver option block from the new KiThe facade while preserving
+    /// the legacy test knobs that still matter for the direct NRBVP smoke cases.
+    fn direct_default_solver_options(
+        scheme: &str,
+        strategy: &str,
+        strategy_params: Option<SolverParams>,
+        linear_sys_method: Option<String>,
+        method: &str,
+        abs_tolerance: f64,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        max_iterations: usize,
+        bounds: Option<HashMap<String, (f64, f64)>>,
+        loglevel: Option<String>,
+    ) -> RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::DampedSolverOptions {
+        let mut options = ReactorBvpSolverConfig::default_lambdify()
+            .to_rusted_options()
+            .expect("default reactor BVP options should build");
+        options = options
+            .with_scheme_name(scheme.to_string())
+            .with_strategy_params(strategy_params)
+            .with_abs_tolerance(abs_tolerance)
+            .with_max_iterations(max_iterations)
+            .with_loglevel(loglevel);
+        options.strategy = strategy.to_string();
+        options.linear_sys_method = linear_sys_method;
+        options.method = method.to_string();
+        if let Some(rel_tolerance) = rel_tolerance {
+            options = options.with_rel_tolerance(rel_tolerance);
+        }
+        if let Some(bounds) = bounds {
+            options = options.with_bounds(bounds);
+        }
+        options
+    }
+
+    /// Solve the compact HMX fixture through the new default reactor facade.
+    ///
+    /// This helper keeps the old smoke tests focused on the combustion setup
+    /// while making the backend path canonical: lambdify execution, AtomView
+    /// symbolic assembly, and the banded matrix route.
+    fn solve_hmx_with_default_backend(
+        reactor: &mut SimpleReactorTask,
+        initial_guess: DMatrix<f64>,
+        n_steps: usize,
+        strategy_params: Option<SolverParams>,
+        tolerance_config: ToleranceConfig,
+        bounds_config: BoundsConfig,
+        max_iterations: usize,
+        abs_tolerance: f64,
+        loglevel: Option<String>,
+    ) -> Result<(), ReactorError> {
+        let substances = vec!["HMX".to_string(), "HMXprod".to_string()];
+        reactor.solver.solve_NRBVP_with_configs(
+            initial_guess,
+            n_steps,
+            "forward".to_string(),
+            "Damped".to_string(),
+            strategy_params,
+            None,
+            "Banded".to_string(),
+            abs_tolerance,
+            tolerance_config,
+            bounds_config,
+            &substances,
+            max_iterations,
+            loglevel,
+        )
+    }
     #[test]
     fn hmx_test3() {
         /////////////////// setting up kinetics
@@ -54,11 +126,11 @@ mod tests {
         let _ = reactor.fast_react_set(vec_of_structs);
         reactor.kindata.substances = vec!["HMX".to_string(), "HMXprod".to_string()];
         reactor.kindata.groups = groups;
-        // println!("reactor {:?}", reactor.kindata);
+        // info!("reactor {:?}", reactor.kindata);
         ///////////// parameters //////////////////
         let ro0 = M * P / (R_G * T0);
         let D = Lambda_eff / (C_p * ro0);
-        println!("D = {}", D);
+        info!("D = {}", D);
         let Diffusion = HashMap::from([("HMX".to_string(), D), ("HMXprod".to_string(), D)]);
         let boundary_condition = HashMap::from([
             ("HMX".to_string(), 1.0 - 1e-3),
@@ -84,40 +156,55 @@ mod tests {
 
         reactor.M = M;
         let res = reactor.setup_bvp();
-        let _ = &reactor.Le_number();
-        println!("reactor {:?}", reactor.kindata);
+        let _ = reactor.Le_number();
+        info!("reactor {:?}", reactor.kindata);
         match res {
-            Ok(_) => println!("ok"),
-            Err(e) => println!("error {:?}", e),
+            Ok(_) => info!("ok"),
+            Err(e) => info!("error {:?}", e),
         }
 
         let n_steps = 200;
         let ig = vec![0.99; n_steps * reactor.solver.unknowns.len()];
         let initial_guess = DMatrix::from_vec(reactor.solver.unknowns.len(), n_steps, ig);
-        let _ = reactor
-            .solver
-            .solve_BVPsci(initial_guess, n_steps, n_steps * 2000, 1e-4);
-        reactor.postprocessing();
+        let tolerance_config = ToleranceConfig::new(1e-5, 1e-5, 1e-5, 1e-6);
+        let bounds_config = BoundsConfig::new(
+            (-0.1, 1.1),     // C bounds
+            (-1e20, 1e20),   // J bounds
+            (-100.0, 100.0), // Teta bounds
+            (-1e20, 1e20),   // q bounds
+        );
+        let _ = solve_hmx_with_default_backend(
+            &mut reactor,
+            initial_guess,
+            n_steps,
+            None,
+            tolerance_config,
+            bounds_config,
+            n_steps * 2000,
+            1e-4,
+            Some("info".to_string()),
+        );
+        reactor.postprocessing().unwrap();
         //  reactor.gnuplot();
-        println!("BC {:?}", &reactor.solver.BorderConditions);
-        println!("unknowns {:?}", &reactor.solver.unknowns);
+        info!("BC {:?}", &reactor.solver.BorderConditions);
+        info!("unknowns {:?}", &reactor.solver.unknowns);
         let rates = reactor.map_eq_rate.clone();
         for (eq, rate) in rates {
-            println!("reaction {} rate {}", eq, rate);
+            info!("reaction {} rate {}", eq, rate);
         }
-        println!("\n \n");
+        info!("\n \n");
         let system = reactor.map_of_equations.clone();
         for (subs, (variable, eq)) in system {
-            println!("subs: {} | variable: {} | eq: {} | \n", subs, variable, eq);
+            info!("subs: {} | variable: {} | eq: {} | \n", subs, variable, eq);
         }
         let bc = &reactor.solver.BorderConditions;
-        println!("bc {:?}", bc);
-        println!(" unknowns{:?}", reactor.solver.unknowns);
+        info!("bc {:?}", bc);
+        info!(" unknowns{:?}", reactor.solver.unknowns);
         // let sol = &reactor.solver.solution.clone().unwrap();
         //let T = sol.column(0).clone();
-        //  println!("T = {}", T);
-        //  println!("q = {}", sol.column(1));
-        // println!("C0 = {}", sol.column(2));
+        //  info!("T = {}", T);
+        //  info!("q = {}", sol.column(1));
+        // info!("C0 = {}", sol.column(2));
     }
     #[test]
     fn test_direct_eq() {
@@ -203,8 +290,8 @@ mod tests {
         coeff_table.add_row(row!["Pe_D", format!("{:?}", Pe_D)]);
         coeff_table.add_row(row!["D_ro", format!("{:.2e}", D_ro)]);
 
-        println!("\n=== COEFFICIENTS ===");
-        coeff_table.printstd();
+        info!("\n=== COEFFICIENTS ===");
+        info!("{}", coeff_table);
 
         // Pretty print equations table
         let mut eq_table = Table::new();
@@ -213,7 +300,7 @@ mod tests {
         for (unknown, equation) in eq_and_unknowns {
             eq_table.add_row(row![format!("{}", unknown), format!("{}", equation)]);
         }
-        eq_table.printstd();
+        info!("{}", eq_table);
 
         ////////////////////////////////////////////
         //solver
@@ -265,12 +352,25 @@ mod tests {
         let abs_tolerance = 1e-6;
         let loglevel = Some("info".to_string());
         let scheme = "forward".to_string();
-        let method = "Sparse".to_string();
+        let method = "Banded".to_string();
         let strategy = "Damped".to_string();
         let linear_sys_method = None;
 
         // Using the new tolerance helper - much simpler!
-        let mut bvp = NRBVP::new(
+        let options = direct_default_solver_options(
+            &scheme,
+            &strategy,
+            Some(strategy_params),
+            linear_sys_method,
+            &method,
+            abs_tolerance,
+            Some(rel_tolerance),
+            max_iterations,
+            Some(Bounds),
+            loglevel,
+        );
+
+        let mut bvp = NRBVP::new_with_options(
             eqs.clone(),
             initial_guess,
             unhnowns_Str,
@@ -279,26 +379,17 @@ mod tests {
             0.0,
             1.0,
             n_steps,
-            scheme,
-            strategy,
-            Some(strategy_params),
-            linear_sys_method,
-            method,
-            abs_tolerance,
-            Some(rel_tolerance),
-            max_iterations,
-            Some(Bounds),
-            loglevel,
+            options,
         );
         bvp.dont_save_log(false);
         bvp.solve();
         bvp.gnuplot_result();
         let eq_and_unknowns = unknowns.clone().into_iter().zip(eqs.clone());
         for (unknown, equation) in eq_and_unknowns {
-            println!("unknown: {} | equation: {}", unknown, equation);
+            info!("unknown: {} | equation: {}", unknown, equation);
         }
-        println!("\n=== EQUATIONS SYSTEM ===");
-        coeff_table.printstd();
+        info!("\n=== EQUATIONS SYSTEM ===");
+        info!("{}", coeff_table);
     }
 
     #[test]
@@ -386,8 +477,8 @@ mod tests {
         coeff_table.add_row(row!["D_ro", format!("{:.2e}", D_ro)]);
         coeff_table.add_row(row!["ro", format!("{:.2e}", ro_m_)]);
 
-        println!("\n=== COEFFICIENTS ===");
-        coeff_table.printstd();
+        info!("\n=== COEFFICIENTS ===");
+        info!("{}", coeff_table);
 
         // Pretty print equations table
         let mut eq_table = Table::new();
@@ -396,7 +487,7 @@ mod tests {
         for (unknown, equation) in eq_and_unknowns {
             eq_table.add_row(row![format!("{}", unknown), format!("{}", equation)]);
         }
-        eq_table.printstd();
+        info!("{}", eq_table);
 
         ////////////////////////////////////////////
         //solver
@@ -448,12 +539,25 @@ mod tests {
         let abs_tolerance = 1e-6;
         let loglevel = Some("info".to_string());
         let scheme = "forward".to_string();
-        let method = "Sparse".to_string();
+        let method = "Banded".to_string();
         let strategy = "Damped".to_string();
         let linear_sys_method = None;
 
         // Using the new tolerance helper - much simpler!
-        let mut bvp = NRBVP::new(
+        let options = direct_default_solver_options(
+            &scheme,
+            &strategy,
+            Some(strategy_params),
+            linear_sys_method,
+            &method,
+            abs_tolerance,
+            Some(rel_tolerance),
+            max_iterations,
+            Some(Bounds),
+            loglevel,
+        );
+
+        let mut bvp = NRBVP::new_with_options(
             eqs.clone(),
             initial_guess,
             unhnowns_Str,
@@ -462,25 +566,16 @@ mod tests {
             0.0,
             1.0,
             n_steps,
-            scheme,
-            strategy,
-            Some(strategy_params),
-            linear_sys_method,
-            method,
-            abs_tolerance,
-            Some(rel_tolerance),
-            max_iterations,
-            Some(Bounds),
-            loglevel,
+            options,
         );
         bvp.dont_save_log(false);
         bvp.solve();
         bvp.gnuplot_result();
         let eq_and_unknowns = unknowns.clone().into_iter().zip(eqs.clone());
         for (unknown, equation) in eq_and_unknowns {
-            println!("unknown: {} | equation: {}", unknown, equation);
+            info!("unknown: {} | equation: {}", unknown, equation);
         }
-        println!("\n=== EQUATIONS SYSTEM ===");
-        coeff_table.printstd();
+        info!("\n=== EQUATIONS SYSTEM ===");
+        info!("{}", coeff_table);
     }
 }

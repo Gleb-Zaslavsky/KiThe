@@ -32,10 +32,13 @@ use crate::Kinetics::mechfinder_api::ReactionData;
 use crate::ReactorsBVP::reactor_BVP_utils::{
     BoundsConfig, ScalingConfig, ToleranceConfig, create_bounds_map, create_tolerance_map,
 };
-use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{NRBVP, SolverParams};
+use crate::ReactorsBVP::solver_backend::ReactorBvpSolverConfig;
+use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{
+    DampedSolverOptions, NRBVP, SolverParams,
+};
 use RustedSciThe::numerical::BVP_sci::BVP_sci_symb::BVPwrap as BVPsci;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
-use log::info;
+use log::{info, warn};
 
 use nalgebra::{DMatrix, DVector};
 
@@ -50,7 +53,7 @@ pub struct SolutionQuality {
     pub energy_balane_error_abs: f64,
     pub energy_balane_error_rel: f64,
 
-    /// steps where sum of molar fractions is larger then threshhold
+    /// steps where sum of mass fractions is larger than the threshold
     pub sum_of_mass_fractions: Vec<(usize, f64)>,
     pub atomic_mass_balance_error: Vec<(usize, f64)>,
 }
@@ -73,6 +76,8 @@ pub enum ReactorError {
     MissingData(String),
     /// Invalid configuration (e.g., negative transport coefficients)
     InvalidConfiguration(String),
+    /// Numeric input is non-finite or otherwise unusable for reactor physics
+    InvalidNumericValue(String),
     /// Numerical calculation errors
     CalculationError(String),
     /// Parsing errors for chemical equations or parameters
@@ -86,6 +91,7 @@ impl fmt::Display for ReactorError {
         match self {
             ReactorError::MissingData(msg) => write!(f, "Missing data: {}", msg),
             ReactorError::InvalidConfiguration(msg) => write!(f, "Invalid configuration: {}", msg),
+            ReactorError::InvalidNumericValue(msg) => write!(f, "Invalid numeric value: {}", msg),
             ReactorError::CalculationError(msg) => write!(f, "Calculation error: {}", msg),
             ReactorError::ParseError(msg) => write!(f, "Parse error: {}", msg),
             ReactorError::IndexOutOfBounds(msg) => write!(f, "Index out of bounds: {}", msg),
@@ -94,6 +100,17 @@ impl fmt::Display for ReactorError {
 }
 
 impl std::error::Error for ReactorError {}
+
+/// Policy for assembling symbolic RHS expressions in `create_bvp_equations`.
+///
+/// `Auto` keeps small systems sequential and switches to parallel assembly for
+/// larger ones where Rayon overhead is likely to pay off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolicRhsAssemblyPolicy {
+    Auto,
+    Sequential,
+    Parallel,
+}
 /*
        (1/l)*  d(Lambda*( (1/l)* dT/d(x/l)  )  )/d(x/l) - c*m*( (1/l)* dT/d(x/l) + Q =0
         define: z = x/l
@@ -119,7 +136,12 @@ impl std::error::Error for ReactorError {}
         dJi/dz - (m*l)/ro*D *Ji + (l^2)*Gi =0
 
 */
-/// Simple structure for elementary chemical reactions with Arrhenius kinetics
+/// Canonical in-memory description of an elementary reaction used by the BVP
+/// pipeline.
+///
+/// `eq` stores the symbolic reaction equation, `A`, `n`, and `E` are the
+/// Arrhenius parameters, and `Q` is the heat release contribution used by the
+/// reactor energy balance.
 ///
 /// Rate = A * T^n * exp(-E/(R*T)) * ∏[Ci]^νi
 #[derive(Debug, Clone)]
@@ -188,6 +210,8 @@ pub struct SimpleReactorTask {
     pub map_of_equations: HashMap<String, (String, Expr)>,
     /// heat release function
     pub heat_release: Expr,
+    /// Policy for symbolic RHS assembly in `create_bvp_equations`
+    pub symbolic_rhs_assembly_policy: SymbolicRhsAssemblyPolicy,
     /// BVP solver instance
     pub solver: BVPSolver,
 }
@@ -230,7 +254,174 @@ impl Default for BVPSolver {
         }
     }
 }
+
+/// Validate the matrix returned by the BVP backend.
+///
+/// The backend may complete without a structured failure but still provide an
+/// unusable solution buffer. This helper keeps the public contract strict by
+/// rejecting empty or non-finite matrices before they enter reactor state.
+pub(crate) fn validate_bvp_solution_matrix(solution: &DMatrix<f64>) -> Result<(), ReactorError> {
+    if solution.nrows() == 0 || solution.ncols() == 0 {
+        return Err(ReactorError::CalculationError(
+            "BVP solver returned an empty solution matrix".to_string(),
+        ));
+    }
+    if let Some((idx, value)) = solution
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(ReactorError::InvalidNumericValue(format!(
+            "BVP solver returned non-finite value {} at flat index {}",
+            value, idx
+        )));
+    }
+    Ok(())
+}
+
+/// Owned handoff payload for building an NRBVP backend snapshot.
+///
+/// The solver owns the canonical reactor state, while this struct packages the
+/// backend-specific runtime settings so both direct and parser-driven solve
+/// paths can assemble the same NRBVP object through one helper.
+#[derive(Debug)]
+pub(crate) struct NrbvpHandoffConfig {
+    pub initial_guess: DMatrix<f64>,
+    pub t0: f64,
+    pub t_end: f64,
+    pub n_steps: usize,
+    pub solver_backend_config: ReactorBvpSolverConfig,
+    pub scheme: String,
+    pub strategy: String,
+    pub strategy_params: Option<SolverParams>,
+    pub linear_sys_method: Option<String>,
+    pub method: String,
+    pub abs_tolerance: f64,
+    pub rel_tolerance: Option<HashMap<String, f64>>,
+    pub max_iterations: usize,
+    pub bounds: Option<HashMap<String, (f64, f64)>>,
+    pub loglevel: Option<String>,
+    pub dont_save_log: bool,
+}
+
+impl NrbvpHandoffConfig {
+    /// Build a handoff config with the fields required by the backend.
+    pub(crate) fn new(
+        initial_guess: DMatrix<f64>,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+        scheme: String,
+        strategy: String,
+        strategy_params: Option<SolverParams>,
+        linear_sys_method: Option<String>,
+        method: String,
+        abs_tolerance: f64,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        max_iterations: usize,
+        bounds: Option<HashMap<String, (f64, f64)>>,
+        loglevel: Option<String>,
+        dont_save_log: bool,
+    ) -> Self {
+        Self {
+            initial_guess,
+            t0,
+            t_end,
+            n_steps,
+            solver_backend_config: ReactorBvpSolverConfig::default_lambdify(),
+            scheme,
+            strategy,
+            strategy_params,
+            linear_sys_method,
+            method,
+            abs_tolerance,
+            rel_tolerance,
+            max_iterations,
+            bounds,
+            loglevel,
+            dont_save_log,
+        }
+    }
+
+    /// Override the generated callback backend while preserving legacy solver settings.
+    pub(crate) fn with_solver_backend_config(
+        mut self,
+        solver_backend_config: ReactorBvpSolverConfig,
+    ) -> Self {
+        self.solver_backend_config = solver_backend_config;
+        self
+    }
+}
+
+/// Apply legacy Newton/runtime settings on top of the generated-backend facade.
+///
+/// The matrix/execution/symbolic route comes from `solver_backend_config`, while
+/// older public methods still pass scheme, strategy, tolerances, and bounds as
+/// positional values. Keeping the merge here prevents parser/direct paths from
+/// drifting while the public API is migrated gradually.
+fn build_damped_options(config: &NrbvpHandoffConfig) -> Result<DampedSolverOptions, ReactorError> {
+    let mut options = config
+        .solver_backend_config
+        .to_rusted_options()
+        .map_err(ReactorError::InvalidConfiguration)?;
+    options = options
+        .with_scheme_name(config.scheme.clone())
+        .with_strategy_params(config.strategy_params.clone())
+        .with_abs_tolerance(config.abs_tolerance)
+        .with_max_iterations(config.max_iterations)
+        .with_loglevel(config.loglevel.clone());
+    options.strategy = config.strategy.clone();
+    options.linear_sys_method = config.linear_sys_method.clone();
+    options.method = config.method.clone();
+    if let Some(rel_tolerance) = config.rel_tolerance.clone() {
+        options = options.with_rel_tolerance(rel_tolerance);
+    }
+    if let Some(bounds) = config.bounds.clone() {
+        options = options.with_bounds(bounds);
+    }
+    Ok(options)
+}
+
 impl BVPSolver {
+    /// Convert the solver boundary-condition map into the backend shape.
+    ///
+    /// The backend expects each physical boundary value wrapped in a single-item
+    /// vector, so we build that representation in one place and reuse it across
+    /// solver entry points.
+    pub(crate) fn backend_boundary_conditions(&self) -> HashMap<String, Vec<(usize, f64)>> {
+        let mut backend_bc = HashMap::with_capacity(self.BorderConditions.len());
+        for (name, &(boundary_index, value)) in &self.BorderConditions {
+            backend_bc.insert(name.clone(), vec![(boundary_index, value)]);
+        }
+        backend_bc
+    }
+
+    /// Build the owned NRBVP backend object from the current solver snapshot.
+    ///
+    /// This keeps the ownership boundary explicit: the solver still owns the
+    /// canonical equation system, but the backend gets its own owned copy at one
+    /// well-defined handoff point.
+    pub(crate) fn build_nrbvp_backend(
+        &self,
+        config: NrbvpHandoffConfig,
+    ) -> Result<NRBVP, ReactorError> {
+        let options = build_damped_options(&config)?;
+        let mut backend = NRBVP::new_with_options(
+            self.eq_system.clone(),
+            config.initial_guess,
+            self.unknowns.clone(),
+            self.arg_name.clone(),
+            self.backend_boundary_conditions(),
+            config.t0,
+            config.t_end,
+            config.n_steps,
+            options,
+        );
+        backend.dont_save_log(config.dont_save_log);
+        Ok(backend)
+    }
+
     /// Solve BVP using damped Newton-Raphson method (NRBVP)
     ///
     /// This is the main solver method with full parameter control
@@ -358,15 +549,8 @@ impl BVPSolver {
         loglevel: Option<String>,
     ) -> Result<(), ReactorError> {
         info!("starting solver!");
-        let BC = self.BorderConditions.clone();
-        let BC: HashMap<String, Vec<(usize, f64)>> =
-            BC.iter().map(|(k, v)| (k.clone(), vec![*v])).collect();
-        let mut bvp = NRBVP::new(
-            self.eq_system.clone(),
+        let mut bvp = self.build_nrbvp_backend(NrbvpHandoffConfig::new(
             initial_guess,
-            self.unknowns.clone(),
-            self.arg_name.clone(),
-            BC,
             self.x_range.0,
             self.x_range.1,
             n_steps,
@@ -380,20 +564,44 @@ impl BVPSolver {
             max_iterations,
             Bounds,
             loglevel,
-        );
-        bvp.solve();
+            false,
+        ))?;
+        let solve_result = bvp
+            .try_solve()
+            .map_err(|err| ReactorError::CalculationError(format!("{err:?}")))?;
+        let converged = solve_result.is_some();
+        if !converged {
+            warn!("BVP solver did not converge to a solution");
+        }
 
-        //   bvp.plot_result();
-        //    bvp.gnuplot_result();
+        let solution = bvp.get_result().ok_or_else(|| {
+            ReactorError::CalculationError(
+                "BVP solver finished without producing a solution matrix".to_string(),
+            )
+        })?;
+        validate_bvp_solution_matrix(&solution)?;
+        if bvp.x_mesh.is_empty() {
+            return Err(ReactorError::CalculationError(
+                "BVP solver finished without producing an x mesh".to_string(),
+            ));
+        }
+        if bvp.x_mesh.iter().any(|value| !value.is_finite()) {
+            return Err(ReactorError::InvalidNumericValue(
+                "BVP solver x mesh contains non-finite values".to_string(),
+            ));
+        }
 
-        // Store solution for later access
-        self.solution = bvp.get_result();
+        // Store solution for later access.
+        self.solution = Some(solution);
         self.x_mesh = Some(bvp.x_mesh);
 
-        // Debug the solution ordering
-        self.debug_solution();
-
-        Ok(())
+        if converged {
+            Ok(())
+        } else {
+            Err(ReactorError::CalculationError(
+                "BVP solver did not converge to a solution".to_string(),
+            ))
+        }
     }
     /// Solve BVP using adaptive mesh refinement (BVPsci)
     ///
@@ -405,9 +613,7 @@ impl BVPSolver {
         max_nodes: usize,
         tol: f64,
     ) {
-        let BC = self.BorderConditions.clone();
-        let BC: HashMap<String, Vec<(usize, f64)>> =
-            BC.iter().map(|(k, v)| (k.clone(), vec![*v])).collect();
+        let BC = self.backend_boundary_conditions();
 
         let mut bvp = BVPsci::new(
             None,
@@ -425,7 +631,10 @@ impl BVPSolver {
             initial_guess,
         );
         bvp.solve();
-        bvp.gnuplot_result();
+        if let Some(solution) = bvp.get_result() {
+            self.solution = Some(solution);
+            self.x_mesh = Some(bvp.mesh());
+        }
     }
     /// Get reference to solution matrix
     ///
@@ -439,19 +648,19 @@ impl BVPSolver {
     /// Prints solution matrix dimensions and sample values for each variable
     pub fn debug_solution(&self) {
         if let Some(solution) = &self.solution {
-            println!("\n=== SOLUTION DEBUG ===");
-            println!(
+            info!("\n=== SOLUTION DEBUG ===");
+            info!(
                 "Solution matrix shape: {} x {}",
                 solution.nrows(),
                 solution.ncols()
             );
-            println!("Unknowns: {:?}", self.unknowns);
+            info!("Unknowns: {:?}", self.unknowns);
 
-            // Print first and lust few values for each variable
+            // Print the first and last few values for each variable.
             for (i, var_name) in self.unknowns.iter().enumerate() {
                 if i < solution.ncols() {
                     let col = solution.column(i);
-                    println!(
+                    info!(
                         "{}: [first...{:.6}, {:.6}, {:.6}, ... last: {:.6}, {:.6}, {:.6}]",
                         var_name,
                         col[0],
@@ -463,7 +672,7 @@ impl BVPSolver {
                     );
                 }
             }
-            println!("=== END DEBUG ===\n");
+            info!("=== END DEBUG ===\n");
         }
     }
 }
@@ -494,6 +703,7 @@ impl SimpleReactorTask {
             map_eq_rate: HashMap::new(),
             map_of_equations: HashMap::new(),
             heat_release: Expr::Const(0.0),
+            symbolic_rhs_assembly_policy: SymbolicRhsAssemblyPolicy::Auto,
             solver: BVPSolver::default(),
         }
     }
@@ -531,6 +741,20 @@ impl SimpleReactorTask {
         let scaling = ScalingConfig::new(dT, L, T_scale);
         self.set_scaling(scaling)
     }
+
+    /// Set the symbolic RHS assembly policy in place.
+    pub fn set_symbolic_rhs_assembly_policy(&mut self, policy: SymbolicRhsAssemblyPolicy) {
+        self.symbolic_rhs_assembly_policy = policy;
+    }
+
+    /// Builder-style helper for configuring symbolic RHS assembly.
+    ///
+    /// This is convenient when the caller wants to configure the reactor in a
+    /// fluent style before calling `setup_bvp`.
+    pub fn with_symbolic_rhs_assembly_policy(mut self, policy: SymbolicRhsAssemblyPolicy) -> Self {
+        self.symbolic_rhs_assembly_policy = policy;
+        self
+    }
     /////////////////////////////////SETTERS////////////////////////////////////////////////////////////////////////////////
     /// Set problem name for identification
     pub fn set_problem_name(&mut self, name: &str) {
@@ -547,9 +771,74 @@ impl SimpleReactorTask {
     pub fn set_boundary_conditions(&mut self, conditions: HashMap<String, f64>) {
         self.boundary_condition = conditions;
     }
-    /// Set all reactor parameters at once
+
+    /// Read-only access to the diffusion coefficients snapshot.
     ///
-    /// Convenient method to set all physical and transport properties
+    /// New code should prefer this getter instead of reaching into the public
+    /// `Diffusion` field directly.
+    pub fn diffusion_coefficients(&self) -> &HashMap<String, f64> {
+        &self.Diffusion
+    }
+
+    /// Read-only access to the raw boundary-condition snapshot.
+    ///
+    /// This keeps the legacy field available while giving external code a
+    /// cleaner place to read from.
+    pub fn boundary_conditions(&self) -> &HashMap<String, f64> {
+        &self.boundary_condition
+    }
+
+    /// Read-only access to the cached transport coefficients `D * rho`.
+    ///
+    /// The cache is populated by `transport_coefficients()` and then reused by
+    /// Lewis and Peclet number calculations.
+    pub fn transport_cache(&self) -> &HashMap<String, f64> {
+        &self.D_ro_map
+    }
+
+    /// Read-only access to the mass Peclet numbers.
+    ///
+    /// `Pe_D` is a domain-standard symbol, so the method keeps the scientific
+    /// naming while still offering a stable accessor for new code.
+    pub fn mass_peclet_numbers(&self) -> &[f64] {
+        &self.Pe_D
+    }
+
+    /// Read-only access to the thermal Peclet number.
+    pub fn thermal_peclet_number(&self) -> f64 {
+        self.Pe_q
+    }
+
+    /// Read-only access to the temperature scaling shift `dT`.
+    pub fn temperature_shift(&self) -> f64 {
+        self.scaling.dT
+    }
+
+    /// Read-only access to the characteristic reactor length.
+    pub fn characteristic_length(&self) -> f64 {
+        self.scaling.L
+    }
+
+    /// Read-only access to the temperature scaling factor.
+    pub fn temperature_scale(&self) -> f64 {
+        self.scaling.T_scale
+    }
+
+    /// Read-only access to the full scaling configuration snapshot.
+    ///
+    /// New callers should prefer this over stitching `dT`, `L`, and `T_scale`
+    /// together manually from the public fields.
+    pub fn scaling_config(&self) -> &ScalingConfig {
+        &self.scaling
+    }
+
+    /// Set all reactor parameters at once.
+    ///
+    /// `thermal_effects` are reaction heats in J/mol, `P` is pressure in Pa,
+    /// `Tm` is temperature in K, `Cp` is heat capacity in J/(kg·K), `Lambda`
+    /// is thermal conductivity in W/(m·K), `Diffusion` stores species
+    /// diffusivities in m²/s, `m` is mass flow in kg/s, and `scaling`
+    /// controls the dimensionless transformation.
     pub fn set_parameters(
         &mut self,
         thermal_effects: Vec<f64>,
@@ -608,14 +897,14 @@ impl SimpleReactorTask {
         info!("Boundary conditions created!");
         self.check_before_solution()?;
         info!("BVP setup completed!");
-        self.pretty_print_task();
-        self.pretty_print_equations();
-        self.pretty_print_reaction_rates();
 
         Ok(())
     }
 
-    /// Set transport properties
+    /// Set transport properties.
+    ///
+    /// `lambda` is thermal conductivity in W/(m·K), `cp` is heat capacity in
+    /// J/(kg·K), and `diffusion` maps species names to diffusivities in m²/s.
     pub fn set_transport_properties(
         &mut self,
         lambda: f64,
@@ -627,7 +916,9 @@ impl SimpleReactorTask {
         self.Diffusion = diffusion;
     }
 
-    /// Set operating conditions
+    /// Set operating conditions.
+    ///
+    /// `pressure` is in Pa, `temperature` is in K, and `mass_flow` is in kg/s.
     pub fn set_operating_conditions(&mut self, pressure: f64, temperature: f64, mass_flow: f64) {
         self.P = pressure;
         self.Tm = temperature;
@@ -643,7 +934,6 @@ impl SimpleReactorTask {
     ///
     /// Convenient method to quickly set up elementary reactions with Arrhenius kinetics
     pub fn fast_react_set(&mut self, vec_of_maps: Vec<FastElemReact>) -> Result<(), ReactorError> {
-        let mut eq_vec: Vec<String> = Vec::new();
         let mut elementary_reaction_vec = Vec::new();
         let mut Q_vec = Vec::new();
         for (idx, map_of_reactiondata) in vec_of_maps.iter().enumerate() {
@@ -662,26 +952,26 @@ impl SimpleReactorTask {
             let n = map_of_reactiondata.n;
             let E = map_of_reactiondata.E;
             let Q = map_of_reactiondata.Q;
-            // Check for NaN (in case of uninitialized f64)
-            if A.is_nan() {
+            // Check for non-finite values (in case of uninitialized or corrupted f64)
+            if !A.is_finite() {
                 return Err(ReactorError::MissingData(format!(
                     "Missing Arrhenius parameter 'A' in input hashmap at index {}",
                     idx
                 )));
             }
-            if n.is_nan() {
+            if !n.is_finite() {
                 return Err(ReactorError::MissingData(format!(
                     "Missing Arrhenius parameter 'n' in input hashmap at index {}",
                     idx
                 )));
             }
-            if E.is_nan() {
+            if !E.is_finite() {
                 return Err(ReactorError::MissingData(format!(
                     "Missing Arrhenius parameter 'E' in input hashmap at index {}",
                     idx
                 )));
             }
-            if Q.is_nan() {
+            if !Q.is_finite() {
                 return Err(ReactorError::MissingData(format!(
                     "Missing Arrhenius parameter 'Q' in input hashmap at index {}",
                     idx
@@ -689,14 +979,14 @@ impl SimpleReactorTask {
             }
             let arrenius = vec![A, n, E];
             let reactdata = ReactionData::new_elementary(eq.clone(), arrenius, None);
-            eq_vec.push(eq);
             Q_vec.push(Q);
             elementary_reaction_vec.push(reactdata);
         }
 
         let mut kindata = KinData::new();
-        kindata.vec_of_equations = eq_vec;
-        kindata.vec_of_reaction_data = Some(elementary_reaction_vec);
+        kindata
+            .set_reaction_data_directly(elementary_reaction_vec, None)
+            .map_err(|err| ReactorError::CalculationError(err.to_string()))?;
         self.kindata = kindata;
         self.thermal_effects = Q_vec;
         Ok(())
@@ -711,24 +1001,30 @@ impl SimpleReactorTask {
     /// - Scaling parameters are valid
     /// - Boundary conditions are complete
     pub fn check_task(&self) -> Result<(), ReactorError> {
+        let ensure_finite_positive = |name: &str, value: f64| -> Result<(), ReactorError> {
+            if !value.is_finite() {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "{} must be finite, got {}",
+                    name, value
+                )));
+            }
+            if value <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "{} must be positive, got {}",
+                    name, value
+                )));
+            }
+            Ok(())
+        };
+
         // Check basic properties
-        if self.P <= 0.0 {
-            return Err(ReactorError::MissingData("P must be positive".to_string()));
-        }
-        if self.Tm <= 0.0 {
-            return Err(ReactorError::MissingData("Tm must be positive".to_string()));
-        }
-        if self.Cp <= 0.0 {
-            return Err(ReactorError::MissingData("Cp must be positive".to_string()));
-        }
-        if self.Lambda <= 0.0 {
-            return Err(ReactorError::MissingData(
-                "Lambda must be positive".to_string(),
-            ));
-        }
-        if self.m <= 0.0 {
-            return Err(ReactorError::MissingData("m must be positive".to_string()));
-        }
+        ensure_finite_positive("P", self.P)?;
+        ensure_finite_positive("Tm", self.Tm)?;
+        ensure_finite_positive("Cp", self.Cp)?;
+        ensure_finite_positive("Lambda", self.Lambda)?;
+        ensure_finite_positive("m", self.m)?;
+
+        ensure_finite_positive("M", self.M)?;
 
         // Check diffusion entries match substances
         if self.Diffusion.len() != self.kindata.substances.len() {
@@ -743,6 +1039,18 @@ impl SimpleReactorTask {
                     substance
                 )));
             }
+            let diffusion = *self.Diffusion.get(substance).ok_or_else(|| {
+                ReactorError::MissingData(format!(
+                    "Missing diffusion coefficient for {}",
+                    substance
+                ))
+            })?;
+            if !diffusion.is_finite() || diffusion <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Diffusion coefficient for {} must be finite and positive, got {}",
+                    substance, diffusion
+                )));
+            }
         }
 
         // Check thermal effects length
@@ -751,23 +1059,53 @@ impl SimpleReactorTask {
                 "Thermal effects length must match number of reactions".to_string(),
             ));
         }
+        for (idx, effect) in self.thermal_effects.iter().enumerate() {
+            if !effect.is_finite() {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Thermal effect at index {} must be finite, got {}",
+                    idx, effect
+                )));
+            }
+        }
 
         // Validate scaling parameters
         self.scaling.validate()?;
 
         // Check boundary conditions
-        if !self.boundary_condition.contains_key("T") {
-            return Err(ReactorError::MissingData(
-                "Missing T in boundary conditions".to_string(),
-            ));
+        let temperature = self.boundary_condition.get("T").ok_or_else(|| {
+            ReactorError::MissingData("Missing T in boundary conditions".to_string())
+        })?;
+        if !temperature.is_finite() || *temperature <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Boundary temperature must be finite and positive, got {}",
+                temperature
+            )));
         }
+
+        let mut boundary_fraction_sum = 0.0;
         for substance in &self.kindata.substances {
-            if !self.boundary_condition.contains_key(substance) {
-                return Err(ReactorError::MissingData(format!(
-                    "Missing boundary condition for {}",
-                    substance
+            let fraction = *self.boundary_condition.get(substance).ok_or_else(|| {
+                ReactorError::MissingData(format!("Missing boundary condition for {}", substance))
+            })?;
+            if !fraction.is_finite() || fraction < 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Boundary fraction for {} must be finite and non-negative, got {}",
+                    substance, fraction
                 )));
             }
+            boundary_fraction_sum += fraction;
+        }
+        if !boundary_fraction_sum.is_finite() || boundary_fraction_sum <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Boundary fractions must sum to a positive finite value, got {}",
+                boundary_fraction_sum
+            )));
+        }
+        if (boundary_fraction_sum - 1.0).abs() > 1e-6 {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Boundary fractions must be normalized to 1.0, got {}",
+                boundary_fraction_sum
+            )));
         }
 
         Ok(())
@@ -817,15 +1155,25 @@ impl SimpleReactorTask {
                 n_substances
             )));
         }
-        if self.M <= 0.0 {
-            return Err(ReactorError::InvalidConfiguration(
-                "M must be positive".to_string(),
-            ));
+        if !self.M.is_finite() || self.M <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "M must be finite and positive, got {}",
+                self.M
+            )));
         }
-        if self.Pe_q <= 0.0 {
-            return Err(ReactorError::InvalidConfiguration(
-                "Pe_q must be positive".to_string(),
-            ));
+        if !self.Pe_q.is_finite() || self.Pe_q <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Pe_q must be finite and positive, got {}",
+                self.Pe_q
+            )));
+        }
+        for (idx, pe_d) in self.Pe_D.iter().enumerate() {
+            if !pe_d.is_finite() || *pe_d <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Pe_D[{}] must be finite and positive, got {}",
+                    idx, pe_d
+                )));
+            }
         }
         Ok(())
     }
@@ -835,19 +1183,16 @@ impl SimpleReactorTask {
     pub fn kinetic_processing(&mut self) -> Result<(), ReactorError> {
         let kd = &mut self.kindata;
         // stoichiometry and element matrix
-        kd.analyze_reactions();
+        kd.analyze_reactions()
+            .map_err(|err| ReactorError::CalculationError(err.to_string()))?;
         // in elementary reactions there are only Arrhenius parameters - no concentration or pressure dependencies
-        kd.calc_sym_constants(None, None, Some(self.T_scaling.clone()));
+        kd.calc_sym_constants(None, None, Some(self.T_scaling.clone()))
+            .map_err(|err| ReactorError::CalculationError(err.to_string()))?;
         Ok(())
     }
 
     ///
     pub fn mean_molar_mass(&mut self) -> Result<(), ReactorError> {
-        println!("DEBUG mean_molar_mass: Entering function");
-        println!(
-            "DEBUG mean_molar_mass: Current molar masses: {:?}",
-            self.kindata.stecheodata.vec_of_molmasses
-        );
         let mut mean_mass_inv = 0.0;
         let molar_masses = self
             .kindata
@@ -855,15 +1200,10 @@ impl SimpleReactorTask {
             .vec_of_molmasses
             .as_ref()
             .ok_or_else(|| ReactorError::MissingData("Molar masses not calculated".to_string()))?;
-        println!(
-            "DEBUG mean_molar_mass: Using molar masses: {:?}",
-            molar_masses
-        );
-
         // M_mean = sum_i(xi*Mi)
         //   x(i) = (ω(i) / M(i)) / ∑(ω(j) / M(j)) where ω(j) - is mass fruction
         // so M_men = ∑(xi*Mi) = ∑ω(i)  / ∑(ω(j) / M(j))= 1/∑(ω(j) / M(j))
-        if self.M == 0.0 || self.M.is_nan() {
+        if !self.M.is_finite() || self.M <= 0.0 {
             for (i, substance) in self.kindata.substances.iter().enumerate() {
                 if let Some(conc) = self.boundary_condition.get(substance) {
                     let mol_mass = molar_masses.get(i).ok_or_else(|| {
@@ -872,16 +1212,44 @@ impl SimpleReactorTask {
                             i
                         ))
                     })?;
+                    if !conc.is_finite() || *conc < 0.0 {
+                        return Err(ReactorError::InvalidNumericValue(format!(
+                            "Boundary fraction for {} must be finite and non-negative, got {}",
+                            substance, conc
+                        )));
+                    }
+                    if !mol_mass.is_finite() || *mol_mass <= 0.0 {
+                        return Err(ReactorError::InvalidNumericValue(format!(
+                            "Molar mass for {} must be finite and positive, got {}",
+                            substance, mol_mass
+                        )));
+                    }
                     mean_mass_inv += conc / mol_mass;
                 }
             }
+            if !mean_mass_inv.is_finite() || mean_mass_inv <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Mean molar mass denominator must be finite and positive, got {}",
+                    mean_mass_inv
+                )));
+            }
             let mean_mass = 1.0 / mean_mass_inv;
+            if !mean_mass.is_finite() || mean_mass <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Mean molar mass must be finite and positive, got {}",
+                    mean_mass
+                )));
+            }
             self.M = mean_mass / 1000.0; // from g/mol to kg/mol
         }
         Ok(())
     }
     ///
-    pub fn transport_coefficients(&mut self) -> HashMap<String, f64> {
+    /// Recompute the cached transport coefficients in place.
+    ///
+    /// The method updates `self.D_ro_map` directly so later hot-path reads can
+    /// borrow the cached data instead of rebuilding or cloning the map.
+    pub fn transport_coefficients(&mut self) -> Result<(), ReactorError> {
         /*
            D = A*T^1.5/P;
            D0  = A*T0^1.5/P0;
@@ -894,23 +1262,54 @@ impl SimpleReactorTask {
            finally
            D*ro = D0*ro0*(T/T0)^0.5
         */
-        let P = self.P;
-        if P.is_nan() {
-            panic!("no pressure field")
-        };
+        if !self.P.is_finite() || self.P <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Pressure must be finite and positive, got {}",
+                self.P
+            )));
+        }
+        if !self.Tm.is_finite() || self.Tm <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Temperature must be finite and positive, got {}",
+                self.Tm
+            )));
+        }
+        if !self.M.is_finite() || self.M <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Mean molar mass must be finite and positive, got {}",
+                self.M
+            )));
+        }
         // ro at standard conditions
         // PV = (m/M)*RT => ro = m/V = P*M/RT;
-        let ro0 = self.M * P / (R_G * 298.15);
-        // dbg!(&ro0, self.M);
+        let ro0 = self.M * self.P / (R_G * 298.15);
+        if !ro0.is_finite() || ro0 <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Reference density must be finite and positive, got {}",
+                ro0
+            )));
+        }
         let mut D_ro_map = HashMap::new();
         for subs in self.kindata.substances.iter() {
             if let Some(D_i) = self.Diffusion.get(subs) {
+                if !D_i.is_finite() || *D_i <= 0.0 {
+                    return Err(ReactorError::InvalidNumericValue(format!(
+                        "Diffusion coefficient for {} must be finite and positive, got {}",
+                        subs, D_i
+                    )));
+                }
                 let D_ro = D_i * ro0 * (self.Tm / 298.15).powf(0.5);
+                if !D_ro.is_finite() || D_ro <= 0.0 {
+                    return Err(ReactorError::InvalidNumericValue(format!(
+                        "D*ro for {} must be finite and positive, got {}",
+                        subs, D_ro
+                    )));
+                }
                 D_ro_map.insert(subs.clone(), D_ro);
             }
         }
-        self.D_ro_map = D_ro_map.clone();
-        D_ro_map
+        self.D_ro_map = D_ro_map;
+        Ok(())
     }
     /// Process scaling parameters for dimensionless equations
     /// Teta = (T - dT)/T_scaling
@@ -931,37 +1330,34 @@ impl SimpleReactorTask {
         Ok(())
     }
     pub fn peclet_numbers(&mut self) -> Result<(), ReactorError> {
-        if self.Lambda <= 0.0 {
+        if !self.Lambda.is_finite() || self.Lambda <= 0.0 {
             return Err(ReactorError::InvalidConfiguration(
                 "Lambda must be positive".to_string(),
             ));
         }
-        if self.m <= 0.0 {
+        if !self.m.is_finite() || self.m <= 0.0 {
             return Err(ReactorError::InvalidConfiguration(
                 "Mass flow rate must be positive".to_string(),
             ));
         }
-        if self.L.is_nan() {
-            return Err(ReactorError::InvalidConfiguration("missing L".to_string()));
-        }
-        if self.m.is_nan() {
-            return Err(ReactorError::InvalidConfiguration("missing m".to_string()));
-        }
-        if self.Cp.is_nan() {
-            return Err(ReactorError::InvalidConfiguration("missing Cp".to_string()));
-        }
-        if self.Lambda.is_nan() {
-            return Err(ReactorError::InvalidConfiguration(
-                "missing Lambda".to_string(),
+        if !self.L.is_finite() || !self.Cp.is_finite() {
+            return Err(ReactorError::InvalidNumericValue(
+                "Peclet inputs must be finite".to_string(),
             ));
         }
 
         let Pe_q = (self.L * self.m * self.Cp) / self.Lambda;
+        if !Pe_q.is_finite() || Pe_q <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Pe_q must be finite and positive, got {}",
+                Pe_q
+            )));
+        }
         let mut Pe_D = Vec::new();
-        let transport_coeffs = self.transport_coefficients();
+        self.transport_coefficients()?;
 
         for subs in self.kindata.substances.iter() {
-            let ro_D_i = transport_coeffs.get(subs).ok_or_else(|| {
+            let ro_D_i = self.D_ro_map.get(subs).ok_or_else(|| {
                 ReactorError::MissingData(format!(
                     "Transport coefficient for substance '{}' not found",
                     subs
@@ -973,8 +1369,13 @@ impl SimpleReactorTask {
                     subs
                 )));
             }
-            dbg!(&self.m, &self.L, &ro_D_i);
             let Pe_D_i = (self.m * self.L) / ro_D_i;
+            if !Pe_D_i.is_finite() || Pe_D_i <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Pe_D for '{}' must be finite and positive, got {}",
+                    subs, Pe_D_i
+                )));
+            }
             Pe_D.push(Pe_D_i);
         }
 
@@ -982,20 +1383,77 @@ impl SimpleReactorTask {
         self.Pe_D = Pe_D;
         Ok(())
     }
-    pub fn ideal_gas_density(&self) -> f64 {
-        self.M * self.P / (R_G * self.Tm)
+    /// Return the ideal-gas density for the current reactor state.
+    ///
+    /// The value is only meaningful when the thermodynamic inputs are finite
+    /// and strictly positive, so we fail fast instead of silently returning
+    /// `Inf` or `NaN`.
+    pub fn ideal_gas_density(&self) -> Result<f64, ReactorError> {
+        if !self.M.is_finite() || self.M <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Mean molar mass must be finite and positive, got {}",
+                self.M
+            )));
+        }
+        if !self.P.is_finite() || self.P <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Pressure must be finite and positive, got {}",
+                self.P
+            )));
+        }
+        if !self.Tm.is_finite() || self.Tm <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Temperature must be finite and positive, got {}",
+                self.Tm
+            )));
+        }
+        let density = self.M * self.P / (R_G * self.Tm);
+        if !density.is_finite() || density <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Ideal gas density must be finite and positive, got {}",
+                density
+            )));
+        }
+        Ok(density)
     }
-    pub fn Le_number(&self) {
-        let D_ro = self.D_ro_map.clone();
-        let mut Le_vec = Vec::new();
-
-        for D_ro_i in D_ro.values() {
-            let Le_i = self.Lambda / (self.Cp * D_ro_i);
-            Le_vec.push(Le_i)
+    /// Compute the average Lewis number from the current transport snapshot.
+    ///
+    /// The method borrows the diffusion map directly so it stays cheap and
+    /// does not clone the full transport state on every call.
+    pub fn Le_number(&self) -> Result<f64, ReactorError> {
+        if self.D_ro_map.is_empty() {
+            return Err(ReactorError::MissingData(
+                "Cannot compute Lewis number without diffusion coefficients".to_string(),
+            ));
+        }
+        if !self.Lambda.is_finite() || self.Lambda <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Thermal conductivity must be finite and positive, got {}",
+                self.Lambda
+            )));
+        }
+        if !self.Cp.is_finite() || self.Cp <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Heat capacity must be finite and positive, got {}",
+                self.Cp
+            )));
         }
 
-        let Le_ave: f64 = Le_vec.iter().map(|&x| x).sum::<f64>() / Le_vec.len() as f64;
-        println!("average Lewis numver {}", Le_ave);
+        let mut le_sum = 0.0;
+        let mut le_count = 0usize;
+
+        for diffusion in self.D_ro_map.values() {
+            if !diffusion.is_finite() || *diffusion <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Diffusion coefficient must be finite and positive, got {}",
+                    diffusion
+                )));
+            }
+            le_sum += self.Lambda / (self.Cp * diffusion);
+            le_count += 1;
+        }
+
+        Ok(le_sum / le_count as f64)
     }
 }
 

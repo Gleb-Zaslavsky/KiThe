@@ -275,58 +275,54 @@ impl PressureStruct {
         Self { Arrenius }
     }
 
-    pub fn K_const(&self, Temp: f64, P: f64) -> f64 {
-        let pressures_str: Vec<String> = self.Arrenius.keys().cloned().collect();
-        let pressures = match convert_strings_to_f64(pressures_str.clone()) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("Error converting pressures to f64: {}", e);
-                return 0.0; // or handle the error in a way that makes sense for your application
-            }
-        };
-        let location: Result<usize, usize> =
-            pressures.binary_search_by(|v| v.partial_cmp(&P).expect("Couldn't compare values"));
+    fn sorted_pressure_points(&self) -> Vec<(f64, &Vec<f64>)> {
+        let mut points: Vec<(f64, &Vec<f64>)> = self
+            .Arrenius
+            .iter()
+            .filter_map(|(pressure, params)| pressure.parse::<f64>().ok().map(|p| (p, params)))
+            .collect();
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        points
+    }
 
-        match location {
-            Ok(i) => {
-                // Exact pressure found
-                let arr_params = &self.Arrenius[pressures_str[i].as_str()];
-                calculate_k(arr_params, &Temp)
-            }
-            Err(i) if i > 0 && i < pressures.len() => {
-                // Interpolate between two pressures
-                let p_low = pressures[i - 1];
-                let p_high = pressures[i];
-                let arr_low = &self.Arrenius[pressures_str[i].as_str()];
-                let arr_high = &self.Arrenius[pressures_str[i].as_str()];
-                let k_low = calculate_k(arr_low, &Temp);
-                let k_high = calculate_k(arr_high, &Temp);
-                interpolate(P, p_low, p_high, k_low, k_high)
-            }
-            _ => {
-                // Pressure out of range, use closest available pressure
-                let i = location.unwrap();
-                let closest_p = if i == 0 {
-                    pressures[0]
-                } else {
-                    pressures[pressures.len() - 1]
-                };
-                let arr_params = &self.Arrenius[closest_p.to_string().as_str()];
-                calculate_k(arr_params, &Temp)
-            }
+    fn pressure_interval(pressures: &[f64], P: f64) -> (usize, usize) {
+        match pressures.binary_search_by(|v| v.total_cmp(&P)) {
+            Ok(i) => (i, i),
+            Err(0) => (0, 0),
+            Err(i) if i >= pressures.len() => (pressures.len() - 1, pressures.len() - 1),
+            Err(i) => (i - 1, i),
         }
+    }
+
+    pub fn K_const(&self, Temp: f64, P: f64) -> f64 {
+        let points = self.sorted_pressure_points();
+        if points.is_empty() {
+            return 0.0;
+        }
+        let pressures: Vec<f64> = points.iter().map(|(pressure, _)| *pressure).collect();
+        let (low_index, high_index) = Self::pressure_interval(&pressures, P);
+
+        if low_index == high_index {
+            let arr_params = points[low_index].1;
+            return calculate_k(arr_params, &Temp);
+        }
+
+        let p_low = pressures[low_index];
+        let p_high = pressures[high_index];
+        let arr_low = points[low_index].1;
+        let arr_high = points[high_index].1;
+        let k_low = calculate_k(arr_low, &Temp);
+        let k_high = calculate_k(arr_high, &Temp);
+        interpolate(P, p_low, p_high, k_low, k_high)
     }
 
     pub fn K_expr(&self, P: f64) -> Expr {
         let T = Expr::Var("T".to_owned());
-        let pressures_str: Vec<String> = self.Arrenius.keys().cloned().collect();
-        let pressures = match convert_strings_to_f64(pressures_str.clone()) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("Error converting pressures to f64: {}", e);
-                return Expr::Const(0.0);
-            }
-        };
+        let points = self.sorted_pressure_points();
+        if points.is_empty() {
+            return Expr::Const(0.0);
+        }
+        let pressures: Vec<f64> = points.iter().map(|(pressure, _)| *pressure).collect();
         let Ps = Expr::Const(P);
         let interpolate_expr = |p_low: f64, p_high: f64, k_low: Expr, k_high: Expr| -> Expr {
             let p_low = Expr::Const(p_low);
@@ -341,42 +337,20 @@ impl PressureStruct {
             a * temp.clone().pow(b) * (-e / (Rsym * temp)).exp()
         };
 
-        let result: Result<usize, usize> =
-            pressures.binary_search_by(|v| v.partial_cmp(&P).expect("Couldn't compare values"));
+        let (low_index, high_index) = Self::pressure_interval(&pressures, P);
 
-        match result {
-            Ok(i) => {
-                // Exact pressure found
-                let arr_params = &self.Arrenius[&pressures_str[i]];
-                calculate_k_expr(arr_params, T)
-            }
-            Err(i) if i > 0 && i < pressures.len() => {
-                // Interpolate between two pressures
-                let p_low = pressures[i - 1];
-                let p_high = pressures[i];
-                let arr_low = &self.Arrenius[&pressures_str[i - 1]];
-                let arr_high = &self.Arrenius[&pressures_str[i]];
-                let k_low = calculate_k_expr(arr_low, T.clone());
-                let k_high = calculate_k_expr(arr_high, T);
-                interpolate_expr(p_low, p_high, k_low, k_high)
-            }
-            _ => {
-                // Pressure out of range, use closest available pressure
-                let i = if result.is_ok() {
-                    result.unwrap()
-                } else {
-                    result.unwrap_err()
-                };
-                let closest_p = if i == 0 {
-                    pressures[0]
-                } else {
-                    pressures[pressures.len() - 1]
-                };
-                let arr_params = &self.Arrenius[&closest_p.to_string()];
-                calculate_k_expr(arr_params, T)
-            }
+        if low_index == high_index {
+            let arr_params = points[low_index].1;
+            return calculate_k_expr(arr_params, T).simplify();
         }
-        .simplify()
+
+        let p_low = pressures[low_index];
+        let p_high = pressures[high_index];
+        let arr_low = points[low_index].1;
+        let arr_high = points[high_index].1;
+        let k_low = calculate_k_expr(arr_low, T.clone());
+        let k_high = calculate_k_expr(arr_high, T);
+        interpolate_expr(p_low, p_high, k_low, k_high).simplify()
     }
 }
 fn calculate_k(arr_params: &[f64], temp: &f64) -> f64 {
@@ -460,17 +434,22 @@ where
     D: Deserializer<'de>,
 {
     let map = HashMap::<String, Vec<f64>>::deserialize(deserializer)?;
-    Ok(map
-        .into_iter()
-        .map(|(k, v)| (F64Wrapper(k.parse::<f64>().unwrap()), v))
-        .collect())
+    map.into_iter()
+        .map(|(k, v)| {
+            k.parse::<f64>()
+                .map(F64Wrapper)
+                .map(|key| (key, v))
+                .map_err(|_| serde::de::Error::custom(format!("invalid pressure key `{}`", k)))
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use approx::assert_relative_eq;
+    use crate::Kinetics::mechfinder_api::{KineticsError, ReactionData, parse_kinetic_data_vec};
     use RustedSciThe::symbolic::symbolic_engine::Expr;
+    use approx::assert_relative_eq;
 
     fn eval_expr(expr: &Expr) -> f64 {
         match expr {
@@ -567,5 +546,128 @@ mod tests {
         let symbolic_value = eval_expr(&symbolic);
 
         assert_relative_eq!(symbolic_value, expected_k_const, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_pressure_reaction_is_order_independent_and_interpolates() {
+        let mut arrenius = HashMap::new();
+        arrenius.insert("100.0".to_string(), vec![3.0, 1.0, 200.0]);
+        arrenius.insert("1.0".to_string(), vec![1.0, 2.0, 100.0]);
+        arrenius.insert("10.0".to_string(), vec![2.0, 0.5, 150.0]);
+
+        let pressure_reaction = PressureStruct::new(arrenius);
+        let temp = 500.0;
+
+        let k_exact_low = pressure_reaction.K_const(temp, 1.0);
+        let k_exact_mid = pressure_reaction.K_const(temp, 10.0);
+        let k_exact_high = pressure_reaction.K_const(temp, 100.0);
+        assert_relative_eq!(
+            k_exact_low,
+            calculate_k(&[1.0, 2.0, 100.0], &temp),
+            epsilon = 1e-12
+        );
+        assert_relative_eq!(
+            k_exact_mid,
+            calculate_k(&[2.0, 0.5, 150.0], &temp),
+            epsilon = 1e-12
+        );
+        assert_relative_eq!(
+            k_exact_high,
+            calculate_k(&[3.0, 1.0, 200.0], &temp),
+            epsilon = 1e-12
+        );
+
+        let expected_interp = interpolate(
+            5.0,
+            1.0,
+            10.0,
+            calculate_k(&[1.0, 2.0, 100.0], &temp),
+            calculate_k(&[2.0, 0.5, 150.0], &temp),
+        );
+        let k_interp = pressure_reaction.K_const(temp, 5.0);
+        assert_relative_eq!(k_interp, expected_interp, epsilon = 1e-12);
+
+        let low_clamped = pressure_reaction.K_const(temp, 0.1);
+        assert_relative_eq!(low_clamped, k_exact_low, epsilon = 1e-12);
+        let high_clamped = pressure_reaction.K_const(temp, 1000.0);
+        assert_relative_eq!(high_clamped, k_exact_high, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_pressure_symbolic_matches_numeric() {
+        let mut arrenius = HashMap::new();
+        arrenius.insert("10.0".to_string(), vec![2.0, 0.5, 150.0]);
+        arrenius.insert("1.0".to_string(), vec![1.0, 2.0, 100.0]);
+
+        let pressure_reaction = PressureStruct::new(arrenius);
+        let temp = 500.0;
+        let symbolic = pressure_reaction.K_expr(5.0).set_variable("T", temp);
+        let symbolic_value = eval_expr(&symbolic);
+        let numeric_value = pressure_reaction.K_const(temp, 5.0);
+
+        assert_relative_eq!(symbolic_value, numeric_value, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_create_uniform_vector_rejects_single_point() {
+        let result = ReactionData::create_uniform_vector(300.0, 400.0, 1);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            KineticsError::InvalidReactionData(message)
+            if message.contains("n must be at least 2")
+        ));
+    }
+
+    #[test]
+    fn test_k_const_for_t_range_rejects_single_point() {
+        let reaction =
+            ReactionData::new_elementary("A -> B".to_string(), vec![1.0, 0.0, 100.0], None);
+
+        let result = reaction.K_const_for_T_range(300.0, 400.0, 1, None, None);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            KineticsError::InvalidReactionData(message)
+            if message.contains("n must be at least 2")
+        ));
+    }
+
+    #[test]
+    fn test_validate_reaction_type_rejects_mismatch() {
+        // Keep the reaction payload structurally valid but pair it with the wrong type tag.
+        let reaction = ReactionData {
+            reaction_type: crate::Kinetics::mechfinder_api::ReactionType::Falloff,
+            eq: "A -> B".to_string(),
+            react: None,
+            data: crate::Kinetics::mechfinder_api::ReactionKinetics::Elementary(
+                crate::Kinetics::mechfinder_api::ElementaryStruct::new(vec![1.0, 0.0, 100.0]),
+            ),
+        };
+
+        let err = reaction.validate_reaction_type().unwrap_err();
+        assert!(matches!(
+            err,
+            KineticsError::InvalidReactionData(message)
+            if message.contains("Mismatch between reaction_type")
+        ));
+    }
+
+    #[test]
+    fn test_parse_kinetic_data_vec_rejects_malformed_payload() {
+        // Missing the kinetic payload should fail before any state is cached.
+        let malformed = vec![serde_json::json!({
+            "type": "elem",
+            "eq": "A -> B"
+        })];
+
+        let err = parse_kinetic_data_vec(malformed).unwrap_err();
+        assert!(matches!(
+            err,
+            KineticsError::InvalidReactionData(message)
+            if message.contains("Error parsing reaction")
+        ));
     }
 }

@@ -17,7 +17,7 @@
 //! ## Main Methods
 //!
 //! - **`set_reactor_params_from_hashmap()`**: Core parsing method that extracts reactor parameters from DocumentMap
-//! - **`parse_toleranse_and_bounds()`**: Specialized parser for solver tolerance and bounds configurations
+//! - **`parse_tolerance_and_bounds()`**: Specialized parser for solver tolerance and bounds configurations
 //! - **`parse_file()`**: File I/O wrapper that creates DocumentParser from file path
 //! - **`parse_parameters_with_exact_names()`**: High-level parsing orchestrator
 //! - **`solve_from_map()`**: Complete workflow from parsed data to solved BVP
@@ -52,11 +52,680 @@
 use super::SimpleReactorBVP::{FastElemReact, SimpleReactorTask};
 use crate::ReactorsBVP::reactor_BVP_utils::InitialConfig;
 use crate::ReactorsBVP::reactor_BVP_utils::{BoundsConfig, ScalingConfig, ToleranceConfig};
+use crate::ReactorsBVP::solver_backend::{
+    ReactorBvpAotBuildPolicy, ReactorBvpAotBuildProfile, ReactorBvpAotCompilePreset,
+    ReactorBvpAotCompiler, ReactorBvpAotExecutionPolicy, ReactorBvpMatrixBackend,
+    ReactorBvpSolverConfig, ReactorBvpSymbolicBackend,
+};
 use crate::Utils::show_this_pic::show_image;
-use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser};
-use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP;
+use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
+use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{AdaptiveGridConfig, SolverParams};
+use RustedSciThe::numerical::BVP_Damp::grid_api::GridRefinementMethod;
+use log::info;
 use nalgebra::DMatrix;
 use std::collections::HashMap;
+
+fn missing_field(section: &str, field: &str) -> crate::ReactorsBVP::SimpleReactorBVP::ReactorError {
+    crate::ReactorsBVP::SimpleReactorBVP::ReactorError::MissingData(format!(
+        "Missing `{}` in `{}` section",
+        field, section
+    ))
+}
+
+fn invalid_numeric(
+    section: &str,
+    field: &str,
+    value: f64,
+) -> crate::ReactorsBVP::SimpleReactorBVP::ReactorError {
+    crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidNumericValue(format!(
+        "`{}.{} = {}` is not finite",
+        section, field, value
+    ))
+}
+
+fn required_section<'a>(
+    task_hashmap: &'a DocumentMap,
+    section: &str,
+) -> Result<
+    &'a HashMap<String, Option<Vec<Value>>>,
+    crate::ReactorsBVP::SimpleReactorBVP::ReactorError,
+> {
+    task_hashmap
+        .get(section)
+        .ok_or_else(|| missing_field("document", section))
+}
+
+fn required_values<'a>(
+    section: &'a HashMap<String, Option<Vec<Value>>>,
+    section_name: &str,
+    field: &str,
+) -> Result<&'a [Value], crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    section
+        .get(field)
+        .ok_or_else(|| missing_field(section_name, field))?
+        .as_ref()
+        .map(|values| values.as_slice())
+        .ok_or_else(|| missing_field(section_name, field))
+}
+
+fn required_f64(
+    section: &HashMap<String, Option<Vec<Value>>>,
+    section_name: &str,
+    field: &str,
+) -> Result<f64, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let value = required_values(section, section_name, field)?
+        .first()
+        .ok_or_else(|| missing_field(section_name, field))?
+        .as_float()
+        .ok_or_else(|| missing_field(section_name, field))?;
+    if !value.is_finite() {
+        return Err(invalid_numeric(section_name, field, value));
+    }
+    Ok(value)
+}
+
+fn required_usize(
+    section: &HashMap<String, Option<Vec<Value>>>,
+    section_name: &str,
+    field: &str,
+) -> Result<usize, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let value = required_values(section, section_name, field)?
+        .first()
+        .ok_or_else(|| missing_field(section_name, field))?;
+    value_as_usize(value).ok_or_else(|| missing_field(section_name, field))
+}
+
+fn required_string(
+    section: &HashMap<String, Option<Vec<Value>>>,
+    section_name: &str,
+    field: &str,
+) -> Result<String, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    required_values(section, section_name, field)?
+        .first()
+        .ok_or_else(|| missing_field(section_name, field))?
+        .as_string()
+        .cloned()
+        .ok_or_else(|| missing_field(section_name, field))
+}
+
+fn optional_string(
+    section: &HashMap<String, Option<Vec<Value>>>,
+    field: &str,
+) -> Result<Option<String>, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    Ok(match section.get(field) {
+        None => None,
+        Some(values) => {
+            let values = values
+                .as_ref()
+                .ok_or_else(|| missing_field("section", field))?;
+            let value = values
+                .first()
+                .ok_or_else(|| missing_field("section", field))?;
+            value
+                .as_option_string()
+                .cloned()
+                .or_else(|| value.as_string().cloned())
+        }
+    })
+}
+
+// RustedSciThe's parser historically emits both Integer and Usize values.
+// Keeping this conversion local avoids relying on one exact parser variant.
+fn value_as_usize(value: &Value) -> Option<usize> {
+    match value {
+        Value::Usize(value) => Some(*value),
+        Value::Integer(value) if *value >= 0 => Some(*value as usize),
+        Value::Optional(Some(inner)) => value_as_usize(inner),
+        _ => None,
+    }
+}
+
+fn optional_usize(
+    section: &HashMap<String, Option<Vec<Value>>>,
+    field: &str,
+) -> Result<Option<usize>, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    Ok(match section.get(field) {
+        None => None,
+        Some(values) => {
+            let values = values
+                .as_ref()
+                .ok_or_else(|| missing_field("section", field))?;
+            let value = values
+                .first()
+                .ok_or_else(|| missing_field("section", field))?;
+            let parsed = value_as_usize(value)
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
+                        format!("`{}` must be a positive integer", field),
+                    )
+                })?;
+            Some(parsed)
+        }
+    })
+}
+
+fn required_vector_f64(
+    section: &HashMap<String, Option<Vec<Value>>>,
+    section_name: &str,
+    field: &str,
+) -> Result<Vec<f64>, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let values = required_values(section, section_name, field)?;
+    let vector = values
+        .first()
+        .ok_or_else(|| missing_field(section_name, field))?
+        .as_vector()
+        .ok_or_else(|| missing_field(section_name, field))?;
+    if let Some(invalid) = vector.iter().copied().find(|value| !value.is_finite()) {
+        return Err(invalid_numeric(section_name, field, invalid));
+    }
+    Ok(vector.clone())
+}
+
+fn required_bool(
+    section: &HashMap<String, Option<Vec<Value>>>,
+    section_name: &str,
+    field: &str,
+) -> Result<bool, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    required_values(section, section_name, field)?
+        .first()
+        .ok_or_else(|| missing_field(section_name, field))?
+        .as_boolean()
+        .ok_or_else(|| missing_field(section_name, field))
+}
+
+fn parse_tolerance_and_bounds_from_map(
+    task_hashmap: &DocumentMap,
+) -> Result<(ToleranceConfig, BoundsConfig), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let rel_tolerance = required_section(task_hashmap, "rel_tolerance")?;
+    let tolerance_config = ToleranceConfig::new(
+        required_f64(rel_tolerance, "rel_tolerance", "C")?,
+        required_f64(rel_tolerance, "rel_tolerance", "J")?,
+        required_f64(rel_tolerance, "rel_tolerance", "Teta")?,
+        required_f64(rel_tolerance, "rel_tolerance", "q")?,
+    );
+
+    let bounds = required_section(task_hashmap, "bounds")?;
+    let parse_pair =
+        |field: &str| -> Result<(f64, f64), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+            let values = required_values(bounds, "bounds", field)?;
+            if values.len() == 1 {
+                let pair = values
+                    .first()
+                    .ok_or_else(|| missing_field("bounds", field))?
+                    .as_vector()
+                    .ok_or_else(|| missing_field("bounds", field))?;
+                if pair.len() != 2 {
+                    return Err(
+                        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
+                            format!("`bounds.{}` must contain exactly two numbers", field),
+                        ),
+                    );
+                }
+                if let Some(invalid) = pair.iter().copied().find(|value| !value.is_finite()) {
+                    return Err(invalid_numeric("bounds", field, invalid));
+                }
+                Ok((pair[0], pair[1]))
+            } else if values.len() == 2 {
+                let left = values[0]
+                    .as_float()
+                    .ok_or_else(|| missing_field("bounds", field))?;
+                let right = values[1]
+                    .as_float()
+                    .ok_or_else(|| missing_field("bounds", field))?;
+                if !left.is_finite() {
+                    return Err(invalid_numeric("bounds", field, left));
+                }
+                if !right.is_finite() {
+                    return Err(invalid_numeric("bounds", field, right));
+                }
+                Ok((left, right))
+            } else {
+                Err(
+                    crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
+                        format!(
+                            "`bounds.{}` must contain one pair or two scalar values",
+                            field
+                        ),
+                    ),
+                )
+            }
+        };
+    let bounds_config = BoundsConfig::new(
+        parse_pair("C")?,
+        parse_pair("J")?,
+        parse_pair("Teta")?,
+        parse_pair("q")?,
+    );
+
+    Ok((tolerance_config, bounds_config))
+}
+
+fn parse_basic_settings_from_map(
+    task_hashmap: &DocumentMap,
+) -> Result<(f64, f64, usize, String), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let process_conditions = required_section(task_hashmap, "process_conditions")?;
+    let t0 = required_f64(process_conditions, "process_conditions", "t0")?;
+    let t_end = required_f64(process_conditions, "process_conditions", "t_end")?;
+    let n_steps = required_usize(process_conditions, "process_conditions", "n_steps")?;
+    let arg = match process_conditions.get("arg") {
+        Some(value) => {
+            let values = value
+                .as_ref()
+                .ok_or_else(|| missing_field("process_conditions", "arg"))?;
+            let arg = values
+                .first()
+                .ok_or_else(|| missing_field("process_conditions", "arg"))?
+                .as_string()
+                .cloned()
+                .ok_or_else(|| missing_field("process_conditions", "arg"))?;
+            Some(arg)
+        }
+        None => None,
+    }
+    .unwrap_or_else(|| "x".to_string());
+    Ok((t0, t_end, n_steps, arg))
+}
+
+fn set_initial_guess_from_map_data(
+    task_hashmap: &DocumentMap,
+    n_steps: usize,
+    unknown_count: usize,
+) -> Result<DMatrix<f64>, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let inconfing = InitialConfig::new();
+    let initial_guess: DMatrix<f64> = if let Some(guess_info) = task_hashmap.get("initial_guess") {
+        let res = if let Some(universal) = guess_info.get("universal") {
+            let values = universal
+                .as_ref()
+                .ok_or_else(|| missing_field("initial_guess", "universal"))?;
+            let val = values
+                .first()
+                .ok_or_else(|| missing_field("initial_guess", "universal"))?
+                .as_float()
+                .ok_or_else(|| missing_field("initial_guess", "universal"))?;
+            if !val.is_finite() {
+                return Err(invalid_numeric("initial_guess", "universal", val));
+            }
+            inconfing.only_one_value_for_all_initial(val, n_steps, unknown_count)?
+        } else {
+            let C_val = required_f64(guess_info, "initial_guess", "C")?;
+            let J_val = required_f64(guess_info, "initial_guess", "J")?;
+            let Teta_val = required_f64(guess_info, "initial_guess", "Teta")?;
+            let q_val = required_f64(guess_info, "initial_guess", "q")?;
+            let map = HashMap::from([
+                ("C".to_string(), C_val),
+                ("J".to_string(), J_val),
+                ("Teta".to_string(), Teta_val),
+                ("q".to_string(), q_val),
+            ]);
+            inconfing.all_const_initial(map, n_steps)?
+        };
+        res
+    } else {
+        inconfing.only_one_value_for_all_initial(1e-2, n_steps, unknown_count)?
+    };
+    Ok(initial_guess)
+}
+
+#[derive(Debug)]
+struct ParsedSolverSettings {
+    solver_backend_config: ReactorBvpSolverConfig,
+    scheme: String,
+    strategy: String,
+    strategy_params: Option<SolverParams>,
+    linear_sys_method: Option<String>,
+    method: String,
+    abs_tolerance: f64,
+    max_iterations: usize,
+    loglevel: Option<String>,
+    dont_save_log: bool,
+}
+
+fn parse_solver_settings_from_map(
+    task_hashmap: &DocumentMap,
+) -> Result<ParsedSolverSettings, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let solver_settings = required_section(task_hashmap, "solver_settings")?;
+    let mut solver_backend_config =
+        if let Some(generated_backend) = optional_string(solver_settings, "generated_backend")? {
+            ReactorBvpSolverConfig::from_generated_backend_name(&generated_backend)
+                .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration)?
+        } else {
+            ReactorBvpSolverConfig::default_lambdify()
+        };
+    if let Some(matrix_backend) = optional_string(solver_settings, "matrix_backend")? {
+        solver_backend_config = solver_backend_config.with_matrix_backend(
+            ReactorBvpMatrixBackend::parse(&matrix_backend).map_err(
+                crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration,
+            )?,
+        );
+    }
+    if let Some(symbolic_backend) = optional_string(solver_settings, "symbolic_backend")? {
+        solver_backend_config = solver_backend_config.with_symbolic_backend(
+            ReactorBvpSymbolicBackend::parse(&symbolic_backend).map_err(
+                crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration,
+            )?,
+        );
+    }
+    let aot_compiler = optional_string(solver_settings, "aot_compiler")?
+        .or(optional_string(solver_settings, "aot_c_compiler")?);
+    if let Some(compiler) = aot_compiler {
+        let compiler = ReactorBvpAotCompiler::parse(&compiler)
+            .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration)?;
+        solver_backend_config =
+            solver_backend_config.map_aot_config(|config| config.with_compiler(compiler));
+    }
+    if let Some(build_policy) = optional_string(solver_settings, "aot_build_policy")? {
+        let build_policy = ReactorBvpAotBuildPolicy::parse(&build_policy)
+            .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration)?;
+        solver_backend_config =
+            solver_backend_config.map_aot_config(|config| config.with_build_policy(build_policy));
+    }
+    if let Some(build_profile) = optional_string(solver_settings, "aot_build_profile")? {
+        let build_profile = ReactorBvpAotBuildProfile::parse(&build_profile)
+            .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration)?;
+        solver_backend_config =
+            solver_backend_config.map_aot_config(|config| config.with_build_profile(build_profile));
+    }
+    if let Some(compile_preset) = optional_string(solver_settings, "aot_compile_preset")? {
+        let compile_preset = ReactorBvpAotCompilePreset::parse(&compile_preset)
+            .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration)?;
+        solver_backend_config = solver_backend_config
+            .map_aot_config(|config| config.with_compile_preset(compile_preset));
+    }
+    if let Some(execution_policy) = optional_string(solver_settings, "aot_execution_policy")? {
+        let execution_policy = ReactorBvpAotExecutionPolicy::parse(&execution_policy)
+            .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration)?;
+        solver_backend_config = solver_backend_config
+            .map_aot_config(|config| config.with_execution_policy(execution_policy));
+    }
+    let target_chunks = optional_usize(solver_settings, "aot_target_chunks")?;
+    let residual_chunks =
+        optional_usize(solver_settings, "aot_residual_target_chunks")?.or(target_chunks);
+    let jacobian_chunks =
+        optional_usize(solver_settings, "aot_jacobian_target_chunks")?.or(target_chunks);
+    if residual_chunks.is_some() || jacobian_chunks.is_some() {
+        solver_backend_config = solver_backend_config
+            .map_aot_config(|config| config.with_target_chunks(residual_chunks, jacobian_chunks));
+    }
+
+    let scheme = required_string(solver_settings, "solver_settings", "scheme")?;
+    let strategy = required_string(solver_settings, "solver_settings", "strategy")?;
+    let linear_sys_method = optional_string(solver_settings, "linear_sys_method")?;
+    let method = required_string(solver_settings, "solver_settings", "method")?;
+    let abs_tolerance = required_f64(solver_settings, "solver_settings", "abs_tolerance")?;
+    let max_iterations = required_usize(solver_settings, "solver_settings", "max_iterations")?;
+    let loglevel = optional_string(solver_settings, "loglevel")?;
+
+    // Keep log suppression compatible with both historical spellings.
+    let dont_save_log = if solver_settings.contains_key("dont_save_log") {
+        required_bool(solver_settings, "solver_settings", "dont_save_log")?
+    } else if solver_settings.contains_key("dont_save_logs") {
+        required_bool(solver_settings, "solver_settings", "dont_save_logs")?
+    } else {
+        true
+    };
+
+    let strategy_params = if let Some(strategy_params) = task_hashmap.get("strategy_params") {
+        let max_jac = strategy_params
+            .get("max_jac")
+            .and_then(|value| value.as_ref())
+            .and_then(|values| values.first())
+            .and_then(|value| value.as_option_usize());
+        let max_damp_iter = strategy_params
+            .get("max_damp_iter")
+            .and_then(|value| value.as_ref())
+            .and_then(|values| values.first())
+            .and_then(|value| value.as_option_usize());
+        let damp_factor = strategy_params
+            .get("damp_factor")
+            .and_then(|value| value.as_ref())
+            .and_then(|values| values.first())
+            .and_then(|value| value.as_option_float());
+
+        let adaptive = if let Some(adaptive_strategy) = task_hashmap.get("adaptive_strategy") {
+            let version = required_usize(adaptive_strategy, "adaptive_strategy", "version")?;
+            let max_refinements =
+                required_usize(adaptive_strategy, "adaptive_strategy", "max_refinements")?;
+            let grid_refinement = required_section(task_hashmap, "grid_refinement")?;
+            let (method_name, method_values) = grid_refinement
+                .iter()
+                .next()
+                .ok_or_else(|| missing_field("grid_refinement", "method"))?;
+            let method_params = method_values
+                .as_ref()
+                .ok_or_else(|| missing_field("grid_refinement", method_name))?
+                .first()
+                .ok_or_else(|| missing_field("grid_refinement", method_name))?
+                .as_vector()
+                .ok_or_else(|| missing_field("grid_refinement", method_name))?;
+            if let Some(invalid) = method_params
+                .iter()
+                .copied()
+                .find(|value| !value.is_finite())
+            {
+                return Err(invalid_numeric("grid_refinement", method_name, invalid));
+            }
+            let grid_method = match method_name.as_str() {
+                "doubleoints" | "double_points" => GridRefinementMethod::DoublePoints,
+                "easy" => GridRefinementMethod::Easy(method_params[0]),
+                "grcarsmooke" | "grcar_smooke" => GridRefinementMethod::GrcarSmooke(
+                    method_params[0],
+                    method_params[1],
+                    method_params[2],
+                ),
+                "pearson" => GridRefinementMethod::Pearson(method_params[0], method_params[1]),
+                "twopnt" => GridRefinementMethod::TwoPoint(
+                    method_params[0],
+                    method_params[1],
+                    method_params[2],
+                ),
+                _ => {
+                    return Err(
+                        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
+                            format!("Unknown grid refinement method `{}`", method_name),
+                        ),
+                    );
+                }
+            };
+            Some(AdaptiveGridConfig {
+                version,
+                max_refinements,
+                grid_method,
+            })
+        } else {
+            None
+        };
+
+        Some(SolverParams {
+            max_jac,
+            max_damp_iter,
+            damp_factor,
+            adaptive,
+        })
+    } else {
+        None
+    };
+
+    Ok(ParsedSolverSettings {
+        solver_backend_config,
+        scheme,
+        strategy,
+        strategy_params,
+        linear_sys_method,
+        method,
+        abs_tolerance,
+        max_iterations,
+        loglevel,
+        dont_save_log,
+    })
+}
+
+/// Validate the dense solution matrix produced by the solver.
+///
+/// Solver backends may report a result without surfacing a structured failure.
+/// This helper keeps the public contract strict by rejecting empty or non-finite
+/// matrices before they are stored in reactor state.
+fn validate_solver_output_matrix(
+    solution: &DMatrix<f64>,
+) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    if solution.nrows() == 0 || solution.ncols() == 0 {
+        return Err(
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::CalculationError(
+                "Solver returned an empty solution matrix".to_string(),
+            ),
+        );
+    }
+    if let Some((idx, value)) = solution
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidNumericValue(format!(
+                "Solver returned non-finite value {} at flat index {}",
+                value, idx
+            )),
+        );
+    }
+    Ok(())
+}
+
+/// Build, configure, solve, and store a validated NRBVP snapshot.
+///
+/// The parser-facing solve methods share the same handoff logic; keeping it in
+/// one place avoids drift between `solve_from_map` and `solve_from_parsed`.
+fn solve_and_store_nrbvp(
+    reactor: &mut SimpleReactorTask,
+    task_map: &DocumentMap,
+    tolerance_config: ToleranceConfig,
+    bounds_config: BoundsConfig,
+    t0: f64,
+    t_end: f64,
+    n_steps: usize,
+    arg: String,
+    initial_guess: DMatrix<f64>,
+) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let solver_settings = parse_solver_settings_from_map(task_map)?;
+
+    let solver = &reactor.solver;
+    let mut nr = solver.build_nrbvp_backend(
+        crate::ReactorsBVP::SimpleReactorBVP::NrbvpHandoffConfig::new(
+            initial_guess,
+            t0,
+            t_end,
+            n_steps,
+            solver_settings.scheme,
+            solver_settings.strategy,
+            solver_settings.strategy_params,
+            solver_settings.linear_sys_method,
+            solver_settings.method,
+            solver_settings.abs_tolerance,
+            Some(tolerance_config.to_full_tolerance_map(&reactor.kindata.substances)),
+            solver_settings.max_iterations,
+            Some(bounds_config.to_full_bounds_map(&reactor.kindata.substances)),
+            solver_settings.loglevel,
+            solver_settings.dont_save_log,
+        )
+        .with_solver_backend_config(solver_settings.solver_backend_config),
+    )?;
+    nr.before_solve_preprocessing();
+    nr.solve();
+
+    let solution = nr.get_result().ok_or_else(|| {
+        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::CalculationError(
+            "Solver finished without producing a solution matrix".to_string(),
+        )
+    })?;
+    validate_solver_output_matrix(&solution)?;
+    if nr.x_mesh.is_empty() {
+        return Err(
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::CalculationError(
+                "Solver finished without producing an x mesh".to_string(),
+            ),
+        );
+    }
+    if nr.x_mesh.iter().any(|value| !value.is_finite()) {
+        return Err(
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidNumericValue(
+                "Solver x mesh contains non-finite values".to_string(),
+            ),
+        );
+    }
+
+    reactor.solver.x_mesh = Some(nr.x_mesh);
+    reactor.solver.solution = Some(solution);
+    reactor.solver.arg_name = arg;
+    set_postprocessing_from_map(reactor, task_map)?;
+    Ok(())
+}
+
+/// Apply post-processing options from a parsed document map.
+///
+/// This keeps the post-processing stage independent from `DocumentParser`
+/// so the solver path can work from either parsed or already-materialized
+/// configuration data without reparsing or mutating parser state.
+fn set_postprocessing_from_map(
+    reactor: &mut SimpleReactorTask,
+    task_hashmap: &DocumentMap,
+) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    reactor.check_balances()?;
+    let solver_settings = required_section(task_hashmap, "postprocessing")?;
+
+    // Flag to create plot via Rust native crate.
+    let plot_flag = match solver_settings.get("plot") {
+        Some(_) => required_bool(solver_settings, "postprocessing", "plot")?,
+        None => false,
+    };
+    // Flag to create plot via GNU plot library.
+    let gnuplot_flag = match solver_settings.get("gnuplot") {
+        Some(_) => required_bool(solver_settings, "postprocessing", "gnuplot")?,
+        None => false,
+    };
+    // Flag to save solution to txt.
+    let save_flag = match solver_settings.get("save") {
+        Some(_) => required_bool(solver_settings, "postprocessing", "save")?,
+        None => false,
+    };
+    let save_to_csv = match solver_settings.get("save_to_csv") {
+        Some(_) => required_bool(solver_settings, "postprocessing", "save_to_csv")?,
+        None => false,
+    };
+
+    let name = optional_string(solver_settings, "filename")?;
+    // Return from dimensionless to dimensioned unknowns.
+    let return_to_dimension = match solver_settings.get("return_to_dimension") {
+        Some(_) => required_bool(solver_settings, "postprocessing", "return_to_dimension")?,
+        None => true,
+    };
+    let no_plots_in_terminal = match solver_settings.get("no_plots_in_terminal") {
+        Some(_) => required_bool(solver_settings, "postprocessing", "no_plots_in_terminal")?,
+        None => false,
+    };
+
+    if return_to_dimension {
+        reactor.postprocessing()?;
+    }
+    if plot_flag {
+        reactor.plot()?;
+        let _ = show_image("Teta");
+    }
+    if gnuplot_flag {
+        reactor.gnuplot()?;
+        let _ = show_image("Teta");
+    }
+    if !no_plots_in_terminal {
+        reactor.plot_in_terminal()?;
+    }
+    if save_flag {
+        reactor.save_to_file(name.clone())?
+    }
+    if save_to_csv {
+        reactor.save_to_csv(name)?;
+    }
+    reactor.estimate_values()?;
+    Ok(())
+}
 impl SimpleReactorTask {
     /// Parses reactor parameters from a DocumentMap and populates the SimpleReactorTask structure.
     ///
@@ -73,206 +742,159 @@ impl SimpleReactorTask {
     /// - `boundary_condition`: Initial/boundary values for all variables
     /// - `diffusion_coefficients`: Transport properties for each substance
     /// - Chemical groups: Atomic composition for custom substance definitions
-    pub fn set_reactor_params_from_hashmap(&mut self, task_hashmap: DocumentMap) {
-        // reactions
-        let reactions = task_hashmap
-            .get("reactions")
-            .expect("Failed to get solver settings");
-
-        let reactions: HashMap<String, Vec<f64>> = reactions
-            .iter()
-            .map(|(key, value)| {
-                let binding = value.clone().unwrap();
-                let value = binding[0]
-                    .as_vector()
-                    .unwrap()
-                    .clone()
-                    .into_iter()
-                    .map(|val| val)
-                    .collect::<Vec<f64>>();
-
-                (key.to_owned(), value)
-            })
-            .collect();
-        let mut vec_of_struct: Vec<FastElemReact> = Vec::new();
-        for (key, value) in reactions {
-            let A = value[0];
-            let n = value[1];
-            let E = value[2];
-            let Q = value[3];
-            let react = FastElemReact {
-                eq: key,
-                A,
-                n,
-                E,
-                Q,
-            };
-
-            vec_of_struct.push(react);
+    pub fn set_reactor_params_from_hashmap(
+        &mut self,
+        task_hashmap: &DocumentMap,
+    ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+        let reactions = required_section(task_hashmap, "reactions")?;
+        let mut vec_of_struct: Vec<FastElemReact> = Vec::with_capacity(reactions.len());
+        for (key, value) in reactions.iter() {
+            let values = value
+                .as_ref()
+                .ok_or_else(|| missing_field("reactions", key))?;
+            let rates = values
+                .first()
+                .ok_or_else(|| missing_field("reactions", key))?
+                .as_vector()
+                .ok_or_else(|| missing_field("reactions", key))?;
+            if rates.len() != 4 {
+                return Err(
+                    crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
+                        format!(
+                            "Reaction `{}` must store exactly 4 Arrhenius parameters",
+                            key
+                        ),
+                    ),
+                );
+            }
+            if let Some(invalid) = rates.iter().copied().find(|value| !value.is_finite()) {
+                return Err(invalid_numeric("reactions", key, invalid));
+            }
+            vec_of_struct.push(FastElemReact {
+                eq: key.to_owned(),
+                A: rates[0],
+                n: rates[1],
+                E: rates[2],
+                Q: rates[3],
+            });
         }
+        self.fast_react_set(vec_of_struct)?;
 
-        let _ = self.fast_react_set(vec_of_struct);
+        let process_conditions = required_section(task_hashmap, "process_conditions")?;
+        self.problem_name = optional_string(process_conditions, "problem_name")?;
+        self.problem_description = optional_string(process_conditions, "problem_description")?;
 
-        //
-        let process_conditions = task_hashmap
-            .get("process_conditions")
-            .expect("Failed to get solver settings");
-        // String and f64 params
-        let problem_name = if let Some(problem_name_val) = process_conditions.get("problem_name") {
-            problem_name_val.clone().unwrap()[0]
-                .as_option_string()
+        let substances_values =
+            required_values(process_conditions, "process_conditions", "substances")?;
+        let mut substances: Vec<String> = Vec::with_capacity(substances_values.len());
+        for val in substances_values.iter() {
+            let substance = val
+                .as_string()
                 .cloned()
-        } else {
-            None
-        };
-        // dbg!(&roblem_name_val);
-        self.problem_name = problem_name;
-        let problem_description =
-            if let Some(problem_description) = process_conditions.get("problem_description") {
-                problem_description.clone().unwrap()[0]
-                    .as_option_string()
-                    .cloned()
-            } else {
-                None
-            };
-        let substances: Vec<String> = process_conditions
-            .get("substances")
-            .expect("Failed to get substances")
-            .clone()
-            .unwrap()
-            .iter()
-            .map(|val| val.as_string().unwrap().clone())
-            .collect();
-
+                .ok_or_else(|| missing_field("process_conditions", "substances"))?;
+            substances.push(substance);
+        }
         self.kindata.substances = substances;
 
-        self.problem_description = problem_description;
-        let Tm = process_conditions
-            .get("Tm")
-            .expect("Failed to get Tm")
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        self.Tm = Tm;
-        let L = process_conditions
-            .get("L")
-            .expect("Failed to get L")
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        let dT = process_conditions
-            .get("dT")
-            .expect("Failed to get dT")
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        let T_scale = process_conditions
-            .get("T_scale")
-            .expect("Failed to get T_scale")
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        let scaling = ScalingConfig::new(dT, L, T_scale);
-        self.scaling = scaling;
-        let P = process_conditions
-            .get("P")
-            .expect("Failed to get P")
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        self.P = P;
-        let Cp = process_conditions
-            .get("Cp")
-            .expect("Failed to get Cp")
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        self.Cp = Cp;
-        let Lambda = process_conditions
-            .get("Lambda")
-            .expect("Failed to get Lambda")
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        self.Lambda = Lambda;
-        let m = process_conditions
-            .get("m")
-            .expect("Failed to get m")
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        self.m = m;
-        if let Some(M) = process_conditions.get("M") {
-            let M = M.clone().unwrap()[0].as_float().unwrap();
-            self.M = M;
+        self.Tm = required_f64(process_conditions, "process_conditions", "Tm")?;
+        let L = required_f64(process_conditions, "process_conditions", "L")?;
+        let dT = required_f64(process_conditions, "process_conditions", "dT")?;
+        let T_scale = required_f64(process_conditions, "process_conditions", "T_scale")?;
+        self.scaling = ScalingConfig::new(dT, L, T_scale);
+        self.P = required_f64(process_conditions, "process_conditions", "P")?;
+        self.Cp = required_f64(process_conditions, "process_conditions", "Cp")?;
+        self.Lambda = required_f64(process_conditions, "process_conditions", "Lambda")?;
+        self.m = required_f64(process_conditions, "process_conditions", "m")?;
+        if let Some(mass) = process_conditions.get("M") {
+            let values = mass
+                .as_ref()
+                .ok_or_else(|| missing_field("process_conditions", "M"))?;
+            let value = values
+                .first()
+                .ok_or_else(|| missing_field("process_conditions", "M"))?
+                .as_float()
+                .ok_or_else(|| missing_field("process_conditions", "M"))?;
+            if !value.is_finite() {
+                return Err(invalid_numeric("process_conditions", "M", value));
+            }
+            self.M = value;
         }
-        // parsing vectors and hashmaps
-        let thermal_effects = process_conditions
-            .get("thermal_effects")
-            .expect("Failed to get thermal_effects")
-            .clone()
-            .unwrap()[0]
-            .as_vector()
-            .unwrap()
-            .clone();
 
-        self.thermal_effects = thermal_effects;
-        let boundary_condition = task_hashmap
-            .get("boundary_condition")
-            .expect("Failed to get solver settings");
-        let boundary_condition: HashMap<String, f64> = boundary_condition
-            .iter()
-            .map(|(key, value)| {
-                let binding = value.clone().unwrap();
+        self.thermal_effects =
+            required_vector_f64(process_conditions, "process_conditions", "thermal_effects")?;
 
-                let value = binding[0].as_float().unwrap();
-
-                (key.to_owned(), value)
-            })
-            .collect();
+        let boundary_condition_section = required_section(task_hashmap, "boundary_condition")?;
+        let mut boundary_condition: HashMap<String, f64> =
+            HashMap::with_capacity(boundary_condition_section.len());
+        for (key, value) in boundary_condition_section.iter() {
+            let values = value
+                .as_ref()
+                .ok_or_else(|| missing_field("boundary_condition", key))?;
+            let value = values
+                .first()
+                .ok_or_else(|| missing_field("boundary_condition", key))?
+                .as_float()
+                .ok_or_else(|| missing_field("boundary_condition", key))?;
+            if !value.is_finite() {
+                return Err(invalid_numeric("boundary_condition", key, value));
+            }
+            boundary_condition.insert(key.to_owned(), value);
+        }
         self.boundary_condition = boundary_condition;
-        let diffusion_coefficients = task_hashmap
-            .get("diffusion_coefficients")
-            .expect("Failed to get solver settings");
-        let diffusion_coefficients: HashMap<String, f64> = diffusion_coefficients
-            .iter()
-            .map(|(key, value)| {
-                let binding = value.clone().unwrap();
-                let value = binding[0].as_float().unwrap();
 
-                (key.to_owned(), value)
-            })
-            .collect();
+        let diffusion_coefficients_section =
+            required_section(task_hashmap, "diffusion_coefficients")?;
+        let mut diffusion_coefficients: HashMap<String, f64> =
+            HashMap::with_capacity(diffusion_coefficients_section.len());
+        for (key, value) in diffusion_coefficients_section.iter() {
+            let values = value
+                .as_ref()
+                .ok_or_else(|| missing_field("diffusion_coefficients", key))?;
+            let value = values
+                .first()
+                .ok_or_else(|| missing_field("diffusion_coefficients", key))?
+                .as_float()
+                .ok_or_else(|| missing_field("diffusion_coefficients", key))?;
+            if !value.is_finite() {
+                return Err(invalid_numeric("diffusion_coefficients", key, value));
+            }
+            diffusion_coefficients.insert(key.to_owned(), value);
+        }
         self.Diffusion = diffusion_coefficients;
-        // groups
+
         if let Some(groups_val) = process_conditions.get("groups") {
-            let groups_enabled = groups_val.clone().unwrap()[0].as_boolean().unwrap();
+            let values = groups_val
+                .as_ref()
+                .ok_or_else(|| missing_field("process_conditions", "groups"))?;
+            let groups_enabled = values
+                .first()
+                .ok_or_else(|| missing_field("process_conditions", "groups"))?
+                .as_boolean()
+                .ok_or_else(|| missing_field("process_conditions", "groups"))?;
             if groups_enabled {
-                let mut groups: HashMap<String, HashMap<String, usize>> = HashMap::new();
+                let mut groups: HashMap<String, HashMap<String, usize>> =
+                    HashMap::with_capacity(self.kindata.substances.len());
                 for sub_i in self.kindata.substances.iter() {
                     if let Some(sub_i_groups) = task_hashmap.get(sub_i.as_str()) {
-                        let sub_i_groups_hashmap: HashMap<String, usize> = sub_i_groups
-                            .iter()
-                            .map(|(key, value)| {
-                                let binding = value.clone().unwrap();
-                                let value = binding[0].as_usize().unwrap();
-                                (key.to_owned(), value)
-                            })
-                            .collect();
+                        let mut sub_i_groups_hashmap: HashMap<String, usize> =
+                            HashMap::with_capacity(sub_i_groups.len());
+                        for (key, value) in sub_i_groups.iter() {
+                            let values = value.as_ref().ok_or_else(|| missing_field(sub_i, key))?;
+                            let value = values
+                                .first()
+                                .ok_or_else(|| missing_field(sub_i, key))?
+                                .as_usize()
+                                .ok_or_else(|| missing_field(sub_i, key))?;
+                            sub_i_groups_hashmap.insert(key.to_owned(), value);
+                        }
                         groups.insert(sub_i.clone(), sub_i_groups_hashmap);
                     }
                 }
                 self.kindata.groups = Some(groups);
             }
         }
+
+        Ok(())
     }
     /// Parses solver tolerance and bounds configurations from the document.
     ///
@@ -299,89 +921,26 @@ impl SimpleReactorTask {
     /// Teta: -100.0, 100.0
     /// q: -1e20, 1e20
     /// ```
+    fn parse_tolerance_and_bounds(
+        &mut self,
+        parser: &mut DocumentParser,
+    ) -> Result<(ToleranceConfig, BoundsConfig), crate::ReactorsBVP::SimpleReactorBVP::ReactorError>
+    {
+        let task_hashmap = parser.get_result().ok_or_else(|| {
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::ParseError(
+                "document must be parsed before tolerance extraction".to_string(),
+            )
+        })?;
+        parse_tolerance_and_bounds_from_map(task_hashmap)
+    }
+
+    /// Legacy spelling kept for compatibility with older call sites.
     fn parse_toleranse_and_bounds(
         &mut self,
         parser: &mut DocumentParser,
-    ) -> Result<(ToleranceConfig, BoundsConfig), String> {
-        let task_hashmap = parser.get_result().unwrap();
-        // Parse tolerance configuration
-        let rel_tolerance = task_hashmap.get("rel_tolerance").unwrap();
-        let C = rel_tolerance
-            .get("C")
-            .ok_or("Missing C in rel_tolerance")?
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        let J = rel_tolerance
-            .get("J")
-            .ok_or("Missing J in rel_tolerance")?
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        let Teta = rel_tolerance
-            .get("Teta")
-            .ok_or("Missing Teta in rel_tolerance")?
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        let q = rel_tolerance
-            .get("q")
-            .ok_or("Missing q in rel_tolerance")?
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        let tolerance_config = ToleranceConfig::new(C, J, Teta, q);
-
-        // Parse bounds configuration
-        let bounds = task_hashmap.get("bounds").unwrap();
-        let C_bounds = bounds
-            .get("C")
-            .expect("Missing C in bounds")
-            .clone()
-            .unwrap();
-
-        let C = (
-            C_bounds[0].as_float().unwrap(),
-            C_bounds[1].as_float().unwrap(),
-        );
-
-        let J_bounds = bounds
-            .get("J")
-            .expect("Missing J in bounds")
-            .clone()
-            .unwrap();
-        let J = (
-            J_bounds[0].as_float().unwrap(),
-            J_bounds[1].as_float().unwrap(),
-        );
-
-        let Teta_bounds = bounds
-            .get("Teta")
-            .expect("Missing Teta in bounds")
-            .clone()
-            .unwrap();
-        let Teta = (
-            Teta_bounds[0].as_float().unwrap(),
-            Teta_bounds[1].as_float().unwrap(),
-        );
-
-        let q_bounds = bounds
-            .get("q")
-            .expect("Missing q in bounds")
-            .clone()
-            .unwrap();
-        let q = (
-            q_bounds[0].as_float().unwrap(),
-            q_bounds[1].as_float().unwrap(),
-        );
-
-        let bounds_config = BoundsConfig::new(C, J, Teta, q);
-
-        Ok((tolerance_config, bounds_config))
+    ) -> Result<(ToleranceConfig, BoundsConfig), crate::ReactorsBVP::SimpleReactorBVP::ReactorError>
+    {
+        self.parse_tolerance_and_bounds(parser)
     }
 
     /// Extracts basic solver settings (time domain and grid size) from the parsed document.
@@ -391,193 +950,49 @@ impl SimpleReactorTask {
     ///
     /// # Returns
     /// * `(t0, t_end, n_steps)` - Start time, end time, and number of grid steps
-    pub fn parse_basic_settings(&mut self, parser: DocumentParser) -> (f64, f64, usize, String) {
-        let task_hashmap = parser.get_result().unwrap();
-        let process_conditions = task_hashmap
-            .get("process_conditions")
-            .expect("Failed to get solver settings");
-        let t0 = process_conditions
-            .get("t0")
-            .expect("Failed to get t0")
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        let t_end = process_conditions
-            .get("t_end")
-            .expect("Failed to get t_end")
-            .clone()
-            .unwrap()[0]
-            .as_float()
-            .unwrap();
-        let n_steps = process_conditions
-            .get("n_steps")
-            .expect("Failed to get n_steps")
-            .clone()
-            .unwrap()[0]
-            .as_usize()
-            .unwrap();
-        let arg = if let Some(arg) = process_conditions.get("arg") {
-            arg.clone().unwrap()[0].as_string().unwrap().clone()
-        } else {
-            "x".to_string()
-        };
-        (t0, t_end, n_steps, arg)
+    pub fn parse_basic_settings(
+        &mut self,
+        parser: DocumentParser,
+    ) -> Result<(f64, f64, usize, String), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+        let task_hashmap = parser.get_result().ok_or_else(|| {
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::ParseError(
+                "document must be parsed before settings extraction".to_string(),
+            )
+        })?;
+        parse_basic_settings_from_map(task_hashmap)
     }
 
-    pub fn set_postpocessing_from_hashmap(&mut self, parser: &mut DocumentParser) {
-        self.check_balances();
-        let result: DocumentMap = parser.get_result().unwrap().clone();
-        let solver_settings = result
-            .get("postprocessing")
-            .expect("Failed to get postpocessing");
-        // flag to create plot via rust native crate
-        let plot_flag = if let Some(plot) = solver_settings.get("plot") {
-            plot.clone().unwrap()[0]
-                .as_boolean()
-                .expect("Failed to get plot as bool")
-        } else {
-            false
-        };
-        // flag to create plot via GNU plot library
-        let gnuplot_flag = if let Some(gnuplotflag) = solver_settings.get("gnuplot") {
-            gnuplotflag.clone().unwrap()[0]
-                .as_boolean()
-                .expect("Failed to get gnuplot as bool")
-        } else {
-            false
-        };
-        // flag to save solution to txt
-        let save_flag = if let Some(save) = solver_settings.get("save") {
-            save.clone().unwrap()[0]
-                .as_boolean()
-                .expect("Failed to get save as bool")
-        } else {
-            false
-        };
-        let save_to_csv = if let Some(save) = solver_settings.get("save_to_csv") {
-            save.clone().unwrap()[0]
-                .as_boolean()
-                .expect("Failed to get save_to_csv as bool")
-        } else {
-            false
-        };
+    pub fn set_postprocessing_from_hashmap(
+        &mut self,
+        parser: &mut DocumentParser,
+    ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+        let result = parser.get_result().ok_or_else(|| {
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::ParseError(
+                "document must be parsed before postprocessing".to_string(),
+            )
+        })?;
+        set_postprocessing_from_map(self, result)
+    }
 
-        let name = if let Some(name) = solver_settings.get("filename") {
-            name.clone().unwrap()[0].as_string().cloned()
-        } else {
-            None
-        };
-        // return from dimensionless to dimensioned unknowns
-        let return_to_dimension =
-            if let Some(return_to_dimension) = solver_settings.get("return_to_dimension") {
-                return_to_dimension.clone().unwrap()[0]
-                    .as_boolean()
-                    .unwrap()
-            } else {
-                true
-            };
-        let no_plots_in_terminal =
-            if let Some(no_plots_in_terminal) = solver_settings.get("no_plots_in_terminal") {
-                no_plots_in_terminal.clone().unwrap()[0]
-                    .as_boolean()
-                    .unwrap()
-            } else {
-                false
-            };
-        if return_to_dimension {
-            self.postprocessing();
-        }
-        if plot_flag {
-            self.plot();
-            let _ = show_image("Teta");
-        }
-        if gnuplot_flag {
-            self.gnuplot();
-            let _ = show_image("Teta");
-        };
-        if !no_plots_in_terminal {
-            self.plot_in_terminal();
-        }
-        if save_flag {
-            self.save_to_file(name.clone())
-        };
-        if save_to_csv {
-            self.save_to_csv(name);
-        };
-        self.estimate_values();
+    /// Legacy spelling kept for compatibility with older call sites.
+    pub fn set_postpocessing_from_hashmap(
+        &mut self,
+        parser: &mut DocumentParser,
+    ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+        self.set_postprocessing_from_hashmap(parser)
     }
 
     pub fn set_initial_guess_from_map(
         &mut self,
         parser: DocumentParser,
         n_steps: usize,
-    ) -> DMatrix<f64> {
-        let result: DocumentMap = parser.get_result().unwrap().clone();
-        let inconfing = InitialConfig::new();
-        let initial_guess: DMatrix<f64> = if let Some(guess_info) = result.get("initial_guess") {
-            let res = if let Some(universal) = guess_info.get("universal") {
-                let val = universal.clone().expect("there must be value")[0]
-                    .as_float()
-                    .unwrap();
-                let res = inconfing.only_one_value_for_all_initial(
-                    val,
-                    n_steps,
-                    self.solver.unknowns.len(),
-                );
-                println!("int the task found universal initial condition {}", val);
-                res.unwrap()
-            } else {
-                // for every type of variable its own initial guess
-                let C_val = guess_info
-                    .get("C")
-                    .expect("no initial guess C")
-                    .clone()
-                    .unwrap()[0]
-                    .as_float()
-                    .unwrap();
-                let J_val = guess_info
-                    .get("J")
-                    .expect("no initial guess J")
-                    .clone()
-                    .unwrap()[0]
-                    .as_float()
-                    .unwrap();
-                let Teta_val = guess_info
-                    .get("Teta")
-                    .expect("no initial guess Teta")
-                    .clone()
-                    .unwrap()[0]
-                    .as_float()
-                    .unwrap();
-                let q_val = guess_info
-                    .get("q")
-                    .expect("no initial guess q")
-                    .clone()
-                    .unwrap()[0]
-                    .as_float()
-                    .unwrap();
-                let map = HashMap::from([
-                    ("C".to_string(), C_val),
-                    ("J".to_string(), J_val),
-                    ("Teta".to_string(), Teta_val),
-                    ("q".to_string(), q_val),
-                ]);
-                let res = inconfing.all_const_initial(map, n_steps);
-                res.unwrap()
-            };
-            res
-        } else {
-            println!(
-                "no initial guess is set: default initial value - 1e-2 for all variables and mesh"
-            );
-            let res =
-                inconfing.only_one_value_for_all_initial(1e-2, n_steps, self.solver.unknowns.len());
-            res.unwrap()
-        };
-        println!("got initial guess of shape {:?}", initial_guess.shape());
-
-        initial_guess
+    ) -> Result<DMatrix<f64>, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+        let result = parser.get_result().ok_or_else(|| {
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::ParseError(
+                "document must be parsed before initial guess extraction".to_string(),
+            )
+        })?;
+        set_initial_guess_from_map_data(result, n_steps, self.solver.unknowns.len())
     }
     /// Complete workflow: parses configuration, sets up BVP, configures solver, and solves the problem.
     ///
@@ -595,44 +1010,46 @@ impl SimpleReactorTask {
     /// 4. Parse tolerances and bounds
     /// 5. Set initial guess and solve
     /// 6. Apply postprocessing (plotting, data export)
-    pub fn solve_from_map(&mut self, mut parser: DocumentParser) {
-        self.parse_parameters_with_exact_names(&mut parser)
-            .expect("Failed to parse parameters");
-        let _ = self.setup_bvp();
-        assert!(!self.solver.unknowns.is_empty());
-        assert!(!self.solver.eq_system.is_empty());
-
-        let mut nr = NRBVP::default();
-        let _ = nr.parse_settings(&mut parser);
-        let solver = &self.solver;
-        nr.eq_system = solver.eq_system.clone();
-        nr.values = solver.unknowns.clone();
-        let BC = solver.BorderConditions.clone();
-        let BC: HashMap<String, Vec<(usize, f64)>> =
-            BC.iter().map(|(k, v)| (k.clone(), vec![*v])).collect();
-        nr.BorderConditions = BC;
-        let (tolerance_config, bounds_config) =
-            self.parse_toleranse_and_bounds(&mut parser).unwrap();
-        let rel_tolerance = Some(tolerance_config.to_full_tolerance_map(&self.kindata.substances));
-        let bounds = Some(bounds_config.to_full_bounds_map(&self.kindata.substances));
-        nr.rel_tolerance = rel_tolerance;
-        nr.Bounds = bounds;
-        let (t0, t_end, n_steps, arg) = self.parse_basic_settings(parser.clone());
-        nr.t0 = t0;
-        nr.t_end = t_end;
-        nr.arg = arg.clone();
-        nr.n_steps = n_steps;
-        self.solver.arg_name = arg;
-        let initial_guess = self.set_initial_guess_from_map(parser.clone(), n_steps);
-        //  let ig = vec![1e-2; n_steps *self.solver.unknowns.len()];
-        // let initial_guess = DMatrix::from_vec(self.solver.unknowns.len(), n_steps, ig);
-        nr.initial_guess = initial_guess;
-        nr.before_solve_preprocessing();
-        nr.solve();
-        self.solver.x_mesh = Some(nr.x_mesh.clone());
-        let y_result = nr.get_result();
-        self.solver.solution = y_result;
-        self.set_postpocessing_from_hashmap(&mut parser);
+    pub fn solve_from_map(
+        &mut self,
+        mut parser: DocumentParser,
+    ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+        self.parse_parameters_with_exact_names(&mut parser)?;
+        let task_map = parser.get_result().ok_or_else(|| {
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::ParseError(
+                "document must be parsed before solver setup".to_string(),
+            )
+        })?;
+        let (tolerance_config, bounds_config) = parse_tolerance_and_bounds_from_map(task_map)?;
+        let (t0, t_end, n_steps, arg) = parse_basic_settings_from_map(task_map)?;
+        self.setup_bvp()?;
+        if self.solver.unknowns.is_empty() {
+            return Err(
+                crate::ReactorsBVP::SimpleReactorBVP::ReactorError::MissingData(
+                    "Solver unknowns were not initialized".to_string(),
+                ),
+            );
+        }
+        if self.solver.eq_system.is_empty() {
+            return Err(
+                crate::ReactorsBVP::SimpleReactorBVP::ReactorError::MissingData(
+                    "Solver equation system was not initialized".to_string(),
+                ),
+            );
+        }
+        let initial_guess =
+            set_initial_guess_from_map_data(task_map, n_steps, self.solver.unknowns.len())?;
+        solve_and_store_nrbvp(
+            self,
+            task_map,
+            tolerance_config,
+            bounds_config,
+            t0,
+            t_end,
+            n_steps,
+            arg,
+            initial_guess,
+        )
     }
 
     /// One-shot method: reads configuration file, parses it, and solves the BVP problem.
@@ -642,14 +1059,17 @@ impl SimpleReactorTask {
     ///
     /// # Arguments
     /// * `path` - Path to the configuration file
-    pub fn solve_from_file(&mut self, path: std::path::PathBuf) {
-        let mut reactor = SimpleReactorTask::new();
-        // Test parsing
-        let mut parser = reactor
+    pub fn solve_from_file(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+        let mut parser = self
             .parse_file(Some(path))
-            .expect("Failed to parse file");
-        let _ = parser.parse_document();
-        reactor.solve_from_map(parser);
+            .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::ParseError)?;
+        parser
+            .parse_document()
+            .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::ParseError)?;
+        self.solve_from_map(parser)
     }
 
     /// Creates a DocumentParser from a file path.
@@ -685,57 +1105,60 @@ impl SimpleReactorTask {
     pub fn parse_parameters_with_exact_names(
         &mut self,
         parser: &mut DocumentParser,
-    ) -> Result<(), String> {
-        let _ = parser.parse_document();
-
-        let result: DocumentMap = parser
-            .get_result()
-            .ok_or("No result after parsing")?
-            .clone();
-        self.set_reactor_params_from_hashmap(result);
+    ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+        // Keep the helper idempotent: callers may hand us a parser that is already parsed.
+        // Re-parsing can mutate the internal document shape in some backends, so we only
+        // parse when the result cache is still empty.
+        if parser.get_result().is_none() {
+            parser
+                .parse_document()
+                .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::ParseError)?;
+        }
+        let result = parser.get_result().ok_or_else(|| {
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::ParseError(
+                "No result after parsing".to_string(),
+            )
+        })?;
+        self.set_reactor_params_from_hashmap(result)?;
         Ok(())
     }
 
-    pub fn solve_from_parsed(&mut self, map: DocumentMap) -> Result<(), String> {
-        let mut parser = DocumentParser::new(String::new());
-        parser.result = Some(map.clone());
-        self.set_reactor_params_from_hashmap(map);
-        let _ = self.setup_bvp();
-        assert!(!self.solver.unknowns.is_empty());
-        assert!(!self.solver.eq_system.is_empty());
-
-        let mut nr = NRBVP::default();
-        let _ = nr.parse_settings(&mut parser);
-        let solver = &self.solver;
-        nr.eq_system = solver.eq_system.clone();
-        nr.values = solver.unknowns.clone();
-        let BC = solver.BorderConditions.clone();
-        let BC: HashMap<String, Vec<(usize, f64)>> =
-            BC.iter().map(|(k, v)| (k.clone(), vec![*v])).collect();
-        nr.BorderConditions = BC;
-        let (tolerance_config, bounds_config) =
-            self.parse_toleranse_and_bounds(&mut parser).unwrap();
-        let rel_tolerance = Some(tolerance_config.to_full_tolerance_map(&self.kindata.substances));
-        let bounds = Some(bounds_config.to_full_bounds_map(&self.kindata.substances));
-        nr.rel_tolerance = rel_tolerance;
-        nr.Bounds = bounds;
-        let (t0, t_end, n_steps, arg) = self.parse_basic_settings(parser.clone());
-        nr.t0 = t0;
-        nr.t_end = t_end;
-        nr.arg = arg.clone();
-        nr.n_steps = n_steps;
-        self.solver.arg_name = arg;
-        let initial_guess = self.set_initial_guess_from_map(parser.clone(), n_steps);
-        //  let ig = vec![1e-2; n_steps *self.solver.unknowns.len()];
-        // let initial_guess = DMatrix::from_vec(self.solver.unknowns.len(), n_steps, ig);
-        nr.initial_guess = initial_guess;
-        nr.before_solve_preprocessing();
-        nr.solve();
-        self.solver.x_mesh = Some(nr.x_mesh.clone());
-        let y_result = nr.get_result();
-        self.solver.solution = y_result;
-        self.set_postpocessing_from_hashmap(&mut parser);
-        Ok(())
+    pub fn solve_from_parsed(
+        &mut self,
+        map: DocumentMap,
+    ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+        let task_map = map;
+        self.set_reactor_params_from_hashmap(&task_map)?;
+        let (tolerance_config, bounds_config) = parse_tolerance_and_bounds_from_map(&task_map)?;
+        let (t0, t_end, n_steps, arg) = parse_basic_settings_from_map(&task_map)?;
+        self.setup_bvp()?;
+        if self.solver.unknowns.is_empty() {
+            return Err(
+                crate::ReactorsBVP::SimpleReactorBVP::ReactorError::MissingData(
+                    "Solver unknowns were not initialized".to_string(),
+                ),
+            );
+        }
+        if self.solver.eq_system.is_empty() {
+            return Err(
+                crate::ReactorsBVP::SimpleReactorBVP::ReactorError::MissingData(
+                    "Solver equation system was not initialized".to_string(),
+                ),
+            );
+        }
+        let initial_guess =
+            set_initial_guess_from_map_data(&task_map, n_steps, self.solver.unknowns.len())?;
+        solve_and_store_nrbvp(
+            self,
+            &task_map,
+            tolerance_config,
+            bounds_config,
+            t0,
+            t_end,
+            n_steps,
+            arg,
+            initial_guess,
+        )
     }
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -817,19 +1240,19 @@ pub const SIMPLE_BVP_TEMPLATE: &'static str = r#"
         #Grid refinement method and parameters
         grid_refinement
         // Available methods:
-        // doubleoints: []
+        // double_points: []
         // easy: [parameter]
-        // grcarsmooke: [param1, param2, param3]
+        // grcar_smooke: [param1, param2, param3] (legacy token: grcarsmooke)
         // pearson: [param1, param2]
         // twopnt: [param1, param2, param3]
-        grcarsmooke: [0.05, 0.05, 1.25]
+        grcar_smooke: [0.05, 0.05, 1.25]
         postprocessing
         gnuplot:true
         save_to_csv:false
         filename: meow
         gui_plot: true
         "#;
-pub fn create_template() {
+pub fn create_template() -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
     use std::fs::File;
     use std::io::Write;
 
@@ -992,9 +1415,9 @@ max_refinements: 3
 #Grid refinement method and parameters
 grid_refinement
 // Available methods:
-// doubleoints: []
+// double_points: []
 // easy: [parameter]
-// grcarsmooke: [param1, param2, param3]
+// grcar_smooke: [param1, param2, param3] (legacy token: grcarsmooke)
 // pearson: [param1, param2]
 // twopnt: [param1, param2, param3]
 pearson: [0.1, 1.5]
@@ -1009,15 +1432,26 @@ save_to_csv: false
 filename: output_name
 "#;
 
-    let mut file = File::create("template.txt").expect("Failed to create template.txt");
-    file.write_all(template_content.as_bytes())
-        .expect("Failed to write template");
-    println!("Template created: template.txt");
+    let mut file = File::create("template.txt").map_err(|err| {
+        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::CalculationError(format!(
+            "Failed to create template.txt: {}",
+            err
+        ))
+    })?;
+    file.write_all(template_content.as_bytes()).map_err(|err| {
+        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::CalculationError(format!(
+            "Failed to write template.txt: {}",
+            err
+        ))
+    })?;
+    info!("Template created: template.txt");
+    Ok(())
 }
 ////////////////////////////////////////////////////TESTS///////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ReactorsBVP::SimpleReactorBVP::ReactorError;
     use std::fs::File;
     use std::io::Write;
     use tempfile::tempdir;
@@ -1094,12 +1528,12 @@ mod tests {
         #Grid refinement method and parameters
         grid_refinement
         // Available methods:
-        // doubleoints: []
+        // double_points: []
         // easy: [parameter]
-        // grcarsmooke: [param1, param2, param3]
+        // grcar_smooke: [param1, param2, param3] (legacy token: grcarsmooke)
         // pearson: [param1, param2]
         // twopnt: [param1, param2, param3]
-        grcarsmooke: [0.05, 0.05, 1.25]
+        grcar_smooke: [0.05, 0.05, 1.25]
         postprocessing
         gnuplot:true
         save_to_csv:false
@@ -1109,7 +1543,7 @@ mod tests {
     fn parse_directly() {
         let mut parser = DocumentParser::new(task_content.to_string());
         let result: DocumentMap = parser.parse_document().unwrap().clone();
-        println!("result {:?}", result);
+        info!("result {:?}", result);
     }
     #[test]
     fn check_substances() {
@@ -1122,7 +1556,7 @@ mod tests {
             .clone()
             .unwrap();
 
-        println!("substances {:?}", substances[0]);
+        info!("substances {:?}", substances[0]);
     }
 
     #[test]
@@ -1130,8 +1564,13 @@ mod tests {
         let mut parser = DocumentParser::new(task_content.to_string());
         let result: DocumentMap = parser.parse_document().unwrap().clone();
         let mut reactor = SimpleReactorTask::new();
-        let _ = reactor.solve_from_parsed(result);
-        println!("solution {:?}", reactor.solver.solution);
+        reactor
+            .solve_from_parsed(result)
+            .expect("Failed to solve parsed task");
+        assert!(reactor.solver.solution.is_some());
+        assert!(reactor.solver.x_mesh.is_some());
+        assert!(!reactor.solver.x_mesh.as_ref().unwrap().is_empty());
+        info!("solution {:?}", reactor.solver.solution);
     }
     #[test]
     fn parsng_task_elementary() {
@@ -1153,7 +1592,7 @@ mod tests {
             .parse_file(Some(file_path))
             .expect("Failed to parse file");
         let _ = parser.parse_document();
-        println!("parser {:?}", parser);
+        info!("parser {:?}", parser);
 
         reactor
             .parse_parameters_with_exact_names(&mut parser)
@@ -1234,6 +1673,228 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_solver_settings_accepts_aot_backend_options() {
+        let mut solver_settings = HashMap::new();
+        solver_settings.insert(
+            "scheme".to_string(),
+            Some(vec![Value::String("forward".to_string())]),
+        );
+        solver_settings.insert(
+            "strategy".to_string(),
+            Some(vec![Value::String("Damped".to_string())]),
+        );
+        solver_settings.insert(
+            "method".to_string(),
+            Some(vec![Value::String("Sparse".to_string())]),
+        );
+        solver_settings.insert("abs_tolerance".to_string(), Some(vec![Value::Float(1e-8)]));
+        solver_settings.insert("max_iterations".to_string(), Some(vec![Value::Usize(50)]));
+        solver_settings.insert(
+            "generated_backend".to_string(),
+            Some(vec![Value::String("banded_aot_tcc".to_string())]),
+        );
+        solver_settings.insert(
+            "aot_compiler".to_string(),
+            Some(vec![Value::String("zig".to_string())]),
+        );
+        solver_settings.insert(
+            "aot_build_policy".to_string(),
+            Some(vec![Value::String("require_prebuilt".to_string())]),
+        );
+        solver_settings.insert(
+            "aot_compile_preset".to_string(),
+            Some(vec![Value::String("fast_build".to_string())]),
+        );
+        solver_settings.insert(
+            "aot_execution_policy".to_string(),
+            Some(vec![Value::String("parallel".to_string())]),
+        );
+        solver_settings.insert("aot_target_chunks".to_string(), Some(vec![Value::Usize(4)]));
+
+        let mut document = DocumentMap::new();
+        document.insert("solver_settings".to_string(), solver_settings);
+
+        let parsed =
+            parse_solver_settings_from_map(&document).expect("AOT solver settings should parse");
+        let options = parsed
+            .solver_backend_config
+            .to_rusted_options()
+            .expect("Parsed AOT settings should build RustedSciThe options");
+
+        assert_eq!(
+            options.generated_backend_config.aot_codegen_backend,
+            RustedSciThe::symbolic::codegen::codegen_aot_driver::AotCodegenBackend::Zig
+        );
+        assert_eq!(options.generated_backend_config.aot_c_compiler, None);
+        assert!(matches!(
+            options.generated_backend_config.aot_build_policy,
+            RustedSciThe::numerical::BVP_Damp::generated_solver_handoff::AotBuildPolicy::RequirePrebuilt
+        ));
+        assert!(matches!(
+            options.generated_backend_config.aot_execution_policy,
+            RustedSciThe::numerical::BVP_Damp::generated_solver_handoff::AotExecutionPolicy::Parallel(_)
+        ));
+        assert!(
+            options
+                .generated_backend_config
+                .aot_chunking_policy
+                .residual
+                .is_some()
+        );
+        assert!(
+            options
+                .generated_backend_config
+                .aot_chunking_policy
+                .sparse_jacobian
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_parse_tolerance_and_bounds_alias_matches_legacy_spelling() {
+        let mut reactor = SimpleReactorTask::new();
+
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("test_bounds_alias.txt");
+
+        let mut file = File::create(&file_path).expect("Failed to create temp file");
+        file.write_all(task_content.as_bytes())
+            .expect("Failed to write to temp file");
+
+        let mut legacy_parser = reactor
+            .parse_file(Some(file_path.clone()))
+            .expect("Failed to parse file");
+        let _ = legacy_parser.parse_document();
+
+        let mut alias_parser = reactor
+            .parse_file(Some(file_path))
+            .expect("Failed to parse file");
+        let _ = alias_parser.parse_document();
+
+        let legacy = reactor
+            .parse_toleranse_and_bounds(&mut legacy_parser)
+            .expect("Legacy spelling should still work");
+        let alias = reactor
+            .parse_tolerance_and_bounds(&mut alias_parser)
+            .expect("New spelling should work too");
+
+        assert_eq!(legacy.0.C, alias.0.C);
+        assert_eq!(legacy.0.J, alias.0.J);
+        assert_eq!(legacy.0.Teta, alias.0.Teta);
+        assert_eq!(legacy.0.q, alias.0.q);
+        assert_eq!(legacy.1.C, alias.1.C);
+        assert_eq!(legacy.1.J, alias.1.J);
+        assert_eq!(legacy.1.Teta, alias.1.Teta);
+        assert_eq!(legacy.1.q, alias.1.q);
+    }
+
+    #[test]
+    fn test_parse_grid_refinement_alias_matches_legacy_spelling() {
+        let mut reactor = SimpleReactorTask::new();
+
+        let legacy_task = task_content.to_string();
+        let alias_task = task_content
+            .replace("grcarsmooke", "grcar_smooke")
+            .replace("doubleoints", "double_points");
+
+        let mut legacy_parser = DocumentParser::new(legacy_task);
+        legacy_parser
+            .parse_document()
+            .expect("Legacy spelling should parse");
+        let mut alias_parser = DocumentParser::new(alias_task);
+        alias_parser
+            .parse_document()
+            .expect("Corrected spelling should parse");
+
+        let legacy = reactor.parse_parameters_with_exact_names(&mut legacy_parser);
+        let alias = reactor.parse_parameters_with_exact_names(&mut alias_parser);
+
+        assert!(legacy.is_ok());
+        assert!(alias.is_ok());
+    }
+
+    #[test]
+    fn test_parse_toleranse_and_bounds_accepts_scalar_pairs() {
+        let mut bounds = HashMap::new();
+        bounds.insert(
+            "C".to_string(),
+            Some(vec![Value::Float(-10.0), Value::Float(10.0)]),
+        );
+        bounds.insert(
+            "J".to_string(),
+            Some(vec![Value::Float(-1e20), Value::Float(1e20)]),
+        );
+        bounds.insert(
+            "Teta".to_string(),
+            Some(vec![Value::Float(-100.0), Value::Float(100.0)]),
+        );
+        bounds.insert(
+            "q".to_string(),
+            Some(vec![Value::Float(-1e20), Value::Float(1e20)]),
+        );
+
+        let mut rel_tolerance = HashMap::new();
+        rel_tolerance.insert("C".to_string(), Some(vec![Value::Float(1e-7)]));
+        rel_tolerance.insert("J".to_string(), Some(vec![Value::Float(1e-7)]));
+        rel_tolerance.insert("Teta".to_string(), Some(vec![Value::Float(1e-7)]));
+        rel_tolerance.insert("q".to_string(), Some(vec![Value::Float(1e-7)]));
+
+        let mut document = DocumentMap::new();
+        document.insert("bounds".to_string(), bounds);
+        document.insert("rel_tolerance".to_string(), rel_tolerance);
+
+        let (tolerance_config, bounds_config) = parse_tolerance_and_bounds_from_map(&document)
+            .expect("Failed to parse scalar-pair bounds");
+
+        assert_eq!(tolerance_config.C, 1e-7);
+        assert_eq!(bounds_config.C, (-10.0, 10.0));
+        assert_eq!(bounds_config.J, (-1e20, 1e20));
+        assert_eq!(bounds_config.Teta, (-100.0, 100.0));
+        assert_eq!(bounds_config.q, (-1e20, 1e20));
+    }
+
+    #[test]
+    fn test_validate_solver_output_matrix_rejects_non_finite_values() {
+        let matrix = DMatrix::from_vec(2, 2, vec![1.0, 2.0, 3.0, f64::NAN]);
+        let result = validate_solver_output_matrix(&matrix);
+        assert!(result.is_err());
+        match result {
+            Err(ReactorError::InvalidNumericValue(msg)) => {
+                assert!(msg.contains("non-finite value"));
+            }
+            _ => panic!("Expected InvalidNumericValue error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_parameters_rejects_non_finite_pressure() {
+        let mut reactor = SimpleReactorTask::new();
+        let task = task_content.replace("P: 1e6", "P: NaN");
+        let mut parser = DocumentParser::new(task);
+        let result = reactor.parse_parameters_with_exact_names(&mut parser);
+        assert!(matches!(result, Err(ReactorError::InvalidNumericValue(_))));
+    }
+
+    #[test]
+    fn test_parse_parameters_with_exact_names_is_idempotent_for_preparsed_document() {
+        let mut reactor = SimpleReactorTask::new();
+        let mut parser = DocumentParser::new(task_content.to_string());
+        parser.parse_document().expect("Failed to parse document");
+
+        reactor
+            .parse_parameters_with_exact_names(&mut parser)
+            .expect("First parse should succeed");
+        reactor
+            .parse_parameters_with_exact_names(&mut parser)
+            .expect("Second parse should also succeed");
+
+        assert_eq!(reactor.kindata.substances, vec!["HMX", "HMXprod"]);
+        assert_eq!(reactor.kindata.vec_of_equations, vec!["HMX=>10HMXprod"]);
+        assert_eq!(reactor.boundary_condition.get("HMX"), Some(&0.999));
+        assert_eq!(reactor.boundary_condition.get("HMXprod"), Some(&0.001));
+    }
+
+    #[test]
     fn test_setup_bvp_from_file() {
         let mut reactor = SimpleReactorTask::new();
         // Create temporary directory
@@ -1255,23 +1916,19 @@ mod tests {
             .parse_parameters_with_exact_names(&mut parser)
             .expect("Failed to parse parameters");
 
-        let res = reactor.setup_bvp();
-        match res {
-            Ok(_) => println!("ok"),
-            Err(e) => println!("error {:?}", e),
-        }
+        reactor.setup_bvp().expect("Failed to setup BVP");
         let rates = reactor.map_eq_rate.clone();
         for (eq, rate) in rates {
-            println!("reaction {} rate {}", eq, rate);
+            info!("reaction {} rate {}", eq, rate);
         }
-        println!("\n \n");
+        info!("\n \n");
         let system = reactor.map_of_equations.clone();
         for (subs, (variable, eq)) in system {
-            println!("subs: {} | variable: {} | eq: {} | \n", subs, variable, eq);
+            info!("subs: {} | variable: {} | eq: {} | \n", subs, variable, eq);
         }
         let bc = &reactor.solver.BorderConditions;
-        println!("bc {:?}", bc);
-        println!(" unknowns{:?}", reactor.solver.unknowns);
+        info!("bc {:?}", bc);
+        info!(" unknowns{:?}", reactor.solver.unknowns);
     }
 
     #[test]
@@ -1289,7 +1946,9 @@ mod tests {
             .parse_file(Some(file_path))
             .expect("Failed to parse file");
         let _ = parser.parse_document();
-        reactor.solve_from_map(parser);
+        reactor
+            .solve_from_map(parser)
+            .expect("Failed to solve from map");
         // println!("parser {:?}", parser);
     }
 }

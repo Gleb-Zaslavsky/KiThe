@@ -1,9 +1,9 @@
-﻿#![allow(warnings)]
+#![allow(warnings)]
 pub mod kinetics;
 mod mechfinder;
 
-use RustedSciThe::symbolic::symbolic_engine::Expr;
 use crate::Kinetics::error::{KineticsError, KineticsResult};
+use RustedSciThe::symbolic::symbolic_engine::Expr;
 /// The module is equipped with a library of kinetic parameters of chemical reactions obtained as a result of parsing publicly available databases
 /// The module takes as input the name of the library and the vector of substances and then produces the following data:
 /// 1) all reactions of starting substances with each other, and all their possible products with each other.
@@ -74,6 +74,20 @@ pub enum ReactionKinetics {
     Elementary(ElementaryStruct),
 }
 impl ReactionData {
+    fn missing_concentration_error(reaction_kind: &str) -> KineticsError {
+        KineticsError::InvalidReactionData(format!(
+            "{} reaction requires concentration data",
+            reaction_kind
+        ))
+    }
+
+    fn missing_pressure_error(reaction_kind: &str) -> KineticsError {
+        KineticsError::InvalidReactionData(format!(
+            "{} reaction requires pressure data",
+            reaction_kind
+        ))
+    }
+
     /// Create elementary reaction
     pub fn new_elementary(
         eq: String,
@@ -156,14 +170,21 @@ impl ReactionData {
         temp: f64,
         pres: Option<f64>,
         concentrations: Option<HashMap<String, f64>>,
-    ) -> f64 {
+    ) -> KineticsResult<f64> {
         match self.data.clone() {
-            ReactionKinetics::Elementary(data) => data.K_const(temp),
-            ReactionKinetics::Falloff(data) => data.K_const(temp, concentrations.clone().unwrap()),
-            ReactionKinetics::Pressure(data) => data.K_const(temp, pres.clone().unwrap()),
-            ReactionKinetics::ThreeBody(data) => {
-                data.K_const(temp, concentrations.clone().unwrap())
-            }
+            ReactionKinetics::Elementary(data) => Ok(data.K_const(temp)),
+            ReactionKinetics::Falloff(data) => Ok(data.K_const(
+                temp,
+                concentrations.ok_or_else(|| Self::missing_concentration_error("falloff"))?,
+            )),
+            ReactionKinetics::Pressure(data) => Ok(data.K_const(
+                temp,
+                pres.ok_or_else(|| Self::missing_pressure_error("pressure"))?,
+            )),
+            ReactionKinetics::ThreeBody(data) => Ok(data.K_const(
+                temp,
+                concentrations.ok_or_else(|| Self::missing_concentration_error("three-body"))?,
+            )),
         }
     }
     ///function to calculate reaction rate constant for the range of temperatures: from T0 to Tend, number of points is n
@@ -180,7 +201,7 @@ impl ReactionData {
         let T = Self::create_uniform_vector(T0, Tend, n)?;
         for Ti in T {
             // println!("T, {}", Ti);
-            let k = self.K_const(Ti, pres, concentrations.clone());
+            let k = self.K_const(Ti, pres, concentrations.clone())?;
             K_const_values.push(k);
         }
         Ok(K_const_values)
@@ -196,12 +217,22 @@ impl ReactionData {
         Ok((0..n).map(|i| T0 + i as f64 * step).collect())
     }
     /// generate the symbolic representation of the reaction rate constant
-    pub fn K_sym(&self, pres: Option<f64>, concentrations: Option<HashMap<String, Expr>>) -> Expr {
+    pub fn K_sym(
+        &self,
+        pres: Option<f64>,
+        concentrations: Option<HashMap<String, Expr>>,
+    ) -> KineticsResult<Expr> {
         match self.data.clone() {
-            ReactionKinetics::Elementary(data) => data.K_expr(),
-            ReactionKinetics::Falloff(data) => data.K_expr(concentrations.clone().unwrap()),
-            ReactionKinetics::Pressure(data) => data.K_expr(pres.clone().unwrap()),
-            ReactionKinetics::ThreeBody(data) => data.K_expr(concentrations.clone().unwrap()),
+            ReactionKinetics::Elementary(data) => Ok(data.K_expr()),
+            ReactionKinetics::Falloff(data) => Ok(data.K_expr(
+                concentrations.ok_or_else(|| Self::missing_concentration_error("falloff"))?,
+            )),
+            ReactionKinetics::Pressure(data) => {
+                Ok(data.K_expr(pres.ok_or_else(|| Self::missing_pressure_error("pressure"))?))
+            }
+            ReactionKinetics::ThreeBody(data) => Ok(data.K_expr(
+                concentrations.ok_or_else(|| Self::missing_concentration_error("three-body"))?,
+            )),
         }
     }
     /// it is often prefered to use a scaled temperature, so this function returns the symbolic representation of the reaction rate constant with scaled temperature
@@ -210,17 +241,17 @@ impl ReactionData {
         pres: Option<f64>,
         concentrations: Option<HashMap<String, Expr>>,
         scaling_T: Option<Expr>,
-    ) -> Expr {
-        let mut K_sym = self.K_sym(pres, concentrations);
+    ) -> KineticsResult<Expr> {
+        let mut K_sym = self.K_sym(pres, concentrations)?;
         if let Some(scaling_T) = scaling_T {
             K_sym = K_sym.substitute_variable("T", &scaling_T);
         }
-        K_sym
+        Ok(K_sym)
     }
 
     /// Convert ReactionData to serde_json::Value
-    pub fn to_serde_value(&self) -> Value {
-        serde_json::to_value(self).unwrap()
+    pub fn to_serde_value(&self) -> KineticsResult<Value> {
+        Ok(serde_json::to_value(self)?)
     }
 }
 ///parses each reaction data into a ReactionData struct, validates the reaction type, and stores the parsed data in a hash map (reaction_data_hash) with a unique code (react_code) as the key.
@@ -234,7 +265,6 @@ pub fn parse_kinetic_data(
     let mut equations = Vec::new();
     info!("______________PARCING REACTION DATA INTO STRUCTS________");
     for (reaction_record, reaction_id) in vec_of_reaction_value.iter().zip(vec_of_reactions) {
-        info!("reaction_record {:#?} \n \n ", reaction_record);
         let react_code = format!("{}_{}", big_mech, reaction_id);
         if let Ok(mut reactiondata) =
             serde_json::from_value::<ReactionData>(reaction_record.clone())
@@ -259,28 +289,23 @@ pub fn parse_kinetic_data(
 pub fn parse_kinetic_data_vec(
     vec_of_reaction_value: Vec<Value>,
 ) -> KineticsResult<(Vec<ReactionData>, Vec<String>)> {
-    println!("\n \n______________PARCING REACTION DATA INTO STRUCTS________");
     let mut reaction_dat = Vec::new();
     let mut equations = Vec::new();
 
-    for reaction_record in vec_of_reaction_value.iter() {
-        println!("reaction_record {:#?} \n \n ", reaction_record);
-        if let Ok(mut reactiondata) =
-            serde_json::from_value::<ReactionData>(reaction_record.clone())
-        {
-            equations.push(reactiondata.eq.clone());
-            println!("parsed into {:#?} \n", reactiondata);
-            reactiondata.validate_reaction_type()?; //hecks if the reaction_type field matches the variant of the data field in a ReactionData instance. If they don't match, the function will panic
-            reaction_dat.push(reactiondata);
-        } else {
-            info!("Error parsing reaction: {}", reaction_record);
-            return Err(KineticsError::InvalidReactionData(format!(
-                "Error parsing reaction: {}",
-                reaction_record
-            )));
+    for reaction_record in vec_of_reaction_value.into_iter() {
+        match serde_json::from_value::<ReactionData>(reaction_record) {
+            Ok(mut reactiondata) => {
+                equations.push(reactiondata.eq.clone());
+                reactiondata.validate_reaction_type()?; // Checks that the reaction_type field matches the data variant.
+                reaction_dat.push(reactiondata);
+            }
+            Err(_) => {
+                return Err(KineticsError::InvalidReactionData(
+                    "Error parsing reaction".to_string(),
+                ));
+            }
         }
     }
-    info!("______________PARCING REACTION DATA INTO STRUCTS ENDED________");
     Ok((reaction_dat, equations))
 }
 /// struct for chemical mechanism construction
@@ -327,15 +352,18 @@ impl Mechanism_search {
 
         let vec: Vec<&str> = self.task_substances.iter().map(|s| s.as_str()).collect();
         let big_mech = self.task_library.clone();
-        info!("Р·Р°РґР°РЅРёРµ {:?}, Р±РёР±Р»РёРѕС‚РµРєР° {:?}", &big_mech, &vec);
+        info!(
+            "Р·Р°РґР°РЅРёРµ {:?}, Р±РёР±Р»РёРѕС‚РµРєР° {:?}",
+            &big_mech, &vec
+        );
         let (mechanism, reactants, vec_of_reactions, vec_of_reaction_value) =
-            mechfinder::mechfinder(&big_mech, vec);
+            mechfinder::mechfinder(&big_mech, vec)?;
         // info!("mechanism {:?}", &mechanism);
-        let (mut reactdata, vec_of_equations) = parse_kinetic_data_vec(vec_of_reaction_value.clone())?;
+        let (reactdata, vec_of_equations) = parse_kinetic_data_vec(vec_of_reaction_value)?;
         self.mechanism = mechanism;
         self.reactants = reactants;
         self.vec_of_reactions = vec_of_reactions;
-        self.reactdata = reactdata.clone();
+        self.reactdata = reactdata;
         Ok((
             self.mechanism.to_owned(),
             self.reactants.to_owned(),
@@ -367,6 +395,7 @@ const THREE_BODY_TESTING_JSON: &str = r#"{"type": "threebody",
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_mechfinder_api() {
@@ -417,7 +446,6 @@ mod tests {
         let key = format!("{}_{}", big_mech, &vec_of_reactions[0]);
         let elem_react_testing_instance: ElementaryStruct =
             serde_json::from_value::<ElementaryStruct>(ReactionDataHash[&key].clone()).unwrap();
-        println!("K_const {:?}", elem_react_testing_instance.K_const(298.15));
         assert!(elem_react_testing_instance.K_const(298.15) > 0.0);
     }
     #[test]
@@ -488,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_three_body_deserialization() {
-        use serde_json::json;
+        // The parser should map the JSON payload to the three-body variant.
         let three_body_json = json!({
             "type": "three-body",
             "eq": "H2+M<=>H+H+M",
@@ -518,9 +546,64 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_parse_kinetic_data_vec_rejects_missing_equation() {
+        // Missing `eq` should fail fast and surface a domain error.
+        let payload = json!({
+            "type": "elem",
+            "Arrenius": [1.0, 0.0, 0.0]
+        });
+
+        let err = parse_kinetic_data_vec(vec![payload]).unwrap_err();
+        assert!(matches!(
+            err,
+            KineticsError::InvalidReactionData(message)
+                if message.contains("Error parsing reaction")
+        ));
+    }
+
+    #[test]
+    fn test_reaction_data_deserialization_rejects_unknown_reaction_type() {
+        // Invalid type tags should be rejected before any derived state is built.
+        let payload = json!({
+            "type": "not-a-real-type",
+            "eq": "A=>B",
+            "Arrenius": [1.0, 0.0, 0.0]
+        });
+
+        let err = serde_json::from_value::<ReactionData>(payload).unwrap_err();
+        assert!(err.to_string().contains("Unknown reaction type"));
+    }
+
+    #[test]
+    fn test_parse_kinetic_data_vec_rejects_missing_rate_parameters() {
+        // Keep a malformed reaction record around so missing numeric payloads fail loudly.
+        let payload = json!({
+            "type": "elem",
+            "eq": "A=>B"
+        });
+
+        let err = parse_kinetic_data_vec(vec![payload]).unwrap_err();
+        assert!(matches!(
+            err,
+            KineticsError::InvalidReactionData(message)
+                if message.contains("Error parsing reaction")
+        ));
+    }
+
+    #[test]
     fn test_pres_deserialization() {
-        let reaction_data: ReactionData =
-            serde_json::from_str(PRES_TESTING_JSON).expect("Error parsing JSON: {err:?}");
+        // This regression test verifies pressure-dependent JSON deserialization.
+        let pres_json = json!({
+            "type": "pres",
+            "eq": "SC4H9<=>C3H6+CH3",
+            "Arrenius": {
+                "0.01": [2.89e+40, -9.76, 140552.983],
+                "0.1": [1.8e+44, -10.5, 154800.281]
+            }
+        });
+
+        let reaction_data: ReactionData = serde_json::from_value(pres_json).unwrap();
         println!("reaction_data: {:#?}", reaction_data);
         assert_eq!(
             reaction_data.reaction_type,

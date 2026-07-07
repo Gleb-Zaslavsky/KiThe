@@ -123,7 +123,13 @@ impl SubsData {
                         } else {
                             // if not then calculate molar mass and element composition matrix from the substance formula
                             let (molar_masss, composition) =
-                                calculate_molar_mass(substance.clone(), groups.clone());
+                                calculate_molar_mass(substance.clone(), groups.clone()).map_err(
+                                    |e| SubsDataError::CalculationFailed {
+                                        substance: substance.clone(),
+                                        operation: "molar mass calculation".to_string(),
+                                        reason: e.to_string(),
+                                    },
+                                )?;
 
                             let composition: HashMap<String, f64> = composition
                                 .iter()
@@ -137,7 +143,13 @@ impl SubsData {
                     _ => {
                         // Calculate from formula since we don't have thermo data
                         let (molar_masss, composition) =
-                            calculate_molar_mass(substance.clone(), groups.clone());
+                            calculate_molar_mass(substance.clone(), groups.clone()).map_err(
+                                |e| SubsDataError::CalculationFailed {
+                                    substance: substance.clone(),
+                                    operation: "molar mass calculation".to_string(),
+                                    reason: e.to_string(),
+                                },
+                            )?;
 
                         let composition: HashMap<String, f64> = composition
                             .iter()
@@ -152,7 +164,13 @@ impl SubsData {
                     println!("No search results found for substance: {}", substance);
                     // Calculate from formula since we don't have any data
                     let (molar_masss, composition) =
-                        calculate_molar_mass(substance.clone(), groups.clone());
+                        calculate_molar_mass(substance.clone(), groups.clone()).map_err(|e| {
+                            SubsDataError::CalculationFailed {
+                                substance: substance.clone(),
+                                operation: "molar mass calculation".to_string(),
+                                reason: e.to_string(),
+                            }
+                        })?;
 
                     let composition: HashMap<String, f64> = composition
                         .iter()

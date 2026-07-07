@@ -82,8 +82,69 @@ pub enum InitialTemplate {
 }
 
 impl InitialTemplate {
-    /// Generate values for n_steps grid points
-    pub fn generate(&self, n_steps: usize) -> Vec<f64> {
+    /// Validate that template parameters can produce a finite profile.
+    fn validate(&self) -> Result<(), ReactorError> {
+        let is_finite = |value: f64| value.is_finite();
+
+        match self {
+            InitialTemplate::Linear { start, end } => {
+                if !is_finite(*start) || !is_finite(*end) {
+                    return Err(ReactorError::InvalidNumericValue(
+                        "Linear template requires finite start and end values".to_string(),
+                    ));
+                }
+            }
+            InitialTemplate::DecreasingExp { start, decay } => {
+                if !is_finite(*start) || !is_finite(*decay) {
+                    return Err(ReactorError::InvalidNumericValue(
+                        "DecreasingExp template requires finite start and decay values".to_string(),
+                    ));
+                }
+            }
+            InitialTemplate::IncreasingExp { end, growth } => {
+                if !is_finite(*end) || !is_finite(*growth) {
+                    return Err(ReactorError::InvalidNumericValue(
+                        "IncreasingExp template requires finite end and growth values".to_string(),
+                    ));
+                }
+            }
+            InitialTemplate::Constant { value } => {
+                if !is_finite(*value) {
+                    return Err(ReactorError::InvalidNumericValue(
+                        "Constant template requires a finite value".to_string(),
+                    ));
+                }
+            }
+            InitialTemplate::Sigmoid {
+                start,
+                end,
+                steepness,
+                center,
+            } => {
+                if !is_finite(*start)
+                    || !is_finite(*end)
+                    || !is_finite(*steepness)
+                    || !is_finite(*center)
+                {
+                    return Err(ReactorError::InvalidNumericValue(
+                        "Sigmoid template requires finite parameters".to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Generate values for n_steps grid points.
+    pub fn generate(&self, n_steps: usize) -> Result<Vec<f64>, ReactorError> {
+        if n_steps < 2 {
+            return Err(ReactorError::InvalidConfiguration(
+                "Initial guess requires at least two grid points".to_string(),
+            ));
+        }
+        self.validate()?;
+
         let mut values = Vec::with_capacity(n_steps);
 
         for i in 0..n_steps {
@@ -105,7 +166,7 @@ impl InitialTemplate {
             values.push(value);
         }
 
-        values
+        Ok(values)
     }
 }
 
@@ -138,6 +199,17 @@ impl InitialConfig {
         unknowns: &[String],
         n_steps: usize,
     ) -> Result<DMatrix<f64>, ReactorError> {
+        if unknowns.is_empty() {
+            return Err(ReactorError::MissingData(
+                "Initial guess requires at least one unknown".to_string(),
+            ));
+        }
+        if n_steps < 2 {
+            return Err(ReactorError::InvalidConfiguration(
+                "Initial guess requires at least two mesh points".to_string(),
+            ));
+        }
+
         let n_vars = unknowns.len();
         let mut data = Vec::with_capacity(n_vars * n_steps);
 
@@ -150,7 +222,7 @@ impl InitialConfig {
                 ))
             })?;
 
-            let values = template.generate(n_steps);
+            let values = template.generate(n_steps)?;
             data.extend(values);
         }
 
@@ -180,6 +252,11 @@ impl InitialConfig {
         map_of_values: HashMap<String, f64>,
         n_steps: usize,
     ) -> Result<DMatrix<f64>, ReactorError> {
+        if map_of_values.is_empty() {
+            return Err(ReactorError::MissingData(
+                "Cannot build a constant initial guess from an empty map".to_string(),
+            ));
+        }
         let unknowns: Vec<String> = map_of_values
             .iter()
             .map(|(unknown, _)| unknown.clone())
@@ -200,6 +277,23 @@ impl InitialConfig {
         n_steps: usize,
         n_values: usize,
     ) -> Result<DMatrix<f64>, ReactorError> {
+        if !value.is_finite() {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Initial guess value must be finite, got {}",
+                value
+            )));
+        }
+        if n_steps < 2 {
+            return Err(ReactorError::InvalidConfiguration(
+                "Initial guess requires at least two grid points".to_string(),
+            ));
+        }
+        if n_values == 0 {
+            return Err(ReactorError::MissingData(
+                "Initial guess requires at least one variable".to_string(),
+            ));
+        }
+
         let ig = vec![value; n_steps * n_values];
         let initial_guess = DMatrix::from_vec(n_values, n_steps, ig);
         Ok(initial_guess)
@@ -229,6 +323,53 @@ impl Default for InitialConfig {
         config.set_template("q", InitialTemplate::Constant { value: 0.0 });
 
         config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_initial_template_generate_rejects_too_few_grid_points() {
+        let template = InitialTemplate::Constant { value: 1.0 };
+        let result = template.generate(1);
+        assert!(matches!(result, Err(ReactorError::InvalidConfiguration(_))));
+    }
+
+    #[test]
+    fn test_initial_config_generate_initial_guess_rejects_invalid_inputs() {
+        let config = InitialConfig::default();
+
+        let empty_unknowns = config.generate_initial_guess(&[], 5);
+        assert!(matches!(empty_unknowns, Err(ReactorError::MissingData(_))));
+
+        let unknowns = vec!["C0".to_string()];
+        let few_steps = config.generate_initial_guess(&unknowns, 1);
+        assert!(matches!(
+            few_steps,
+            Err(ReactorError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn test_only_one_value_for_all_initial_rejects_invalid_inputs() {
+        let config = InitialConfig::default();
+
+        let nan_value = config.only_one_value_for_all_initial(f64::NAN, 4, 2);
+        assert!(matches!(
+            nan_value,
+            Err(ReactorError::InvalidNumericValue(_))
+        ));
+
+        let zero_values = config.only_one_value_for_all_initial(1.0, 4, 0);
+        assert!(matches!(zero_values, Err(ReactorError::MissingData(_))));
+
+        let too_few_steps = config.only_one_value_for_all_initial(1.0, 1, 2);
+        assert!(matches!(
+            too_few_steps,
+            Err(ReactorError::InvalidConfiguration(_))
+        ));
     }
 }
 /// Configuration for solver relative tolerances
@@ -382,16 +523,18 @@ pub fn create_bounds_map(
     full_bounds_map
 }
 
-/// Configuration for dimensionless scaling parameters
+/// Configuration for dimensionless scaling parameters.
 ///
-/// Defines the characteristic scales used to convert dimensional equations to dimensionless form
+/// `dT` is the temperature shift in kelvin, `L` is the characteristic
+/// reactor length in meters, and `T_scale` is the temperature scale used
+/// in the dimensionless temperature variable.
 #[derive(Debug, Clone)]
 pub struct ScalingConfig {
-    /// Temperature scaling parameter: Θ = (T - dT)/dT
+    /// Temperature shift in K used by `Teta = (T - dT) / T_scale`.
     pub dT: f64,
-    /// Length scaling parameter: z = x/L
+    /// Characteristic reactor length in m used by `z = x / L`.
     pub L: f64,
-    ///
+    /// Temperature scale in K used by the dimensionless temperature.
     pub T_scale: f64,
 }
 
@@ -406,12 +549,12 @@ impl Default for ScalingConfig {
 }
 
 impl ScalingConfig {
-    /// Create new scaling configuration
+    /// Create a new scaling configuration.
     pub fn new(dT: f64, L: f64, T_scale: f64) -> Self {
         Self { dT, L, T_scale }
     }
 
-    /// Validate scaling parameters
+    /// Validate scaling parameters.
     pub fn validate(&self) -> Result<(), ReactorError> {
         if self.dT <= 0.0 {
             return Err(ReactorError::InvalidConfiguration(
@@ -426,11 +569,15 @@ impl ScalingConfig {
         Ok(())
     }
 
-    /// Convert to HashMap for backward compatibility
+    /// Convert to `HashMap` for backward compatibility.
+    ///
+    /// The compatibility snapshot must contain every field required by
+    /// `from_hashmap()` so the roundtrip stays lossless.
     pub fn to_hashmap(&self) -> HashMap<String, f64> {
         let mut map = HashMap::new();
         map.insert("dT".to_string(), self.dT);
         map.insert("L".to_string(), self.L);
+        map.insert("T_scale".to_string(), self.T_scale);
         map
     }
 
@@ -443,7 +590,7 @@ impl ScalingConfig {
             ReactorError::MissingData("Missing L in scaling parameters".to_string())
         })?;
         let T_scale = map.get("T_scale").copied().ok_or_else(|| {
-            ReactorError::MissingData("Missing L in scaling parameters".to_string())
+            ReactorError::MissingData("Missing T_scale in scaling parameters".to_string())
         })?;
         let config = Self::new(dT, L, T_scale);
         config.validate()?;
