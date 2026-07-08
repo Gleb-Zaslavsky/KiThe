@@ -235,7 +235,7 @@ impl PlotTestApp {
 }
 
 impl eframe::App for PlotTestApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.plot_window.show(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.plot_window.show(ui.ctx());
     }
 }

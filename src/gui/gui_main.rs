@@ -146,9 +146,10 @@ impl MainApp {
     }
 }
 impl eframe::App for MainApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Set button text color and size to be more visible
-        ctx.style_mut(|style| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Set button text color and size to be more visible.
+        {
+            let style = ui.style_mut();
             style.visuals.widgets.inactive.fg_stroke.color = egui::Color32::BLACK;
             style.visuals.widgets.hovered.fg_stroke.color = egui::Color32::BLACK;
             style.visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
@@ -156,9 +157,10 @@ impl eframe::App for MainApp {
                 egui::TextStyle::Button,
                 egui::FontId::new(16.0, egui::FontFamily::Proportional),
             );
-        });
+        }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let ctx = ui.ctx().clone();
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(50.0);
                 // Main title
@@ -267,54 +269,54 @@ impl eframe::App for MainApp {
         // Show kinetics window if opened
         if self.kinetics_open {
             if let Some(kinetics_app) = &mut self.kinetics_app {
-                kinetics_app.show(ctx, &mut self.kinetics_open);
+                kinetics_app.show(&ctx, &mut self.kinetics_open);
             }
         }
 
         // Show combustion window if opened
         if self.combustion_open {
             if let Some(combustion_app) = &mut self.combustion_app {
-                combustion_app.show(ctx, &mut self.combustion_open);
+                combustion_app.show(&ctx, &mut self.combustion_open);
             }
         }
 
         // Show thermochemistry window if opened
         if self.thermochemistry_open {
             if let Some(thermochemistry_app) = &mut self.thermochemistry_app {
-                thermochemistry_app.show(ctx, &mut self.thermochemistry_open);
+                thermochemistry_app.show(&ctx, &mut self.thermochemistry_open);
             }
         }
 
         // Show transport window if opened
         if self.transport_open {
             if let Some(transport_app) = &mut self.transport_app {
-                transport_app.show(ctx, &mut self.transport_open);
+                transport_app.show(&ctx, &mut self.transport_open);
             }
         }
 
         // Show settings window if opened
         if self.settings_open {
             if let Some(settings_app) = &mut self.settings_app {
-                settings_app.show(ctx, &mut self.settings_open);
+                settings_app.show(&ctx, &mut self.settings_open);
             }
         }
 
         // Show all libs window if opened
         if self.all_libs_open {
             if let Some(all_libs_app) = &mut self.all_libs_app {
-                all_libs_app.show(ctx, &mut self.all_libs_open);
+                all_libs_app.show(&ctx, &mut self.all_libs_open);
             }
         }
 
         if self.solid_ivp_open {
             if let Some(solid_ivp_app) = &mut self.solid_ivp_app {
-                solid_ivp_app.show(ctx, &mut self.solid_ivp_open)
+                solid_ivp_app.show(&ctx, &mut self.solid_ivp_open)
             }
         }
 
         if self.experimental_kinetics_open {
             if let Some(experimental_kinetics_app) = &mut self.experimental_kinetics_app {
-                experimental_kinetics_app.show(ctx, &mut self.experimental_kinetics_open);
+                experimental_kinetics_app.show(&ctx, &mut self.experimental_kinetics_open);
             }
         }
     }

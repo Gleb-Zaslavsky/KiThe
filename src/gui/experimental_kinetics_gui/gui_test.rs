@@ -122,9 +122,9 @@ mod tests {
         mut run_test: impl FnMut(&mut Harness<PlotAppTestState>),
     ) {
         let state = PlotAppTestState { app, open: true };
-        let mut harness = Harness::new_state(
-            |ctx, state: &mut PlotAppTestState| {
-                state.app.show(ctx, &mut state.open);
+        let mut harness = Harness::new_ui_state(
+            |ui, state: &mut PlotAppTestState| {
+                state.app.show(ui.ctx(), &mut state.open);
             },
             state,
         );

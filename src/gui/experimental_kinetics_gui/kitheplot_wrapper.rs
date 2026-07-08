@@ -75,12 +75,12 @@ impl KiThePlotWindowState {
             }
 
             match class {
-                egui::ViewportClass::Embedded => {
+                egui::ViewportClass::EmbeddedWindow => {
                     egui::Window::new("KiThe Plot Redactor")
                         .open(open)
                         .default_size([1200.0, 860.0])
-                        .show(ctx, |_ui| {
-                            let actions = view.draw(ctx, controller);
+                        .show(ctx, |ui| {
+                            let actions = view.draw(ui, controller);
                             for action in actions {
                                 let _ = controller.dispatch(action);
                             }

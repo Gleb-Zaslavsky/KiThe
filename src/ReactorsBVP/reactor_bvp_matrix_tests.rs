@@ -115,7 +115,10 @@ mod tests {
                 (*expected - *actual).abs() <= atol,
                 "{label} mismatch at index {idx}: expected {expected}, got {actual}, atol={atol}"
             );
-            assert!(actual.is_finite(), "{label} contains non-finite value at {idx}");
+            assert!(
+                actual.is_finite(),
+                "{label} contains non-finite value at {idx}"
+            );
         }
     }
 

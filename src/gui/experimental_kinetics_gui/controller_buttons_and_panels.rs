@@ -56,7 +56,7 @@ impl TopDropDownMenues {
             ui.menu_button("Direct Problem", |ui| {
                 if ui.button("Solve IVP").clicked() {
                     direct_problem_state.open();
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -918,18 +918,18 @@ impl NewExperimentDialogState {
                     ui.separator();
 
                     // File browser panel (left side)
-                    egui::SidePanel::left("file_browser")
+                    egui::Panel::left("file_browser")
                         .resizable(true)
-                        .default_width(300.0)
-                        .show_inside(ui, |ui| {
+                        .default_size(300.0)
+                        .show(ui, |ui| {
                             self.show_file_browser(ui);
                         });
 
                     // Metadata panel (right side)
-                    egui::SidePanel::right("metadata_panel")
+                    egui::Panel::right("metadata_panel")
                         .resizable(true)
-                        .default_width(250.0)
-                        .show_inside(ui, |ui| {
+                        .default_size(250.0)
+                        .show(ui, |ui| {
                             ui.heading("📝 Metadata");
                             ui.separator();
 
@@ -1211,17 +1211,17 @@ impl NewExperimentDialogState {
 
                 ui.separator();
 
-                egui::SidePanel::left("save_series_dir_browser")
+                egui::Panel::left("save_series_dir_browser")
                     .resizable(true)
-                    .default_width(360.0)
-                    .show_inside(ui, |ui| {
+                    .default_size(360.0)
+                    .show(ui, |ui| {
                         self.show_directory_browser(ui);
                     });
 
-                egui::SidePanel::right("save_series_meta_panel")
+                egui::Panel::right("save_series_meta_panel")
                     .resizable(true)
-                    .default_width(280.0)
-                    .show_inside(ui, |ui| {
+                    .default_size(280.0)
+                    .show(ui, |ui| {
                         ui.heading("Save Options");
                         ui.separator();
                         ui.label("Directory:");

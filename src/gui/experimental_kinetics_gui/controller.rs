@@ -101,7 +101,7 @@ impl PlotController {
         }
 
         // Обрабатываем масштабирование (прокрутка колеса мыши)
-        let scroll_delta = response.ctx.input(|i| i.raw_scroll_delta);
+        let scroll_delta = response.ctx.input(|i| i.smooth_scroll_delta);
         // Проверяем, было ли движение колеса мыши по вертикали
         if scroll_delta.y != 0.0 {
             // Определяем направление прокрутки (вверх или вниз)

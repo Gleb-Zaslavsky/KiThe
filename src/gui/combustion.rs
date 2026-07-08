@@ -617,7 +617,7 @@ impl CombustionApp {
     pub fn show(&mut self, ctx: &egui::Context, open: &mut bool) {
         egui::Window::new("Gas-phase Combustion/Steady State Plug Flow")
             .open(open)
-            .default_size(ctx.screen_rect().size())
+            .default_size(ctx.content_rect().size())
             .resizable(true)
             .collapsible(true)
             .show(ctx, |ui| {

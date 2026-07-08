@@ -1694,23 +1694,21 @@ mod tests {
         let ig = vec![0.99; n_steps * reactor.solver.unknowns.len()];
         let initial_guess = DMatrix::from_vec(reactor.solver.unknowns.len(), n_steps, ig);
         // Using the new convenience method with both configs:
-        let _ = reactor
-            .solver
-            .solve_NRBVP_with_configs(
-                initial_guess,
-                n_steps,
-                scheme,
-                strategy,
-                Some(strategy_params),
-                linear_sys_method,
-                method,
-                abs_tolerance,
-                tolerance_config,
-                bounds_config,
-                &vec!["HMX".to_string(), "HMXprod".to_string()],
-                max_iterations,
-                loglevel,
-            );
+        let _ = reactor.solver.solve_NRBVP_with_configs(
+            initial_guess,
+            n_steps,
+            scheme,
+            strategy,
+            Some(strategy_params),
+            linear_sys_method,
+            method,
+            abs_tolerance,
+            tolerance_config,
+            bounds_config,
+            &vec!["HMX".to_string(), "HMXprod".to_string()],
+            max_iterations,
+            loglevel,
+        );
         assert!(
             reactor.solver.solution.is_some(),
             "solve_NRBVP_with_configs should store the computed solution"

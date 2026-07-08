@@ -23,20 +23,20 @@ impl SolidIVPApp {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, open: &mut bool) {
-        let mut style = (*ctx.style()).clone();
-        style.text_styles.insert(
-            egui::TextStyle::Body,
-            egui::FontId::new(16.0, egui::FontFamily::Proportional),
-        );
-        style.text_styles.insert(
-            egui::TextStyle::Button,
-            egui::FontId::new(16.0, egui::FontFamily::Proportional),
-        );
-        style.text_styles.insert(
-            egui::TextStyle::Heading,
-            egui::FontId::new(24.0, egui::FontFamily::Proportional),
-        );
-        ctx.set_style(style);
+        ctx.global_style_mut(|style| {
+            style.text_styles.insert(
+                egui::TextStyle::Body,
+                egui::FontId::new(16.0, egui::FontFamily::Proportional),
+            );
+            style.text_styles.insert(
+                egui::TextStyle::Button,
+                egui::FontId::new(16.0, egui::FontFamily::Proportional),
+            );
+            style.text_styles.insert(
+                egui::TextStyle::Heading,
+                egui::FontId::new(24.0, egui::FontFamily::Proportional),
+            );
+        });
 
         egui::Window::new("Solid state kinetic models")
             .open(open)
