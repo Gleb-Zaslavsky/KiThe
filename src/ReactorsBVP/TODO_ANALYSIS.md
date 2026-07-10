@@ -62,6 +62,14 @@ Scope: `src/ReactorsBVP/` only. This checklist intentionally treats performance 
   Done when:
   solver status/result is validated, non-finite solution matrices are rejected, and a test covers failed/invalid solve output if the backend exposes status hooks.
 
+- [x] Keep explicit postprocessing flags stable on the solved HMX regression path.
+  Functions:
+  - `task_parser_reactor_BVP.rs::solve_from_parsed`
+  Why:
+  the solved BVP path should keep honoring `return_to_dimension`, `plot`, `gnuplot`, `save`, `save_to_csv`, and `no_plots_in_terminal` without regressing into panics or silent no-op behavior.
+  Done when:
+  a known solvable HMX task still solves with explicit postprocessing toggles and the regression test stays green.
+
 ## P1: hot-path performance and allocation pressure
 
 Current status: the remaining copy pressure is now concentrated in owned solver/backend handoffs, not in avoidable intermediate cloning. For the current roadmap this pass is treated as complete, and the next practical work lives in P2 and P3.
@@ -179,6 +187,7 @@ RustedSciThe `0.4.8` exposes the modern damped BVP API through `NRBVP::new_with_
   KiThe should not expose every RustedSciThe internal type directly in user-facing reactor code. A local facade lets us keep stable names, document combustion-oriented defaults, and absorb future RustedSciThe API shifts in one place.
   Current status:
   the facade builds `DampedSolverOptions` for `Banded/Sparse + Lambdify` and for `Banded/Sparse + AOT` with `tcc`, `gcc`, or `zig`. It keeps `Lambdify + AtomView + Banded` as the ordinary default and leaves actual AOT compilation to RustedSciThe at solve time.
+  KiThe's task parser now delegates solver-side settings parsing to RustedSciThe's native BVP parser and only keeps the reactor-physics side, `initial_guess`, and a small compatibility bridge for legacy grid-refinement spellings plus scalar short-hand bounds/tolerances.
 
 - [x] Make the new KiThe default `Lambdify + AtomView + Banded`.
   Target default mapping:
@@ -233,6 +242,15 @@ RustedSciThe `0.4.8` exposes the modern damped BVP API through `NRBVP::new_with_
   Current status:
   `banded_aot_*` and `sparse_aot_*` produce real `DampedSolverOptions`; `tcc/gcc` fill the C compiler field, `zig` selects the Zig codegen backend, and parser tests cover build policy, execution policy, compile preset, compiler aliasing, and chunking. Ordinary tests do not execute a compiler.
 
+- [x] Normalize Lambdify and AOT task documents into mutually exclusive execution contracts.
+  Contract:
+  - Lambdify documents use `backend_policy: lambdify_only` and carry no AOT compiler, build, or execution-lifecycle fields.
+  - AOT documents use `backend_policy: aot_only`; matrix and compiler choices remain explicit.
+  Compatibility:
+  contradictory older documents are normalized before the native RustedSciThe parser sees them, while unknown backend names remain untouched so RustedSciThe can report a typed validation error.
+  Current status:
+  GUI controls, task templates, parser normalization, and story/regression tests all enforce this contract. The Lambdify parser-driven solve no longer triggers AOT DLL generation through a stale `build_if_missing` policy.
+
 - [x] Add gated AOT solve/integration tests.
   Target:
   - compact combustion fixture using `AOT + tcc + AtomView + Banded`
@@ -270,13 +288,70 @@ RustedSciThe `0.4.8` exposes the modern damped BVP API through `NRBVP::new_with_
   Current status:
   `reactor_bvp_story_tests.rs` and `reactor_bvp_matrix_tests.rs` now provide the reusable compact HMX fixture, backend-shape checks, solve smoke tests for the default and sparse lambdify routes, a compatibility baseline for `ExprLegacy + Sparse`, and gated AOT solve/profile-comparison tests across both banded and sparse matrix routes.
 
-- [ ] Decide how much RustedSciThe task parser syntax to mirror.
+- [x] Decide how much RustedSciThe task parser syntax to mirror.
   Reference:
   RustedSciThe already parses keys such as `generated_backend`, `symbolic_backend`, `matrix_backend`, `aot_codegen_backend`, `aot_c_compiler`, `aot_build_policy`, `aot_build_profile`, `aot_compile_preset`, `aot_execution_policy`, `banded_linear_solver`, and `refinement_steps`.
   Decision:
-  either mirror these names in KiThe for consistency, or provide KiThe aliases while documenting the mapping.
+  do not mirror the full solver syntax in KiThe; let RustedSciThe own solver keys directly and keep only the narrow reactor-side aliases that belong to physics compatibility.
+  Boundary rule:
+  KiThe keeps physics and reactor-specific initial-condition strategy, including `process_conditions`, `boundary_conditions`, and `initial_guess`.
+  RustedSciThe owns solver-engine knobs such as tolerances, bounds, symbolic backend choice, matrix backend choice, AOT policy, compiler selection, chunking, solve execution settings, and native solver-side task parsing.
   Done when:
-  task templates and examples use one canonical spelling, aliases are tested, and error messages mention accepted values.
+  task templates and examples use one canonical spelling for solver settings, solver aliases are tested natively in RustedSciThe, and KiThe no longer needs to duplicate backend-specific key names beyond the physics-side compatibility layer.
+
+- [x] Finish the solver-settings handoff in `task_parser_reactor_BVP.rs`.
+  Local KiThe-only responsibilities after the next RustedSciThe pass:
+  - keep `set_reactor_params_from_hashmap`
+  - keep `parse_physics_run_settings_from_map`
+  - keep `set_initial_guess_from_map_data`
+  - keep reactor-side post-solve output helpers only if they are still clearly reactor-specific
+  Remaining local bridge:
+  - `normalize_reactor_physics_task_map` only for physics-side shorthand cleanup (`grid_refinement` spelling and `C/J/Teta/q` family expansion)
+  Removed local solver-settings code:
+  - `parse_solver_tolerance_and_bounds_from_map`
+  - `parse_solver_backend_config_from_map`
+  - `apply_native_solver_settings`
+  - the temporary solver-side compatibility branch inside `solve_and_store_nrbvp`
+  Migration rule:
+  move the typed solver settings into RustedSciThe first, then simplify KiThe solve paths to a single handoff call that only passes physics + initial guess + raw solver-settings document.
+  Current status:
+  KiThe now parses the solver contract through typed RustedSciThe entry points and no longer performs local solver-settings translation on the hot solve path:
+  - `task_parser_bvp::parse_bvp_solver_settings_from_document()` for solver-selection and generated-backend settings
+  - `task_parser_damped::parse_bvp_damped_solver_settings_from_document()` for damped solver scalars, bounds, and tolerances
+  The remaining local bridge is now only about reactor-side compatibility normalization, especially `grid_refinement` spelling cleanup and the `C/J/Teta/q` family expansion into full reactor-variable maps.
+  The removed local helpers are `parse_solver_tolerance_and_bounds_from_map`, `apply_native_solver_settings`, `parse_solver_backend_config_from_spec`, and the old solver-facade bridge inside `solve_and_store_nrbvp`, so the manual solver-settings parsing path is gone.
+  Done when:
+  KiThe solve path no longer rewrites solver settings locally, and the only remaining solver-facing code here is a thin bridge to the native RustedSciThe parser or builder.
+
+- [ ] Native RustedSciThe parser notes for the next pass.
+  Target files:
+  - `task_parser_bvp.rs`
+  - `task_parser_damped.rs`
+  Desired shape:
+  - expose `parse_*_from_document` split entry points for `problem` vs `solver_settings`
+  - keep a typed `*_Spec`/`*_SettingsSpec` result instead of mutating `NRBVP` directly during parsing
+  - add `try_*` methods that return `Result<..., BvpTaskError>` or a solver-specific typed error
+  - keep old `set_*`/`parse_*` names only as thin compatibility wrappers if needed
+  - remove `panic!` on bad user input; unknown backend/matrix/grid-refinement names must become typed errors
+  - make `set_params_from_hashmap` and `set_postpocessing_from_hashmap` bridge-free and fallible in the typed path
+  - keep solver settings parsing isolated from physical problem parsing
+  Concrete solver settings to own natively:
+  - `generated_backend`
+  - `matrix_backend`
+  - `symbolic_backend`
+  - `aot_*`
+  - `strategy_params`
+  - `adaptive_strategy`
+  - `grid_refinement`
+  - `bounds`
+  - `rel_tolerance`
+  - `scheme`, `strategy`, `method`, `linear_sys_method`, `abs_tolerance`, `max_iterations`, `loglevel`, `dont_save_log`
+  Specific panic sites to remove:
+  - unknown grid refinement method dispatch
+  - missing / malformed solver settings sections
+  - postprocessing parser fallthroughs that should be typed errors instead of process aborts
+  End state:
+  KiThe no longer carries solver-settings compatibility helpers except for a very small migration bridge, and RustedSciThe exposes a typed parser that the KiThe reactor facade can call directly.
 
 ## P1: numerical contract and validation coverage
 

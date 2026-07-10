@@ -37,12 +37,15 @@ When install as library:
 * Experimental Kinetics - data processing pipeline for Thermogravimetric Analysis TGA
   * raw data manupulations via Polars crate
   * smothing and filtering: Hampel/MAD, savitzky–golay, LOWESS, splines
-  * Kinetyc methods - 
-            - Friedman, 
-             - Ozawa-Flinn-Wall (OFW), 
-             - Kissinger-Akahira-Sunose (KAS), 
-             Starink,
-             Vyazovkin
+  * Kinetyc methods:
+            * Friedman, 
+             * Ozawa-Flinn-Wall (OFW), 
+             * Kissinger-Akahira-Sunose (KAS), 
+             * Starink,
+             * Vyazovkin,
+             * Kissnger,
+             * Criado,
+             * Combined kinetic analysis
 
 
  When install as executable:

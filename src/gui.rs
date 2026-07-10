@@ -2,6 +2,9 @@
 pub mod NIST_gui;
 pub mod all_libs_gui;
 pub mod combustion;
+#[cfg(test)]
+mod combustion_story_tests;
+mod combustion_gui_tests;
 mod combustion_test;
 
 pub mod experimental_kinetics_gui;

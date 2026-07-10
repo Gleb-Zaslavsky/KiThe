@@ -285,13 +285,17 @@ pub(crate) fn validate_bvp_solution_matrix(solution: &DMatrix<f64>) -> Result<()
 /// The solver owns the canonical reactor state, while this struct packages the
 /// backend-specific runtime settings so both direct and parser-driven solve
 /// paths can assemble the same NRBVP object through one helper.
-#[derive(Debug)]
 pub(crate) struct NrbvpHandoffConfig {
     pub initial_guess: DMatrix<f64>,
     pub t0: f64,
     pub t_end: f64,
     pub n_steps: usize,
     pub solver_backend_config: ReactorBvpSolverConfig,
+    /// Optional solver-ready damped options built natively by RustedSciThe.
+    ///
+    /// When present, this takes precedence over the local facade conversion so
+    /// parser-driven paths can hand the backend a ready-made solver contract.
+    pub solver_options: Option<DampedSolverOptions>,
     pub scheme: String,
     pub strategy: String,
     pub strategy_params: Option<SolverParams>,
@@ -330,6 +334,7 @@ impl NrbvpHandoffConfig {
             t_end,
             n_steps,
             solver_backend_config: ReactorBvpSolverConfig::default_lambdify(),
+            solver_options: None,
             scheme,
             strategy,
             strategy_params,
@@ -352,6 +357,12 @@ impl NrbvpHandoffConfig {
         self.solver_backend_config = solver_backend_config;
         self
     }
+
+    /// Attach a solver-ready damped options object and bypass the local facade conversion.
+    pub(crate) fn with_solver_options(mut self, solver_options: DampedSolverOptions) -> Self {
+        self.solver_options = Some(solver_options);
+        self
+    }
 }
 
 /// Apply legacy Newton/runtime settings on top of the generated-backend facade.
@@ -361,10 +372,14 @@ impl NrbvpHandoffConfig {
 /// positional values. Keeping the merge here prevents parser/direct paths from
 /// drifting while the public API is migrated gradually.
 fn build_damped_options(config: &NrbvpHandoffConfig) -> Result<DampedSolverOptions, ReactorError> {
-    let mut options = config
-        .solver_backend_config
-        .to_rusted_options()
-        .map_err(ReactorError::InvalidConfiguration)?;
+    let mut options = if let Some(solver_options) = config.solver_options.clone() {
+        solver_options
+    } else {
+        config
+            .solver_backend_config
+            .to_rusted_options()
+            .map_err(ReactorError::InvalidConfiguration)?
+    };
     options = options
         .with_scheme_name(config.scheme.clone())
         .with_strategy_params(config.strategy_params.clone())

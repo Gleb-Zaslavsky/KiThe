@@ -14,6 +14,26 @@
 //! - Boundary conditions and initial conditions
 //! - Solver settings (tolerances, bounds, numerical methods)
 //!
+//! ## Boundary between KiThe and RustedSciThe
+//!
+//! ### Stays in KiThe
+//! - `process_conditions` and other physical reactor inputs
+//! - reactions, species, thermophysical data, and transport data
+//! - boundary-condition structure that belongs to the reactor model
+//! - `initial_guess`, because this is a reactor-BVP-specific initial-condition strategy
+//!   rather than a generic numerical-solver setting
+//!
+//! ### Moves to RustedSciThe
+//! - tolerance and bound parsing for the solver engine
+//! - matrix backend selection (`Sparse`, `Banded`)
+//! - symbolic backend selection (`ExprLegacy`, `AtomView`)
+//! - AOT / lambdify execution policy and compiler selection
+//! - solver iteration, logging, chunking, and other backend execution knobs
+//! - solver-side task parsing that RustedSciThe now understands natively
+//!
+//! The goal is for KiThe to parse the physics and initial-condition strategy, while
+//! RustedSciThe owns the numerical solver contract and all backend-specific options.
+//!
 //! ## Main Methods
 //!
 //! - **`set_reactor_params_from_hashmap()`**: Core parsing method that extracts reactor parameters from DocumentMap
@@ -22,6 +42,12 @@
 //! - **`parse_parameters_with_exact_names()`**: High-level parsing orchestrator
 //! - **`solve_from_map()`**: Complete workflow from parsed data to solved BVP
 //! - **`solve_from_file()`**: One-shot method: file → parsing → solving
+//!
+//!
+//! ## Practical split rule
+//!
+//! If a setting changes the physics of the reactor task, it stays here.
+//! If a setting changes how the NRBVP backend solves the task, it should move to RustedSciThe.
 //!
 //! ## Non-Obvious Code Features & Tips
 //!
@@ -52,18 +78,12 @@
 use super::SimpleReactorBVP::{FastElemReact, SimpleReactorTask};
 use crate::ReactorsBVP::reactor_BVP_utils::InitialConfig;
 use crate::ReactorsBVP::reactor_BVP_utils::{BoundsConfig, ScalingConfig, ToleranceConfig};
-use crate::ReactorsBVP::solver_backend::{
-    ReactorBvpAotBuildPolicy, ReactorBvpAotBuildProfile, ReactorBvpAotCompilePreset,
-    ReactorBvpAotCompiler, ReactorBvpAotExecutionPolicy, ReactorBvpMatrixBackend,
-    ReactorBvpSolverConfig, ReactorBvpSymbolicBackend,
-};
 use crate::Utils::show_this_pic::show_image;
 use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
-use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{AdaptiveGridConfig, SolverParams};
-use RustedSciThe::numerical::BVP_Damp::grid_api::GridRefinementMethod;
 use log::info;
 use nalgebra::DMatrix;
 use std::collections::HashMap;
+use RustedSciThe::numerical::BVP_Damp::task_parser_damped;
 
 fn missing_field(section: &str, field: &str) -> crate::ReactorsBVP::SimpleReactorBVP::ReactorError {
     crate::ReactorsBVP::SimpleReactorBVP::ReactorError::MissingData(format!(
@@ -135,19 +155,6 @@ fn required_usize(
     value_as_usize(value).ok_or_else(|| missing_field(section_name, field))
 }
 
-fn required_string(
-    section: &HashMap<String, Option<Vec<Value>>>,
-    section_name: &str,
-    field: &str,
-) -> Result<String, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
-    required_values(section, section_name, field)?
-        .first()
-        .ok_or_else(|| missing_field(section_name, field))?
-        .as_string()
-        .cloned()
-        .ok_or_else(|| missing_field(section_name, field))
-}
-
 fn optional_string(
     section: &HashMap<String, Option<Vec<Value>>>,
     field: &str,
@@ -175,34 +182,11 @@ fn value_as_usize(value: &Value) -> Option<usize> {
     match value {
         Value::Usize(value) => Some(*value),
         Value::Integer(value) if *value >= 0 => Some(*value as usize),
+        Value::Float(value) if value.is_finite() && *value >= 0.0 => Some(*value as usize),
+        Value::String(value) => value.trim().parse::<usize>().ok(),
         Value::Optional(Some(inner)) => value_as_usize(inner),
         _ => None,
     }
-}
-
-fn optional_usize(
-    section: &HashMap<String, Option<Vec<Value>>>,
-    field: &str,
-) -> Result<Option<usize>, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
-    Ok(match section.get(field) {
-        None => None,
-        Some(values) => {
-            let values = values
-                .as_ref()
-                .ok_or_else(|| missing_field("section", field))?;
-            let value = values
-                .first()
-                .ok_or_else(|| missing_field("section", field))?;
-            let parsed = value_as_usize(value)
-                .filter(|value| *value > 0)
-                .ok_or_else(|| {
-                    crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
-                        format!("`{}` must be a positive integer", field),
-                    )
-                })?;
-            Some(parsed)
-        }
-    })
 }
 
 fn required_vector_f64(
@@ -234,74 +218,11 @@ fn required_bool(
         .ok_or_else(|| missing_field(section_name, field))
 }
 
-fn parse_tolerance_and_bounds_from_map(
-    task_hashmap: &DocumentMap,
-) -> Result<(ToleranceConfig, BoundsConfig), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
-    let rel_tolerance = required_section(task_hashmap, "rel_tolerance")?;
-    let tolerance_config = ToleranceConfig::new(
-        required_f64(rel_tolerance, "rel_tolerance", "C")?,
-        required_f64(rel_tolerance, "rel_tolerance", "J")?,
-        required_f64(rel_tolerance, "rel_tolerance", "Teta")?,
-        required_f64(rel_tolerance, "rel_tolerance", "q")?,
-    );
-
-    let bounds = required_section(task_hashmap, "bounds")?;
-    let parse_pair =
-        |field: &str| -> Result<(f64, f64), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
-            let values = required_values(bounds, "bounds", field)?;
-            if values.len() == 1 {
-                let pair = values
-                    .first()
-                    .ok_or_else(|| missing_field("bounds", field))?
-                    .as_vector()
-                    .ok_or_else(|| missing_field("bounds", field))?;
-                if pair.len() != 2 {
-                    return Err(
-                        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
-                            format!("`bounds.{}` must contain exactly two numbers", field),
-                        ),
-                    );
-                }
-                if let Some(invalid) = pair.iter().copied().find(|value| !value.is_finite()) {
-                    return Err(invalid_numeric("bounds", field, invalid));
-                }
-                Ok((pair[0], pair[1]))
-            } else if values.len() == 2 {
-                let left = values[0]
-                    .as_float()
-                    .ok_or_else(|| missing_field("bounds", field))?;
-                let right = values[1]
-                    .as_float()
-                    .ok_or_else(|| missing_field("bounds", field))?;
-                if !left.is_finite() {
-                    return Err(invalid_numeric("bounds", field, left));
-                }
-                if !right.is_finite() {
-                    return Err(invalid_numeric("bounds", field, right));
-                }
-                Ok((left, right))
-            } else {
-                Err(
-                    crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
-                        format!(
-                            "`bounds.{}` must contain one pair or two scalar values",
-                            field
-                        ),
-                    ),
-                )
-            }
-        };
-    let bounds_config = BoundsConfig::new(
-        parse_pair("C")?,
-        parse_pair("J")?,
-        parse_pair("Teta")?,
-        parse_pair("q")?,
-    );
-
-    Ok((tolerance_config, bounds_config))
-}
-
-fn parse_basic_settings_from_map(
+// ============================= KiThe physics / run-setup block =============================
+//
+// This is still part of the reactor task contract. It defines the physical run window,
+// not the numerical method used to solve it.
+fn parse_physics_run_settings_from_map(
     task_hashmap: &DocumentMap,
 ) -> Result<(f64, f64, usize, String), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
     let process_conditions = required_section(task_hashmap, "process_conditions")?;
@@ -367,197 +288,261 @@ fn set_initial_guess_from_map_data(
     Ok(initial_guess)
 }
 
-#[derive(Debug)]
-struct ParsedSolverSettings {
-    solver_backend_config: ReactorBvpSolverConfig,
-    scheme: String,
-    strategy: String,
-    strategy_params: Option<SolverParams>,
-    linear_sys_method: Option<String>,
-    method: String,
-    abs_tolerance: f64,
-    max_iterations: usize,
-    loglevel: Option<String>,
-    dont_save_log: bool,
+/// Normalize solver-facing compatibility keys before delegating to RustedSciThe.
+///
+/// KiThe keeps the user-facing names readable, while the native damped parser
+/// expects a small set of typed fields and canonical spellings.
+pub(crate) fn normalize_reactor_physics_task_map(task_map: &DocumentMap) -> DocumentMap {
+    let mut normalized = task_map.clone();
+    normalize_exclusive_solver_backend(&mut normalized);
+    if let Some(grid_refinement) = normalized.get_mut("grid_refinement") {
+        if let Some(values) = grid_refinement.remove("grcar_smooke") {
+            grid_refinement
+                .entry("grcarsmooke".to_string())
+                .or_insert(values);
+        }
+        if let Some(values) = grid_refinement.remove("double_points") {
+            grid_refinement
+                .entry("doubleoints".to_string())
+                .or_insert(values);
+        }
+    }
+    if adaptive_grid_is_explicitly_disabled(&normalized) {
+        // RustedSciThe treats the presence of `adaptive_strategy` as an enabled
+        // adaptive grid contract. A user-level `strategy_params.adaptive: None`
+        // is the opposite: keep damping settings, but disable all grid adaptation.
+        normalized.remove("adaptive_strategy");
+        normalized.remove("grid_refinement");
+    }
+    normalize_solver_counter_field(&mut normalized, "solver_settings", "max_iterations");
+    normalize_solver_counter_field(&mut normalized, "solver_settings", "refinement_steps");
+    normalize_solver_counter_field(&mut normalized, "strategy_params", "max_jac");
+    normalize_solver_counter_field(&mut normalized, "strategy_params", "max_damp_iter");
+    normalize_solver_counter_field(&mut normalized, "adaptive_strategy", "version");
+    normalize_solver_counter_field(&mut normalized, "adaptive_strategy", "max_refinements");
+    normalized
 }
 
-fn parse_solver_settings_from_map(
-    task_hashmap: &DocumentMap,
-) -> Result<ParsedSolverSettings, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
-    let solver_settings = required_section(task_hashmap, "solver_settings")?;
-    let mut solver_backend_config =
-        if let Some(generated_backend) = optional_string(solver_settings, "generated_backend")? {
-            ReactorBvpSolverConfig::from_generated_backend_name(&generated_backend)
-                .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration)?
-        } else {
-            ReactorBvpSolverConfig::default_lambdify()
-        };
-    if let Some(matrix_backend) = optional_string(solver_settings, "matrix_backend")? {
-        solver_backend_config = solver_backend_config.with_matrix_backend(
-            ReactorBvpMatrixBackend::parse(&matrix_backend).map_err(
-                crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration,
-            )?,
-        );
-    }
-    if let Some(symbolic_backend) = optional_string(solver_settings, "symbolic_backend")? {
-        solver_backend_config = solver_backend_config.with_symbolic_backend(
-            ReactorBvpSymbolicBackend::parse(&symbolic_backend).map_err(
-                crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration,
-            )?,
-        );
-    }
-    let aot_compiler = optional_string(solver_settings, "aot_compiler")?
-        .or(optional_string(solver_settings, "aot_c_compiler")?);
-    if let Some(compiler) = aot_compiler {
-        let compiler = ReactorBvpAotCompiler::parse(&compiler)
-            .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration)?;
-        solver_backend_config =
-            solver_backend_config.map_aot_config(|config| config.with_compiler(compiler));
-    }
-    if let Some(build_policy) = optional_string(solver_settings, "aot_build_policy")? {
-        let build_policy = ReactorBvpAotBuildPolicy::parse(&build_policy)
-            .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration)?;
-        solver_backend_config =
-            solver_backend_config.map_aot_config(|config| config.with_build_policy(build_policy));
-    }
-    if let Some(build_profile) = optional_string(solver_settings, "aot_build_profile")? {
-        let build_profile = ReactorBvpAotBuildProfile::parse(&build_profile)
-            .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration)?;
-        solver_backend_config =
-            solver_backend_config.map_aot_config(|config| config.with_build_profile(build_profile));
-    }
-    if let Some(compile_preset) = optional_string(solver_settings, "aot_compile_preset")? {
-        let compile_preset = ReactorBvpAotCompilePreset::parse(&compile_preset)
-            .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration)?;
-        solver_backend_config = solver_backend_config
-            .map_aot_config(|config| config.with_compile_preset(compile_preset));
-    }
-    if let Some(execution_policy) = optional_string(solver_settings, "aot_execution_policy")? {
-        let execution_policy = ReactorBvpAotExecutionPolicy::parse(&execution_policy)
-            .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration)?;
-        solver_backend_config = solver_backend_config
-            .map_aot_config(|config| config.with_execution_policy(execution_policy));
-    }
-    let target_chunks = optional_usize(solver_settings, "aot_target_chunks")?;
-    let residual_chunks =
-        optional_usize(solver_settings, "aot_residual_target_chunks")?.or(target_chunks);
-    let jacobian_chunks =
-        optional_usize(solver_settings, "aot_jacobian_target_chunks")?.or(target_chunks);
-    if residual_chunks.is_some() || jacobian_chunks.is_some() {
-        solver_backend_config = solver_backend_config
-            .map_aot_config(|config| config.with_target_chunks(residual_chunks, jacobian_chunks));
-    }
+const AOT_ONLY_SOLVER_FIELDS: &[&str] = &[
+    "aot_codegen_backend",
+    "aot_c_compiler",
+    "aot_build_policy",
+    "aot_build_profile",
+    "aot_compile_preset",
+    "aot_execution_policy",
+];
 
-    let scheme = required_string(solver_settings, "solver_settings", "scheme")?;
-    let strategy = required_string(solver_settings, "solver_settings", "strategy")?;
-    let linear_sys_method = optional_string(solver_settings, "linear_sys_method")?;
-    let method = required_string(solver_settings, "solver_settings", "method")?;
-    let abs_tolerance = required_f64(solver_settings, "solver_settings", "abs_tolerance")?;
-    let max_iterations = required_usize(solver_settings, "solver_settings", "max_iterations")?;
-    let loglevel = optional_string(solver_settings, "loglevel")?;
+#[derive(Clone, Copy)]
+enum ExclusiveSolverBackend {
+    Lambdify,
+    Aot,
+}
 
-    // Keep log suppression compatible with both historical spellings.
-    let dont_save_log = if solver_settings.contains_key("dont_save_log") {
-        required_bool(solver_settings, "solver_settings", "dont_save_log")?
-    } else if solver_settings.contains_key("dont_save_logs") {
-        required_bool(solver_settings, "solver_settings", "dont_save_logs")?
-    } else {
-        true
+/// Normalize KiThe's exclusive execution choice before invoking RustedSciThe.
+///
+/// RustedSciThe permits artifact lifecycle and callback selection to be
+/// configured independently. KiThe intentionally exposes Lambdify/AOT as an
+/// exclusive choice, so old documents containing `lambdify_only` together with
+/// `build_if_missing` are reduced to one coherent backend contract here.
+fn normalize_exclusive_solver_backend(document: &mut DocumentMap) {
+    let Some(section) = document.get_mut("solver_settings") else {
+        return;
     };
 
-    let strategy_params = if let Some(strategy_params) = task_hashmap.get("strategy_params") {
-        let max_jac = strategy_params
-            .get("max_jac")
-            .and_then(|value| value.as_ref())
-            .and_then(|values| values.first())
-            .and_then(|value| value.as_option_usize());
-        let max_damp_iter = strategy_params
-            .get("max_damp_iter")
-            .and_then(|value| value.as_ref())
-            .and_then(|values| values.first())
-            .and_then(|value| value.as_option_usize());
-        let damp_factor = strategy_params
-            .get("damp_factor")
-            .and_then(|value| value.as_ref())
-            .and_then(|values| values.first())
-            .and_then(|value| value.as_option_float());
+    let generated_backend = section
+        .get("generated_backend")
+        .and_then(|slot| slot.as_ref())
+        .and_then(|values| values.first())
+        .and_then(Value::as_string)
+        .map(|value| value.trim().to_ascii_lowercase());
+    let backend_policy = section
+        .get("backend_policy")
+        .and_then(|slot| slot.as_ref())
+        .and_then(|values| values.first())
+        .and_then(Value::as_string)
+        .map(|value| value.trim().to_ascii_lowercase());
 
-        let adaptive = if let Some(adaptive_strategy) = task_hashmap.get("adaptive_strategy") {
-            let version = required_usize(adaptive_strategy, "adaptive_strategy", "version")?;
-            let max_refinements =
-                required_usize(adaptive_strategy, "adaptive_strategy", "max_refinements")?;
-            let grid_refinement = required_section(task_hashmap, "grid_refinement")?;
-            let (method_name, method_values) = grid_refinement
-                .iter()
-                .next()
-                .ok_or_else(|| missing_field("grid_refinement", "method"))?;
-            let method_params = method_values
-                .as_ref()
-                .ok_or_else(|| missing_field("grid_refinement", method_name))?
-                .first()
-                .ok_or_else(|| missing_field("grid_refinement", method_name))?
-                .as_vector()
-                .ok_or_else(|| missing_field("grid_refinement", method_name))?;
-            if let Some(invalid) = method_params
-                .iter()
-                .copied()
-                .find(|value| !value.is_finite())
-            {
-                return Err(invalid_numeric("grid_refinement", method_name, invalid));
+    let generated_backend_mode = generated_backend
+        .as_deref()
+        .and_then(|backend| {
+            if backend.contains("_aot") || backend.starts_with("aot_") {
+                Some(ExclusiveSolverBackend::Aot)
+            } else if backend.contains("lambdify") {
+                Some(ExclusiveSolverBackend::Lambdify)
+            } else {
+                None
             }
-            let grid_method = match method_name.as_str() {
-                "doubleoints" | "double_points" => GridRefinementMethod::DoublePoints,
-                "easy" => GridRefinementMethod::Easy(method_params[0]),
-                "grcarsmooke" | "grcar_smooke" => GridRefinementMethod::GrcarSmooke(
-                    method_params[0],
-                    method_params[1],
-                    method_params[2],
-                ),
-                "pearson" => GridRefinementMethod::Pearson(method_params[0], method_params[1]),
-                "twopnt" => GridRefinementMethod::TwoPoint(
-                    method_params[0],
-                    method_params[1],
-                    method_params[2],
-                ),
-                _ => {
-                    return Err(
-                        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
-                            format!("Unknown grid refinement method `{}`", method_name),
-                        ),
-                    );
-                }
-            };
-            Some(AdaptiveGridConfig {
-                version,
-                max_refinements,
-                grid_method,
-            })
-        } else {
-            None
-        };
+        });
+    // Preserve explicit unknown presets so the native typed parser can reject
+    // them instead of silently changing user intent.
+    if generated_backend.is_some() && generated_backend_mode.is_none() {
+        return;
+    }
 
-        Some(SolverParams {
-            max_jac,
-            max_damp_iter,
-            damp_factor,
-            adaptive,
+    let backend = generated_backend_mode
+        .or_else(|| match backend_policy.as_deref() {
+            Some("aot_only") => Some(ExclusiveSolverBackend::Aot),
+            Some("lambdify_only") => Some(ExclusiveSolverBackend::Lambdify),
+            _ => None,
         })
-    } else {
-        None
+        .unwrap_or(ExclusiveSolverBackend::Lambdify);
+
+    let method = section
+        .get("method")
+        .and_then(|slot| slot.as_ref())
+        .and_then(|values| values.first())
+        .and_then(Value::as_string)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "banded".to_string());
+    let matrix_prefix = if method == "sparse" { "sparse" } else { "banded" };
+
+    match backend {
+        ExclusiveSolverBackend::Lambdify => {
+            section.insert(
+                "generated_backend".to_string(),
+                Some(vec![Value::String(format!("{matrix_prefix}_lambdify"))]),
+            );
+            section.insert(
+                "backend_policy".to_string(),
+                Some(vec![Value::String("lambdify_only".to_string())]),
+            );
+            for field_name in AOT_ONLY_SOLVER_FIELDS {
+                section.remove(*field_name);
+            }
+        }
+        ExclusiveSolverBackend::Aot => {
+            if generated_backend.is_none() {
+                let compiler = section
+                    .get("aot_c_compiler")
+                    .and_then(|slot| slot.as_ref())
+                    .and_then(|values| values.first())
+                    .and_then(Value::as_string)
+                    .map(|value| value.trim().to_ascii_lowercase())
+                    .unwrap_or_else(|| "tcc".to_string());
+                section.insert(
+                    "generated_backend".to_string(),
+                    Some(vec![Value::String(format!(
+                        "{matrix_prefix}_aot_{compiler}"
+                    ))]),
+                );
+            }
+            section.insert(
+                "backend_policy".to_string(),
+                Some(vec![Value::String("aot_only".to_string())]),
+            );
+        }
+    }
+}
+
+/// Returns true when the task explicitly disables adaptive grid refinement.
+///
+/// The old and still-valid reactor task syntax keeps this switch in
+/// `strategy_params` as `adaptive: None`. GUI rendering can create empty
+/// `adaptive_strategy` / `grid_refinement` sections, so normalization must let
+/// the explicit switch win before delegating to the native RustedSciThe parser.
+fn adaptive_grid_is_explicitly_disabled(document: &DocumentMap) -> bool {
+    document
+        .get("strategy_params")
+        .and_then(|section| section.get("adaptive"))
+        .is_some_and(|slot| slot_is_explicit_none(slot.as_ref()))
+}
+
+/// Checks whether a document field carries an explicit `None` marker.
+fn slot_is_explicit_none(values: Option<&Vec<Value>>) -> bool {
+    values
+        .and_then(|values| values.first())
+        .is_some_and(value_is_explicit_none)
+}
+
+/// Checks the value shapes that can represent `None` after GUI edits or parsing.
+fn value_is_explicit_none(value: &Value) -> bool {
+    match value {
+        Value::Optional(None) => true,
+        Value::String(value) => value.trim().eq_ignore_ascii_case("none"),
+        _ => false,
+    }
+}
+
+/// Coerce a solver counter field into the scalar shape accepted by RustedSciThe.
+///
+/// RustedSciThe 0.4.12 names these fields as `usize`, but its `Value::as_usize`
+/// helper currently reads non-negative `Value::Integer` payloads. KiThe keeps
+/// the GUI flexible and normalizes to that native parser contract at the handoff.
+fn normalize_solver_counter_field(
+    document: &mut DocumentMap,
+    section_name: &str,
+    field_name: &str,
+) {
+    let Some(section) = document.get_mut(section_name) else {
+        return;
+    };
+    let Some(values) = section.get_mut(field_name).and_then(|slot| slot.as_mut()) else {
+        return;
     };
 
-    Ok(ParsedSolverSettings {
-        solver_backend_config,
-        scheme,
-        strategy,
-        strategy_params,
-        linear_sys_method,
-        method,
-        abs_tolerance,
-        max_iterations,
-        loglevel,
-        dont_save_log,
-    })
+    if let Some(first) = values.first_mut() {
+        if let Some(value) = value_as_usize(first) {
+            *first = Value::Integer(value as i64);
+            values.truncate(1);
+        }
+    }
+}
+
+/// Convert the typed damped solver-family settings into the canonical tolerance map.
+///
+/// The native RustedSciThe parser owns the typed solver contract. KiThe still needs
+/// the expanded `C/J/Teta/q` family because the reactor solver stores tolerances in
+/// the per-unknown map format used by the physical model.
+fn tolerance_config_from_damped_spec(
+    spec: &task_parser_damped::BvpDampedSolverSettingsSpec,
+) -> Result<ToleranceConfig, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let rel_tolerance = spec.rel_tolerance.as_ref().ok_or_else(|| {
+        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::MissingData(
+            "Missing `rel_tolerance` in `solver_settings` section".to_string(),
+        )
+    })?;
+    Ok(ToleranceConfig::new(
+        *rel_tolerance
+            .get("C")
+            .ok_or_else(|| missing_field("rel_tolerance", "C"))?,
+        *rel_tolerance
+            .get("J")
+            .ok_or_else(|| missing_field("rel_tolerance", "J"))?,
+        *rel_tolerance
+            .get("Teta")
+            .ok_or_else(|| missing_field("rel_tolerance", "Teta"))?,
+        *rel_tolerance
+            .get("q")
+            .ok_or_else(|| missing_field("rel_tolerance", "q"))?,
+    ))
+}
+
+/// Convert the typed damped solver-family settings into the canonical bounds map.
+///
+/// This mirrors [`tolerance_config_from_damped_spec`] and keeps the boundary between
+/// solver-document parsing and reactor-state handoff explicit.
+fn bounds_config_from_damped_spec(
+    spec: &task_parser_damped::BvpDampedSolverSettingsSpec,
+) -> Result<BoundsConfig, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let bounds = spec.bounds.as_ref().ok_or_else(|| {
+        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::MissingData(
+            "Missing `bounds` in `solver_settings` section".to_string(),
+        )
+    })?;
+    Ok(BoundsConfig::new(
+        *bounds
+            .get("C")
+            .ok_or_else(|| missing_field("bounds", "C"))?,
+        *bounds
+            .get("J")
+            .ok_or_else(|| missing_field("bounds", "J"))?,
+        *bounds
+            .get("Teta")
+            .ok_or_else(|| missing_field("bounds", "Teta"))?,
+        *bounds
+            .get("q")
+            .ok_or_else(|| missing_field("bounds", "q"))?,
+    ))
 }
 
 /// Validate the dense solution matrix produced by the solver.
@@ -598,15 +583,32 @@ fn validate_solver_output_matrix(
 fn solve_and_store_nrbvp(
     reactor: &mut SimpleReactorTask,
     task_map: &DocumentMap,
-    tolerance_config: ToleranceConfig,
-    bounds_config: BoundsConfig,
     t0: f64,
     t_end: f64,
     n_steps: usize,
     arg: String,
     initial_guess: DMatrix<f64>,
 ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
-    let solver_settings = parse_solver_settings_from_map(task_map)?;
+    let solver_task_map = normalize_reactor_physics_task_map(task_map);
+    let damped_spec = task_parser_damped::parse_bvp_damped_solver_settings_from_document(&solver_task_map)
+        .map_err(|err| {
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
+                format!("RustedSciThe rejected solver settings: {err}"),
+            )
+        })?;
+    // The typed RST options already contain tolerances, bounds, and backend
+    // execution details, so the KiThe handoff only needs to pass them through.
+    let solver_options = damped_spec
+        .build_solver_options()
+        .map_err(|err| crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
+            format!("RustedSciThe rejected solver settings: {err}")
+        ))?;
+    // The backend still expects the reactor-specific expanded maps, so we keep
+    // this small compatibility bridge until RustedSciThe accepts them directly.
+    let tolerance_config = tolerance_config_from_damped_spec(&damped_spec)?;
+    let bounds_config = bounds_config_from_damped_spec(&damped_spec)?;
+    let full_bounds = Some(bounds_config.to_full_bounds_map(&reactor.kindata.substances));
+    let full_rel_tolerance = Some(tolerance_config.to_full_tolerance_map(&reactor.kindata.substances));
 
     let solver = &reactor.solver;
     let mut nr = solver.build_nrbvp_backend(
@@ -615,19 +617,19 @@ fn solve_and_store_nrbvp(
             t0,
             t_end,
             n_steps,
-            solver_settings.scheme,
-            solver_settings.strategy,
-            solver_settings.strategy_params,
-            solver_settings.linear_sys_method,
-            solver_settings.method,
-            solver_settings.abs_tolerance,
-            Some(tolerance_config.to_full_tolerance_map(&reactor.kindata.substances)),
-            solver_settings.max_iterations,
-            Some(bounds_config.to_full_bounds_map(&reactor.kindata.substances)),
-            solver_settings.loglevel,
-            solver_settings.dont_save_log,
+            damped_spec.scheme.clone(),
+            damped_spec.strategy.clone(),
+            damped_spec.strategy_params.clone(),
+            damped_spec.linear_sys_method.clone(),
+            damped_spec.method.clone(),
+            damped_spec.abs_tolerance,
+            full_rel_tolerance,
+            damped_spec.max_iterations,
+            full_bounds,
+            damped_spec.loglevel.clone(),
+            damped_spec.dont_save_log,
         )
-        .with_solver_backend_config(solver_settings.solver_backend_config),
+        .with_solver_options(solver_options),
     )?;
     nr.before_solve_preprocessing();
     nr.solve();
@@ -898,6 +900,8 @@ impl SimpleReactorTask {
     }
     /// Parses solver tolerance and bounds configurations from the document.
     ///
+    /// This is solver-side configuration, not reactor-physics parsing.
+    ///
     /// Extracts numerical solver settings including relative tolerances and variable bounds
     /// for the four main variable types: C (concentrations), J (fluxes), Teta (temperature), q (heat flux).
     ///
@@ -931,7 +935,16 @@ impl SimpleReactorTask {
                 "document must be parsed before tolerance extraction".to_string(),
             )
         })?;
-        parse_tolerance_and_bounds_from_map(task_hashmap)
+        let normalized = normalize_reactor_physics_task_map(task_hashmap);
+        let spec = task_parser_damped::parse_bvp_damped_solver_settings_from_document(&normalized)
+            .map_err(|err| {
+                crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
+                    format!("RustedSciThe rejected solver settings: {err}"),
+                )
+            })?;
+        let tolerance_config = tolerance_config_from_damped_spec(&spec)?;
+        let bounds_config = bounds_config_from_damped_spec(&spec)?;
+        Ok((tolerance_config, bounds_config))
     }
 
     /// Legacy spelling kept for compatibility with older call sites.
@@ -943,7 +956,9 @@ impl SimpleReactorTask {
         self.parse_tolerance_and_bounds(parser)
     }
 
-    /// Extracts basic solver settings (time domain and grid size) from the parsed document.
+    /// Extracts the physical run window from the parsed document.
+    ///
+    /// These are reactor-task inputs, not numerical solver knobs.
     ///
     /// # Arguments
     /// * `parser` - DocumentParser containing the configuration
@@ -959,7 +974,7 @@ impl SimpleReactorTask {
                 "document must be parsed before settings extraction".to_string(),
             )
         })?;
-        parse_basic_settings_from_map(task_hashmap)
+        parse_physics_run_settings_from_map(task_hashmap)
     }
 
     pub fn set_postprocessing_from_hashmap(
@@ -1020,8 +1035,7 @@ impl SimpleReactorTask {
                 "document must be parsed before solver setup".to_string(),
             )
         })?;
-        let (tolerance_config, bounds_config) = parse_tolerance_and_bounds_from_map(task_map)?;
-        let (t0, t_end, n_steps, arg) = parse_basic_settings_from_map(task_map)?;
+        let (t0, t_end, n_steps, arg) = parse_physics_run_settings_from_map(task_map)?;
         self.setup_bvp()?;
         if self.solver.unknowns.is_empty() {
             return Err(
@@ -1042,8 +1056,6 @@ impl SimpleReactorTask {
         solve_and_store_nrbvp(
             self,
             task_map,
-            tolerance_config,
-            bounds_config,
             t0,
             t_end,
             n_steps,
@@ -1129,8 +1141,7 @@ impl SimpleReactorTask {
     ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
         let task_map = map;
         self.set_reactor_params_from_hashmap(&task_map)?;
-        let (tolerance_config, bounds_config) = parse_tolerance_and_bounds_from_map(&task_map)?;
-        let (t0, t_end, n_steps, arg) = parse_basic_settings_from_map(&task_map)?;
+        let (t0, t_end, n_steps, arg) = parse_physics_run_settings_from_map(&task_map)?;
         self.setup_bvp()?;
         if self.solver.unknowns.is_empty() {
             return Err(
@@ -1151,8 +1162,6 @@ impl SimpleReactorTask {
         solve_and_store_nrbvp(
             self,
             &task_map,
-            tolerance_config,
-            bounds_config,
             t0,
             t_end,
             n_steps,
@@ -1209,13 +1218,19 @@ pub const SIMPLE_BVP_TEMPLATE: &'static str = r#"
         A=>10B: [130000.0, 0.0, 20920.0, 102000.0]
         solver_settings
         scheme: forward
-        method: Sparse
+        method: Banded
         strategy: Damped
         linear_sys_method: None
+        generated_backend: banded_lambdify
+        matrix_backend: Banded
+        backend_policy: lambdify_only
+        symbolic_backend: AtomView
+        banded_linear_solver: auto
+        refinement_steps: 5
         abs_tolerance: 1e-7
         max_iterations: 100
         loglevel: Some(info)
-        dont_save_logs: true
+        dont_save_log: true
         bounds
         C: -10.0, 10.0
         J:  -1e20, 1e20
@@ -1360,11 +1375,23 @@ solver_settings
 # Discretization scheme
 scheme: forward
 # Solution method
-method: Sparse
+method: Banded
 # Convergence strategy
 strategy: Damped
 # Linear system solver
 linear_sys_method: None
+# High-level generated backend preset
+generated_backend: banded_lambdify
+# Generated matrix backend
+matrix_backend: Banded
+# Backend selection policy
+backend_policy: lambdify_only
+# Symbolic assembly backend
+symbolic_backend: AtomView
+# Banded linear solver policy
+banded_linear_solver: auto
+# Iterative refinement steps
+refinement_steps: 5
 # Absolute tolerance
 abs_tolerance: 1e-5
 # Maximum iterations
@@ -1372,7 +1399,7 @@ max_iterations: 100
 # Logging level
 loglevel: Some(info)
 # Disable log saving
-dont_save_logs: true
+dont_save_log: true
 
 # Variable bounds for solver
 bounds
@@ -1497,13 +1524,19 @@ mod tests {
         HMX=>10HMXprod: [130000.0, 0.0, 20920.0, 102000.0]
         solver_settings
         scheme: forward
-        method: Sparse
+        method: Banded
         strategy: Damped
         linear_sys_method: None
+        generated_backend: banded_lambdify
+        matrix_backend: Banded
+        backend_policy: lambdify_only
+        symbolic_backend: AtomView
+        banded_linear_solver: auto
+        refinement_steps: 5
         abs_tolerance: 1e-7
         max_iterations: 100
         loglevel: Some(info)
-        dont_save_logs: true
+        dont_save_log: true
         bounds
         C: -10.0, 10.0
         J:  -1e20, 1e20
@@ -1571,6 +1604,48 @@ mod tests {
         assert!(reactor.solver.x_mesh.is_some());
         assert!(!reactor.solver.x_mesh.as_ref().unwrap().is_empty());
         info!("solution {:?}", reactor.solver.solution);
+    }
+
+    #[test]
+    fn test_solve_from_parsed_with_explicit_postprocessing_flags() {
+        let mut parser = DocumentParser::new(task_content.to_string());
+        let mut result: DocumentMap = parser.parse_document().unwrap().clone();
+
+        // Keep the regression path focused on the solve/postprocessing handoff
+        // without creating file or terminal side effects during the test.
+        let postprocessing = result
+            .get_mut("postprocessing")
+            .expect("postprocessing section must exist in the parsed task");
+        postprocessing.insert(
+            "plot".to_string(),
+            Some(vec![Value::Boolean(false)]),
+        );
+        postprocessing.insert(
+            "gnuplot".to_string(),
+            Some(vec![Value::Boolean(false)]),
+        );
+        postprocessing.insert("save".to_string(), Some(vec![Value::Boolean(false)]));
+        postprocessing.insert(
+            "save_to_csv".to_string(),
+            Some(vec![Value::Boolean(false)]),
+        );
+        postprocessing.insert(
+            "return_to_dimension".to_string(),
+            Some(vec![Value::Boolean(false)]),
+        );
+        postprocessing.insert(
+            "no_plots_in_terminal".to_string(),
+            Some(vec![Value::Boolean(true)]),
+        );
+
+        let mut reactor = SimpleReactorTask::new();
+        reactor
+            .solve_from_parsed(result)
+            .expect("Failed to solve parsed task with explicit postprocessing flags");
+        assert!(reactor.solver.solution.is_some());
+        assert!(reactor.solver.x_mesh.is_some());
+        assert!(!reactor.solver.x_mesh.as_ref().unwrap().is_empty());
+        assert!(!reactor.solver.solution.as_ref().unwrap().is_empty());
     }
     #[test]
     fn parsng_task_elementary() {
@@ -1673,7 +1748,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_solver_settings_accepts_aot_backend_options() {
+    fn test_build_bvp_damped_solver_options_accepts_aot_backend_options() {
         let mut solver_settings = HashMap::new();
         solver_settings.insert(
             "scheme".to_string(),
@@ -1685,16 +1760,24 @@ mod tests {
         );
         solver_settings.insert(
             "method".to_string(),
-            Some(vec![Value::String("Sparse".to_string())]),
+            Some(vec![Value::String("Banded".to_string())]),
         );
         solver_settings.insert("abs_tolerance".to_string(), Some(vec![Value::Float(1e-8)]));
-        solver_settings.insert("max_iterations".to_string(), Some(vec![Value::Usize(50)]));
+        solver_settings.insert("max_iterations".to_string(), Some(vec![Value::Integer(50)]));
         solver_settings.insert(
             "generated_backend".to_string(),
             Some(vec![Value::String("banded_aot_tcc".to_string())]),
         );
         solver_settings.insert(
-            "aot_compiler".to_string(),
+            "matrix_backend".to_string(),
+            Some(vec![Value::String("Banded".to_string())]),
+        );
+        solver_settings.insert(
+            "symbolic_backend".to_string(),
+            Some(vec![Value::String("AtomView".to_string())]),
+        );
+        solver_settings.insert(
+            "aot_c_compiler".to_string(),
             Some(vec![Value::String("zig".to_string())]),
         );
         solver_settings.insert(
@@ -1707,46 +1790,407 @@ mod tests {
         );
         solver_settings.insert(
             "aot_execution_policy".to_string(),
-            Some(vec![Value::String("parallel".to_string())]),
+            Some(vec![Value::String("auto".to_string())]),
         );
-        solver_settings.insert("aot_target_chunks".to_string(), Some(vec![Value::Usize(4)]));
 
         let mut document = DocumentMap::new();
         document.insert("solver_settings".to_string(), solver_settings);
 
-        let parsed =
-            parse_solver_settings_from_map(&document).expect("AOT solver settings should parse");
-        let options = parsed
-            .solver_backend_config
-            .to_rusted_options()
-            .expect("Parsed AOT settings should build RustedSciThe options");
+        let normalized = normalize_reactor_physics_task_map(&document);
+        let solver_settings = task_parser_damped::parse_bvp_damped_solver_settings_from_document(&normalized)
+            .expect("BVP damped solver settings should parse through the typed RST API");
+        let options = solver_settings
+            .build_solver_options()
+            .expect("Typed damped settings should build RustedSciThe options");
 
         assert_eq!(
-            options.generated_backend_config.aot_codegen_backend,
-            RustedSciThe::symbolic::codegen::codegen_aot_driver::AotCodegenBackend::Zig
+            options.generated_backend_config.aot_c_compiler.as_deref(),
+            Some("zig")
         );
-        assert_eq!(options.generated_backend_config.aot_c_compiler, None);
         assert!(matches!(
             options.generated_backend_config.aot_build_policy,
             RustedSciThe::numerical::BVP_Damp::generated_solver_handoff::AotBuildPolicy::RequirePrebuilt
         ));
         assert!(matches!(
             options.generated_backend_config.aot_execution_policy,
-            RustedSciThe::numerical::BVP_Damp::generated_solver_handoff::AotExecutionPolicy::Parallel(_)
+            RustedSciThe::numerical::BVP_Damp::generated_solver_handoff::AotExecutionPolicy::Auto
         ));
+        assert!(matches!(
+            options.generated_backend_config.backend_policy_override,
+            Some(
+                RustedSciThe::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy::AotOnly
+            )
+        ));
+        assert!(options.generated_backend_config.matrix_backend_override.is_some());
+    }
+
+    #[test]
+    fn test_normalize_reactor_physics_task_map_coerces_solver_counters_for_rst_parser() {
+        let mut document = DocumentMap::new();
+        document.insert(
+            "solver_settings".to_string(),
+            HashMap::from([
+                (
+                    "max_iterations".to_string(),
+                    Some(vec![Value::Integer(100)]),
+                ),
+                (
+                    "refinement_steps".to_string(),
+                    Some(vec![Value::Float(2.0)]),
+                ),
+            ]),
+        );
+        document.insert(
+            "strategy_params".to_string(),
+            HashMap::from([
+                ("max_jac".to_string(), Some(vec![Value::Integer(3)])),
+                ("max_damp_iter".to_string(), Some(vec![Value::Float(4.0)])),
+            ]),
+        );
+        document.insert(
+            "adaptive_strategy".to_string(),
+            HashMap::from([
+                ("version".to_string(), Some(vec![Value::Integer(1)])),
+                (
+                    "max_refinements".to_string(),
+                    Some(vec![Value::Float(5.0)]),
+                ),
+            ]),
+        );
+
+        let normalized = normalize_reactor_physics_task_map(&document);
+
+        assert!(matches!(
+            normalized
+                .get("solver_settings")
+                .and_then(|section| section.get("max_iterations"))
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first()),
+            Some(Value::Integer(100))
+        ));
+        assert!(matches!(
+            normalized
+                .get("solver_settings")
+                .and_then(|section| section.get("refinement_steps"))
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first()),
+            Some(Value::Integer(2))
+        ));
+        assert!(matches!(
+            normalized
+                .get("strategy_params")
+                .and_then(|section| section.get("max_jac"))
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first()),
+            Some(Value::Integer(3))
+        ));
+        assert!(matches!(
+            normalized
+                .get("strategy_params")
+                .and_then(|section| section.get("max_damp_iter"))
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first()),
+            Some(Value::Integer(4))
+        ));
+        assert!(matches!(
+            normalized
+                .get("adaptive_strategy")
+                .and_then(|section| section.get("version"))
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first()),
+            Some(Value::Integer(1))
+        ));
+        assert!(matches!(
+            normalized
+                .get("adaptive_strategy")
+                .and_then(|section| section.get("max_refinements"))
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first()),
+            Some(Value::Integer(5))
+        ));
+    }
+
+    #[test]
+    fn test_normalize_reactor_physics_task_map_unwraps_optional_string_counters() {
+        let mut document = DocumentMap::new();
+        document.insert(
+            "solver_settings".to_string(),
+            HashMap::from([(
+                "max_iterations".to_string(),
+                Some(vec![Value::Optional(Some(Box::new(Value::String("120".to_string()))))]),
+            )]),
+        );
+        document.insert(
+            "adaptive_strategy".to_string(),
+            HashMap::from([(
+                "version".to_string(),
+                Some(vec![Value::Optional(Some(Box::new(Value::String("2".to_string()))))]),
+            )]),
+        );
+
+        let normalized = normalize_reactor_physics_task_map(&document);
+
+        assert!(matches!(
+            normalized
+                .get("solver_settings")
+                .and_then(|section| section.get("max_iterations"))
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first()),
+            Some(Value::Integer(120))
+        ));
+        assert!(matches!(
+            normalized
+                .get("adaptive_strategy")
+                .and_then(|section| section.get("version"))
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first()),
+            Some(Value::Integer(2))
+        ));
+    }
+
+    #[test]
+    fn test_normalize_reactor_physics_task_map_handles_parsed_template_counters() {
+        let mut parser = DocumentParser::new(task_content.to_string());
+        parser
+            .parse_document()
+            .expect("task fixture should parse before normalization");
+        let parsed = parser
+            .get_result()
+            .expect("parser should expose parsed task fixture");
+
+        let normalized = normalize_reactor_physics_task_map(parsed);
+        let value = normalized
+            .get("solver_settings")
+            .and_then(|section| section.get("max_iterations"))
+            .and_then(|slot| slot.as_ref())
+            .and_then(|values| values.first())
+            .expect("normalized solver_settings.max_iterations should exist");
+
+        match value {
+            Value::Integer(value) => assert_eq!(*value, 100),
+            other => panic!("max_iterations should normalize for the RST parser, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_normalized_template_solver_settings_parse_with_native_rst_parser() {
+        let mut parser = DocumentParser::new(task_content.to_string());
+        parser
+            .parse_document()
+            .expect("task fixture should parse before normalization");
+        let parsed = parser
+            .get_result()
+            .expect("parser should expose parsed task fixture");
+
+        let normalized = normalize_reactor_physics_task_map(parsed);
+        let spec = task_parser_damped::parse_bvp_damped_solver_settings_from_document(&normalized)
+            .expect("normalized KiThe task fixture should satisfy the native RST parser");
+        let options = spec
+            .build_solver_options()
+            .expect("normalized Lambdify settings should build native RST options");
+
+        assert_eq!(spec.max_iterations, 100);
+        assert!(matches!(
+            options.generated_backend_config.backend_policy_override,
+            Some(
+                RustedSciThe::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy::LambdifyOnly
+            )
+        ));
+        assert!(matches!(
+            options.generated_backend_config.aot_build_policy,
+            RustedSciThe::numerical::BVP_Damp::generated_solver_handoff::AotBuildPolicy::UseIfAvailable
+        ));
+        let solver_settings = normalized
+            .get("solver_settings")
+            .expect("normalized task should retain solver settings");
+        for field_name in AOT_ONLY_SOLVER_FIELDS {
+            assert!(
+                !solver_settings.contains_key(*field_name),
+                "Lambdify handoff must remove AOT-only field `{field_name}`"
+            );
+        }
+    }
+
+    #[test]
+    fn test_lambdify_normalization_removes_aot_build_lifecycle() {
+        let mut document = DocumentMap::new();
+        document.insert(
+            "solver_settings".to_string(),
+            HashMap::from([
+                (
+                    "method".to_string(),
+                    Some(vec![Value::String("Banded".to_string())]),
+                ),
+                (
+                    "generated_backend".to_string(),
+                    Some(vec![Value::String("banded_lambdify".to_string())]),
+                ),
+                (
+                    "backend_policy".to_string(),
+                    Some(vec![Value::String("lambdify_only".to_string())]),
+                ),
+                (
+                    "aot_build_policy".to_string(),
+                    Some(vec![Value::String("build_if_missing".to_string())]),
+                ),
+                (
+                    "aot_c_compiler".to_string(),
+                    Some(vec![Value::String("tcc".to_string())]),
+                ),
+            ]),
+        );
+
+        let normalized = normalize_reactor_physics_task_map(&document);
+        let solver_settings = normalized
+            .get("solver_settings")
+            .expect("normalized task should retain solver settings");
+
+        assert_eq!(
+            solver_settings
+                .get("backend_policy")
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first())
+                .and_then(Value::as_string)
+                .map(String::as_str),
+            Some("lambdify_only")
+        );
+        assert!(!solver_settings.contains_key("aot_build_policy"));
+        assert!(!solver_settings.contains_key("aot_c_compiler"));
+    }
+
+    #[test]
+    fn test_normalize_reactor_physics_task_map_respects_adaptive_none_switch() {
+        let mut document = DocumentMap::new();
+        document.insert(
+            "strategy_params".to_string(),
+            HashMap::from([(
+                "adaptive".to_string(),
+                Some(vec![Value::Optional(None)]),
+            )]),
+        );
+        document.insert(
+            "adaptive_strategy".to_string(),
+            HashMap::from([
+                ("version".to_string(), Some(vec![Value::Integer(1)])),
+                (
+                    "max_refinements".to_string(),
+                    Some(vec![Value::Integer(3)]),
+                ),
+            ]),
+        );
+        document.insert(
+            "grid_refinement".to_string(),
+            HashMap::from([(
+                "pearson".to_string(),
+                Some(vec![Value::Vector(vec![0.1, 1.5])]),
+            )]),
+        );
+
+        let normalized = normalize_reactor_physics_task_map(&document);
+
         assert!(
-            options
-                .generated_backend_config
-                .aot_chunking_policy
-                .residual
-                .is_some()
+            normalized.get("adaptive_strategy").is_none(),
+            "strategy_params.adaptive: None must disable the native adaptive_strategy contract"
         );
         assert!(
-            options
-                .generated_backend_config
-                .aot_chunking_policy
-                .sparse_jacobian
-                .is_some()
+            normalized.get("grid_refinement").is_none(),
+            "grid_refinement is meaningful only when adaptive_strategy is enabled"
+        );
+    }
+
+    #[test]
+    fn test_adaptive_none_survives_gui_created_empty_sections_for_native_rst_parser() {
+        let mut document = DocumentMap::new();
+        document.insert(
+            "solver_settings".to_string(),
+            HashMap::from([
+                (
+                    "scheme".to_string(),
+                    Some(vec![Value::String("forward".to_string())]),
+                ),
+                (
+                    "method".to_string(),
+                    Some(vec![Value::String("Banded".to_string())]),
+                ),
+                (
+                    "strategy".to_string(),
+                    Some(vec![Value::String("Damped".to_string())]),
+                ),
+                ("linear_sys_method".to_string(), Some(vec![Value::Optional(None)])),
+                ("abs_tolerance".to_string(), Some(vec![Value::Float(1e-5)])),
+                ("max_iterations".to_string(), Some(vec![Value::Usize(100)])),
+                (
+                    "loglevel".to_string(),
+                    Some(vec![Value::Optional(Some(Box::new(Value::String(
+                        "info".to_string(),
+                    ))))]),
+                ),
+                ("dont_save_log".to_string(), Some(vec![Value::Boolean(true)])),
+            ]),
+        );
+        document.insert(
+            "bounds".to_string(),
+            HashMap::from([
+                (
+                    "C".to_string(),
+                    Some(vec![Value::Float(-10.0), Value::Float(10.0)]),
+                ),
+                (
+                    "J".to_string(),
+                    Some(vec![Value::Float(-1e20), Value::Float(1e20)]),
+                ),
+                (
+                    "Teta".to_string(),
+                    Some(vec![Value::Float(-100.0), Value::Float(100.0)]),
+                ),
+                (
+                    "q".to_string(),
+                    Some(vec![Value::Float(-1e20), Value::Float(1e20)]),
+                ),
+            ]),
+        );
+        document.insert(
+            "rel_tolerance".to_string(),
+            HashMap::from([
+                ("C".to_string(), Some(vec![Value::Float(1e-5)])),
+                ("J".to_string(), Some(vec![Value::Float(1e-5)])),
+                ("Teta".to_string(), Some(vec![Value::Float(1e-5)])),
+                ("q".to_string(), Some(vec![Value::Float(1e-5)])),
+            ]),
+        );
+        document.insert(
+            "strategy_params".to_string(),
+            HashMap::from([
+                (
+                    "max_jac".to_string(),
+                    Some(vec![Value::Optional(Some(Box::new(Value::Integer(3))))]),
+                ),
+                (
+                    "max_damp_iter".to_string(),
+                    Some(vec![Value::Optional(Some(Box::new(Value::Integer(10))))]),
+                ),
+                (
+                    "damp_factor".to_string(),
+                    Some(vec![Value::Optional(Some(Box::new(Value::Float(0.5))))]),
+                ),
+                ("adaptive".to_string(), Some(vec![Value::Optional(None)])),
+            ]),
+        );
+        // Structured GUI rendering can create these sections even when the task
+        // uses the legacy-but-valid `adaptive: None` switch.
+        document.insert("adaptive_strategy".to_string(), HashMap::new());
+        document.insert("grid_refinement".to_string(), HashMap::new());
+
+        let normalized = normalize_reactor_physics_task_map(&document);
+        let spec = task_parser_damped::parse_bvp_damped_solver_settings_from_document(&normalized)
+            .expect("adaptive: None should disable grid adaptation without requiring version");
+
+        assert_eq!(spec.max_iterations, 100);
+        assert_eq!(
+            spec.strategy_params
+                .expect("strategy params should be parsed")
+                .adaptive,
+            None
         );
     }
 
@@ -1815,42 +2259,69 @@ mod tests {
 
     #[test]
     fn test_parse_toleranse_and_bounds_accepts_scalar_pairs() {
-        let mut bounds = HashMap::new();
-        bounds.insert(
-            "C".to_string(),
-            Some(vec![Value::Float(-10.0), Value::Float(10.0)]),
-        );
-        bounds.insert(
-            "J".to_string(),
-            Some(vec![Value::Float(-1e20), Value::Float(1e20)]),
-        );
-        bounds.insert(
-            "Teta".to_string(),
-            Some(vec![Value::Float(-100.0), Value::Float(100.0)]),
-        );
-        bounds.insert(
-            "q".to_string(),
-            Some(vec![Value::Float(-1e20), Value::Float(1e20)]),
-        );
-
-        let mut rel_tolerance = HashMap::new();
-        rel_tolerance.insert("C".to_string(), Some(vec![Value::Float(1e-7)]));
-        rel_tolerance.insert("J".to_string(), Some(vec![Value::Float(1e-7)]));
-        rel_tolerance.insert("Teta".to_string(), Some(vec![Value::Float(1e-7)]));
-        rel_tolerance.insert("q".to_string(), Some(vec![Value::Float(1e-7)]));
-
         let mut document = DocumentMap::new();
-        document.insert("bounds".to_string(), bounds);
-        document.insert("rel_tolerance".to_string(), rel_tolerance);
+        document.insert(
+            "solver_settings".to_string(),
+            HashMap::from([
+                (
+                    "scheme".to_string(),
+                    Some(vec![Value::String("forward".to_string())]),
+                ),
+                (
+                    "strategy".to_string(),
+                    Some(vec![Value::String("Damped".to_string())]),
+                ),
+                (
+                    "method".to_string(),
+                    Some(vec![Value::String("Banded".to_string())]),
+                ),
+                ("abs_tolerance".to_string(), Some(vec![Value::Float(1e-7)])),
+                ("max_iterations".to_string(), Some(vec![Value::Integer(100)])),
+            ]),
+        );
+        document.insert(
+            "bounds".to_string(),
+            HashMap::from([
+                (
+                    "C".to_string(),
+                    Some(vec![Value::Float(-10.0), Value::Float(10.0)]),
+                ),
+                (
+                    "J".to_string(),
+                    Some(vec![Value::Float(-1e20), Value::Float(1e20)]),
+                ),
+                (
+                    "Teta".to_string(),
+                    Some(vec![Value::Float(-100.0), Value::Float(100.0)]),
+                ),
+                (
+                    "q".to_string(),
+                    Some(vec![Value::Float(-1e20), Value::Float(1e20)]),
+                ),
+            ]),
+        );
+        document.insert(
+            "rel_tolerance".to_string(),
+            HashMap::from([
+                ("C".to_string(), Some(vec![Value::Float(1e-7)])),
+                ("J".to_string(), Some(vec![Value::Float(1e-7)])),
+                ("Teta".to_string(), Some(vec![Value::Float(1e-7)])),
+                ("q".to_string(), Some(vec![Value::Float(1e-7)])),
+            ]),
+        );
 
-        let (tolerance_config, bounds_config) = parse_tolerance_and_bounds_from_map(&document)
-            .expect("Failed to parse scalar-pair bounds");
+        let spec = task_parser_damped::parse_bvp_damped_solver_settings_from_document(&document)
+            .expect("Failed to parse native damped solver settings");
 
-        assert_eq!(tolerance_config.C, 1e-7);
-        assert_eq!(bounds_config.C, (-10.0, 10.0));
-        assert_eq!(bounds_config.J, (-1e20, 1e20));
-        assert_eq!(bounds_config.Teta, (-100.0, 100.0));
-        assert_eq!(bounds_config.q, (-1e20, 1e20));
+        assert_eq!(spec.abs_tolerance, 1e-7);
+        assert_eq!(
+            spec.rel_tolerance.as_ref().and_then(|map| map.get("C")).copied(),
+            Some(1e-7)
+        );
+        assert_eq!(
+            spec.bounds.as_ref().and_then(|map| map.get("C")).copied(),
+            Some((-10.0, 10.0))
+        );
     }
 
     #[test]

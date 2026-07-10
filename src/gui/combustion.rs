@@ -40,6 +40,7 @@ use crate::cli::reactor_help::REACTOR_ENG_HELPER;
 use crate::gui::gui_plot::PlotWindow;
 use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
 use eframe::egui;
+use log::{info, warn};
 use std::collections::HashMap;
 /*
 this is value enum from RustedSciThe::command_interpreter::task_parser
@@ -349,6 +350,1406 @@ fn render_section(
     (add_field, delete_section)
 }
 
+const BVP_GRID_REFINEMENT_METHODS: &[&str] =
+    &["pearson", "grcarsmooke", "twopnt", "easy", "doubleoints"];
+
+/// Canonicalizes grid-refinement method names accepted by older task files.
+///
+/// RustedSciThe currently parses `grcarsmooke` and `doubleoints`; KiThe also
+/// accepts the more readable aliases in the GUI and rewrites them at the
+/// structured-editor boundary.
+fn canonical_grid_refinement_method_name(raw: &str) -> Option<&'static str> {
+    let normalized = raw.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    match normalized.as_str() {
+        "pearson" => Some("pearson"),
+        "grcarsmooke" | "grcar_smooke" => Some("grcarsmooke"),
+        "twopnt" | "two_point" | "two_points" => Some("twopnt"),
+        "easy" => Some("easy"),
+        "doubleoints" | "double_points" | "doublepoints" => Some("doubleoints"),
+        _ => None,
+    }
+}
+
+fn grid_refinement_method_label(method: &str) -> &'static str {
+    match method {
+        "pearson" => "Pearson",
+        "grcarsmooke" => "Grcar-Smooke",
+        "twopnt" => "Two-point",
+        "easy" => "Easy",
+        "doubleoints" => "Double points",
+        _ => "Pearson",
+    }
+}
+
+fn default_grid_refinement_params(method: &str) -> Vec<f64> {
+    match method {
+        "pearson" => vec![0.1, 1.5],
+        "grcarsmooke" => vec![0.05, 0.05, 1.25],
+        "twopnt" => vec![0.05, 0.05, 1.25],
+        "easy" => vec![0.05],
+        "doubleoints" => Vec::new(),
+        _ => vec![0.1, 1.5],
+    }
+}
+
+fn grid_refinement_slot_to_params(slot: Option<&Vec<Value>>) -> Option<Vec<f64>> {
+    let values = slot?;
+    if let Some(vector) = values.first().and_then(|value| value.as_vector()) {
+        return Some(vector.clone());
+    }
+
+    let mut params = Vec::with_capacity(values.len());
+    for value in values {
+        params.push(value.as_float()?);
+    }
+    Some(params)
+}
+
+/// Reshapes a grid-refinement section into the single-method contract used by RST.
+fn normalize_grid_refinement_section(
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+) -> String {
+    let mut selected_method = None;
+    let mut selected_params = None;
+
+    for method in BVP_GRID_REFINEMENT_METHODS {
+        if let Some((key, slot)) = section
+            .iter()
+            .find(|(key, _)| canonical_grid_refinement_method_name(key) == Some(*method))
+        {
+            selected_method = Some(*method);
+            selected_params = grid_refinement_slot_to_params(slot.as_ref());
+            if key.as_str() != *method {
+                info!("Grid refinement alias '{}' normalized to '{}'", key, method);
+            }
+            break;
+        }
+    }
+
+    let method = selected_method.unwrap_or("pearson");
+    let mut params = default_grid_refinement_params(method);
+    if let Some(existing_params) = selected_params {
+        for (target, source) in params.iter_mut().zip(existing_params.into_iter()) {
+            if source.is_finite() {
+                *target = source;
+            }
+        }
+    }
+
+    section.clear();
+    section.insert(method.to_string(), Some(vec![Value::Vector(params)]));
+    method.to_string()
+}
+
+/// Returns whether a compatibility value explicitly disables adaptive refinement.
+fn value_is_explicit_none(value: &Value) -> bool {
+    matches!(value, Value::Optional(None))
+        || matches!(value, Value::String(value) if value.trim().eq_ignore_ascii_case("none"))
+}
+
+/// Reads and removes the obsolete `strategy_params.adaptive` GUI switch.
+///
+/// RustedSciThe enables adaptive refinement from the presence of the
+/// `adaptive_strategy` section, not from this field. Older task documents may
+/// still carry `adaptive: None`, so the marker is consumed once and translated
+/// into the native section-presence contract.
+fn take_legacy_adaptive_marker(document: &mut DocumentMap) -> Option<bool> {
+    let strategy_params = document.get_mut("strategy_params")?;
+    let values = strategy_params.remove("adaptive")??;
+    let value = values.first()?;
+    Some(!value_is_explicit_none(value))
+}
+
+/// Enables or disables the complete native adaptive-grid contract.
+///
+/// Version 1 is currently the only production strategy exposed by
+/// RustedSciThe. Enabling adaptation therefore seeds it automatically together
+/// with a bounded refinement count and one valid grid-refinement method.
+fn set_bvp_adaptive_grid_enabled(document: &mut DocumentMap, enabled: bool) {
+    if let Some(strategy_params) = document.get_mut("strategy_params") {
+        strategy_params.remove("adaptive");
+    }
+
+    if !enabled {
+        document.remove("adaptive_strategy");
+        document.remove("grid_refinement");
+        return;
+    }
+
+    let adaptive_strategy = ensure_section_mut(document, "adaptive_strategy");
+    adaptive_strategy.insert("version".to_string(), Some(vec![Value::Usize(1)]));
+    let _ = ensure_field_slot(
+        adaptive_strategy,
+        "max_refinements",
+        Value::Usize(3),
+    );
+    normalize_usize_field(adaptive_strategy, "max_refinements");
+
+    let grid_refinement = ensure_section_mut(document, "grid_refinement");
+    normalize_grid_refinement_section(grid_refinement);
+}
+
+/// Canonicalizes adaptive-grid state loaded from old or partially edited tasks.
+fn normalize_bvp_adaptive_grid_settings(document: &mut DocumentMap) {
+    let compatibility_marker = take_legacy_adaptive_marker(document);
+    let has_native_payload = document
+        .get("adaptive_strategy")
+        .is_some_and(|section| !section.is_empty())
+        || document
+            .get("grid_refinement")
+            .is_some_and(|section| !section.is_empty());
+    let enabled = compatibility_marker.unwrap_or(has_native_payload);
+    set_bvp_adaptive_grid_enabled(document, enabled);
+}
+
+/// Renders the one coherent adaptive-grid control surface accepted by RST.
+fn render_bvp_adaptive_grid_panel(
+    ui: &mut egui::Ui,
+    document: &mut DocumentMap,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) {
+    normalize_bvp_adaptive_grid_settings(document);
+    let mut enabled = document.contains_key("adaptive_strategy");
+
+    ui.group(|ui| {
+        ui.vertical(|ui| {
+            let response = ui.checkbox(&mut enabled, "Adaptive grid refinement");
+            if response.hovered() {
+                if let Some(map) = help_map {
+                    if let Some((_, help_text)) =
+                        map.iter().find(|(key, _)| *key == "adaptive_strategy")
+                    {
+                        *current_help = help_text.to_string();
+                    }
+                }
+            }
+            if response.changed() {
+                set_bvp_adaptive_grid_enabled(document, enabled);
+                info!("Adaptive grid refinement enabled: {}", enabled);
+            }
+
+            if enabled {
+                ui.label("Adaptive strategy version: 1");
+                egui::Grid::new("bvp_adaptive_strategy_grid")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        let adaptive_strategy =
+                            ensure_section_mut(document, "adaptive_strategy");
+                        let current = adaptive_strategy
+                            .get("max_refinements")
+                            .and_then(|slot| slot.as_ref())
+                            .and_then(|values| values.first())
+                            .and_then(value_as_usize)
+                            .unwrap_or(3);
+                        let mut max_refinements = current;
+                        ui.label("Maximum grid refinements");
+                        if ui
+                            .add(egui::DragValue::new(&mut max_refinements).speed(1))
+                            .changed()
+                        {
+                            adaptive_strategy.insert(
+                                "max_refinements".to_string(),
+                                Some(vec![Value::Usize(max_refinements)]),
+                            );
+                            info!("Maximum grid refinements changed to: {}", max_refinements);
+                        }
+                        ui.end_row();
+                    });
+
+                let (_, delete_requested) = render_grid_refinement_section(
+                    ui,
+                    ensure_section_mut(document, "grid_refinement"),
+                    help_map,
+                    current_help,
+                );
+                if delete_requested {
+                    enabled = false;
+                    set_bvp_adaptive_grid_enabled(document, false);
+                }
+            }
+        });
+    });
+}
+
+/// Renders grid refinement as a finite method selector plus typed parameters.
+///
+/// A raw map is too easy to make invalid here because RustedSciThe accepts only
+/// one active method. This editor keeps the document in the exact shape the
+/// backend parser expects.
+fn render_grid_refinement_section(
+    ui: &mut egui::Ui,
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) -> (bool, bool) {
+    let mut delete_section = false;
+    let current_method = normalize_grid_refinement_section(section);
+
+    ui.horizontal(|ui| {
+        let section_header = egui::CollapsingHeader::new("grid_refinement")
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::Grid::new("bvp_grid_refinement_strategy_grid")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        let label_response = ui.label("Grid refinement strategy");
+                        if label_response.hovered() {
+                            if let Some(map) = help_map {
+                                if let Some((_, help_text)) =
+                                    map.iter().find(|(key, _)| *key == "grid_refinement")
+                                {
+                                    *current_help = help_text.to_string();
+                                }
+                            }
+                        }
+
+                        let mut selected_method = current_method.clone();
+                        egui::ComboBox::from_id_salt("grid_refinement.method")
+                            .selected_text(grid_refinement_method_label(&selected_method))
+                            .show_ui(ui, |ui| {
+                                for method in BVP_GRID_REFINEMENT_METHODS {
+                                    ui.selectable_value(
+                                        &mut selected_method,
+                                        (*method).to_string(),
+                                        grid_refinement_method_label(method),
+                                    );
+                                }
+                            });
+                        ui.end_row();
+
+                        if selected_method != current_method {
+                            section.clear();
+                            section.insert(
+                                selected_method.clone(),
+                                Some(vec![Value::Vector(default_grid_refinement_params(
+                                    &selected_method,
+                                ))]),
+                            );
+                            info!("Grid refinement strategy changed to: {}", selected_method);
+                        }
+
+                        let method = selected_method;
+                        let params = section
+                            .get_mut(&method)
+                            .and_then(|slot| slot.as_mut())
+                            .and_then(|values| values.first_mut())
+                            .and_then(|value| match value {
+                                Value::Vector(params) => Some(params),
+                                _ => None,
+                            })
+                            .expect("grid refinement section should contain a vector payload");
+
+                        ui.label("Parameters");
+                        if params.is_empty() {
+                            ui.label("No parameters");
+                        } else {
+                            ui.horizontal(|ui| {
+                                for (index, value) in params.iter_mut().enumerate() {
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(value)
+                                                .speed(0.01)
+                                                .prefix(format!("p{}=", index + 1)),
+                                        )
+                                        .changed()
+                                    {
+                                        info!(
+                                            "Grid refinement parameter {} changed to: {}",
+                                            index + 1,
+                                            value
+                                        );
+                                    }
+                                }
+                            });
+                        }
+                        ui.end_row();
+                    });
+            });
+
+        if section_header.header_response.hovered() {
+            if let Some(map) = help_map {
+                if let Some((_, help_text)) = map.iter().find(|(key, _)| *key == "grid_refinement")
+                {
+                    *current_help = help_text.to_string();
+                }
+            }
+        }
+
+        if ui.button("Delete").clicked() {
+            delete_section = true;
+        }
+    });
+
+    (false, delete_section)
+}
+
+/// Serializes a parser value using the same DSL that `DocumentParser` accepts.
+fn value_to_document_string(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Float(value) => value.to_string(),
+        Value::Integer(value) => value.to_string(),
+        Value::Usize(value) => value.to_string(),
+        Value::Boolean(value) => value.to_string(),
+        Value::Vector(values) => {
+            let values = values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{}]", values)
+        }
+        Value::Optional(Some(inner)) => format!("Some({})", value_to_document_string(inner)),
+        Value::Optional(None) => "None".to_string(),
+    }
+}
+
+/// Serializes all values assigned to one document key as one parser-friendly line.
+///
+/// `DocumentParser` accepts `key: a, b`, but rejects repeating the same key
+/// several times in one section. The GUI model may still store scalar pairs as
+/// `Some(vec![Value::Float(a), Value::Float(b)])`, so saving must collapse them
+/// back into a single comma-separated DSL value.
+fn values_to_document_string(values: &[Value]) -> String {
+    values
+        .iter()
+        .map(value_to_document_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Ensures that a section exists and returns a mutable reference to it.
+///
+/// The BVP solver panel seeds missing solver fields on demand, but it never
+/// overwrites existing user edits.
+fn ensure_section_mut<'a>(
+    document: &'a mut DocumentMap,
+    section_name: &str,
+) -> &'a mut HashMap<String, Option<Vec<Value>>> {
+    document
+        .entry(section_name.to_string())
+        .or_insert_with(HashMap::new)
+}
+
+/// Ensures that a field slot exists and seeds a single default value if needed.
+fn ensure_field_slot<'a>(
+    section: &'a mut HashMap<String, Option<Vec<Value>>>,
+    field_name: &str,
+    default_value: Value,
+) -> &'a mut Option<Vec<Value>> {
+    let entry = section
+        .entry(field_name.to_string())
+        .or_insert_with(|| Some(vec![default_value.clone()]));
+
+    if entry.is_none() {
+        *entry = Some(vec![default_value.clone()]);
+    }
+
+    if entry.as_ref().is_some_and(|values| values.is_empty()) {
+        *entry = Some(vec![default_value]);
+    }
+
+    entry
+}
+
+/// Seeds the canonical BVP solver backend defaults.
+///
+/// This keeps the structured GUI aligned with the lower RustedSciThe solver
+/// API and gives users a visible starting point for both lambdify and AOT
+/// routes.
+fn ensure_bvp_solver_backend_defaults(document: &mut DocumentMap) {
+    let section = ensure_section_mut(document, "solver_settings");
+    normalize_matrix_backend_aliases(section);
+    let defaults = [
+        ("scheme", Value::String("forward".to_string())),
+        ("strategy", Value::String("Damped".to_string())),
+        ("linear_sys_method", Value::Optional(None)),
+        ("generated_backend", Value::String("banded_lambdify".to_string())),
+        ("symbolic_backend", Value::String("AtomView".to_string())),
+        ("banded_linear_solver", Value::String("auto".to_string())),
+        ("refinement_steps", Value::Usize(5)),
+        ("abs_tolerance", Value::Float(1e-7)),
+        ("max_iterations", Value::Usize(100)),
+        (
+            "loglevel",
+            Value::Optional(Some(Box::new(Value::String("info".to_string())))),
+        ),
+        ("dont_save_log", Value::Boolean(true)),
+    ];
+
+    for (field_name, default_value) in defaults {
+        let _ = ensure_field_slot(section, field_name, default_value);
+    }
+
+    normalize_usize_field(section, "max_iterations");
+    normalize_usize_field(section, "refinement_steps");
+    synchronize_exclusive_execution_backend(section);
+
+    // Canonical preset names encode the matrix route as a prefix. Keep that
+    // derived value aligned while preserving unknown custom backend names.
+    if string_field_value(section, "generated_backend").is_some_and(|backend| {
+        backend.starts_with("banded_") || backend.starts_with("sparse_")
+    }) {
+        sync_generated_backend_from_controls(section);
+    }
+}
+
+/// Coerces a solver counter-like value into a plain `usize`, if possible.
+///
+/// The GUI and the text parser can temporarily carry counters in a few legacy
+/// shapes. Normalizing them here keeps the solver handoff strict without making
+/// the editor brittle.
+fn value_as_usize(value: &Value) -> Option<usize> {
+    match value {
+        Value::Usize(value) => Some(*value),
+        Value::Integer(value) if *value >= 0 => Some(*value as usize),
+        Value::Float(value) if value.is_finite() && *value >= 0.0 => Some(*value as usize),
+        Value::String(value) => value.trim().parse::<usize>().ok(),
+        Value::Optional(Some(inner)) => value_as_usize(inner.as_ref()),
+        _ => None,
+    }
+}
+
+/// Normalizes numeric fields that must stay `usize` for the solver backend.
+///
+/// The GUI can load or temporarily hold numeric values in different scalar
+/// variants, but the solver contract expects these fields to remain non-negative
+/// integers.
+fn normalize_usize_field(
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    field_name: &str,
+) {
+    let Some(values) = section.get_mut(field_name).and_then(|slot| slot.as_mut()) else {
+        return;
+    };
+
+    if let Some(first) = values.first_mut() {
+        if let Some(value) = value_as_usize(first) {
+            *first = Value::Usize(value);
+            values.truncate(1);
+        }
+    }
+}
+
+fn string_field_value(
+    section: &HashMap<String, Option<Vec<Value>>>,
+    field_name: &str,
+) -> Option<String> {
+    section
+        .get(field_name)
+        .and_then(|slot| slot.as_ref())
+        .and_then(|values| values.first())
+        .and_then(|value| value.as_string().cloned())
+}
+
+fn set_string_field(
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    field_name: &str,
+    value: &str,
+) {
+    section.insert(
+        field_name.to_string(),
+        Some(vec![Value::String(value.to_string())]),
+    );
+}
+
+fn canonical_matrix_backend(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "banded" => Some("Banded"),
+        "sparse" => Some("Sparse"),
+        _ => None,
+    }
+}
+
+/// Keeps the two RST matrix-backend aliases synchronized behind one GUI field.
+///
+/// `method` is the required solver setting while `matrix_backend` is the
+/// generated-backend override. They select the same Sparse/Banded storage route
+/// for reactor BVP tasks, so exposing both independently only permits invalid
+/// disagreement. The required `method` field wins when loading old documents.
+fn normalize_matrix_backend_aliases(
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+) -> &'static str {
+    let method = string_field_value(section, "method")
+        .as_deref()
+        .and_then(canonical_matrix_backend);
+    let matrix_backend = string_field_value(section, "matrix_backend")
+        .as_deref()
+        .and_then(canonical_matrix_backend);
+    let backend = method.or(matrix_backend).unwrap_or("Banded");
+
+    set_string_field(section, "method", backend);
+    set_string_field(section, "matrix_backend", backend);
+    backend
+}
+
+const BVP_AOT_ONLY_FIELDS: &[&str] = &[
+    "aot_codegen_backend",
+    "aot_c_compiler",
+    "aot_build_policy",
+    "aot_build_profile",
+    "aot_compile_preset",
+    "aot_execution_policy",
+];
+
+/// Keeps Lambdify and AOT as mutually exclusive execution contracts.
+///
+/// RustedSciThe intentionally treats backend selection and artifact lifecycle
+/// as independent controls. KiThe exposes a simpler exclusive choice, so its
+/// GUI must never submit `LambdifyOnly + BuildIfMissing`: that combination runs
+/// lambdified callbacks while still compiling an unused shared library.
+fn synchronize_exclusive_execution_backend(
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+) {
+    let Some(generated_backend) = string_field_value(section, "generated_backend") else {
+        return;
+    };
+    let normalized = generated_backend.trim().to_ascii_lowercase();
+
+    if normalized.contains("_aot") || normalized.starts_with("aot_") {
+        set_string_field(section, "backend_policy", "aot_only");
+        let defaults = [
+            ("aot_codegen_backend", "C"),
+            ("aot_c_compiler", "tcc"),
+            ("aot_build_policy", "build_if_missing"),
+            ("aot_build_profile", "release"),
+            ("aot_compile_preset", "dev_fastest"),
+            ("aot_execution_policy", "auto"),
+        ];
+        for (field_name, default_value) in defaults {
+            let _ = ensure_field_slot(
+                section,
+                field_name,
+                Value::String(default_value.to_string()),
+            );
+        }
+    } else if normalized.contains("lambdify") {
+        set_string_field(section, "backend_policy", "lambdify_only");
+        for field_name in BVP_AOT_ONLY_FIELDS {
+            section.remove(*field_name);
+        }
+    }
+}
+
+fn optional_string_field_value(
+    section: &HashMap<String, Option<Vec<Value>>>,
+    field_name: &str,
+) -> Option<String> {
+    let value = section
+        .get(field_name)
+        .and_then(|slot| slot.as_ref())
+        .and_then(|values| values.first())?;
+
+    match value {
+        Value::Optional(None) => None,
+        Value::Optional(Some(inner)) => inner.as_string().cloned(),
+        Value::String(value) if value.eq_ignore_ascii_case("none") => None,
+        Value::String(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn set_optional_string_field(
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    field_name: &str,
+    value: Option<&str>,
+) {
+    let value = value
+        .map(|value| Value::Optional(Some(Box::new(Value::String(value.to_string())))))
+        .unwrap_or(Value::Optional(None));
+    section.insert(field_name.to_string(), Some(vec![value]));
+}
+
+fn normalize_optional_string_field(
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    field_name: &str,
+) {
+    let current_value = optional_string_field_value(section, field_name);
+    let is_valid_shape = section
+        .get(field_name)
+        .and_then(|slot| slot.as_ref())
+        .and_then(|values| values.first())
+        .map(|value| match value {
+            Value::Optional(None) => true,
+            Value::Optional(Some(inner)) => inner.as_string().is_some(),
+            Value::String(_) => true,
+            _ => false,
+        })
+        .unwrap_or(false);
+
+    if !is_valid_shape {
+        set_optional_string_field(section, field_name, None);
+    } else if matches!(
+        section
+            .get(field_name)
+            .and_then(|slot| slot.as_ref())
+            .and_then(|values| values.first()),
+        Some(Value::String(_))
+    ) {
+        set_optional_string_field(section, field_name, current_value.as_deref());
+    }
+}
+
+/// Recomputes the low-level generated backend string from the visible backend controls.
+///
+/// This keeps the document compatible with the solver while allowing the GUI to
+/// expose a smaller, more direct control surface.
+fn sync_generated_backend_from_controls(section: &mut HashMap<String, Option<Vec<Value>>>) {
+    let Some(current_backend) = string_field_value(section, "generated_backend") else {
+        return;
+    };
+
+    let is_aot = current_backend.contains("_aot_");
+    let matrix_backend = string_field_value(section, "matrix_backend")
+        .unwrap_or_else(|| "Banded".to_string());
+    let compiler = string_field_value(section, "aot_c_compiler").unwrap_or_else(|| "tcc".to_string());
+
+    let next_backend = if is_aot {
+        match (matrix_backend.as_str(), compiler.as_str()) {
+            ("Sparse", "gcc") => "sparse_aot_gcc",
+            ("Sparse", "zig") => "sparse_aot_zig",
+            ("Sparse", _) => "sparse_aot_tcc",
+            (_, "gcc") => "banded_aot_gcc",
+            (_, "zig") => "banded_aot_zig",
+            _ => "banded_aot_tcc",
+        }
+    } else {
+        match matrix_backend.as_str() {
+            "Sparse" => "sparse_lambdify",
+            _ => "banded_lambdify",
+        }
+    };
+
+    if next_backend != current_backend {
+        set_string_field(section, "generated_backend", next_backend);
+        synchronize_exclusive_execution_backend(section);
+        println!("Field 'generated_backend' changed to: {}", next_backend);
+    }
+}
+
+/// Collects the species names that own dedicated composition sections.
+///
+/// BVP reactor documents store the canonical species list in
+/// `process_conditions.substances`. Those names can also appear as their own
+/// sections when the document carries atomic composition data.
+fn bvp_species_section_names(document: &DocumentMap) -> Vec<String> {
+    let Some(process_conditions) = document.get("process_conditions") else {
+        return Vec::new();
+    };
+
+    let Some(substances) = process_conditions
+        .get("substances")
+        .and_then(|slot| slot.as_ref())
+    else {
+        return Vec::new();
+    };
+
+    substances
+        .iter()
+        .filter_map(|value| value.as_string().cloned())
+        .collect()
+}
+
+/// Renders `Option<String>` solver settings without exposing the generic optional editor.
+///
+/// The lower solver still accepts `linear_sys_method`, but for the BVP routes
+/// used here the normal value is `None`: Banded and Sparse backends pick their
+/// own linear algebra policy. If a compatibility override is needed, the GUI
+/// offers only the parser-supported textual choices.
+fn render_solver_backend_optional_string_choice_row(
+    ui: &mut egui::Ui,
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    field_name: &str,
+    display_name: &str,
+    choices: &[(&str, Option<&str>)],
+    default_label: &str,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) {
+    normalize_optional_string_field(section, field_name);
+    let current_value = optional_string_field_value(section, field_name);
+    let current_label = choices
+        .iter()
+        .find(|(_, value)| value.map(str::to_string) == current_value)
+        .map(|(label, _)| *label)
+        .unwrap_or(default_label);
+
+    let label_response = ui.label(display_name);
+    if label_response.hovered() {
+        if let Some(map) = help_map {
+            let help_key = format!("solver_settings.{}", field_name);
+            if let Some((_, help_text)) = map.iter().find(|(key, _)| *key == help_key) {
+                *current_help = help_text.to_string();
+            }
+        }
+    }
+
+    let mut selected_label = current_label.to_string();
+    egui::ComboBox::from_id_salt(format!("solver_settings.{}.{}", display_name, field_name))
+        .selected_text(selected_label.as_str())
+        .show_ui(ui, |ui| {
+            for (label, _) in choices {
+                ui.selectable_value(&mut selected_label, (*label).to_string(), *label);
+            }
+        });
+
+    if selected_label != current_label {
+        let selected_value = choices
+            .iter()
+            .find(|(label, _)| *label == selected_label)
+            .and_then(|(_, value)| *value);
+        set_optional_string_field(section, field_name, selected_value);
+        info!(
+            "Field '{}' changed to: {}",
+            field_name,
+            selected_value.unwrap_or("None")
+        );
+    }
+
+    ui.end_row();
+}
+
+/// Renders one row in the structured solver backend panel.
+fn render_solver_backend_row(
+    ui: &mut egui::Ui,
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    field_name: &str,
+    display_name: &str,
+    default_value: Value,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) {
+    let values = ensure_field_slot(section, field_name, default_value);
+    let label_response = ui.label(display_name);
+
+    if label_response.hovered() {
+        if let Some(map) = help_map {
+            let help_key = format!("solver_settings.{}", field_name);
+            if let Some((_, help_text)) = map.iter().find(|(key, _)| *key == help_key) {
+                *current_help = help_text.to_string();
+            }
+        }
+    }
+
+    match values {
+        Some(values) => {
+            if values.is_empty() {
+                ui.label("None");
+            } else {
+                for value in values.iter_mut() {
+                    render_value(ui, value, field_name);
+                }
+            }
+        }
+        None => {
+            ui.label("None");
+        }
+    }
+
+    ui.end_row();
+}
+
+/// Renders a solver backend row that must stay as `usize`.
+///
+/// The solver rejects floating-point and signed integer representations for
+/// iteration counters, so this helper keeps the GUI contract aligned with the
+/// parser contract.
+fn render_solver_backend_usize_row(
+    ui: &mut egui::Ui,
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    field_name: &str,
+    display_name: &str,
+    default_value: usize,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) {
+    let current_value = {
+        let values = ensure_field_slot(section, field_name, Value::Usize(default_value));
+        values
+            .as_ref()
+            .and_then(|values| values.first())
+            .and_then(value_as_usize)
+            .unwrap_or(default_value)
+    };
+
+    normalize_usize_field(section, field_name);
+
+    let label_response = ui.label(display_name);
+    if label_response.hovered() {
+        if let Some(map) = help_map {
+            let help_key = format!("solver_settings.{}", field_name);
+            if let Some((_, help_text)) = map.iter().find(|(key, _)| *key == help_key) {
+                *current_help = help_text.to_string();
+            }
+        }
+    }
+
+    let mut current_value = current_value;
+
+    if ui.add(egui::DragValue::new(&mut current_value).speed(1)).changed() {
+        section.insert(field_name.to_string(), Some(vec![Value::Usize(current_value)]));
+        println!("Field '{}' changed to: {}", field_name, current_value);
+    }
+
+    ui.end_row();
+}
+
+/// Renders a dropdown-backed string field in the solver backend panel.
+fn render_solver_backend_choice_row(
+    ui: &mut egui::Ui,
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    field_name: &str,
+    display_name: &str,
+    choices: &[&str],
+    default_value: &str,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) {
+    let current_value = string_field_value(section, field_name).unwrap_or_else(|| {
+        let default_value = default_value.to_string();
+        set_string_field(section, field_name, &default_value);
+        default_value
+    });
+
+    let label_response = ui.label(display_name);
+    if label_response.hovered() {
+        if let Some(map) = help_map {
+            let help_key = format!("solver_settings.{}", field_name);
+            if let Some((_, help_text)) = map.iter().find(|(key, _)| *key == help_key) {
+                *current_help = help_text.to_string();
+            }
+        }
+    }
+
+    let mut selected_value = current_value.clone();
+    egui::ComboBox::from_id_salt(format!("solver_settings.{}.{}", display_name, field_name))
+        .selected_text(selected_value.as_str())
+        .show_ui(ui, |ui| {
+            for choice in choices {
+                ui.selectable_value(&mut selected_value, (*choice).to_string(), *choice);
+            }
+        });
+
+    if selected_value != current_value {
+        set_string_field(section, field_name, &selected_value);
+        println!("Field '{}' changed to: {}", field_name, selected_value);
+
+        if field_name == "matrix_backend" || field_name == "aot_c_compiler" {
+            sync_generated_backend_from_controls(section);
+        }
+    }
+
+    ui.end_row();
+}
+
+/// Renders a user-facing execution-mode selector and keeps `generated_backend`
+/// synchronized with the higher-level choice.
+fn render_generated_backend_mode_row(
+    ui: &mut egui::Ui,
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) -> bool {
+    let current_backend =
+        string_field_value(section, "generated_backend").unwrap_or_else(|| "banded_lambdify".to_string());
+    let current_mode = if current_backend.contains("_aot_") {
+        "AOT"
+    } else {
+        "Lambdify"
+    };
+
+    let label_response = ui.label("Residuals and Jacobian Backend");
+    if label_response.hovered() {
+        if let Some(map) = help_map {
+            if let Some((_, help_text)) = map
+                .iter()
+                .find(|(key, _)| *key == "solver_settings.generated_backend")
+            {
+                *current_help = help_text.to_string();
+            }
+        }
+    }
+
+    let mut selected_mode = current_mode.to_string();
+    egui::ComboBox::from_id_salt("solver_settings.generated_backend.mode")
+        .selected_text(selected_mode.as_str())
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut selected_mode, "Lambdify".to_string(), "Lambdify");
+            ui.selectable_value(&mut selected_mode, "AOT".to_string(), "AOT");
+        });
+
+    let changed = selected_mode != current_mode;
+    if changed {
+        let matrix_backend = string_field_value(section, "matrix_backend")
+            .unwrap_or_else(|| "Banded".to_string());
+        let compiler = string_field_value(section, "aot_c_compiler")
+            .unwrap_or_else(|| "tcc".to_string());
+        let backend_name = match (selected_mode.as_str(), matrix_backend.as_str(), compiler.as_str()) {
+            ("AOT", "Sparse", "gcc") => "sparse_aot_gcc",
+            ("AOT", "Sparse", "zig") => "sparse_aot_zig",
+            ("AOT", "Sparse", _) => "sparse_aot_tcc",
+            ("AOT", _, "gcc") => "banded_aot_gcc",
+            ("AOT", _, "zig") => "banded_aot_zig",
+            ("AOT", _, _) => "banded_aot_tcc",
+            ("Lambdify", "Sparse", _) => "sparse_lambdify",
+            _ => "banded_lambdify",
+        };
+        set_string_field(section, "generated_backend", backend_name);
+        synchronize_exclusive_execution_backend(section);
+        println!("Field 'generated_backend' changed to: {}", backend_name);
+    }
+
+    ui.end_row();
+    selected_mode == "AOT"
+}
+
+/// Renders the structured solver backend panel for BVP problems.
+fn render_bvp_solver_backend_panel(
+    ui: &mut egui::Ui,
+    document: &mut DocumentMap,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) {
+    ensure_bvp_solver_backend_defaults(document);
+    let section = ensure_section_mut(document, "solver_settings");
+
+    ui.separator();
+    ui.label("Solver backend");
+    ui.label("Default route: Lambdify + AtomView + Banded");
+    ui.label("Residuals and Jacobian backend is exclusive: Lambdify or AOT.");
+    ui.add_space(6.0);
+
+    ui.label("Core solve");
+    egui::Grid::new("bvp_solver_backend_core_grid")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            render_solver_backend_choice_row(
+                ui,
+                section,
+                "scheme",
+                "scheme",
+                &["forward", "trapezoid"],
+                "forward",
+                help_map,
+                current_help,
+            );
+            let matrix_backend_before = normalize_matrix_backend_aliases(section).to_string();
+            render_solver_backend_choice_row(
+                ui,
+                section,
+                "method",
+                "Linear algebra backend",
+                &["Banded", "Sparse"],
+                "Banded",
+                help_map,
+                current_help,
+            );
+            let matrix_backend_after = string_field_value(section, "method")
+                .as_deref()
+                .and_then(canonical_matrix_backend)
+                .unwrap_or("Banded");
+            set_string_field(section, "matrix_backend", matrix_backend_after);
+            if matrix_backend_after != matrix_backend_before {
+                sync_generated_backend_from_controls(section);
+            }
+            render_solver_backend_row(
+                ui,
+                section,
+                "strategy",
+                "strategy",
+                Value::String("Damped".to_string()),
+                help_map,
+                current_help,
+            );
+            render_solver_backend_optional_string_choice_row(
+                ui,
+                section,
+                "linear_sys_method",
+                "Linear system method override",
+                &[("Auto", None), ("faithful", Some("faithful"))],
+                "Auto",
+                help_map,
+                current_help,
+            );
+            render_solver_backend_row(
+                ui,
+                section,
+                "abs_tolerance",
+                "abs_tolerance",
+                Value::Float(1e-7),
+                help_map,
+                current_help,
+            );
+            render_solver_backend_usize_row(
+                ui,
+                section,
+                "max_iterations",
+                "max_iterations",
+                100,
+                help_map,
+                current_help,
+            );
+            render_solver_backend_row(
+                ui,
+                section,
+                "loglevel",
+                "loglevel",
+                Value::Optional(Some(Box::new(Value::String("info".to_string())))),
+                help_map,
+                current_help,
+            );
+            render_solver_backend_row(
+                ui,
+                section,
+                "dont_save_log",
+                "dont_save_log",
+                Value::Boolean(true),
+                help_map,
+                current_help,
+            );
+        });
+
+    ui.add_space(8.0);
+    ui.label("Execution and assembly");
+    egui::Grid::new("bvp_solver_backend_generated_grid")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            let aot_enabled = render_generated_backend_mode_row(
+                ui,
+                section,
+                help_map,
+                current_help,
+            );
+            render_solver_backend_choice_row(
+                ui,
+                section,
+                "symbolic_backend",
+                "Symbolic backend",
+                &["AtomView", "ExprLegacy"],
+                "AtomView",
+                help_map,
+                current_help,
+            );
+            if aot_enabled {
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "aot_c_compiler",
+                    "AOT compiler",
+                    &["tcc", "gcc", "zig"],
+                    "tcc",
+                    help_map,
+                    current_help,
+                );
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "aot_build_policy",
+                    "AOT build policy",
+                    &[
+                        "build_if_missing",
+                        "use_if_available",
+                        "require_prebuilt",
+                        "rebuild_always",
+                    ],
+                    "build_if_missing",
+                    help_map,
+                    current_help,
+                );
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "aot_build_profile",
+                    "AOT build profile",
+                    &["release", "debug"],
+                    "release",
+                    help_map,
+                    current_help,
+                );
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "aot_compile_preset",
+                    "AOT compile preset",
+                    &["production", "fast_build", "dev_fastest"],
+                    "dev_fastest",
+                    help_map,
+                    current_help,
+                );
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "aot_execution_policy",
+                    "AOT execution policy",
+                    &["auto", "sequential", "parallel"],
+                    "auto",
+                    help_map,
+                    current_help,
+                );
+            }
+            render_solver_backend_choice_row(
+                ui,
+                section,
+                "banded_linear_solver",
+                "Banded linear solver",
+                &[
+                    "auto",
+                    "faithful",
+                    "block_tridiagonal",
+                    "block_tridiagonal_consistent",
+                    "faer_sparse",
+                    "general_partial_pivot",
+                ],
+                "auto",
+                help_map,
+                current_help,
+            );
+            render_solver_backend_usize_row(
+                ui,
+                section,
+                "refinement_steps",
+                "refinement_steps",
+                5,
+                help_map,
+                current_help,
+            );
+            let _ = aot_enabled;
+        });
+}
+
+const BVP_PHYSICS_SECTIONS: &[&str] = &[
+    "process_conditions",
+    "boundary_condition",
+    "diffusion_coefficients",
+    "reactions",
+    "bounds",
+];
+
+/// Solver-level controls that are still stored in separate sections for readability.
+const BVP_SOLVER_ADVANCED_SECTIONS: &[&str] = &[
+    "rel_tolerance",
+    "strategy_params",
+];
+
+const BVP_ADAPTIVE_SOLVER_SECTIONS: &[&str] = &["adaptive_strategy", "grid_refinement"];
+
+const BVP_INITIAL_GUESS_SECTIONS: &[&str] = &["initial_guess"];
+
+const BVP_POSTPROCESSING_SECTIONS: &[&str] = &["postprocessing"];
+
+fn is_bvp_structured_section(section_name: &str, species_sections: &[String]) -> bool {
+    section_name == "solver_settings"
+        || BVP_PHYSICS_SECTIONS.contains(&section_name)
+        || BVP_SOLVER_ADVANCED_SECTIONS.contains(&section_name)
+        || BVP_ADAPTIVE_SOLVER_SECTIONS.contains(&section_name)
+        || BVP_INITIAL_GUESS_SECTIONS.contains(&section_name)
+        || BVP_POSTPROCESSING_SECTIONS.contains(&section_name)
+        || species_sections.iter().any(|species| species == section_name)
+}
+
+/// Renders a titled group of BVP sections in the structured screen layout.
+///
+/// The helper keeps the canonical sections visible up front while still
+/// reusing the generic per-section editor for data entry.
+fn render_bvp_section_group(
+    ui: &mut egui::Ui,
+    title: &str,
+    section_names: &[&str],
+    document: &mut DocumentMap,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+    new_field_names: &mut HashMap<String, String>,
+    new_field_values: &mut HashMap<String, String>,
+) {
+    ui.group(|ui| {
+        ui.vertical(|ui| {
+            ui.heading(title);
+            ui.add_space(4.0);
+
+            let mut sections_to_process = Vec::new();
+            let mut sections_to_delete = Vec::new();
+
+            for section_name in section_names {
+                let section = ensure_section_mut(document, section_name);
+                let field_name = new_field_names
+                    .entry((*section_name).to_string())
+                    .or_insert_with(String::new);
+                let field_value = new_field_values
+                    .entry((*section_name).to_string())
+                    .or_insert_with(String::new);
+
+                let (add_field, delete_section) = if *section_name == "grid_refinement" {
+                    render_grid_refinement_section(ui, section, help_map, current_help)
+                } else {
+                    render_section(
+                        ui,
+                        section_name,
+                        section,
+                        field_name,
+                        field_value,
+                        help_map,
+                        current_help,
+                    )
+                };
+
+                if add_field {
+                    sections_to_process.push((
+                        (*section_name).to_string(),
+                        field_name.clone(),
+                        field_value.clone(),
+                    ));
+                }
+
+                if delete_section {
+                    sections_to_delete.push((*section_name).to_string());
+                }
+            }
+
+            for section_name in sections_to_delete {
+                document.remove(&section_name);
+                println!("Deleted section: {}", section_name);
+            }
+
+            for (section_name, field_name, field_value) in sections_to_process {
+                if !field_name.is_empty() {
+                    let value = if field_value.parse::<f64>().is_ok() {
+                        if let Ok(num) = field_value.parse::<f64>() {
+                            Value::Float(num)
+                        } else {
+                            Value::String(field_value.clone())
+                        }
+                    } else if field_value.parse::<i64>().is_ok() {
+                        if let Ok(num) = field_value.parse::<i64>() {
+                            Value::Integer(num)
+                        } else {
+                            Value::String(field_value.clone())
+                        }
+                    } else if field_value.to_lowercase() == "true"
+                        || field_value.to_lowercase() == "false"
+                    {
+                        Value::Boolean(field_value.to_lowercase() == "true")
+                    } else {
+                        Value::String(field_value.clone())
+                    };
+
+                    document
+                        .entry(section_name.clone())
+                        .or_insert_with(HashMap::new)
+                        .insert(field_name.clone(), Some(vec![value]));
+                    println!("Added field '{}' to section '{}'", field_name, section_name);
+
+                    new_field_names.insert(section_name.clone(), String::new());
+                    new_field_values.insert(section_name, String::new());
+                }
+            }
+        });
+    });
+}
+
+/// Renders a titled group of BVP sections whose names are known only at runtime.
+///
+/// Species composition sections are the common example: the section names come
+/// from the task document rather than a static enum-like list.
+fn render_bvp_dynamic_section_group(
+    ui: &mut egui::Ui,
+    title: &str,
+    section_names: &[String],
+    document: &mut DocumentMap,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+    new_field_names: &mut HashMap<String, String>,
+    new_field_values: &mut HashMap<String, String>,
+) {
+    if section_names.is_empty() {
+        return;
+    }
+
+    ui.group(|ui| {
+        ui.vertical(|ui| {
+            ui.heading(title);
+            ui.add_space(4.0);
+
+            let mut sections_to_process = Vec::new();
+            let mut sections_to_delete = Vec::new();
+
+            for section_name in section_names {
+                let section = ensure_section_mut(document, section_name);
+                let field_name = new_field_names
+                    .entry(section_name.clone())
+                    .or_insert_with(String::new);
+                let field_value = new_field_values
+                    .entry(section_name.clone())
+                    .or_insert_with(String::new);
+
+                let (add_field, delete_section) = render_section(
+                    ui,
+                    section_name,
+                    section,
+                    field_name,
+                    field_value,
+                    help_map,
+                    current_help,
+                );
+
+                if add_field {
+                    sections_to_process.push((
+                        section_name.clone(),
+                        field_name.clone(),
+                        field_value.clone(),
+                    ));
+                }
+
+                if delete_section {
+                    sections_to_delete.push(section_name.clone());
+                }
+            }
+
+            for section_name in sections_to_delete {
+                document.remove(&section_name);
+                println!("Deleted section: {}", section_name);
+            }
+
+            for (section_name, field_name, field_value) in sections_to_process {
+                if !field_name.is_empty() {
+                    let value = if field_value.parse::<f64>().is_ok() {
+                        if let Ok(num) = field_value.parse::<f64>() {
+                            Value::Float(num)
+                        } else {
+                            Value::String(field_value.clone())
+                        }
+                    } else if field_value.parse::<i64>().is_ok() {
+                        if let Ok(num) = field_value.parse::<i64>() {
+                            Value::Integer(num)
+                        } else {
+                            Value::String(field_value.clone())
+                        }
+                    } else if field_value.to_lowercase() == "true"
+                        || field_value.to_lowercase() == "false"
+                    {
+                        Value::Boolean(field_value.to_lowercase() == "true")
+                    } else {
+                        Value::String(field_value.clone())
+                    };
+
+                    document
+                        .entry(section_name.clone())
+                        .or_insert_with(HashMap::new)
+                        .insert(field_name.clone(), Some(vec![value]));
+                    println!("Added field '{}' to section '{}'", field_name, section_name);
+
+                    new_field_names.insert(section_name.clone(), String::new());
+                    new_field_values.insert(section_name, String::new());
+                }
+            }
+        });
+    });
+}
+
 /// Main application state for the combustion reactor GUI.
 ///
 /// This struct maintains all the state necessary for the GUI application,
@@ -379,6 +1780,8 @@ pub struct CombustionApp {
     pub current_file_path: Option<std::path::PathBuf>,
     pub show_help_window: bool,
     pub current_help_info: String,
+    pub last_run_message: Option<String>,
+    pub last_run_is_error: bool,
     pub plot_window: Option<PlotWindow>,
 }
 
@@ -414,47 +1817,28 @@ impl CombustionApp {
     /// * None fields show "field_name: None"
     pub fn document_to_string(&self) -> String {
         let mut result = String::new();
-        for (section_name, section_data) in &self.document {
+        let mut section_names = self.document.keys().collect::<Vec<_>>();
+        section_names.sort();
+
+        for section_name in section_names {
+            let section_data = &self.document[section_name];
+            if section_data.is_empty() {
+                continue;
+            }
             result.push_str(section_name);
             result.push('\n');
-            for (field_name, maybe_values) in section_data {
+
+            let mut field_names = section_data.keys().collect::<Vec<_>>();
+            field_names.sort();
+
+            for field_name in field_names {
+                let maybe_values = &section_data[field_name];
                 if let Some(values) = maybe_values {
-                    for value in values {
-                        match value {
-                            Value::String(s) => {
-                                result.push_str(&format!("{}: {}\n", field_name, s))
-                            }
-                            Value::Float(f) => result.push_str(&format!("{}: {}\n", field_name, f)),
-                            Value::Integer(i) => {
-                                result.push_str(&format!("{}: {}\n", field_name, i))
-                            }
-                            Value::Usize(u) => result.push_str(&format!("{}: {}\n", field_name, u)),
-                            Value::Boolean(b) => {
-                                result.push_str(&format!("{}: {}\n", field_name, b))
-                            }
-                            Value::Vector(vec) => {
-                                let vec_str = vec
-                                    .iter()
-                                    .map(|v| v.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(", ");
-                                result.push_str(&format!("{}: [{}]\n", field_name, vec_str));
-                            }
-                            Value::Optional(opt) => {
-                                if let Some(inner) = opt {
-                                    match inner.as_ref() {
-                                        Value::String(s) => result
-                                            .push_str(&format!("{}: Some({})\n", field_name, s)),
-                                        _ => {
-                                            result.push_str(&format!("{}: Some(...)\n", field_name))
-                                        }
-                                    }
-                                } else {
-                                    result.push_str(&format!("{}: None\n", field_name));
-                                }
-                            }
-                        }
-                    }
+                    result.push_str(&format!(
+                        "{}: {}\n",
+                        field_name,
+                        values_to_document_string(values)
+                    ));
                 } else {
                     result.push_str(&format!("{}: None\n", field_name));
                 }
@@ -499,26 +1883,52 @@ impl CombustionApp {
     ///
     /// Solver errors are handled internally by the respective solver implementations.
     /// This method focuses on dispatch logic rather than error propagation.
-    fn run_calculation(&mut self) {
+    pub(crate) fn run_calculation(&mut self) {
+        self.plot_window = None;
+        self.last_run_message = Some("Running calculation...".to_string());
+        self.last_run_is_error = false;
+        if let Some(section) = self.document.get_mut("solver_settings") {
+            normalize_usize_field(section, "max_iterations");
+            normalize_usize_field(section, "refinement_steps");
+        }
+
         match self.selected_problem {
             ProblemsEnum::BVPSimple => {
-                println!("Starting BVP Simple calculation...");
+                info!("Starting BVP Simple calculation.");
                 let mut reactor = SimpleReactorTask::new();
                 if let Err(err) = reactor.solve_from_parsed(self.document.clone()) {
-                    println!("Failed to solve reactor task: {}", err);
+                    warn!("Failed to solve reactor task: {}", err);
+                    self.last_run_message = Some(format!("Calculation failed: {}", err));
+                    self.last_run_is_error = true;
+                    return;
                 }
-                let postproc = &self.document.get("postprocessing").cloned().unwrap();
-                let gui_plot = if let Some(gui_plot_) = postproc.get("gui_plot") {
-                    gui_plot_.clone().unwrap()[0]
-                        .as_boolean()
-                        .expect("Failed to get gui_plot as bool")
-                } else {
-                    true
-                };
+
+                // The GUI should default to plotting solved BVP results unless the
+                // postprocessing section explicitly disables it.
+                let gui_plot = self
+                    .document
+                    .get("postprocessing")
+                    .and_then(|postproc| postproc.get("gui_plot"))
+                    .and_then(|slot| slot.as_ref())
+                    .and_then(|values| values.first())
+                    .and_then(|value| value.as_boolean())
+                    .unwrap_or(true);
 
                 if gui_plot {
-                    let y = reactor.solver.solution.clone().unwrap();
-                    let x_mesh = reactor.solver.x_mesh.clone().unwrap();
+                    let Some(y) = reactor.solver.solution.clone() else {
+                        warn!("Solved BVP did not provide a solution matrix; skipping plot window.");
+                        self.last_run_message = Some(
+                            "Calculation completed, but no solution matrix was returned."
+                                .to_string(),
+                        );
+                        return;
+                    };
+                    let Some(x_mesh) = reactor.solver.x_mesh.clone() else {
+                        warn!("Solved BVP did not provide a mesh; skipping plot window.");
+                        self.last_run_message =
+                            Some("Calculation completed, but no mesh was returned.".to_string());
+                        return;
+                    };
                     let arg = "x".to_owned();
                     let values = reactor.solver.unknowns.clone();
 
@@ -529,10 +1939,14 @@ impl CombustionApp {
                     self.plot_window = Some(PlotWindow::new(arg, values, t_result, y_result));
                 }
 
+                self.last_run_message = Some("Calculation completed successfully.".to_string());
+
                 return;
             }
             ProblemsEnum::None => {
                 println!("No calculation available for this problem type.");
+                self.last_run_message =
+                    Some("No calculation is available for the current problem type.".to_string());
             }
         }
     }
@@ -578,8 +1992,19 @@ impl CombustionApp {
             current_file_path: None,
             show_help_window: false,
             current_help_info: String::new(),
+            last_run_message: None,
+            last_run_is_error: false,
             plot_window: None,
         }
+        .with_seeded_defaults()
+    }
+
+    /// Seeds problem-specific defaults after constructing the app state.
+    fn with_seeded_defaults(mut self) -> Self {
+        if matches!(self.selected_problem, ProblemsEnum::BVPSimple) {
+            ensure_bvp_solver_backend_defaults(&mut self.document);
+        }
+        self
     }
 
     /// Renders the main application window and handles all user interactions.
@@ -727,99 +2152,254 @@ impl CombustionApp {
                     ProblemsEnum::None => None,
                 };
 
+                if matches!(self.selected_problem, ProblemsEnum::BVPSimple) {
+                    render_bvp_solver_backend_panel(
+                        ui,
+                        &mut self.document,
+                        help_map,
+                        &mut self.current_help_info,
+                    );
+                    normalize_bvp_adaptive_grid_settings(&mut self.document);
+                    render_bvp_section_group(
+                        ui,
+                        "Advanced solver settings",
+                        BVP_SOLVER_ADVANCED_SECTIONS,
+                        &mut self.document,
+                        help_map,
+                        &mut self.current_help_info,
+                        &mut self.new_field_names,
+                        &mut self.new_field_values,
+                    );
+                    render_bvp_adaptive_grid_panel(
+                        ui,
+                        &mut self.document,
+                        help_map,
+                        &mut self.current_help_info,
+                    );
+                }
+
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label("ℹ️");
+                    ui.label("ℹ");
                     ui.style_mut().text_styles.insert(
                         egui::TextStyle::Body,
-                        egui::FontId::new(16.0, egui::FontFamily::Proportional),
+                        egui::FontId::new(14.0, egui::FontFamily::Proportional),
                     );
-                    let help_width = ui.available_width() - 30.0;
+                    let help_width = (ui.available_width() - 30.0).max(0.0);
                     let display_text = if self.current_help_info.is_empty() {
                         "Hover over fields and sections for help information"
                     } else {
                         &self.current_help_info
                     };
                     ui.add_sized(
-                        [help_width, 80.0],
+                        [help_width, 28.0],
                         egui::Label::new(
                             egui::RichText::new(display_text)
                                 .color(egui::Color32::BLACK)
-                                .size(16.0),
-                        )
-                        .wrap(),
+                                .size(14.0),
+                        ),
                     );
                 });
                 ui.add_space(20.0);
 
                 // Render document sections
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    let mut sections_to_process = Vec::new();
-                    let mut sections_to_delete = Vec::new();
-
-                    for (section_name, section_data) in self.document.iter_mut() {
-                        let field_name = self
-                            .new_field_names
-                            .entry(section_name.clone())
-                            .or_insert_with(String::new);
-                        let field_value = self
-                            .new_field_values
-                            .entry(section_name.clone())
-                            .or_insert_with(String::new);
-
-                        let (add_field, delete_section) = render_section(
+                    if matches!(self.selected_problem, ProblemsEnum::BVPSimple) {
+                        let bvp_species_sections = bvp_species_section_names(&self.document);
+                        render_bvp_section_group(
                             ui,
-                            section_name,
-                            section_data,
-                            field_name,
-                            field_value,
+                            "Physics",
+                            BVP_PHYSICS_SECTIONS,
+                            &mut self.document,
                             help_map,
                             &mut self.current_help_info,
+                            &mut self.new_field_names,
+                            &mut self.new_field_values,
+                        );
+                        ui.add_space(8.0);
+
+                        render_bvp_dynamic_section_group(
+                            ui,
+                            "Atomic composition",
+                            &bvp_species_sections,
+                            &mut self.document,
+                            help_map,
+                            &mut self.current_help_info,
+                            &mut self.new_field_names,
+                            &mut self.new_field_values,
+                        );
+                        ui.add_space(8.0);
+
+                        render_bvp_section_group(
+                            ui,
+                            "Initial guess",
+                            BVP_INITIAL_GUESS_SECTIONS,
+                            &mut self.document,
+                            help_map,
+                            &mut self.current_help_info,
+                            &mut self.new_field_names,
+                            &mut self.new_field_values,
+                        );
+                        ui.add_space(8.0);
+
+                        render_bvp_section_group(
+                            ui,
+                            "Postprocessing",
+                            BVP_POSTPROCESSING_SECTIONS,
+                            &mut self.document,
+                            help_map,
+                            &mut self.current_help_info,
+                            &mut self.new_field_names,
+                            &mut self.new_field_values,
                         );
 
-                        if add_field {
-                            sections_to_process.push((
-                                section_name.clone(),
-                                field_name.clone(),
-                                field_value.clone(),
-                            ));
-                        }
+                        ui.add_space(12.0);
+                        egui::CollapsingHeader::new("Legacy raw document")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                let mut sections_to_process = Vec::new();
+                                let mut sections_to_delete = Vec::new();
 
-                        if delete_section {
-                            sections_to_delete.push(section_name.clone());
-                        }
-                    }
+                                for (section_name, section_data) in self.document.iter_mut() {
+                                    if is_bvp_structured_section(section_name, &bvp_species_sections)
+                                    {
+                                        continue;
+                                    }
 
-                    // Delete sections outside the iterator
-                    for section_name in sections_to_delete {
-                        self.document.remove(&section_name);
-                        println!("Deleted section: {}", section_name);
-                    }
+                                    let field_name = self
+                                        .new_field_names
+                                        .entry(section_name.clone())
+                                        .or_insert_with(String::new);
+                                    let field_value = self
+                                        .new_field_values
+                                        .entry(section_name.clone())
+                                        .or_insert_with(String::new);
 
-                    // Process field additions
-                    for (section_name, field_name, field_value) in sections_to_process {
-                        if !field_name.is_empty() {
-                            let value = if field_value.parse::<f64>().is_ok() {
-                                Value::Float(field_value.parse().unwrap())
-                            } else if field_value.parse::<i64>().is_ok() {
-                                Value::Integer(field_value.parse().unwrap())
-                            } else if field_value == "true" || field_value == "false" {
-                                Value::Boolean(field_value.parse().unwrap())
-                            } else {
-                                Value::String(field_value.clone())
-                            };
+                                    let (add_field, delete_section) = render_section(
+                                        ui,
+                                        section_name,
+                                        section_data,
+                                        field_name,
+                                        field_value,
+                                        help_map,
+                                        &mut self.current_help_info,
+                                    );
 
-                            if let Some(section) = self.document.get_mut(&section_name) {
-                                section.insert(field_name.clone(), Some(vec![value]));
-                                println!(
-                                    "Added field '{}' to section '{}' with value: {}",
-                                    field_name, section_name, field_value
-                                );
+                                    if add_field {
+                                        sections_to_process.push((
+                                            section_name.clone(),
+                                            field_name.clone(),
+                                            field_value.clone(),
+                                        ));
+                                    }
+
+                                    if delete_section {
+                                        sections_to_delete.push(section_name.clone());
+                                    }
+                                }
+
+                                for section_name in sections_to_delete {
+                                    self.document.remove(&section_name);
+                                    println!("Deleted section: {}", section_name);
+                                }
+
+                                for (section_name, field_name, field_value) in sections_to_process {
+                                    if !field_name.is_empty() {
+                                        let value = if field_value.parse::<f64>().is_ok() {
+                                            Value::Float(field_value.parse().unwrap())
+                                        } else if field_value.parse::<i64>().is_ok() {
+                                            Value::Integer(field_value.parse().unwrap())
+                                        } else if field_value == "true"
+                                            || field_value == "false"
+                                        {
+                                            Value::Boolean(field_value.parse().unwrap())
+                                        } else {
+                                            Value::String(field_value.clone())
+                                        };
+
+                                        if let Some(section) = self.document.get_mut(&section_name) {
+                                            section.insert(field_name.clone(), Some(vec![value]));
+                                            println!(
+                                                "Added field '{}' to section '{}' with value: {}",
+                                                field_name, section_name, field_value
+                                            );
+                                        }
+
+                                        self.new_field_names
+                                            .insert(section_name.clone(), String::new());
+                                        self.new_field_values
+                                            .insert(section_name, String::new());
+                                    }
+                                }
+                            });
+                    } else {
+                        let mut sections_to_process = Vec::new();
+                        let mut sections_to_delete = Vec::new();
+
+                        for (section_name, section_data) in self.document.iter_mut() {
+                            let field_name = self
+                                .new_field_names
+                                .entry(section_name.clone())
+                                .or_insert_with(String::new);
+                            let field_value = self
+                                .new_field_values
+                                .entry(section_name.clone())
+                                .or_insert_with(String::new);
+
+                            let (add_field, delete_section) = render_section(
+                                ui,
+                                section_name,
+                                section_data,
+                                field_name,
+                                field_value,
+                                help_map,
+                                &mut self.current_help_info,
+                            );
+
+                            if add_field {
+                                sections_to_process.push((
+                                    section_name.clone(),
+                                    field_name.clone(),
+                                    field_value.clone(),
+                                ));
                             }
 
-                            self.new_field_names
-                                .insert(section_name.clone(), String::new());
-                            self.new_field_values.insert(section_name, String::new());
+                            if delete_section {
+                                sections_to_delete.push(section_name.clone());
+                            }
+                        }
+
+                        // Delete sections outside the iterator
+                        for section_name in sections_to_delete {
+                            self.document.remove(&section_name);
+                            println!("Deleted section: {}", section_name);
+                        }
+
+                        // Process field additions
+                        for (section_name, field_name, field_value) in sections_to_process {
+                            if !field_name.is_empty() {
+                                let value = if field_value.parse::<f64>().is_ok() {
+                                    Value::Float(field_value.parse().unwrap())
+                                } else if field_value.parse::<i64>().is_ok() {
+                                    Value::Integer(field_value.parse().unwrap())
+                                } else if field_value == "true" || field_value == "false" {
+                                    Value::Boolean(field_value.parse().unwrap())
+                                } else {
+                                    Value::String(field_value.clone())
+                                };
+
+                                if let Some(section) = self.document.get_mut(&section_name) {
+                                    section.insert(field_name.clone(), Some(vec![value]));
+                                    println!(
+                                        "Added field '{}' to section '{}' with value: {}",
+                                        field_name, section_name, field_value
+                                    );
+                                }
+
+                                self.new_field_names
+                                    .insert(section_name.clone(), String::new());
+                                self.new_field_values.insert(section_name, String::new());
+                            }
                         }
                     }
 
@@ -841,6 +2421,19 @@ impl CombustionApp {
                 // Big RUN CALCULATION button at the bottom
                 ui.separator();
                 ui.add_space(10.0);
+                if let Some(message) = &self.last_run_message {
+                    let status_color = if self.last_run_is_error {
+                        egui::Color32::from_rgb(180, 30, 30)
+                    } else {
+                        egui::Color32::from_rgb(20, 120, 40)
+                    };
+                    ui.label(
+                        egui::RichText::new(message.as_str())
+                            .color(status_color)
+                            .size(14.0),
+                    );
+                    ui.add_space(4.0);
+                }
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                     let button = egui::Button::new("🚀 RUN CALCULATION!")
                         .min_size(egui::Vec2::new(200.0, 50.0))
@@ -905,7 +2498,7 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     ("boundary_condition", "Initial values for all variables at the reactor inlet."),
     ("diffusion_coefficients", "Molecular diffusion coefficients for each chemical substance [m²/s]."),
     ("reactions", "Chemical reactions with Arrhenius kinetic parameters [A, n, E, Q]."),
-    ("solver_settings", "Numerical solver configuration including discretization scheme and solution method."),
+    ("solver_settings", "Structured solver backend controls. The core solve route and generated-backend knobs are exposed here as first-class document fields."),
     ("bounds", "Variable bounds for solver convergence. Format: lower_bound, upper_bound for each variable type."),
     ("rel_tolerance", "Relative convergence tolerances for each variable type in the numerical solver."),
     ("strategy_params", "Advanced solver strategy parameters for damped Newton-Raphson method."),
@@ -943,14 +2536,26 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     // boundary_condition fields
     ("boundary_condition.T", "Initial/boundary temperature [K]. Type: Float. Range: 200-2000K. Starting temperature of the system"),
     // solver_settings fields
-    ("solver_settings.scheme", "Spatial discretization scheme. Type: String. Options: forward, backward, central. forward=upwind stable"),
-    ("solver_settings.method", "Linear system solution method. Type: String. Options: Sparse, Dense. Sparse=efficient for large systems"),
-    ("solver_settings.strategy", "Convergence strategy. Type: String. Options: Damped, Newton. Damped=more robust convergence"),
-    ("solver_settings.linear_sys_method", "Linear solver algorithm. Type: Optional<String>. None=automatic selection"),
+    ("solver_settings.scheme", "Spatial discretization scheme. Type: String. Options: forward, trapezoid. forward remains the lightest-weight route."),
+    ("solver_settings.method", "Linear algebra and matrix-storage backend. Type: String. Options: Banded, Sparse. KiThe keeps the lower-level matrix_backend alias synchronized automatically."),
+    ("solver_settings.strategy", "Convergence strategy. Type: String. Options: Damped, Frozen, Naive. Damped remains the robust default."),
+    ("solver_settings.linear_sys_method", "Legacy linear-system method override. Type: Optional<String>. None/Auto lets Banded and Sparse backends choose their solver policy."),
     ("solver_settings.abs_tolerance", "Absolute convergence tolerance. Type: Float. Range: 1e-12 to 1e-3. Smaller=more accurate"),
-    ("solver_settings.max_iterations", "Maximum solver iterations. Type: Integer. Range: 10-1000. Higher=more attempts to converge"),
+    ("solver_settings.max_iterations", "Maximum solver iterations. Type: Usize. Range: 10-1000. Higher=more attempts to converge"),
     ("solver_settings.loglevel", "Logging verbosity level. Type: Optional<String>. Options: Some(info), Some(debug), None"),
-    ("solver_settings.dont_save_logs", "Disable log file saving. Type: Boolean. true=no log files, false=save logs"),
+    ("solver_settings.dont_save_log", "Disable log file saving. Type: Boolean. true=no log files, false=save logs"),
+    ("solver_settings.generated_backend", "High-level solver preset used by the RustedSciThe backend. Type: String. Default: banded_lambdify."),
+    ("solver_settings.matrix_backend", "Compatibility alias for solver_settings.method. The structured GUI synchronizes this field automatically."),
+    ("solver_settings.backend_policy", "Backend selection policy. Type: String. Options: lambdify_only, prefer_aot_then_lambdify, prefer_aot_then_numeric, aot_only, numeric_only."),
+    ("solver_settings.symbolic_backend", "Symbolic assembly backend. Type: String. Options: AtomView, ExprLegacy. AtomView is the modern default."),
+    ("solver_settings.aot_codegen_backend", "AOT code generation backend. Type: String. Options: C, Rust, Zig."),
+    ("solver_settings.aot_c_compiler", "AOT C compiler choice. Type: String. Options: tcc, gcc, zig."),
+    ("solver_settings.aot_build_policy", "AOT build lifecycle policy. Type: String. Options: use_if_available, build_if_missing, require_prebuilt, rebuild_always."),
+    ("solver_settings.aot_build_profile", "AOT build profile. Type: String. Options: release, debug."),
+    ("solver_settings.aot_compile_preset", "AOT compile preset. Type: String. Options: production, fast_build, dev_fastest."),
+    ("solver_settings.aot_execution_policy", "Runtime execution policy for compiled callbacks. Type: String. Options: auto, sequential, parallel."),
+    ("solver_settings.banded_linear_solver", "Banded linear solver policy. Type: String. Options: auto, faithful, block_tridiagonal, block_tridiagonal_consistent, faer_sparse, general_partial_pivot."),
+    ("solver_settings.refinement_steps", "Iterative refinement steps for the banded linear solver. Type: Usize. Default: 5. Set 0 to disable extra refinement."),
     // bounds fields
     ("bounds.C", "Concentration variable bounds [lower, upper]. Type: Vec<Float>. Example: -10.0, 10.0. Prevents unphysical values"),
     ("bounds.J", "Flux variable bounds [lower, upper]. Type: Vec<Float>. Example: -1e20, 1e20. Wide bounds for numerical stability"),
@@ -966,14 +2571,14 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     ("strategy_params.max_damp_iter", "Maximum damping iterations for convergence. Type: Optional<Integer>. Range: 1-50. Controls step size reduction"),
     ("strategy_params.damp_factor", "Damping factor for step size control. Type: Optional<Float>. Range: 0.1-0.9. Smaller=more conservative steps"),
     // adaptive_strategy fields
-    ("adaptive_strategy.version", "Grid refinement algorithm version. Type: Integer. Options: 1, 2. Different refinement strategies"),
+    ("adaptive_strategy.version", "Grid refinement contract version. KiThe currently supports and seeds version 1 automatically."),
     ("adaptive_strategy.max_refinements", "Maximum number of refinement iterations. Type: Integer. Range: 1-10. More=finer final mesh"),
     // grid_refinement fields
-    ("grid_refinement.grcarsmooke", "Grcar-Smooke refinement parameters [tol1, tol2, factor]. Type: Vec<Float>. Controls mesh adaptation sensitivity"),
+    ("grid_refinement.grcar_smooke", "Grcar-Smooke refinement parameters [tol1, tol2, factor]. Type: Vec<Float>. Controls mesh adaptation sensitivity"),
     ("grid_refinement.pearson", "Pearson refinement parameters [tol, factor]. Type: Vec<Float>. Alternative mesh refinement method"),
     ("grid_refinement.twopnt", "Two-point refinement parameters [tol1, tol2, factor]. Type: Vec<Float>. Boundary layer focused refinement"),
     ("grid_refinement.easy", "Simple refinement parameter [factor]. Type: Vec<Float>. Basic uniform refinement"),
-    ("grid_refinement.doubleoints", "Double points refinement (no parameters). Type: Vec<Float>. Simple point doubling method"),
+    ("grid_refinement.double_points", "Double points refinement (no parameters). Type: Vec<Float>. Simple point doubling method"),
     // postprocessing fields
     ("postprocessing.gnuplot", "Generate gnuplot visualization files. Type: Boolean. true=create plots, false=no plotting"),
     ("postprocessing.save_to_csv", "Export results to CSV format. Type: Boolean. true=save CSV files, false=no CSV export"),
