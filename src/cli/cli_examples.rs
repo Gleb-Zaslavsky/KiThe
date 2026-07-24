@@ -1,4 +1,3 @@
-use crate::Examples::ClassicalThermodynamics_examples::SubsData_examples;
 use crate::Examples::NIST_examples::NIST_examples;
 use crate::Examples::SubstanceDataCollecting::collecting_thermo_data;
 use crate::Examples::kinetics_examples::kin_examples;
@@ -13,7 +12,6 @@ pub fn examples_menu() {
             "Thermodynamics Examples",
             "NIST Examples",
             "Substance Data Collection",
-            "Classical Thermodynamics",
             "Back to main menu",
         ];
 
@@ -29,8 +27,7 @@ pub fn examples_menu() {
             1 => thermo_examples(6),
             2 => NIST_examples(6),
             3 => collecting_thermo_data(6),
-            4 => SubsData_examples(6),
-            5 => break,
+            4 => break,
             _ => {}
         }
     }

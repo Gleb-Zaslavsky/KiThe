@@ -395,9 +395,9 @@ fn print_settings_table(settings: &Settings) {
 
     // Create and print the table
     let table = Table::new(rows).to_string();
-    println!("\n=== TGA Application Settings ===");
-    println!("{}", table);
-    println!("================================\n");
+    info!("\n=== TGA Application Settings ===");
+    info!("{}", table);
+    info!("================================\n");
 }
 
 //============================================================================================

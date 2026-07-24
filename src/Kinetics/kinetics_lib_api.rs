@@ -329,9 +329,9 @@ mod tests {
         .collect();
 
         // collecting reaction data for library name lib
-        kin_instance.open_json_files(lib);
+        let _ = kin_instance.open_json_files(lib);
         // veiew all reactions in library
-        kin_instance.print_all_reactions();
+        let _ = kin_instance.print_all_reactions();
         assert_eq!(kin_instance.HashMapOfReactantsAndProducts.is_empty(), false);
         assert_eq!(kin_instance.LibKineticData.is_empty(), false);
         let all_lib: HashSet<String> = kin_instance.AllLibraries.clone().into_iter().collect();
@@ -430,9 +430,9 @@ mod tests {
         let lib = "NUIG";
 
         // collecting reaction data for library name lib
-        kin_instance.open_json_files(lib);
+        let _ = kin_instance.open_json_files(lib);
         // veiew all reactions in library
-        kin_instance.print_all_reactions();
+        let _ = kin_instance.print_all_reactions();
 
         // search reaction by equation
         let data_of_reacion = kin_instance.LibKineticData.get("1").unwrap();
@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn test_search_data_by_field() {
         let mut kin_instance = KineticData::new();
-        kin_instance.open_json_files("NUIG");
+        let _ = kin_instance.open_json_files("NUIG");
 
         let reactions_by_field = kin_instance.get_reactions_by_field("type", "falloff");
         println!(" reactions_by_field {:?}", reactions_by_field);
@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn test_form_user_chosen_data() {
         let mut kin_instance = KineticData::new();
-        kin_instance.open_json_files("NUIG");
+        let _ = kin_instance.open_json_files("NUIG");
 
         // Prepare some test data
         kin_instance.FoundReactionsByProducts = vec!["1".to_string(), "2".to_string()];
@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn test_form_user_chosen_data_integration() {
         let mut kin_instance = KineticData::new();
-        kin_instance.open_json_files("NUIG");
+        let _ = kin_instance.open_json_files("NUIG");
 
         // Perform a search to populate FoundReactionsByProducts
         kin_instance

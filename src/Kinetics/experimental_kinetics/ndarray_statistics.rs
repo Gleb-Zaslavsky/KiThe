@@ -38,7 +38,7 @@ use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{TGADataset,
 
 use ndarray::{Array1, Array2, Axis};
 use ndarray_stats::CorrelationExt;
-use ndarray_stats::interpolate::Interpolate;
+
 use polars::prelude::*;
 use std::collections::HashMap;
 use std::fmt;

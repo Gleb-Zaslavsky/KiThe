@@ -1,13 +1,11 @@
-use crate::Kinetics::experimental_kinetics::column_provenance::ColumnProvenance;
 use crate::Kinetics::experimental_kinetics::exp_engine_api::GoldenPipelineConfig;
 use crate::Kinetics::experimental_kinetics::experiment_series_main::{
     ExperimentMeta, TGAExperiment, TGASeries,
 };
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    ColumnMeta, ColumnNature, ColumnOrigin, TGADataset, TGADomainError, TGASchema,
-    TimeMonotonicityReport, Unit,
+    ColumnNature, TGADataset, TGADomainError, TGASchema, TimeMonotonicityReport,
 };
-use crate::Kinetics::experimental_kinetics::testing_mod::{AdvancedTGAConfig, VirtualTGA};
+
 use polars::prelude::*;
 use std::collections::HashMap;
 //=================================================================================
@@ -618,10 +616,10 @@ pub fn create_experiment_from_columns(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Kinetics::experimental_kinetics::column_provenance::ColumnProvenance;
     use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
         ColumnMeta, ColumnOrigin, History, Unit,
     };
-    use polars::prelude::*;
 
     fn make_mock_dataset() -> TGADataset {
         let df = df! {

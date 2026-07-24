@@ -205,7 +205,7 @@ impl ColumnManagerState {
     }
 
     /// Handles drop experiment operation with confirmation dialog
-    fn handle_drop_experiment(&mut self, model: &mut PlotModel) {
+    fn handle_drop_experiment(&mut self, _model: &mut PlotModel) {
         // First, find which experiments have selected columns
         let selected_experiments: Vec<_> = self
             .column_checkboxes
@@ -241,7 +241,7 @@ impl ColumnManagerState {
         if selected_experiments.is_empty() {
             self.system_message =
                 "Select at least one experiment (via any column checkbox)".to_string();
-            println!("{}", self.system_message);
+            info!("{}", self.system_message);
             return;
         }
 
@@ -254,7 +254,7 @@ impl ColumnManagerState {
                         "Experiment '{}': time monotonicity OK for '{}'",
                         exp_id, report.time_column
                     );
-                    println!("{}", msg);
+                    info!("{}", msg);
                     per_experiment_messages.push(msg);
                 }
                 Ok(report) => {
@@ -280,7 +280,7 @@ impl ColumnManagerState {
                         report.time_column,
                         details.join("; ")
                     );
-                    println!("{}", msg);
+                    info!("{}", msg);
                     per_experiment_messages.push(msg);
                 }
                 Err(e) => {
@@ -288,7 +288,7 @@ impl ColumnManagerState {
                         "Experiment '{}': time monotonicity check error: {:?}",
                         exp_id, e
                     );
-                    println!("{}", msg);
+                    info!("{}", msg);
                     per_experiment_messages.push(msg);
                 }
             }
@@ -311,7 +311,7 @@ impl ColumnManagerState {
         if selected_experiments.is_empty() {
             self.system_message =
                 "Select at least one experiment (via any column checkbox)".to_string();
-            println!("{}", self.system_message);
+            info!("{}", self.system_message);
             return;
         }
 
@@ -324,12 +324,12 @@ impl ColumnManagerState {
                         "Experiment '{}': cannot sort time column '{}' because it contains null/NaN/inf values",
                         exp_id, report.time_column
                     );
-                    println!("{}", msg);
+                    info!("{}", msg);
                     per_experiment_messages.push(msg);
                 }
                 Ok(report) if report.is_strictly_increasing => {
                     let msg = format!("Experiment '{}': time already monotonic", exp_id);
-                    println!("{}", msg);
+                    info!("{}", msg);
                     per_experiment_messages.push(msg);
                 }
                 Ok(report) => match model.sort_experiment_by_time(&exp_id) {
@@ -345,12 +345,12 @@ impl ColumnManagerState {
                                 exp_id, report.time_column
                             )
                         };
-                        println!("{}", msg);
+                        info!("{}", msg);
                         per_experiment_messages.push(msg);
                     }
                     Err(e) => {
                         let msg = format!("Experiment '{}': sort by time failed: {:?}", exp_id, e);
-                        println!("{}", msg);
+                        info!("{}", msg);
                         per_experiment_messages.push(msg);
                     }
                 },
@@ -359,7 +359,7 @@ impl ColumnManagerState {
                         "Experiment '{}': time monotonicity report error: {:?}",
                         exp_id, e
                     );
-                    println!("{}", msg);
+                    info!("{}", msg);
                     per_experiment_messages.push(msg);
                 }
             }

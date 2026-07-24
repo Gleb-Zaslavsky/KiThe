@@ -55,7 +55,7 @@
 //! slightly noisy.  No smoothing or derivative computation is required.
 
 use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::IsoLayerResult;
-use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::IsoconversionalResult;
+
 use crate::Kinetics::experimental_kinetics::kinetic_methods::kinetic_regression::linear_regression;
 use crate::Kinetics::experimental_kinetics::kinetic_methods::*;
 
@@ -285,7 +285,7 @@ impl PeakDetector {
         }
 
         // соседние точки
-        let x1 = x[idx - 1];
+        let _x1 = x[idx - 1];
         let x2 = x[idx];
         let x3 = x[idx + 1];
 

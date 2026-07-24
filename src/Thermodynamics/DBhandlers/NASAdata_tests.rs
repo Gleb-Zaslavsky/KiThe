@@ -2,7 +2,6 @@
 
 #[cfg(test)]
 mod tests {
-    use std::result;
 
     use crate::Thermodynamics::DBhandlers::NASAdata::{Coeffs, Cp, NASAError, NASAdata, dh, ds};
     use crate::Thermodynamics::DBhandlers::thermo_api::{
@@ -158,6 +157,46 @@ mod tests {
         });
         let result = nasa.from_serde(invalid_data);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_serde_rejects_malformed_composition() {
+        let mut nasa = NASAdata::new();
+
+        // Missing ':' must now fail during deserialization instead of slipping through.
+        let missing_separator = serde_json::json!({
+            "composition": "{C1, O:2}",
+            "Cp": [300.0, 1000.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            "model": "NASA-7"
+        });
+        let err = nasa.from_serde(missing_separator).unwrap_err();
+        assert!(matches!(err, NASAError::SerdeError(_)));
+
+        // Duplicate element names must also be rejected explicitly.
+        let duplicate_elements = serde_json::json!({
+            "composition": "{C:1, O:2, C:3}",
+            "Cp": [300.0, 1000.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            "model": "NASA-7"
+        });
+        let err = nasa.from_serde(duplicate_elements).unwrap_err();
+        assert!(matches!(err, NASAError::SerdeError(_)));
+    }
+
+    #[test]
+    fn test_from_serde_accepts_missing_composition_field() {
+        let mut nasa = NASAdata::new();
+
+        let missing_composition = serde_json::json!({
+            "Cp": [300.0, 1000.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            "model": "NASA-7"
+        });
+
+        nasa.from_serde(missing_composition)
+            .expect("composition should be optional for records that do not provide it");
+
+        assert!(nasa.input.composition.is_none());
+        assert_eq!(nasa.input.model, "NASA-7");
+        assert_eq!(nasa.input.Cp.len(), 9);
     }
     #[test]
     fn test_with_real_data_ThermoCalc() {
@@ -319,13 +358,7 @@ mod tests {
         assert!(result.is_ok());
         let coeffs_result = nasa.coeffs;
         println!("coeffs result {:?} \n", coeffs_result);
-        assert_relative_eq!(coeffs_result.0, coeffs_min.coeff.0, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.1, coeffs_min.coeff.1, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.2, coeffs_min.coeff.2, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.3, coeffs_min.coeff.3, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.4, coeffs_min.coeff.4, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.5, coeffs_min.coeff.5, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.6, coeffs_min.coeff.6, epsilon = 1e-3);
+        assert_eq!(coeffs_result, coeffs_min.coeff);
     }
 
     #[test]
@@ -368,13 +401,7 @@ mod tests {
         assert!(result.is_ok());
         let coeffs_result = nasa.coeffs;
         println!("coeffs result {:?} \n", coeffs_result);
-        assert_relative_eq!(coeffs_result.0, coeffs_min.coeff.0, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.1, coeffs_min.coeff.1, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.2, coeffs_min.coeff.2, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.3, coeffs_min.coeff.3, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.4, coeffs_min.coeff.4, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.5, coeffs_min.coeff.5, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.6, coeffs_min.coeff.6, epsilon = 1e-3);
+        assert_eq!(coeffs_result, coeffs_min.coeff);
     }
     #[test]
     fn test_fitting_adjacent3_with_dummy() {
@@ -416,13 +443,7 @@ mod tests {
         assert!(result.is_ok());
         let coeffs_result = nasa.coeffs;
         println!("coeffs result {:?} \n", coeffs_result);
-        assert_relative_eq!(coeffs_result.0, coeffs_min.coeff.0, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.1, coeffs_min.coeff.1, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.2, coeffs_min.coeff.2, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.3, coeffs_min.coeff.3, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.4, coeffs_min.coeff.4, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.5, coeffs_min.coeff.5, epsilon = 1e-3);
-        assert_relative_eq!(coeffs_result.6, coeffs_min.coeff.6, epsilon = 1e-3);
+        assert_eq!(coeffs_result, coeffs_min.coeff);
     }
     //////////////////////REAL DATA/////////////////////////////////////////////////////
     #[test]
@@ -921,7 +942,7 @@ mod tests {
         let result = nasa.fitting_non_adjacent(coeffs, 400.0, 1800.0);
         assert!(result.is_ok());
 
-        let report = result.unwrap();
+        let _report = result.unwrap();
 
         assert_ne!(nasa.coeffs, (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
     }

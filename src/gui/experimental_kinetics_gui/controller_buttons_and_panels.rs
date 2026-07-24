@@ -119,15 +119,15 @@ impl FileManager {
     }
 
     fn import_data(_model: &mut PlotModel) {
-        println!("Stub: Import Data clicked");
+        info!("Stub: Import Data clicked");
     }
 
     fn export_data(_model: &mut PlotModel) {
-        println!("Stub: Export Data clicked");
+        info!("Stub: Export Data clicked");
     }
 
     fn manage_data(_model: &mut PlotModel) {
-        println!("Stub: Manage Data clicked");
+        info!("Stub: Manage Data clicked");
     }
 
     fn save_as_image(model: &mut PlotModel, kithe_plot_window: &mut KiThePlotWindowState) {
@@ -514,7 +514,7 @@ impl WrightPanelControllers {
                 ctx.request_repaint();
             }
             _ => {
-                println!(
+                info!(
                     "Stub: {action} clicked (input_value={}, selected_only={})",
                     state.input_value, state.apply_only_to_selected_chart
                 );
@@ -560,7 +560,7 @@ impl WrightPanelControllers {
     pub fn handle_ui_interactions(
         ui: &mut egui::Ui,
         model: &mut PlotModel,
-        manage_plot_dialog: &mut NewExperimentDialogState,
+        _manage_plot_dialog: &mut NewExperimentDialogState,
     ) {
         model.prune_stale_plots();
         ui.separator();
@@ -794,7 +794,7 @@ impl NewExperimentDialogState {
                 .map_err(|e| TGAGUIError::BindingError(format!("bind m failed: {:?}", e)))?;
             match model.series.get_mass_col(&exp_id) {
                 Ok(mass_name) => {
-                    println!("binded mass column {}", mass_name);
+                    info!("binded mass column {}", mass_name);
                 }
                 Err(e) => {
                     return Err(TGAGUIError::BindingError(format!(
@@ -813,7 +813,7 @@ impl NewExperimentDialogState {
                 .map_err(|e| TGAGUIError::BindingError(format!("bind T failed: {:?}", e)))?;
             match model.series.get_temperature_col(&exp_id) {
                 Ok(t_name) => {
-                    println!("binded temperature column {}", t_name);
+                    info!("binded temperature column {}", t_name);
                 }
                 Err(e) => {
                     return Err(TGAGUIError::BindingError(format!(
@@ -832,7 +832,7 @@ impl NewExperimentDialogState {
                 .map_err(|e| TGAGUIError::BindingError(format!("bind t failed: {:?}", e)))?;
             match model.series.get_time_col(&exp_id) {
                 Ok(t_name) => {
-                    println!("binded time column {}", t_name);
+                    info!("binded time column {}", t_name);
                 }
                 Err(e) => {
                     return Err(TGAGUIError::BindingError(format!(
@@ -1020,9 +1020,9 @@ impl NewExperimentDialogState {
                                 exp.meta.heating_rate = self.meta.heating_rate;
                                 exp.meta.isothermal_temperature = self.meta.isothermal_temperature;
                                 exp.meta.comment = self.meta.comment.clone();
-                                println!("File parsed successfully");
-                                println!("Experiment ID set to: {}", exp.meta.id);
-                                println!("found columns with names {:?}", &exp.list_of_columns());
+                                info!("File parsed successfully");
+                                info!("Experiment ID set to: {}", exp.meta.id);
+                                info!("found columns with names {:?}", &exp.list_of_columns());
                                 exp.check_nulls_for_operation_borrowed("parsing file");
                                 if let Err(e) =
                                     exp.sample_all_columns_even_layers_table(50, Vec::new())

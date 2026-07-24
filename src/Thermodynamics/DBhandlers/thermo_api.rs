@@ -40,7 +40,9 @@
 //! - Comprehensive getter methods for accessing calculated properties and functions
 //! - Integration with web scraping for real-time NIST data access
 
-use crate::Thermodynamics::DBhandlers::NIST_parser::{Phase, SearchType};
+use crate::Thermodynamics::DBhandlers::NIST_parser::{
+    NistError as NistParserError, Phase, SearchType,
+};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use enum_dispatch::enum_dispatch;
 use serde_json::Value;
@@ -52,6 +54,7 @@ pub enum ThermoError {
     NoCoefficientsFound { temperature: f64, range: String },
     InvalidTemperatureRange,
     UnsupportedUnit(String),
+    ParserError(NistParserError),
     SerdeError(serde_json::Error),
     SymbolicError(String),
     CalculationError(String),
@@ -71,8 +74,9 @@ impl fmt::Display for ThermoError {
             ThermoError::InvalidTemperatureRange => {
                 write!(f, "Invalid temperature range in coefficient data")
             }
+            ThermoError::ParserError(err) => write!(f, "Failed to retrieve NIST data: {}", err),
             ThermoError::SerdeError(msg) => {
-                write!(f, "Failed to deserialize NASA data: {}", msg)
+                write!(f, "Failed to deserialize thermodynamic data: {}", msg)
             }
             ThermoError::UnsupportedUnit(unit) => {
                 write!(
@@ -94,7 +98,15 @@ impl fmt::Display for ThermoError {
     }
 }
 
-impl Error for ThermoError {}
+impl Error for ThermoError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            ThermoError::SerdeError(err) => Some(err),
+            ThermoError::ParserError(err) => Some(err),
+            _ => None,
+        }
+    }
+}
 
 impl From<super::NISTdata::NISTError> for ThermoError {
     fn from(err: super::NISTdata::NISTError) -> Self {
@@ -105,6 +117,9 @@ impl From<super::NISTdata::NISTError> for ThermoError {
             super::NISTdata::NISTError::InvalidTemperatureRange => {
                 ThermoError::InvalidTemperatureRange
             }
+            super::NISTdata::NISTError::SchemaError(msg) => ThermoError::CalculationError(msg),
+            super::NISTdata::NISTError::ParserSetupError(msg) => ThermoError::CalculationError(msg),
+            super::NISTdata::NISTError::ParserError(err) => ThermoError::ParserError(err),
             super::NISTdata::NISTError::SerdeError(msg) => ThermoError::SerdeError(msg),
             super::NISTdata::NISTError::UnsupportedUnit(unit) => ThermoError::UnsupportedUnit(unit),
             super::NISTdata::NISTError::SymbolicError(msg) => ThermoError::SymbolicError(msg),

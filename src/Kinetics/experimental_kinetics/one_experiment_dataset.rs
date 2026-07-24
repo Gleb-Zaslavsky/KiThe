@@ -65,8 +65,6 @@
 /// - It is recommended to call `trim_edges` before Hampel filtering.
 /// - Smoothing and filtering do not modify column metadata (units, origin).
 ///
-use nalgebra::DVectorView;
-use ndarray::ArrayView1;
 use polars::error::{PolarsError, PolarsResult};
 
 use polars::prelude::LazyFrame;
@@ -79,7 +77,7 @@ use crate::Kinetics::experimental_kinetics::column_provenance::{
 use log::info;
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 //===============================================================
@@ -2131,6 +2129,7 @@ pub struct NumericColumn {
 }
 
 impl NumericColumn {
+    /*
     /// Преобразование в ndarray представление
     pub fn as_ndarray(&self) -> ArrayView1<f64> {
         ArrayView1::from(self.data.as_slice())
@@ -2140,6 +2139,7 @@ impl NumericColumn {
     pub fn as_dvector(&self) -> DVectorView<f64> {
         DVectorView::from_slice(self.data.as_slice(), self.data.len())
     }
+    */
 }
 /// return data back to Polars
 impl TGADataset {

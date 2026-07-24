@@ -39,6 +39,7 @@ use crate::Thermodynamics::thermo_lib_api::ThermoData;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 /// Error types for pair diffusion calculations
 #[derive(Debug)]
@@ -51,6 +52,10 @@ pub enum PairDiffusionError {
     InvalidUnit(String),
     /// Requested substance not found in library
     SubstanceNotFound(String),
+    /// A required physical quantity was not finite or not positive enough for the model
+    InvalidPhysicalValue { field: String, value: f64 },
+    /// A computed diffusion quantity became non-finite
+    NonFiniteOutput { field: String },
 }
 impl fmt::Display for PairDiffusionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -64,6 +69,12 @@ impl fmt::Display for PairDiffusionError {
             PairDiffusionError::InvalidUnit(unit) => write!(f, "Invalid unit specified: {}", unit),
             PairDiffusionError::SubstanceNotFound(name) => {
                 write!(f, "Substance not found: {}", name)
+            }
+            PairDiffusionError::InvalidPhysicalValue { field, value } => {
+                write!(f, "Invalid physical value for {}: {}", field, value)
+            }
+            PairDiffusionError::NonFiniteOutput { field } => {
+                write!(f, "Non-finite diffusion output for {}", field)
             }
         }
     }
@@ -109,11 +120,45 @@ pub struct PairDiffusion {
     /// Unit conversion multiplier
     pub unit_multiplier: f64,
     /// Temperature-dependent diffusion coefficient function
-    pub D_closure: Box<dyn Fn(f64) -> f64 + Send + Sync>,
+    pub D_closure: Arc<dyn Fn(f64) -> f64 + Send + Sync>,
     /// Symbolic expression for diffusion coefficient D(T)
     pub D_symbolic: Expr,
 }
 impl PairDiffusion {
+    fn validate_positive_finite(field: &str, value: f64) -> Result<(), PairDiffusionError> {
+        if !value.is_finite() || value <= 0.0 {
+            Err(PairDiffusionError::InvalidPhysicalValue {
+                field: field.to_string(),
+                value,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn validate_nonnegative_finite(field: &str, value: f64) -> Result<(), PairDiffusionError> {
+        if !value.is_finite() || value < 0.0 {
+            Err(PairDiffusionError::InvalidPhysicalValue {
+                field: field.to_string(),
+                value,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn validate_state(&self) -> Result<(), PairDiffusionError> {
+        Self::validate_positive_finite("temperature", self.T)?;
+        Self::validate_positive_finite("pressure", self.P)?;
+        Self::validate_positive_finite("molar_mass_a", self.M_A)?;
+        Self::validate_positive_finite("molar_mass_b", self.M_B)?;
+        Self::validate_positive_finite("collision_diameter", self.sigma)?;
+        Self::validate_positive_finite("well_depth", self.e_k)?;
+        Self::validate_nonnegative_finite("dipole_moment", self.mu)?;
+        Self::validate_positive_finite("unit_multiplier", self.unit_multiplier)?;
+        Ok(())
+    }
+
     pub fn default() -> Self {
         PairDiffusion {
             substance_A_input: TransportInput::default(),
@@ -129,7 +174,7 @@ impl PairDiffusion {
             D: 0.0,
             D_unit: None,
             unit_multiplier: 1.0,
-            D_closure: Box::new(|_T| 0.0),
+            D_closure: Arc::new(|_T| 0.0),
             D_symbolic: Expr::Const(0.0),
         }
     }
@@ -140,8 +185,8 @@ impl PairDiffusion {
         P: f64,
         M_A: f64,
         M_B: f64,
-    ) -> Self {
-        PairDiffusion {
+    ) -> Result<Self, PairDiffusionError> {
+        let pair = PairDiffusion {
             substance_A_input,
             substance_B_input,
             T_interval: None,
@@ -155,9 +200,14 @@ impl PairDiffusion {
             D: 0.0,
             D_unit: None,
             unit_multiplier: 1.0,
-            D_closure: Box::new(|_T| 0.0),
+            D_closure: Arc::new(|_T| 0.0),
             D_symbolic: Expr::Const(0.0),
-        }
+        };
+        Self::validate_positive_finite("temperature", T)?;
+        Self::validate_positive_finite("pressure", P)?;
+        Self::validate_positive_finite("molar_mass_a", M_A)?;
+        Self::validate_positive_finite("molar_mass_b", M_B)?;
+        Ok(pair)
     }
 
     pub fn set_T_interval(&mut self, T_min: f64, T_max: f64) {
@@ -176,7 +226,7 @@ impl PairDiffusion {
         Ok(())
     }
 
-    pub fn calc_coefficients(&mut self) {
+    pub fn calc_coefficients(&mut self) -> Result<(), PairDiffusionError> {
         // e_k = 'well_depth'
         //  sigma_k = 'diam'
         //  mu_A= 'dipole'
@@ -201,6 +251,15 @@ impl PairDiffusion {
         } = self.substance_B_input;
         const K_B: f64 = 1.38e-23;
 
+        Self::validate_nonnegative_finite("substance_a_diam", sigma_k_A)?;
+        Self::validate_nonnegative_finite("substance_b_diam", sigma_k_B)?;
+        Self::validate_nonnegative_finite("substance_a_well_depth", e_k_A)?;
+        Self::validate_nonnegative_finite("substance_b_well_depth", e_k_B)?;
+        Self::validate_nonnegative_finite("substance_a_dipole", mu_A)?;
+        Self::validate_nonnegative_finite("substance_b_dipole", mu_B)?;
+        Self::validate_nonnegative_finite("substance_a_polar", alpha_A)?;
+        Self::validate_nonnegative_finite("substance_b_polar", alpha_B)?;
+
         let (e_k, sigma, mu) = if (mu_A == 0.0 && mu_B == 0.0) || (mu_A != 0.0 && mu_B != 0.0) {
             let e_k = (e_k_A * e_k_B).powf(0.5);
             let sigma = (sigma_k_A + sigma_k_B) / 2.0;
@@ -223,9 +282,11 @@ impl PairDiffusion {
         self.e_k = e_k;
         self.sigma = sigma;
         self.mu = mu;
+        Ok(())
     }
 
-    pub fn calculate_D(&mut self) {
+    pub fn calculate_D(&mut self) -> Result<(), PairDiffusionError> {
+        self.validate_state()?;
         let P = self.P;
         let T = self.T;
         let e_k = self.e_k;
@@ -235,13 +296,25 @@ impl PairDiffusion {
         let M_b = self.M_B;
         let um = self.unit_multiplier;
         let omega = omega_11_calc(T, e_k, mu, sigma);
+        if !omega.is_finite() || omega <= 0.0 {
+            return Err(PairDiffusionError::NonFiniteOutput {
+                field: "collision_integral".to_string(),
+            });
+        }
         let m1 = 1.0 / M_a + 1.0 / M_b;
         let D = um * 1.858e-3 * T.powf(1.5) * m1.powf(0.5) / (P * sigma.powi(2) * omega);
+        if !D.is_finite() {
+            return Err(PairDiffusionError::NonFiniteOutput {
+                field: "diffusion_coefficient".to_string(),
+            });
+        }
 
         self.D = D;
+        Ok(())
     }
 
-    pub fn calculate_D_closure(&mut self) {
+    pub fn calculate_D_closure(&mut self) -> Result<(), PairDiffusionError> {
+        self.validate_state()?;
         let P = self.P;
 
         let e_k = self.e_k.clone();
@@ -251,14 +324,16 @@ impl PairDiffusion {
         let M_b = self.M_B;
         let um = self.unit_multiplier;
         let m1 = 1.0 / M_a + 1.0 / M_b;
-        let D_closure = move |T| {
+        let D_closure = Arc::new(move |T| {
             let omega = omega_11_calc(T, e_k, mu, sigma);
             um * 1.858e-3 * T.powf(1.5) * m1.powf(0.5) / (P * sigma.powi(2) * omega)
-        };
-        self.D_closure = Box::new(D_closure);
+        });
+        self.D_closure = D_closure;
+        Ok(())
     }
 
-    pub fn calculate_D_symbolic(&mut self) {
+    pub fn calculate_D_symbolic(&mut self) -> Result<(), PairDiffusionError> {
+        self.validate_state()?;
         let P = self.P;
 
         let e_k = self.e_k.clone();
@@ -277,6 +352,7 @@ impl PairDiffusion {
         let D_symbolic = k * T.pow(Expr::Const(1.5)) * m1.pow(Expr::Const(0.5))
             / (P * sigma.pow(Expr::Const(2.0)) * omega);
         self.D_symbolic = D_symbolic;
+        Ok(())
     }
 
     pub fn taylor_series(&mut self, T0: f64, n: usize) {
@@ -287,6 +363,7 @@ impl PairDiffusion {
 
     pub fn integr_mean(&mut self) -> Result<(), PairDiffusionError> {
         use RustedSciThe::symbolic::symbolic_integration::QuadMethod;
+        self.validate_state()?;
         let (T_min, T_max) = self
             .T_interval
             .ok_or(PairDiffusionError::InvalidTemperatureRange)?;
@@ -303,6 +380,11 @@ impl PairDiffusion {
                 .map_err(|e| {
                     PairDiffusionError::SymbolicError(format!("Failed to integrate entropy: {}", e))
                 })?;
+        if !I.is_finite() {
+            return Err(PairDiffusionError::NonFiniteOutput {
+                field: "mean_diffusion".to_string(),
+            });
+        }
         self.D = I;
         Ok(())
     }
@@ -324,7 +406,7 @@ impl Clone for PairDiffusion {
             D: self.D,
             D_unit: self.D_unit.clone(),
             unit_multiplier: self.unit_multiplier,
-            D_closure: Box::new(|_T| 0.0),
+            D_closure: self.D_closure.clone(),
             D_symbolic: self.D_symbolic.clone(),
         }
     }
@@ -392,6 +474,17 @@ pub struct MultiSubstanceDiffusion {
 }
 
 impl MultiSubstanceDiffusion {
+    fn validate_positive_finite(field: &str, value: f64) -> Result<(), PairDiffusionError> {
+        if !value.is_finite() || value <= 0.0 {
+            Err(PairDiffusionError::InvalidPhysicalValue {
+                field: field.to_string(),
+                value,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn default() -> Self {
         Self {
             substances: HashMap::new(),
@@ -408,8 +501,8 @@ impl MultiSubstanceDiffusion {
     /// # Arguments
     /// * `T` - System temperature [K]
     /// * `P` - System pressure [Pa]
-    pub fn new(T: f64, P: f64) -> Self {
-        Self {
+    pub fn new(T: f64, P: f64) -> Result<Self, PairDiffusionError> {
+        let diffusion = Self {
             substances: HashMap::new(),
             substance_names: Vec::new(),
             pair_diffusions: HashMap::new(),
@@ -417,7 +510,20 @@ impl MultiSubstanceDiffusion {
             T,
             P,
             D_unit: None,
+        };
+        if !T.is_finite() || T <= 0.0 {
+            return Err(PairDiffusionError::InvalidPhysicalValue {
+                field: "temperature".to_string(),
+                value: T,
+            });
         }
+        if !P.is_finite() || P <= 0.0 {
+            return Err(PairDiffusionError::InvalidPhysicalValue {
+                field: "pressure".to_string(),
+                value: P,
+            });
+        }
+        Ok(diffusion)
     }
 
     /// Adds individual substance with transport data
@@ -470,81 +576,89 @@ impl MultiSubstanceDiffusion {
     ///
     /// Uses double loop to compute N(N+1)/2 unique pairs.
     /// Must set molar masses first via `set_molar_masses()`.
-    pub fn calculate_all_pairs(&mut self) {
+    pub fn calculate_all_pairs(&mut self) -> Result<(), PairDiffusionError> {
         self.pair_diffusions.clear();
 
         for (i, name_a) in self.substance_names.iter().enumerate() {
-            for (j, name_b) in self.substance_names.iter().enumerate() {
-                if i <= j {
-                    let transport_a = &self.substances[name_a];
-                    let transport_b = &self.substances[name_b];
+            for name_b in self.substance_names.iter().skip(i) {
+                let transport_a = self
+                    .substances
+                    .get(name_a)
+                    .ok_or_else(|| PairDiffusionError::SubstanceNotFound(name_a.clone()))?;
+                let transport_b = self
+                    .substances
+                    .get(name_b)
+                    .ok_or_else(|| PairDiffusionError::SubstanceNotFound(name_b.clone()))?;
 
-                    let mut pair_diff = PairDiffusion::new(
-                        transport_a.input.clone(),
-                        transport_b.input.clone(),
-                        self.T,
-                        self.P,
-                        transport_a.M,
-                        transport_b.M,
-                    );
+                let mut pair_diff = PairDiffusion::new(
+                    transport_a.input.clone(),
+                    transport_b.input.clone(),
+                    self.T,
+                    self.P,
+                    transport_a.M,
+                    transport_b.M,
+                )?;
 
-                    if let Some(ref unit) = self.D_unit {
-                        let _ = pair_diff.set_D_unit(Some(unit.clone()));
-                    }
-
-                    pair_diff.calc_coefficients();
-                    pair_diff.calculate_D();
-
-                    self.pair_diffusions
-                        .insert((name_a.clone(), name_b.clone()), pair_diff);
+                if let Some(ref unit) = self.D_unit {
+                    let _ = pair_diff.set_D_unit(Some(unit.clone()));
                 }
+
+                pair_diff.calc_coefficients()?;
+                pair_diff.calculate_D()?;
+
+                self.pair_diffusions
+                    .insert((name_a.clone(), name_b.clone()), pair_diff);
             }
         }
+        Ok(())
     }
 
     /// Creates temperature-dependent closures for all pairs
     ///
     /// Must call `calculate_all_pairs()` first.
-    pub fn calculate_all_closures(&mut self) {
+    pub fn calculate_all_closures(&mut self) -> Result<(), PairDiffusionError> {
         for pair_diff in self.pair_diffusions.values_mut() {
-            pair_diff.calculate_D_closure();
+            pair_diff.calculate_D_closure()?;
         }
+        Ok(())
     }
 
     /// Creates symbolic expressions for all pairs
     ///
     /// Must call `calculate_all_pairs()` first.
-    pub fn calculate_all_symbolic(&mut self) {
+    pub fn calculate_all_symbolic(&mut self) -> Result<(), PairDiffusionError> {
         for pair_diff in self.pair_diffusions.values_mut() {
-            pair_diff.calculate_D_symbolic();
+            pair_diff.calculate_D_symbolic()?;
         }
+        Ok(())
     }
 
     /// Creates symmetric N×N diffusion coefficient matrix
     ///
     /// # Returns
     /// Symmetric matrix where matrix[i][j] = D_ij [m²/s or cm²/s]
-    pub fn create_diffusion_matrix(&mut self) -> Vec<Vec<f64>> {
+    pub fn create_diffusion_matrix(&mut self) -> Result<Vec<Vec<f64>>, PairDiffusionError> {
         let n = self.substance_names.len();
         let mut matrix = vec![vec![0.0; n]; n];
+        let index_by_name: HashMap<&str, usize> = self
+            .substance_names
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| (name.as_str(), idx))
+            .collect();
 
-        for (i, name_a) in self.substance_names.iter().enumerate() {
-            for (j, name_b) in self.substance_names.iter().enumerate() {
-                let key = if i <= j {
-                    (name_a.clone(), name_b.clone())
-                } else {
-                    (name_b.clone(), name_a.clone())
-                };
-
-                if let Some(pair_diff) = self.pair_diffusions.get(&key) {
-                    matrix[i][j] = pair_diff.D;
-                    matrix[j][i] = pair_diff.D;
-                }
+        for ((name_a, name_b), pair_diff) in &self.pair_diffusions {
+            if let (Some(&i), Some(&j)) = (
+                index_by_name.get(name_a.as_str()),
+                index_by_name.get(name_b.as_str()),
+            ) {
+                matrix[i][j] = pair_diff.D;
+                matrix[j][i] = pair_diff.D;
             }
         }
 
         self.diffusion_matrix = Some(matrix.clone());
-        matrix
+        Ok(matrix)
     }
 
     /// Retrieves PairDiffusion data for specific substance pair
@@ -612,12 +726,24 @@ impl MultiSubstanceDiffusion {
     ///
     /// # Arguments
     /// * `masses` - HashMap mapping substance names to molar masses [kg/mol]
-    pub fn set_molar_masses(&mut self, masses: HashMap<String, f64>) {
+    ///
+    /// # Returns
+    /// * `Ok(())` when every provided molar mass is finite, positive, and matches
+    ///   a loaded substance.
+    /// * `Err(...)` when a mass is non-physical or the substance is unknown.
+    pub fn set_molar_masses(
+        &mut self,
+        masses: HashMap<String, f64>,
+    ) -> Result<(), PairDiffusionError> {
         for (name, mass) in masses {
-            if let Some(transport_data) = self.substances.get_mut(&name) {
-                transport_data.M = mass;
-            }
+            Self::validate_positive_finite(&format!("molar_mass:{}", name), mass)?;
+            let transport_data = self
+                .substances
+                .get_mut(&name)
+                .ok_or_else(|| PairDiffusionError::SubstanceNotFound(name.clone()))?;
+            transport_data.M = mass;
         }
+        Ok(())
     }
 }
 
@@ -628,18 +754,28 @@ mod tests {
     use super::*;
     use crate::Thermodynamics::DBhandlers::TRANSPORTdata::TransportData;
     use crate::Thermodynamics::thermo_lib_api::ThermoData;
+
+    fn seed_transport_input(input: &mut TransportInput, diam: f64, well_depth: f64) {
+        input.diam = diam;
+        input.well_depth = well_depth;
+        input.dipole = 0.0;
+        input.rot_relax = 0.0;
+        input.polar = 0.0;
+    }
     use approx::assert_relative_eq;
     #[test]
-    fn test_pair_diffusion() {
+    fn test_pair_diffusion() -> Result<(), PairDiffusionError> {
         let thermo_data = ThermoData::new();
         let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
         let CO_data = sublib.get("CO").unwrap();
         let N2_data = sublib.get("N2").unwrap();
         let mut tr1 = TransportData::new();
         tr1.from_serde(CO_data.clone()).unwrap();
+        seed_transport_input(&mut tr1.input, 3.69, 97.0);
         let CO_input = tr1.input;
         let mut tr2 = TransportData::new();
         tr2.from_serde(N2_data.clone()).unwrap();
+        seed_transport_input(&mut tr2.input, 3.62, 71.4);
         let N2_input = tr2.input;
         let mut pair_diff = PairDiffusion::new(
             CO_input,
@@ -648,24 +784,27 @@ mod tests {
             101325.0,
             28.01 / 1000.0,
             30.01 / 1000.0,
-        );
+        )?;
         let _ = pair_diff.set_D_unit(Some("m2/s".to_string()));
-        pair_diff.calc_coefficients();
-        pair_diff.calculate_D();
+        pair_diff.calc_coefficients().unwrap();
+        pair_diff.calculate_D().unwrap();
         println!("D_CO_NO at 300K: {} m^2/s* 1e6", pair_diff.D * 1e6);
+        Ok(())
     }
 
     #[test]
-    fn test_closure() {
+    fn test_closure() -> Result<(), PairDiffusionError> {
         let thermo_data = ThermoData::new();
         let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
         let CO_data = sublib.get("CO").unwrap();
         let N2_data = sublib.get("N2").unwrap();
         let mut tr1 = TransportData::new();
         tr1.from_serde(CO_data.clone()).unwrap();
+        seed_transport_input(&mut tr1.input, 3.69, 97.0);
         let CO_input = tr1.input;
         let mut tr2 = TransportData::new();
         tr2.from_serde(N2_data.clone()).unwrap();
+        seed_transport_input(&mut tr2.input, 3.62, 71.4);
         let N2_input = tr2.input;
         let mut pair_diff = PairDiffusion::new(
             CO_input,
@@ -674,28 +813,32 @@ mod tests {
             101325.0,
             28.01 / 1000.0,
             30.01 / 1000.0,
-        );
-        pair_diff.calc_coefficients();
-        pair_diff.calculate_D_closure();
+        )?;
+        pair_diff.calc_coefficients().unwrap();
+        pair_diff.calculate_D_closure().unwrap();
 
         let D_300 = (pair_diff.D_closure)(300.0);
         let D_400 = (pair_diff.D_closure)(400.0);
 
         assert!(D_400 > D_300);
         println!("D at 300K: {}, D at 400K: {}", D_300, D_400);
+        Ok(())
     }
 
     #[test]
-    fn test_symbolic() {
+    fn test_clone_preserves_closure_behavior_and_independent_rebuild()
+    -> Result<(), PairDiffusionError> {
         let thermo_data = ThermoData::new();
         let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
         let CO_data = sublib.get("CO").unwrap();
         let N2_data = sublib.get("N2").unwrap();
         let mut tr1 = TransportData::new();
         tr1.from_serde(CO_data.clone()).unwrap();
+        seed_transport_input(&mut tr1.input, 3.69, 97.0);
         let CO_input = tr1.input;
         let mut tr2 = TransportData::new();
         tr2.from_serde(N2_data.clone()).unwrap();
+        seed_transport_input(&mut tr2.input, 3.62, 71.4);
         let N2_input = tr2.input;
         let mut pair_diff = PairDiffusion::new(
             CO_input,
@@ -704,9 +847,49 @@ mod tests {
             101325.0,
             28.01 / 1000.0,
             30.01 / 1000.0,
+        )?;
+        pair_diff.calc_coefficients().unwrap();
+        pair_diff.calculate_D_closure().unwrap();
+
+        let cloned = pair_diff.clone();
+        assert_relative_eq!(
+            (cloned.D_closure)(300.0),
+            (pair_diff.D_closure)(300.0),
+            epsilon = 1e-12
         );
-        pair_diff.calc_coefficients();
-        pair_diff.calculate_D_symbolic();
+
+        pair_diff.unit_multiplier = 2.0;
+        pair_diff.calculate_D_closure().unwrap();
+        let original_after = (pair_diff.D_closure)(300.0);
+        let cloned_after = (cloned.D_closure)(300.0);
+        assert!((original_after - cloned_after).abs() > 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_symbolic() -> Result<(), PairDiffusionError> {
+        let thermo_data = ThermoData::new();
+        let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
+        let CO_data = sublib.get("CO").unwrap();
+        let N2_data = sublib.get("N2").unwrap();
+        let mut tr1 = TransportData::new();
+        tr1.from_serde(CO_data.clone()).unwrap();
+        seed_transport_input(&mut tr1.input, 3.69, 97.0);
+        let CO_input = tr1.input;
+        let mut tr2 = TransportData::new();
+        tr2.from_serde(N2_data.clone()).unwrap();
+        seed_transport_input(&mut tr2.input, 3.62, 71.4);
+        let N2_input = tr2.input;
+        let mut pair_diff = PairDiffusion::new(
+            CO_input,
+            N2_input,
+            300.0,
+            101325.0,
+            28.01 / 1000.0,
+            30.01 / 1000.0,
+        )?;
+        pair_diff.calc_coefficients().unwrap();
+        pair_diff.calculate_D_symbolic().unwrap();
 
         let D_sym_func = pair_diff.D_symbolic.lambdify1D();
         let D_300 = D_sym_func(300.0);
@@ -714,19 +897,22 @@ mod tests {
 
         assert!(D_400 > D_300);
         println!("Symbolic D at 300K: {}, at 400K: {}", D_300, D_400);
+        Ok(())
     }
 
     #[test]
-    fn test_taylor_series() {
+    fn test_taylor_series() -> Result<(), PairDiffusionError> {
         let thermo_data = ThermoData::new();
         let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
         let CO_data = sublib.get("CO").unwrap();
         let N2_data = sublib.get("N2").unwrap();
         let mut tr1 = TransportData::new();
         tr1.from_serde(CO_data.clone()).unwrap();
+        seed_transport_input(&mut tr1.input, 3.69, 97.0);
         let CO_input = tr1.input;
         let mut tr2 = TransportData::new();
         tr2.from_serde(N2_data.clone()).unwrap();
+        seed_transport_input(&mut tr2.input, 3.62, 71.4);
         let N2_input = tr2.input;
         let mut pair_diff = PairDiffusion::new(
             CO_input,
@@ -735,9 +921,9 @@ mod tests {
             101325.0,
             28.01 / 1000.0,
             30.01 / 1000.0,
-        );
-        pair_diff.calc_coefficients();
-        pair_diff.calculate_D_symbolic();
+        )?;
+        pair_diff.calc_coefficients().unwrap();
+        pair_diff.calculate_D_symbolic().unwrap();
 
         let original_func = pair_diff.D_symbolic.lambdify1D();
         let original_300 = original_func(300.0);
@@ -748,19 +934,22 @@ mod tests {
 
         assert_relative_eq!(original_300, taylor_300, epsilon = 1e-6);
         println!("Original: {}, Taylor: {}", original_300, taylor_300);
+        Ok(())
     }
 
     #[test]
-    fn test_integr_mean() {
+    fn test_integr_mean() -> Result<(), PairDiffusionError> {
         let thermo_data = ThermoData::new();
         let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
         let CO_data = sublib.get("CO").unwrap();
         let N2_data = sublib.get("N2").unwrap();
         let mut tr1 = TransportData::new();
         tr1.from_serde(CO_data.clone()).unwrap();
+        seed_transport_input(&mut tr1.input, 3.69, 97.0);
         let CO_input = tr1.input;
         let mut tr2 = TransportData::new();
         tr2.from_serde(N2_data.clone()).unwrap();
+        seed_transport_input(&mut tr2.input, 3.62, 71.4);
         let N2_input = tr2.input;
         let mut pair_diff = PairDiffusion::new(
             CO_input,
@@ -769,14 +958,85 @@ mod tests {
             101325.0,
             28.01 / 1000.0,
             30.01 / 1000.0,
-        );
-        pair_diff.calc_coefficients();
-        pair_diff.calculate_D_symbolic();
+        )?;
+        pair_diff.calc_coefficients().unwrap();
+        pair_diff.calculate_D_symbolic().unwrap();
         pair_diff.set_T_interval(300.0, 400.0);
 
         let result = pair_diff.integr_mean();
         assert!(result.is_ok());
         println!("Mean D over 300-400K: {}", pair_diff.D);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pair_diffusion_rejects_nonfinite_inputs() -> Result<(), PairDiffusionError> {
+        let thermo_data = ThermoData::new();
+        let sublib = thermo_data.LibThermoData.get("Aramco_transport").unwrap();
+        let CO_data = sublib.get("CO").unwrap();
+        let N2_data = sublib.get("N2").unwrap();
+
+        let mut tr1 = TransportData::new();
+        tr1.from_serde(CO_data.clone()).unwrap();
+        seed_transport_input(&mut tr1.input, 3.69, 97.0);
+        let CO_input = tr1.input;
+        let mut tr2 = TransportData::new();
+        tr2.from_serde(N2_data.clone()).unwrap();
+        seed_transport_input(&mut tr2.input, 3.62, 71.4);
+        let N2_input = tr2.input;
+
+        let pair_diff = PairDiffusion::new(
+            CO_input,
+            N2_input,
+            f64::NAN,
+            101325.0,
+            28.01 / 1000.0,
+            30.01 / 1000.0,
+        );
+
+        let err = pair_diff.unwrap_err();
+        assert!(matches!(
+            err,
+            PairDiffusionError::InvalidPhysicalValue { field, .. } if field == "temperature"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_multi_diffusion_rejects_invalid_masses() -> Result<(), PairDiffusionError> {
+        let mut multi_diff = MultiSubstanceDiffusion::new(300.0, 101325.0)?;
+        multi_diff
+            .add_substances_from_library(vec!["CO".to_string()], "Aramco_transport")
+            .unwrap();
+
+        let invalid_mass = HashMap::from([("CO".to_string(), -1.0)]);
+        let err = multi_diff.set_molar_masses(invalid_mass).unwrap_err();
+        assert!(matches!(
+            err,
+            PairDiffusionError::InvalidPhysicalValue { field, .. } if field.starts_with("molar_mass:")
+        ));
+
+        let missing_mass = HashMap::from([("NOPE".to_string(), 28.0)]);
+        let err = multi_diff.set_molar_masses(missing_mass).unwrap_err();
+        assert!(matches!(err, PairDiffusionError::SubstanceNotFound(name) if name == "NOPE"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_multi_diffusion_calculate_all_pairs_rejects_inconsistent_names()
+    -> Result<(), PairDiffusionError> {
+        let mut multi_diff = MultiSubstanceDiffusion::new(300.0, 101325.0)?;
+        multi_diff
+            .add_substances_from_library(vec!["CO".to_string()], "Aramco_transport")
+            .unwrap();
+        multi_diff
+            .set_molar_masses(HashMap::from([("CO".to_string(), 28.01 / 1000.0)]))
+            .unwrap();
+        multi_diff.substance_names.push("NOPE".to_string());
+
+        let err = multi_diff.calculate_all_pairs().unwrap_err();
+        assert!(matches!(err, PairDiffusionError::SubstanceNotFound(name) if name == "NOPE"));
+        Ok(())
     }
 
     #[test]
@@ -794,7 +1054,7 @@ mod tests {
     /////////////////////////////////////
     #[test]
     fn test_multi_substance_diffusion() {
-        let mut multi_diff = MultiSubstanceDiffusion::new(300.0, 101325.0);
+        let mut multi_diff = MultiSubstanceDiffusion::new(300.0, 101325.0).unwrap();
 
         let result = multi_diff.add_substances_from_library(
             vec!["CO".to_string(), "N2".to_string(), "O2".to_string()],
@@ -810,12 +1070,12 @@ mod tests {
         .iter()
         .map(|(k, v)| (k.to_string(), *v))
         .collect();
-        multi_diff.set_molar_masses(masses);
+        multi_diff.set_molar_masses(masses).unwrap();
 
         multi_diff.set_common_D_unit("cm2/s".to_string());
-        multi_diff.calculate_all_pairs();
+        multi_diff.calculate_all_pairs().unwrap();
 
-        let matrix = multi_diff.create_diffusion_matrix();
+        let matrix = multi_diff.create_diffusion_matrix().unwrap();
         assert_eq!(matrix.len(), 3);
         assert_eq!(matrix[0].len(), 3);
 
@@ -827,7 +1087,7 @@ mod tests {
     }
     #[test]
     fn test_multi_substance_closures() {
-        let mut multi_diff = MultiSubstanceDiffusion::new(300.0, 101325.0);
+        let mut multi_diff = MultiSubstanceDiffusion::new(300.0, 101325.0).unwrap();
 
         let _ = multi_diff.add_substances_from_library(
             vec!["CO".to_string(), "N2".to_string()],
@@ -838,10 +1098,10 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), *v))
             .collect();
-        multi_diff.set_molar_masses(masses);
+        multi_diff.set_molar_masses(masses).unwrap();
 
-        multi_diff.calculate_all_pairs();
-        multi_diff.calculate_all_closures();
+        multi_diff.calculate_all_pairs().unwrap();
+        multi_diff.calculate_all_closures().unwrap();
 
         let pair_diff = multi_diff.get_pair_diffusion("CO", "N2").unwrap();
         let D_300 = (pair_diff.D_closure)(300.0);
@@ -852,7 +1112,7 @@ mod tests {
 
     #[test]
     fn test_multi_substance_symbolic() {
-        let mut multi_diff = MultiSubstanceDiffusion::new(300.0, 101325.0);
+        let mut multi_diff = MultiSubstanceDiffusion::new(300.0, 101325.0).unwrap();
 
         let _ = multi_diff.add_substances_from_library(
             vec!["CO".to_string(), "N2".to_string()],
@@ -863,10 +1123,10 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), *v))
             .collect();
-        multi_diff.set_molar_masses(masses);
+        multi_diff.set_molar_masses(masses).unwrap();
 
-        multi_diff.calculate_all_pairs();
-        multi_diff.calculate_all_symbolic();
+        multi_diff.calculate_all_pairs().unwrap();
+        multi_diff.calculate_all_symbolic().unwrap();
 
         let pair_diff = multi_diff.get_pair_diffusion("CO", "N2").unwrap();
         let D_sym_func = pair_diff.D_symbolic.lambdify1D();
@@ -878,7 +1138,7 @@ mod tests {
 
     #[test]
     fn test_matrix_symmetry() {
-        let mut multi_diff = MultiSubstanceDiffusion::new(300.0, 101325.0);
+        let mut multi_diff = MultiSubstanceDiffusion::new(300.0, 101325.0).unwrap();
 
         let _ = multi_diff.add_substances_from_library(
             vec!["CO".to_string(), "N2".to_string(), "O2".to_string()],
@@ -893,10 +1153,10 @@ mod tests {
         .iter()
         .map(|(k, v)| (k.to_string(), *v))
         .collect();
-        multi_diff.set_molar_masses(masses);
+        multi_diff.set_molar_masses(masses).unwrap();
 
-        multi_diff.calculate_all_pairs();
-        let matrix = multi_diff.create_diffusion_matrix();
+        multi_diff.calculate_all_pairs().unwrap();
+        let matrix = multi_diff.create_diffusion_matrix().unwrap();
 
         for i in 0..matrix.len() {
             for j in 0..matrix[i].len() {
@@ -907,7 +1167,7 @@ mod tests {
 
     #[test]
     fn test_error_handling() {
-        let mut multi_diff = MultiSubstanceDiffusion::new(300.0, 101325.0);
+        let mut multi_diff = MultiSubstanceDiffusion::new(300.0, 101325.0).unwrap();
 
         let result = multi_diff
             .add_substances_from_library(vec!["INVALID_SUBSTANCE".to_string()], "Aramco_transport");

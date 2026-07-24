@@ -483,6 +483,7 @@ mod tests {
     }
 
     // #[test]
+    #[allow(dead_code)]
     fn test_load_kinetics_from_file_invalid_json() {
         // Create a file with invalid JSON
         let mut temp_file = NamedTempFile::new().unwrap();
@@ -636,10 +637,10 @@ mod tests {
         let mut kd = KinData::new();
         // set the shortcut reactions for our KineticData instance
         // it means we want reactions from Cantera sub-librarie from number 1 to number 10
-        kd.set_reactions_from_shortcut_range("C1..C10".to_string());
+        let _ = kd.set_reactions_from_shortcut_range("C1..C10".to_string());
         // searching for reactions in data base
-        kd.get_reactions_from_shortcuts();
-        kd.kinetic_main(); // parsing reaction data into structures and stoichometric calculations under one hood
+        let _ = kd.get_reactions_from_shortcuts();
+        let _ = kd.kinetic_main(); // parsing reaction data into structures and stoichometric calculations under one hood
         let kintic_written = kd.create_kinetics_document(file_path);
         assert!(kintic_written.is_ok());
         //PARSING SUBSTANCE DATA FROM TEMPORARY FILE///////////////////////////////////////////////////////////

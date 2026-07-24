@@ -47,7 +47,7 @@ impl AllLibsGui {
                     .id_salt("all_keys_subs")
                     .max_height(400.0)
                     .show(ui, |ui| {
-                        for (library, substance) in &self.thermo_data.VecOfSubsAdresses {
+                        for (library, substance) in self.thermo_data.VecOfSubsAdresses.as_ref() {
                             if !self.show_differences
                                 && !self.exists_in_lib_thermo_data(library, substance)
                             {
@@ -68,7 +68,7 @@ impl AllLibsGui {
                     .id_salt("substance_libs")
                     .max_height(400.0)
                     .show(ui, |ui| {
-                        for (library, substances) in &self.thermo_data.LibThermoData {
+                        for (library, substances) in self.thermo_data.LibThermoData.as_ref() {
                             for substance in substances.keys() {
                                 if !self.show_differences
                                     && !self.exists_in_vec_addresses(library, substance)

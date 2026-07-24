@@ -883,7 +883,7 @@ mod tests {
         );
         assert_relative_eq!(map[key], expected, epsilon = eps);
     }
-
+    #[allow(dead_code)]
     fn assert_expression_values(
         model: FittingModelName,
         x_data: &[f64],

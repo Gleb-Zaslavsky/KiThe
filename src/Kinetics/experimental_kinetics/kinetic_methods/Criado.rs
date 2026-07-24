@@ -324,7 +324,7 @@ fn integrate_simpson(model: &KineticModelNames, alpha: &[f64]) -> Vec<f64> {
     let f = |a: f64| model_fn(a, vec![]);
     integrate_g(&f, alpha)
 }
-
+#[allow(dead_code)]
 fn evaluate_model_monotonic(
     exp_curve: &[(f64, f64)],
     solver: &CriadoSolver,
@@ -883,7 +883,7 @@ mod tests {
                 interp.best_model, interp.mechanism, interp.confidence,
             );
         }
-        let interp = solver.global_criado_interpretation().unwrap();
+        // let interp = solver.global_criado_interpretation().unwrap();
     }
 
     #[test]
@@ -920,7 +920,7 @@ mod tests {
                 interp.best_model, interp.mechanism, interp.confidence,
             );
         }
-        let interp = solver.global_criado_interpretation().unwrap();
+        let _interp = solver.global_criado_interpretation().unwrap();
     }
 
     #[test]
@@ -958,6 +958,6 @@ mod tests {
                 interp.best_model, interp.mechanism, interp.confidence,
             );
         }
-        let interp = solver.global_criado_interpretation().unwrap();
+        let _interp = solver.global_criado_interpretation().unwrap();
     }
 }

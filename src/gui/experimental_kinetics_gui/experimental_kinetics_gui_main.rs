@@ -194,7 +194,7 @@ impl PlotApp {
             columns[1].vertical(|ui| {
                 PlotView::render_info_panel(ui, &self.model);
                 ui.separator();
-                WrightPanelControllers::quick_action_panel(
+                let _ = WrightPanelControllers::quick_action_panel(
                     ui,
                     &mut self.model,
                     &mut self.quick_actions_state,

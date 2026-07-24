@@ -1,6 +1,6 @@
 [package]
 name = "KiThe"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 author = "Gleb Zasllavsky"
 license = "MIT"
@@ -65,7 +65,5 @@ panic = "abort"
 [profile.dev]
 opt-level = 0
 debug = false 
-
-
 
 

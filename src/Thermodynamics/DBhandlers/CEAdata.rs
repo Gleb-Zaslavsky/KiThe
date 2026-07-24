@@ -38,6 +38,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 //use super::transport_api::{TransportCalculator, TransportError, LambdaUnit, ViscosityUnit};
 //use super::transport_api::{validate_temperature, validate_pressure, validate_molar_mass, validate_density};
 //use super::transport_api::{lambda_unit_to_multiplier, viscosity_unit_to_multiplier};
@@ -212,9 +213,9 @@ pub struct CEAdata {
     pub V: f64,
 
     /// Closure function for thermal conductivity calculations
-    pub Lambda_fun: Box<dyn Fn(f64) -> f64 + Send + Sync>,
+    pub Lambda_fun: Arc<dyn Fn(f64) -> f64 + Send + Sync>,
     /// Closure function for viscosity calculations
-    pub V_fun: Box<dyn Fn(f64) -> f64 + Send + Sync>,
+    pub V_fun: Arc<dyn Fn(f64) -> f64 + Send + Sync>,
 
     /// Symbolic expression for thermal conductivity
     pub Lambda_sym: Option<Expr>,
@@ -250,8 +251,8 @@ impl CEAdata {
 
             Lambda: 0.0,
             V: 0.0,
-            Lambda_fun: Box::new(|x| x),
-            V_fun: Box::new(|x| x),
+            Lambda_fun: Arc::new(|x| x),
+            V_fun: Arc::new(|x| x),
             Lambda_sym: None,
             V_sym: None,
             T_interval: None,
@@ -531,9 +532,9 @@ impl CEAdata {
         let c = self.coeff_Lambda.clone();
         let um = self.L_unit_multiplier;
         let (e, f, k, g) = (c[0], c[1], c[2], c[3]);
-        let Lambda = move |t: f64| um * calculate_L(t, e, f, k, g);
-        self.Lambda_fun = Box::new(Lambda.clone());
-        Ok(Box::new(Lambda))
+        let lambda_fun = Arc::new(move |t: f64| um * calculate_L(t, e, f, k, g));
+        self.Lambda_fun = lambda_fun.clone();
+        Ok(Box::new(move |t| lambda_fun(t)))
     }
 
     /// Create closure function for viscosity calculations
@@ -555,9 +556,9 @@ impl CEAdata {
         let c = self.coeff_Visc.clone();
         let um = self.V_unit_multiplier;
         let (e, f, k, g) = (c[0], c[1], c[2], c[3]);
-        let V = move |t: f64| um * calculate_V(t, e, f, k, g);
-        self.V_fun = Box::new(V.clone());
-        Ok(Box::new(V))
+        let visc_fun = Arc::new(move |t: f64| um * calculate_V(t, e, f, k, g));
+        self.V_fun = visc_fun.clone();
+        Ok(Box::new(move |t| visc_fun(t)))
     }
 
     /// Create symbolic expression for thermal conductivity
@@ -675,24 +676,40 @@ impl CEAdata {
         }
         let (func1, func2, func_to_fit) = match lv_type {
             LV::Viscosity => {
-                self.coeff_Visc = coeffs_min.coeff.clone();
-                self.create_sym_Visc()?;
-                let func1 = self.V_sym.clone().unwrap();
-                self.coeff_Visc = coeffs_max.coeff.clone();
-                self.create_sym_Visc()?;
-                let func2 = self.V_sym.clone().unwrap();
+                // Build both symbolic inputs on temporary clones so a rejected fit
+                // does not partially overwrite the published state.
+                let mut lower = self.clone();
+                lower.coeff_Visc = coeffs_min.coeff.clone();
+                lower.create_sym_Visc()?;
+                let func1 = lower.V_sym.clone().ok_or_else(|| {
+                    CEAError::MissingCoefficients("V_sym not calculated".to_string())
+                })?;
+
+                let mut upper = self.clone();
+                upper.coeff_Visc = coeffs_max.coeff.clone();
+                upper.create_sym_Visc()?;
+                let func2 = upper.V_sym.clone().ok_or_else(|| {
+                    CEAError::MissingCoefficients("V_sym not calculated".to_string())
+                })?;
                 // ln(1e-7) = -16,1180
                 let func_to_fit =
                     Expr::parse_expression("-16.1180+ e * ln( t ) + f/t + k/ t^2 + g ");
                 (func1, func2, func_to_fit)
             }
             LV::Lambda => {
-                self.coeff_Lambda = coeffs_min.coeff.clone();
-                self.create_sym_Lambda()?;
-                let func1 = self.Lambda_sym.clone().unwrap();
-                self.coeff_Lambda = coeffs_max.coeff.clone();
-                self.create_sym_Lambda()?;
-                let func2 = self.Lambda_sym.clone().unwrap();
+                let mut lower = self.clone();
+                lower.coeff_Lambda = coeffs_min.coeff.clone();
+                lower.create_sym_Lambda()?;
+                let func1 = lower.Lambda_sym.clone().ok_or_else(|| {
+                    CEAError::MissingCoefficients("Lambda_sym not calculated".to_string())
+                })?;
+
+                let mut upper = self.clone();
+                upper.coeff_Lambda = coeffs_max.coeff.clone();
+                upper.create_sym_Lambda()?;
+                let func2 = upper.Lambda_sym.clone().ok_or_else(|| {
+                    CEAError::MissingCoefficients("Lambda_sym not calculated".to_string())
+                })?;
                 // ln(1e-4) = -9.21034
                 let func_to_fit =
                     Expr::parse_expression("-9.21034 + e * ln( t ) + f/t + k/ t^2 + g ");
@@ -721,11 +738,21 @@ impl CEAdata {
             None,
             None,
         );
-        let map_of_solutions = sew.get_map_of_solutions().unwrap();
-        let e = map_of_solutions.get("e").unwrap().clone();
-        let f = map_of_solutions.get("f").unwrap().clone();
-        let k = map_of_solutions.get("k").unwrap().clone();
-        let g = map_of_solutions.get("g").unwrap().clone();
+        let map_of_solutions = sew.get_map_of_solutions().ok_or_else(|| {
+            CEAError::MissingCoefficients("LM fitting did not publish coefficients".to_string())
+        })?;
+        let e = map_of_solutions.get("e").cloned().ok_or_else(|| {
+            CEAError::MissingCoefficients("Missing fitted coefficient 'e'".to_string())
+        })?;
+        let f = map_of_solutions.get("f").cloned().ok_or_else(|| {
+            CEAError::MissingCoefficients("Missing fitted coefficient 'f'".to_string())
+        })?;
+        let k = map_of_solutions.get("k").cloned().ok_or_else(|| {
+            CEAError::MissingCoefficients("Missing fitted coefficient 'k'".to_string())
+        })?;
+        let g = map_of_solutions.get("g").cloned().ok_or_else(|| {
+            CEAError::MissingCoefficients("Missing fitted coefficient 'g'".to_string())
+        })?;
         match lv_type {
             LV::Viscosity => {
                 self.coeff_Visc = vec![e, f, k, g];
@@ -734,11 +761,21 @@ impl CEAdata {
                 self.coeff_Lambda = vec![e, f, k, g];
             }
         }
-        println!("{:?}", map_of_solutions);
-        let r_ssquared = sew.get_r_ssquared();
-        println!("r_ssquared: {}", r_ssquared.unwrap());
-        // Comment out assertion for tests
-        // assert!(1.0 - r_ssquared.unwrap() < 1e-2);
+        let r_ssquared = sew.get_r_ssquared().ok_or_else(|| {
+            CEAError::MissingCoefficients("LM fitting did not publish R²".to_string())
+        })?;
+        if !r_ssquared.is_finite() {
+            return Err(CEAError::SymbolicError(
+                "LM fitting produced a non-finite R² value".to_string(),
+            ));
+        }
+        if 1.0 - r_ssquared >= 1e-2 {
+            return Err(CEAError::ParseError(format!(
+                "Adjacent CEA fitting quality is too poor: R² = {:.6}",
+                r_ssquared
+            )));
+        }
+        // Only publish the fitted coefficients after every validation gate has passed.
         Ok(sew)
     }
     /// Determine and execute appropriate strategy for user temperature interval
@@ -823,6 +860,8 @@ impl CEAdata {
 //////////////////////////////impl Clone and Debug///////////////////////////////////////
 impl Clone for CEAdata {
     fn clone(&self) -> Self {
+        let lambda_fun = self.Lambda_fun.clone();
+        let visc_fun = self.V_fun.clone();
         Self {
             input: self.input.clone(),
             L_unit: self.L_unit.clone(),
@@ -834,27 +873,8 @@ impl Clone for CEAdata {
             coeff_Lambda: self.coeff_Lambda.clone(),
             Lambda: self.Lambda,
             V: self.V,
-
-            Lambda_fun: {
-                /*
-                let c = self.coeff_Lambda.clone();
-                let um = self.L_unit_multiplier;
-                let (e, f, k, g) = (c[0], c[1], c[2], c[3]);
-                let Lambda = move |t: f64| um * calculate_L(t, e, f, k, g);
-                Box::new(Lambda)
-                */
-                Box::new(|x| x)
-            },
-            V_fun: {
-                /*
-                let c = self.coeff_Visc.clone();
-                let um = self.V_unit_multiplier;
-                let (e, f, k, g) = (c[0], c[1], c[2], c[3]);
-                let V = move |t: f64| um * calculate_V(t, e, f, k, g);
-                Box::new(V)
-                */
-                Box::new(|x| x)
-            },
+            Lambda_fun: lambda_fun,
+            V_fun: visc_fun,
             Lambda_sym: self.Lambda_sym.clone(),
             V_sym: self.V_sym.clone(),
             T_interval: self.T_interval,
@@ -1020,12 +1040,14 @@ impl TransportCalculator for CEAdata {
     fn get_lambda_fun(
         &self,
     ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, super::transport_api::TransportError> {
-        Ok(self.clone().Lambda_fun)
+        let lambda_fun = self.Lambda_fun.clone();
+        Ok(Box::new(move |t| lambda_fun(t)))
     }
     fn get_viscosity_fun(
         &self,
     ) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, super::transport_api::TransportError> {
-        Ok(self.clone().V_fun)
+        let visc_fun = self.V_fun.clone();
+        Ok(Box::new(move |t| visc_fun(t)))
     }
 
     fn fitting_coeffs_for_T_interval(
@@ -1204,6 +1226,36 @@ mod tests {
     }
 
     #[test]
+    fn test_clone_preserves_closure_behavior_and_independent_rebuild() {
+        let mut original = setup_cea_data();
+        original.extract_coefficients(500.0).unwrap();
+        original
+            .set_lambda_unit(Some("mW/m/K".to_string()))
+            .unwrap();
+        original.set_V_unit(Some("mkPa*s".to_string())).unwrap();
+        let _ = original.create_closure_Lambda().unwrap();
+        let _ = original.create_closure_Visc().unwrap();
+
+        let cloned = original.clone();
+        assert_relative_eq!(
+            (cloned.Lambda_fun)(500.0),
+            (original.Lambda_fun)(500.0),
+            epsilon = 1e-6
+        );
+        assert_relative_eq!(
+            (cloned.V_fun)(500.0),
+            (original.V_fun)(500.0),
+            epsilon = 1e-6
+        );
+
+        original.set_lambda_unit(Some("W/m/K".to_string())).unwrap();
+        let _ = original.create_closure_Lambda().unwrap();
+        let original_after = (original.Lambda_fun)(500.0);
+        let cloned_after = (cloned.Lambda_fun)(500.0);
+        assert!((original_after - cloned_after).abs() > 1e-3);
+    }
+
+    #[test]
     fn test_create_symbolic_expressions() {
         let mut CEA = setup_cea_data();
         CEA.extract_coefficients(500.0).unwrap();
@@ -1332,10 +1384,10 @@ mod tests {
     #[test]
     fn test_fitting_coeffs_for_T_interval_no_interval_set() {
         let mut CEA = setup_cea_data();
-        let l = "T_interval not set".to_string();
+        let _l = "T_interval not set".to_string();
         assert!(matches!(
             CEA.fitting_coeffs_for_T_interval(LV::Viscosity),
-            Err(CEAError::MissingData(l))
+            Err(CEAError::MissingData(_l))
         ));
     }
 
@@ -1385,6 +1437,26 @@ mod tests {
             CEA.fitting_adjacent(coeffs_min, coeffs_max, 700.0, 1200.0, LV::Viscosity),
             Err(CEAError::ParseError(_))
         ));
+    }
+
+    #[test]
+    fn test_fitting_adjacent_rejection_keeps_existing_coefficients() {
+        let mut CEA = setup_cea_data();
+        CEA.coeff_Visc = vec![9.0, 8.0, 7.0, 6.0];
+        let original = CEA.coeff_Visc.clone();
+
+        let coeffs_min = Coeffs {
+            T: (200.0, 800.0),
+            coeff: vec![0.62526577, -31.779652, -1640.7983, 1.7454992],
+        };
+        let coeffs_max = Coeffs {
+            T: (1000.0, 5000.0),
+            coeff: vec![0.87395209, 561.52222, -173948.09, -0.39335958],
+        };
+
+        let result = CEA.fitting_adjacent(coeffs_min, coeffs_max, 700.0, 1200.0, LV::Viscosity);
+        assert!(matches!(result, Err(CEAError::ParseError(_))));
+        assert_eq!(CEA.coeff_Visc, original);
     }
 
     #[test]

@@ -284,7 +284,7 @@ fn covariance(x: &[f64], y: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests_differential {
     use super::*;
-    use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion_tests::tests::simulate_tga_first_order2;
+
     use crate::Kinetics::experimental_kinetics::kinetic_methods_tests::tests::build_view_from_cfg_exact_m0;
     use crate::Kinetics::experimental_kinetics::testing_mod::tests_afvanced_config::base_advanced_config_non_isothermal;
     use std::time::Instant;
@@ -306,7 +306,7 @@ mod tests_differential {
 
     #[test]
     fn friedman_differential_compute_with_mock_non_isothermal_data2() {
-        let now = Instant::now();
+        let _now = Instant::now();
         let cfg = base_advanced_config_non_isothermal(
             420.0,
             1e6,

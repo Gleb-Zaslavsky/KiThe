@@ -1364,9 +1364,9 @@ mod tests {
     #[test]
     fn test_with_real_data() {
         let mut kd = KinData::new();
-        kd.set_reactions_from_shortcut_range("C1..C3".to_string());
-        kd.get_reactions_from_shortcuts();
-        kd.reactdata_parsing();
+        let _ = kd.set_reactions_from_shortcut_range("C1..C3".to_string());
+        let _ = kd.get_reactions_from_shortcuts();
+        let _ = kd.reactdata_parsing();
         if let Some(reactdata) = kd.vec_of_reaction_data.as_mut() {
             reactdata.retain(|rd| rd.reaction_type == ReactionType::Elem);
         }
@@ -1469,7 +1469,7 @@ mod tests {
         let Q_g = 3000.0;
         let C_p = 0.35 * 4.184;
         let Lambda_eff = 0.07; // W/m-K 
-        let M = 34.2 / 1000.0; //  kg/mol
+        let _M = 34.2 / 1000.0; //  kg/mol
         let A = 1.3 * 1e5; //
         let E = 5000.0 * 4.184; //  
         let Diffusion = HashMap::from([("HMX".to_string(), 1e-3), ("HMXprod".to_string(), 1e-3)]);
@@ -1661,7 +1661,7 @@ mod tests {
         // GridRefinementMethod::GrcarSmooke(0.1, 0.1, 3.5);
         //GridRefinementMethod::Pearson(0.09, 3.5);
         // or GridRefinementMethod::Pearson(0.05, 2.5);
-        let adaptive = AdaptiveGridConfig {
+        let _adaptive = AdaptiveGridConfig {
             version: 1,
             max_refinements: 2,
             grid_method,
@@ -1725,7 +1725,7 @@ mod tests {
             info!("y = {}, eq {}", reactor.solver.unknowns[i], eq);
         }
         let sol = &reactor.solver.solution.clone().unwrap();
-        let T = sol.column(0).clone();
+        let _T = sol.column(0).clone();
         //  info!("T = {}", T);
         //  info!("q = {}", sol.column(1));
         // info!("C0 = {}", sol.column(2));
@@ -1879,7 +1879,7 @@ mod tests {
             info!("y = {}, eq {}", reactor.solver.unknowns[i], eq);
         }
         let sol = &reactor.solver.solution.clone().unwrap();
-        let T = sol.column(0).clone();
+        let _T = sol.column(0).clone();
         //  info!("T = {}", T);
         //  info!("q = {}", sol.column(1));
     }

@@ -103,7 +103,7 @@ use RustedSciThe::numerical::ODE_api2::{SolverParam, SolverType, UniversalODESol
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
-use std::env::vars;
+
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use tabled::{Table, Tabled};

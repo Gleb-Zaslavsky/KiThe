@@ -1299,6 +1299,7 @@ impl KinData {
     }
 
     /// Recompute the visible lifecycle state after a structural mutation.
+    #[allow(dead_code)]
     pub(crate) fn refresh_state_from_available_data(&mut self) -> KineticsResult<()> {
         self.rebuild_reaction_ids_from_available_metadata();
         self.publish_refreshed_state(None)
@@ -1939,6 +1940,10 @@ impl KinData {
             self.substances.clone()
         };
         StoichAnalyzer_instance.substances = next_substances.clone();
+        // Preserve manually provided molar masses when the caller already supplied them.
+        // This keeps downstream reactor builders from silently losing user data during
+        // the reaction-analysis refresh.
+        StoichAnalyzer_instance.vec_of_molmasses = self.stecheodata.vec_of_molmasses.clone();
         //find stoichiometric matrix and other matrices
         StoichAnalyzer_instance.analyse_reactions()?;
         StoichAnalyzer_instance.create_matrix_of_elements()?;

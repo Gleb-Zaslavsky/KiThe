@@ -1,7 +1,7 @@
 use super::SimpleReactorBVP::{FastElemReact, R_G, SimpleReactorTask};
 use crate::ReactorsBVP::reactor_BVP_utils::ScalingConfig;
 use std::collections::HashMap;
-
+#[allow(dead_code)]
 /// Build a compact HMX-style reactor fixture that exercises the full BVP pipeline.
 pub(crate) fn compact_hmx_reactor() -> SimpleReactorTask {
     let eq = "HMX=>HMXprod".to_string();

@@ -1,12 +1,12 @@
 //! # Single-Phase Thermodynamics Module
 //!
-//! This module provides optimized thermodynamic calculations for single-phase systems.
-//! It offers better performance and simpler API compared to multi-phase systems when
-//! only one phase is involved.
+//! This module provides the single-phase facade over the shared `PhaseSystem`
+//! thermodynamic engine.
 //!
 //! ## Key Structure
 //!
-//! - [`OnePhase`]: Manages a single phase with direct access to substance data
+//! - [`OnePhase`]: Manages one `None`-keyed phase through the same canonical
+//!   payload, cache, and pure-evaluation paths used by multi-phase systems.
 //!
 //! ## None Key Convention
 //!
@@ -17,31 +17,33 @@
 //! ## Example Usage
 //!
 //! ```rust
+//! use KiThe::Thermodynamics::User_PhaseOrSolution2::OnePhase;
 //! use std::collections::HashMap;
 //!
 //! // Single-phase gas system
-//! let mut system = OnePhase::new();
-//! // system.subs_data.substances = vec!["CO2".to_string(), "H2O".to_string()];
+//! let system = OnePhase::new();
+//! // Inspect resolved data with `system.subs_data_view()`.
 //!
 //! // Calculate properties - results use None key for compatibility
 //! // let result = system.calculate_Gibbs_sym(298.15)?;
 //! // assert!(result.contains_key(&None));
 //! ```
 //!
-//! ## Performance Benefits
-//!
-//! - Direct field access instead of HashMap lookups
-//! - No phase iteration overhead
-//! - Optimized data structures for single-phase operations
+//! `OnePhase` is intentionally a small facade, not a separate state model.
 
 use crate::Thermodynamics::User_substances::SubsData;
 use crate::Thermodynamics::User_substances_error::{SubsDataError, SubsDataResult};
+use crate::Thermodynamics::phase_layout::SystemLayout;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::DMatrix;
 use std::fmt;
 
 use crate::Thermodynamics::User_PhaseOrSolution::{
-    R, R_sym, SubstancesContainer, ThermodynamicsCalculatorTrait,
+    MoleNumberSnapshot, PhaseComposition, PhaseDataPreparation, PhaseEquilibriumAssembly,
+    PhaseEvaluationRequest, PhaseFunction, PhaseLagrangeFunction, PhaseSpec,
+    PhaseSymbolicPropertyBuilder, ResolvedPhaseSystem, ResolvedPhaseSystemReport,
+    SubstanceSystemFactoryError, SubstancesContainer, ThermoEvaluationConditions,
+    ThermodynamicsCalculatorTrait,
 };
 use std::collections::HashMap;
 use std::f64;
@@ -53,131 +55,340 @@ use std::f64;
 ///
 /// # Example
 /// ```rust
+/// use KiThe::Thermodynamics::User_PhaseOrSolution2::OnePhase;
+///
 /// let mut system = OnePhase::new();
-/// // Direct access to substance data
-/// // system.subs_data.substances.push("CO2".to_string());
+/// // Inspect resolved data through `system.subs_data_view()`.
+/// // Typed builders or crate-level transition helpers install components.
 /// ```
+#[derive(Clone)]
 pub struct OnePhase {
-    pub subs_data: SubsData,
-    pub symbolic_vars: (Option<Expr>, Option<Vec<Expr>>),
-    pub vec_of_n_vars: Vec<Expr>,
-    pub Np: Expr,
-    pub map_of_var_each_substance: HashMap<String, Expr>,
-    /// hashmap of Gibbs free energy of a given mixure of substances (numerical result at given T, P, concentration)
-    pub dG: HashMap<String, f64>,
-    /// hashmap of Gibbs free energy of a given mixure of substances (function at given T, P, concentration)
-    pub dG_fun: HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
-    /// hashmap of Gibbs free energy of a given mixure of substances (symbolic result at given T, P, concentration)
-    pub dG_sym: HashMap<String, Expr>,
-
-    /// hashmap of entropy of a given mixure of substances (numerical result at given T, P, concentration)
-    pub dS: HashMap<String, f64>,
-    /// hashmap of entropy functions
-    pub dS_fun: HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>>,
-    /// hashmap of entropy of a given mixure of substances (symbolic result at given T, P, concentration)
-    pub dS_sym: HashMap<String, Expr>,
+    phase_system: crate::Thermodynamics::User_PhaseOrSolution::PhaseSystem,
 }
 impl OnePhase {
     /// Creates a new single-phase system with empty data.
     pub fn new() -> Self {
         OnePhase {
-            subs_data: SubsData::new(),
-            symbolic_vars: (None, None),
-            vec_of_n_vars: Vec::new(),
-            Np: Expr::Var("Np".to_string()),
-            map_of_var_each_substance: HashMap::new(),
-            dG: HashMap::new(),
-            dG_fun: HashMap::new(),
-            dG_sym: HashMap::new(),
-            dS: HashMap::new(),
-            dS_fun: HashMap::new(),
-            dS_sym: HashMap::new(),
+            phase_system:
+                crate::Thermodynamics::User_PhaseOrSolution::PhaseSystem::new_single_phase(),
         }
     }
 
-    /// Wraps any result with None key for trait compatibility.
-    /// Uses optimized HashMap capacity for single-item storage.
-    fn wrap_result<T>(&self, result: T) -> HashMap<Option<String>, T> {
-        let mut outer = HashMap::with_capacity(1);
-        outer.insert(None, result);
-        outer
+    /// Returns the current revision of the visible layout/cache state.
+    pub fn layout_revision(&self) -> usize {
+        self.phase_system.layout_revision()
     }
 
-    /// Extracts data from trait's expected format with proper error handling.
-    /// Looks for None key which represents the single phase.
-    fn extract_phase_data<'a, T>(
-        &self,
-        n: &'a HashMap<Option<String>, T>,
-    ) -> SubsDataResult<&'a T> {
-        n.get(&None).ok_or_else(move || SubsDataError::MissingData {
-            field: "phase data".to_string(),
-            substance: "None".to_string(),
-        })
+    /// Returns the resolved single-phase declaration when the system was
+    /// created through the typed specification/factory path.
+    pub fn phase_spec(&self) -> Option<&PhaseSpec> {
+        self.phase_system.phase_specs().first()
     }
 
-    fn indexed_moles_variables_local(
+    /// Canonical declarations retained by the shared phase engine. The slice
+    /// is empty for manually assembled legacy payloads until they are resolved
+    /// through a typed `PhaseSpec`.
+    pub fn phase_specs(&self) -> &[PhaseSpec] {
+        self.phase_system.phase_specs()
+    }
+
+    /// Returns the canonical layout when this instance came from the typed
+    /// resolution path rather than direct legacy field assembly.
+    pub fn resolved_layout(&self) -> Option<&SystemLayout> {
+        self.phase_system.resolved_layout()
+    }
+
+    /// Typed lookup provenance for the resolved payloads, when this system
+    /// came from the typed resolution pipeline.
+    pub fn resolution_report(&self) -> Option<&ResolvedPhaseSystemReport> {
+        self.phase_system.resolution_report()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_phase_spec(&mut self, phase_spec: PhaseSpec) {
+        let layout = self.current_layout();
+        self.phase_system
+            .configure_resolved_phases(vec![phase_spec], layout);
+    }
+
+    /// Installs a typed one-phase resolution in one commit. A multi-phase
+    /// resolved payload is rejected here rather than silently becoming a
+    /// partially represented `OnePhase` facade.
+    pub(crate) fn install_resolved_system(
         &mut self,
-        Np: Option<Expr>,
-    ) -> Result<
-        (
-            (Option<Expr>, Option<Vec<Expr>>),
-            Vec<Expr>,
-            Vec<Expr>,
-            HashMap<String, Expr>,
-        ),
-        SubsDataError,
-    > {
-        let n = Expr::IndexedVars(self.subs_data.substances.len(), "N").0;
-        let Np = Np.unwrap_or_else(|| Expr::Var("Np".to_string()));
-
-        let mut map_of_var_each_substance = HashMap::with_capacity(self.subs_data.substances.len());
-        for (i, substance) in self.subs_data.substances.iter().enumerate() {
-            let var = Expr::Var(format!("N{}", i));
-            map_of_var_each_substance.insert(substance.clone(), var);
+        resolved: ResolvedPhaseSystem,
+    ) -> Result<(), SubstanceSystemFactoryError> {
+        let specs = resolved.phase_specs();
+        if specs.len() != 1 || specs[0].id().as_option().is_some() {
+            return Err(SubstanceSystemFactoryError::InvalidSpecification {
+                field: "resolved phases".to_string(),
+                reason: "OnePhase requires exactly one unnamed resolved phase".to_string(),
+            });
         }
-
-        self.symbolic_vars = (Some(Np.clone()), Some(n.clone()));
-        self.vec_of_n_vars = n.clone();
-        self.Np = Np.clone();
-        self.map_of_var_each_substance = map_of_var_each_substance.clone();
-
-        Ok((
-            (Some(Np.clone()), Some(n.clone())),
-            n,
-            vec![Np],
-            map_of_var_each_substance.clone(),
-        ))
-    }
-
-    /// Calculates Gibbs free energy for given conditions and mole numbers.
-    pub fn calcutate_Gibbs_free_energy_local(
-        &mut self,
-        T: f64,
-        P: f64,
-        n: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
-    ) -> SubsDataResult<()> {
-        let n_Np = self.extract_phase_data(&n)?.clone();
-        let Np = n_Np.0;
-        let n = n_Np.1;
-        let dG_phase = self.subs_data.calc_dG_for_one_phase(P, T, n, Np);
-        self.dG = dG_phase.clone();
+        self.phase_system.install_resolved_system(resolved);
         Ok(())
     }
 
-    pub fn calculate_Gibbs_fun_unmut(
-        &mut self,
-        T: f64,
-        P: f64,
-    ) -> HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>> {
-        self.subs_data.calculate_Gibbs_fun_one_phase(P, T)
+    /// Borrowed access to the underlying single-phase database payload.
+    pub fn subs_data_view(&self) -> &SubsData {
+        self.phase_system.single_phase_data()
     }
-    /// Returns entropy functions wrapped for trait compatibility.
-    pub fn calculate_S_fun_unmut(
-        &mut self,
-        T: f64,
-        P: f64,
-    ) -> HashMap<String, Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static>> {
-        self.subs_data.calculate_S_fun_for_one_phase(P, T)
+
+    #[inline]
+    fn subs_data(&self) -> &SubsData {
+        self.phase_system.single_phase_data()
+    }
+
+    /// Replaces the one-phase payload through the crate-private migration
+    /// boundary. Derived caches and typed metadata are discarded before a new
+    /// phase specification can be installed.
+    #[cfg(test)]
+    pub(crate) fn replace_subs_data(&mut self, subs_data: SubsData) {
+        self.phase_system.replace_single_phase_data(subs_data);
+    }
+
+    /// Executes one transitional raw-data edit, then invalidates the one-phase
+    /// layout and all derived caches. It remains crate-private so external
+    /// callers cannot desynchronise raw data from the resolved declaration.
+    #[cfg(test)]
+    pub(crate) fn with_subs_data_mut<R>(&mut self, update: impl FnOnce(&mut SubsData) -> R) -> R {
+        self.phase_system.with_single_phase_data_mut(update)
+    }
+
+    /// Replaces the one-phase component list and invalidates all dependent
+    /// layout and thermodynamic caches. Full production assembly normally
+    /// enters through a typed `PhaseSpec`; this keeps crate fixtures explicit.
+    #[cfg(test)]
+    pub(crate) fn set_substances(&mut self, substances: Vec<String>) {
+        self.with_subs_data_mut(|subs_data| {
+            subs_data.substances = substances;
+        });
+    }
+
+    /// Returns the canonical engine layout used for every one-phase derived
+    /// vector and symbolic variable family.
+    pub(crate) fn current_layout(&self) -> SystemLayout {
+        self.phase_system.current_layout()
+    }
+
+    /// Shared symbolic bookkeeping owned by `PhaseSystem`. This crate-private
+    /// view lets migration tests assert the common representation directly.
+    #[cfg(test)]
+    pub(crate) fn symbolic_layout_view(
+        &self,
+    ) -> &crate::Thermodynamics::User_PhaseOrSolution::PhaseSymbolicLayout {
+        self.phase_system.symbolic_layout()
+    }
+
+    /// Returns a typed snapshot of the current state and caches.
+    pub fn state_snapshot(
+        &self,
+    ) -> crate::Thermodynamics::User_PhaseOrSolution::ThermoStateSnapshot<'_> {
+        use crate::Thermodynamics::User_PhaseOrSolution::{
+            build_single_cache_snapshot, build_thermo_state_snapshot,
+        };
+        let layout_revision = self.layout_revision();
+        build_thermo_state_snapshot(
+            layout_revision,
+            build_single_cache_snapshot(layout_revision, self.dG_view()),
+            build_single_cache_snapshot(layout_revision, self.dG_fun_view()),
+            build_single_cache_snapshot(layout_revision, self.dG_sym_view()),
+            build_single_cache_snapshot(layout_revision, self.dS_view()),
+            build_single_cache_snapshot(layout_revision, self.dS_fun_view()),
+            build_single_cache_snapshot(layout_revision, self.dS_sym_view()),
+        )
+    }
+
+    /// Returns a typed thermodynamic result snapshot aligned to a single-phase layout.
+    pub fn result_snapshot(
+        &self,
+        temperature: Option<f64>,
+        pressure: Option<f64>,
+    ) -> crate::Thermodynamics::User_PhaseOrSolution::ThermoResultSnapshot<'_> {
+        use crate::Thermodynamics::User_PhaseOrSolution::{
+            build_single_cache_snapshot, build_thermo_result_snapshot,
+        };
+        let layout_revision = self.layout_revision();
+        build_thermo_result_snapshot(
+            layout_revision,
+            self.current_layout(),
+            temperature,
+            pressure,
+            build_single_cache_snapshot(layout_revision, self.dG_view()),
+            build_single_cache_snapshot(layout_revision, self.dG_fun_view()),
+            build_single_cache_snapshot(layout_revision, self.dG_sym_view()),
+            build_single_cache_snapshot(layout_revision, self.dS_view()),
+            build_single_cache_snapshot(layout_revision, self.dS_fun_view()),
+            build_single_cache_snapshot(layout_revision, self.dS_sym_view()),
+        )
+    }
+
+    /// Normalizes sparse mole input into a layout-carrying snapshot. New
+    /// callers should prefer this over the legacy tuple returned by the broad
+    /// compatibility trait.
+    pub fn normalize_mole_numbers(
+        &self,
+        non_zero_number_of_moles: HashMap<
+            Option<String>,
+            (Option<f64>, Option<HashMap<String, f64>>),
+        >,
+    ) -> SubsDataResult<MoleNumberSnapshot> {
+        self.phase_system
+            .normalize_mole_numbers(non_zero_number_of_moles)
+    }
+
+    /// Borrowed Gibbs energy cache for read-only consumers.
+    pub fn dG_view(&self) -> &HashMap<String, f64> {
+        self.phase_system.single_dG_view()
+    }
+
+    /// Borrowed Gibbs function cache for read-only consumers.
+    pub fn dG_fun_view(&self) -> &HashMap<String, PhaseFunction> {
+        self.phase_system.single_dG_fun_view()
+    }
+
+    /// Borrowed symbolic Gibbs cache for read-only consumers.
+    pub fn dG_sym_view(&self) -> &HashMap<String, Expr> {
+        self.phase_system.single_dG_sym_view()
+    }
+
+    /// Borrowed entropy cache for read-only consumers.
+    pub fn dS_view(&self) -> &HashMap<String, f64> {
+        self.phase_system.single_dS_view()
+    }
+
+    /// Borrowed entropy function cache for read-only consumers.
+    pub fn dS_fun_view(&self) -> &HashMap<String, PhaseFunction> {
+        self.phase_system.single_dS_fun_view()
+    }
+
+    /// Borrowed symbolic entropy cache for read-only consumers.
+    pub fn dS_sym_view(&self) -> &HashMap<String, Expr> {
+        self.phase_system.single_dS_sym_view()
+    }
+
+    /// Returns the request that validates the published numeric Gibbs cache.
+    pub fn gibbs_cache_context(
+        &self,
+    ) -> Option<&crate::Thermodynamics::User_PhaseOrSolution::NumericThermoCacheContext> {
+        self.phase_system.gibbs_cache_context()
+    }
+
+    /// Returns whether the published Gibbs result is valid for this exact request.
+    pub fn has_current_gibbs_cache(
+        &self,
+        conditions: ThermoEvaluationConditions,
+        compositions: &HashMap<Option<String>, PhaseComposition>,
+    ) -> bool {
+        self.phase_system
+            .has_current_gibbs_cache(conditions, compositions)
+    }
+
+    pub fn has_current_gibbs_request(&self, request: &PhaseEvaluationRequest) -> bool {
+        self.phase_system.has_current_gibbs_request(request)
+    }
+
+    /// Returns the request that validates the published numeric entropy cache.
+    pub fn entropy_cache_context(
+        &self,
+    ) -> Option<&crate::Thermodynamics::User_PhaseOrSolution::NumericThermoCacheContext> {
+        self.phase_system.entropy_cache_context()
+    }
+
+    /// Returns whether the published entropy result is valid for this exact request.
+    pub fn has_current_entropy_cache(
+        &self,
+        conditions: ThermoEvaluationConditions,
+        compositions: &HashMap<Option<String>, PhaseComposition>,
+    ) -> bool {
+        self.phase_system
+            .has_current_entropy_cache(conditions, compositions)
+    }
+
+    pub fn has_current_entropy_request(&self, request: &PhaseEvaluationRequest) -> bool {
+        self.phase_system.has_current_entropy_request(request)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_dG_mut(&mut self) -> &mut HashMap<String, f64> {
+        self.phase_system.dG_mut()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_dG_fun_mut(&mut self) -> &mut HashMap<String, PhaseFunction> {
+        self.phase_system.dG_fun_mut()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_dG_sym_mut(&mut self) -> &mut HashMap<String, Expr> {
+        self.phase_system.dG_sym_mut()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_dS_fun_mut(&mut self) -> &mut HashMap<String, PhaseFunction> {
+        self.phase_system.dS_fun_mut()
+    }
+
+    /// Evaluates Gibbs energy without publishing a phase-system cache.
+    pub fn evaluate_gibbs(
+        &self,
+        temperature: f64,
+        pressure: f64,
+        compositions: &HashMap<Option<String>, PhaseComposition>,
+    ) -> SubsDataResult<HashMap<Option<String>, HashMap<String, f64>>> {
+        self.evaluate_gibbs_at(
+            ThermoEvaluationConditions::new(temperature, pressure)?,
+            compositions,
+        )
+    }
+
+    /// Delegates the pure query to the shared phase-system engine.
+    pub fn evaluate_gibbs_at(
+        &self,
+        conditions: ThermoEvaluationConditions,
+        compositions: &HashMap<Option<String>, PhaseComposition>,
+    ) -> SubsDataResult<HashMap<Option<String>, HashMap<String, f64>>> {
+        self.phase_system
+            .evaluate_gibbs_at(conditions, compositions)
+    }
+
+    /// Evaluates Gibbs energy from one self-contained request without cache publication.
+    pub fn evaluate_gibbs_request(
+        &self,
+        request: &PhaseEvaluationRequest,
+    ) -> SubsDataResult<HashMap<Option<String>, HashMap<String, f64>>> {
+        self.phase_system.evaluate_gibbs_request(request)
+    }
+
+    /// Evaluates entropy without publishing a phase-system cache.
+    pub fn evaluate_entropy(
+        &self,
+        temperature: f64,
+        pressure: f64,
+        compositions: &HashMap<Option<String>, PhaseComposition>,
+    ) -> SubsDataResult<HashMap<Option<String>, HashMap<String, f64>>> {
+        self.evaluate_entropy_at(
+            ThermoEvaluationConditions::new(temperature, pressure)?,
+            compositions,
+        )
+    }
+
+    /// Delegates the pure query to the shared phase-system engine.
+    pub fn evaluate_entropy_at(
+        &self,
+        conditions: ThermoEvaluationConditions,
+        compositions: &HashMap<Option<String>, PhaseComposition>,
+    ) -> SubsDataResult<HashMap<Option<String>, HashMap<String, f64>>> {
+        self.phase_system
+            .evaluate_entropy_at(conditions, compositions)
+    }
+
+    /// Entropy counterpart of `evaluate_gibbs_request`.
+    pub fn evaluate_entropy_request(
+        &self,
+        request: &PhaseEvaluationRequest,
+    ) -> SubsDataResult<HashMap<Option<String>, HashMap<String, f64>>> {
+        self.phase_system.evaluate_entropy_request(request)
     }
 
     pub fn calculate_Lagrange_equations_fun(
@@ -190,100 +401,135 @@ impl OnePhase {
         Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
         SubsDataError,
     > {
-        let G = G_fun;
-        let subs = self.subs_data.substances.clone();
-        let fun =
-            move |T: f64, n: Option<Vec<f64>>, Np: Option<f64>, Lambda: Vec<f64>| -> Vec<f64> {
-                let A = A.transpose();
-                let n_substances = A.ncols();
-
-                let mut vec_of_eqs: Vec<f64> = Vec::new();
-
-                for i in 0..n_substances {
-                    let subst_i = subs[i].clone();
-                    let G_i = G.get(&subst_i).unwrap();
-                    let col_of_subs_i = A.column(i).iter().map(|&v| v).collect::<Vec<f64>>();
-                    let sum_by_elemnts: f64 = col_of_subs_i
-                        .iter()
-                        .zip(Lambda.iter())
-                        .map(|(aij, Lambda_j)| aij * Lambda_j)
-                        .fold(0.0, |acc, x| acc + x);
-                    let eq_i = sum_by_elemnts + G_i(T, n.clone(), Np.clone()) / (R * Tm);
-                    vec_of_eqs.push(eq_i);
-                }
-                vec_of_eqs
-            };
-        Ok(Box::new(fun))
-    }
-}
-
-impl Clone for OnePhase {
-    fn clone(&self) -> Self {
-        let mut new_dG_fun = HashMap::new();
-        for (substance, _) in &self.dG_fun {
-            let placeholder: Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static> =
-                Box::new(|_: f64, _: Option<Vec<f64>>, _: Option<f64>| 0.0);
-            new_dG_fun.insert(substance.clone(), placeholder);
-        }
-
-        let mut new_dS_fun = HashMap::new();
-        for (substance, _) in &self.dS_fun {
-            let placeholder: Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64 + 'static> =
-                Box::new(|_: f64, _: Option<Vec<f64>>, _: Option<f64>| 0.0);
-            new_dS_fun.insert(substance.clone(), placeholder);
-        }
-
-        Self {
-            subs_data: self.subs_data.clone(),
-            symbolic_vars: self.symbolic_vars.clone(),
-            vec_of_n_vars: self.vec_of_n_vars.clone(),
-            Np: self.Np.clone(),
-            map_of_var_each_substance: self.map_of_var_each_substance.clone(),
-            dG: self.dG.clone(),
-            dG_fun: new_dG_fun,
-            dG_sym: self.dG_sym.clone(),
-            dS: self.dS.clone(),
-            dS_fun: new_dS_fun,
-            dS_sym: self.dS_sym.clone(),
-        }
+        self.phase_system
+            .build_numeric_lagrange_equations(A, HashMap::from([(None, G_fun)]), Tm)
     }
 }
 
 impl fmt::Debug for OnePhase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OnePhase")
-            .field("subs_data", &self.subs_data)
-            .field("symbolic_vars", &self.symbolic_vars)
-            .field("vec_of_n_vars", &self.vec_of_n_vars)
-            .field("Np", &self.Np)
-            .field("map_of_var_each_substance", &self.map_of_var_each_substance)
-            .field("dG", &self.dG)
-            .field("dG_sym", &self.dG_sym)
-            .field("dS", &self.dS)
-            .field("dS_sym", &self.dS_sym)
+            .field("subs_data", self.subs_data())
+            .field("symbolic_layout", self.phase_system.symbolic_layout())
+            .field("dG", self.phase_system.single_dG_view())
+            .field("dG_sym", self.phase_system.single_dG_sym_view())
+            .field("dS", self.phase_system.single_dS_view())
+            .field("dS_sym", self.phase_system.single_dS_sym_view())
             .finish()
     }
 }
+
+impl PhaseDataPreparation for OnePhase {
+    fn prepare_thermal_coefficients(&mut self, temperature: f64) -> SubsDataResult<()> {
+        self.phase_system.extract_all_thermal_coeffs(temperature)
+    }
+
+    fn rebuild_numeric_thermodynamic_properties(&mut self, temperature: f64) -> SubsDataResult<()> {
+        self.phase_system
+            .calculate_therm_map_of_properties(temperature)
+    }
+
+    fn rebuild_symbolic_thermodynamic_properties(&mut self) -> SubsDataResult<()> {
+        self.phase_system.calculate_therm_map_of_sym()
+    }
+
+    fn ensure_coefficients_for_temperature(
+        &mut self,
+        temperature: f64,
+    ) -> SubsDataResult<Vec<String>> {
+        self.phase_system
+            .extract_coeffs_if_current_coeffs_not_valid(temperature)
+    }
+
+    fn configure_phase_properties(
+        &mut self,
+        pressure: f64,
+        pressure_unit: Option<String>,
+        molar_masses: HashMap<String, f64>,
+        mass_unit: Option<String>,
+    ) -> SubsDataResult<()> {
+        self.phase_system.configure_system_properties(
+            pressure,
+            pressure_unit,
+            molar_masses,
+            mass_unit,
+        )
+    }
+
+    fn fetch_missing_thermochemistry_from_nist(&mut self) -> SubsDataResult<()> {
+        self.phase_system.fetch_missing_from_nist()
+    }
+}
+
+impl PhaseSymbolicPropertyBuilder for OnePhase {
+    fn build_symbolic_gibbs(&mut self, temperature: f64) -> SubsDataResult<()> {
+        self.phase_system.calculate_gibbs_sym(temperature)
+    }
+
+    fn build_gibbs_functions(&mut self, temperature: f64, pressure: f64) -> SubsDataResult<()> {
+        self.phase_system.calculate_gibbs_fun(temperature, pressure)
+    }
+
+    fn substitute_pressure_in_symbolic_gibbs(&mut self, pressure: f64) {
+        self.phase_system.set_pressure_in_gibbs_sym(pressure);
+    }
+
+    fn substitute_temperature_in_symbolic_gibbs(&mut self, temperature: f64) {
+        self.phase_system.set_temperature_in_gibbs_sym(temperature);
+    }
+
+    fn build_symbolic_entropy(&mut self, temperature: f64) -> SubsDataResult<()> {
+        self.phase_system.calculate_entropy_sym(temperature)
+    }
+
+    fn build_entropy_functions(&mut self, temperature: f64, pressure: f64) -> SubsDataResult<()> {
+        self.phase_system
+            .calculate_entropy_fun(temperature, pressure)
+    }
+}
+
+impl PhaseEquilibriumAssembly for OnePhase {
+    fn build_symbolic_lagrange_equations(
+        &mut self,
+        element_matrix: DMatrix<f64>,
+        reference_temperature: f64,
+    ) -> SubsDataResult<Vec<Expr>> {
+        self.phase_system
+            .build_symbolic_lagrange_equations(element_matrix, reference_temperature)
+    }
+
+    fn build_numeric_lagrange_equations(
+        &mut self,
+        element_matrix: DMatrix<f64>,
+        temperature: f64,
+        pressure: f64,
+        reference_temperature: f64,
+    ) -> SubsDataResult<PhaseLagrangeFunction> {
+        self.phase_system.calculate_lagrange_equations_fun2(
+            element_matrix,
+            temperature,
+            pressure,
+            reference_temperature,
+        )
+    }
+}
+
 /// Implementation of ThermodynamicsCalculatorTrait for single-phase systems.
 /// All methods maintain compatibility with multi-phase interface using None keys.
 impl ThermodynamicsCalculatorTrait for OnePhase {
     /// Extracts thermal coefficients for the given temperature.
     fn extract_all_thermal_coeffs(&mut self, temperature: f64) -> SubsDataResult<()> {
-        self.subs_data.extract_all_thermal_coeffs(temperature)?;
-        Ok(())
+        PhaseDataPreparation::prepare_thermal_coefficients(self, temperature)
     }
 
     /// Calculates thermodynamic property maps at given temperature.
     fn calculate_therm_map_of_properties(&mut self, temperature: f64) -> SubsDataResult<()> {
-        self.subs_data
-            .calculate_therm_map_of_properties(temperature)?;
-        Ok(())
+        PhaseDataPreparation::rebuild_numeric_thermodynamic_properties(self, temperature)
     }
 
     /// Creates symbolic expressions for thermodynamic properties.
     fn calculate_therm_map_of_sym(&mut self) -> SubsDataResult<()> {
-        self.subs_data.calculate_therm_map_of_sym()?;
-        Ok(())
+        PhaseDataPreparation::rebuild_symbolic_thermodynamic_properties(self)
     }
 
     /// Validates and extracts coefficients for temperature range.
@@ -291,10 +537,7 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
         &mut self,
         temperature: f64,
     ) -> SubsDataResult<Vec<String>> {
-        let v = self
-            .subs_data
-            .extract_coeffs_if_current_coeffs_not_valid_for_all_subs(temperature)?;
-        Ok(v)
+        PhaseDataPreparation::ensure_coefficients_for_temperature(self, temperature)
     }
 
     /// Calculates Gibbs free energy for given conditions and mole numbers.
@@ -302,38 +545,29 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
         &mut self,
         T: f64,
         P: f64,
-        n: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
+        n: HashMap<Option<String>, PhaseComposition>,
     ) -> SubsDataResult<HashMap<Option<String>, HashMap<String, f64>>> {
-        self.calcutate_Gibbs_free_energy_local(T, P, n)?;
-        let dG_phase = self.dG.clone();
-        Ok(self.wrap_result(dG_phase))
+        self.phase_system.calculate_gibbs_free_energy(T, P, n)
     }
 
     /// Creates symbolic expressions for Gibbs free energy.
     fn calculate_Gibbs_sym(&mut self, T: f64) -> SubsDataResult<()> {
-        let Np = self.symbolic_vars.0.clone();
-        let n = self.symbolic_vars.1.clone();
-        self.dG_sym = self.subs_data.calculate_Gibbs_sym_one_phase(T, n, Np);
-        Ok(())
+        PhaseSymbolicPropertyBuilder::build_symbolic_gibbs(self, T)
     }
 
     /// Sets pressure value in symbolic Gibbs expressions.
     fn set_P_to_sym_in_G_sym(&mut self, P: f64) {
-        for (_, sym_fun) in self.dG_sym.iter_mut() {
-            *sym_fun = sym_fun.set_variable("P", P).simplify()
-        }
+        PhaseSymbolicPropertyBuilder::substitute_pressure_in_symbolic_gibbs(self, P);
     }
 
     /// Sets temperature value in symbolic Gibbs expressions.
     fn set_T_to_sym_in_G_sym(&mut self, T: f64) {
-        for (_, sym_fun) in self.dG_sym.iter_mut() {
-            *sym_fun = sym_fun.set_variable("T", T).simplify()
-        }
+        PhaseSymbolicPropertyBuilder::substitute_temperature_in_symbolic_gibbs(self, T);
     }
 
     /// Creates Gibbs free energy functions for given conditions.
-    fn calculate_Gibbs_fun(&mut self, T: f64, P: f64) {
-        self.dG_fun = self.subs_data.calculate_Gibbs_fun_one_phase(P, T);
+    fn calculate_Gibbs_fun(&mut self, T: f64, P: f64) -> SubsDataResult<()> {
+        PhaseSymbolicPropertyBuilder::build_gibbs_functions(self, T, P)
     }
 
     /// Calculates entropy for given conditions and mole numbers.
@@ -341,26 +575,19 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
         &mut self,
         T: f64,
         P: f64,
-        n: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)>,
+        n: HashMap<Option<String>, PhaseComposition>,
     ) -> SubsDataResult<()> {
-        let n_Np = self.extract_phase_data(&n)?.clone();
-        let Np = n_Np.0;
-        let n = n_Np.1;
-        self.dS = self.subs_data.calculate_S_for_one_phase(P, T, n, Np);
-        Ok(())
+        self.phase_system.calculate_entropy(T, P, n)
     }
 
     /// Creates symbolic expressions for entropy.
     fn calculate_S_sym(&mut self, T: f64) -> SubsDataResult<()> {
-        let Np = self.symbolic_vars.0.clone();
-        let n = self.symbolic_vars.1.clone();
-        self.dS_sym = self.subs_data.calculate_S_sym_for_one_phase(T, n, Np);
-        Ok(())
+        PhaseSymbolicPropertyBuilder::build_symbolic_entropy(self, T)
     }
 
     /// Creates entropy functions for given conditions.
-    fn calculate_S_fun(&mut self, T: f64, P: f64) {
-        self.dS_fun = self.subs_data.calculate_S_fun_for_one_phase(P, T);
+    fn calculate_S_fun(&mut self, T: f64, P: f64) -> SubsDataResult<()> {
+        PhaseSymbolicPropertyBuilder::build_entropy_functions(self, T, P)
     }
 
     fn configure_system_properties(
@@ -370,46 +597,29 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
         molar_masses: HashMap<String, f64>,
         mass_unit: Option<String>,
     ) -> SubsDataResult<()> {
-        // Set pressure and molar masses for each phase
-        self.subs_data.set_P(pressure, pressure_unit.clone());
-        self.subs_data
-            .set_M(molar_masses.clone(), mass_unit.clone());
-        Ok(())
+        PhaseDataPreparation::configure_phase_properties(
+            self,
+            pressure,
+            pressure_unit,
+            molar_masses,
+            mass_unit,
+        )
     }
     fn if_not_found_go_NIST(&mut self) -> SubsDataResult<()> {
-        self.subs_data.if_not_found_go_NIST()?;
-        Ok(())
+        PhaseDataPreparation::fetch_missing_thermochemistry_from_nist(self)
     }
-    fn extract_SubstancesContainer(&mut self) -> SubsDataResult<SubstancesContainer> {
-        let substances = self.subs_data.substances.clone();
+    fn extract_SubstancesContainer(&self) -> SubsDataResult<SubstancesContainer> {
+        let substances = self.subs_data().substances.clone();
         Ok(SubstancesContainer::SinglePhase(substances))
     }
-    fn get_all_substances(&mut self) -> Vec<String> {
-        self.subs_data.substances.clone()
+    fn get_all_substances(&self) -> Vec<String> {
+        self.subs_data().substances.clone()
     }
     fn calculate_elem_composition_and_molar_mass(
         &mut self,
         groups: Option<HashMap<String, HashMap<String, usize>>>,
     ) -> SubsDataResult<(DMatrix<f64>, HashMap<String, f64>, Vec<String>)> {
-        self.subs_data
-            .calculate_elem_composition_and_molar_mass(groups)?;
-        let elem_composition_matrix =
-            self.subs_data
-                .elem_composition_matrix
-                .clone()
-                .ok_or_else(|| {
-                    SubsDataError::MatrixOperationFailed(
-                        "Element composition matrix not calculated".to_string(),
-                    )
-                })?;
-
-        let unique_elements = self.subs_data.unique_elements.clone();
-        let hashmap_of_molar_masses = self.subs_data.hasmap_of_molar_mass.clone();
-        Ok((
-            elem_composition_matrix,
-            hashmap_of_molar_masses,
-            unique_elements,
-        ))
+        self.phase_system.element_composition_and_molar_mass(groups)
     }
     fn indexed_moles_variables(
         &mut self,
@@ -422,26 +632,7 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
         ),
         SubsDataError,
     > {
-        let n = Expr::IndexedVars(self.subs_data.substances.len(), "N").0;
-        let Np = Expr::Var("Np".to_string());
-
-        let mut map_of_var_each_substance = HashMap::with_capacity(self.subs_data.substances.len());
-        for (i, substance) in self.subs_data.substances.iter().enumerate() {
-            let var = Expr::Var(format!("N{}", i));
-            map_of_var_each_substance.insert(substance.clone(), var);
-        }
-
-        self.symbolic_vars = (Some(Np.clone()), Some(n.clone()));
-        self.vec_of_n_vars = n.clone();
-        self.Np = Np.clone();
-        self.map_of_var_each_substance = map_of_var_each_substance.clone();
-
-        Ok((
-            self.wrap_result((Some(Np.clone()), Some(n.clone()))),
-            n,
-            vec![Np],
-            self.wrap_result(map_of_var_each_substance),
-        ))
+        self.phase_system.indexed_moles_variables()
     }
     /////////////////////////////equations for G->min///////////////////////////////////////
     fn calculate_Lagrange_equations_sym(
@@ -449,32 +640,7 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
         A: DMatrix<f64>,
         Tm: f64,
     ) -> Result<Vec<Expr>, SubsDataError> {
-        let A = A.clone().transpose();
-        let n_elements = A.nrows();
-        let Lambda = Expr::IndexedVars(n_elements, "Lambda").0;
-        let n_substances = A.ncols();
-        let subs = self.subs_data.substances.clone();
-        let mut vec_of_eqs: Vec<Expr> = Vec::new();
-
-        for i in 0..n_substances {
-            let Tm = Expr::Const(Tm);
-            let subst_i = subs[i].clone();
-            let G_i = self.dG_sym.get(&subst_i).unwrap().clone();
-            let col_of_subs_i = A
-                .column(i)
-                .iter()
-                .map(|&v| Expr::Const(v))
-                .collect::<Vec<Expr>>();
-            let sum_by_elemnts: Expr = col_of_subs_i
-                .iter()
-                .zip(Lambda.iter())
-                .map(|(aij, Lambda_j)| aij.clone() * Lambda_j.clone())
-                .fold(Expr::Const(0.0), |acc, x| acc + x)
-                .simplify();
-            let eq_i = sum_by_elemnts + (G_i.clone() / (R_sym * Tm)).simplify();
-            vec_of_eqs.push(eq_i.simplify());
-        }
-        Ok(vec_of_eqs)
+        PhaseEquilibriumAssembly::build_symbolic_lagrange_equations(self, A, Tm)
     }
 
     fn calculate_Lagrange_equations_fun2(
@@ -486,9 +652,7 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
     ) -> SubsDataResult<
         Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>, Vec<f64>) -> Vec<f64> + 'static>,
     > {
-        let dG_fun = self.calculate_Gibbs_fun_unmut(T, P);
-        let Lagrange_equations = self.calculate_Lagrange_equations_fun(A, dG_fun, Tm)?;
-        Ok(Lagrange_equations)
+        PhaseEquilibriumAssembly::build_numeric_lagrange_equations(self, A, T, P, Tm)
     }
     //////////////////////////////equations for Keq///////////////////////////////////////
     /*
@@ -632,37 +796,7 @@ impl ThermodynamicsCalculatorTrait for OnePhase {
         ),
         SubsDataError,
     > {
-        let mut full_map_of_mole_numbers = non_zero_number_of_moles.clone();
-        let mut map_of_mole_num_vecs: HashMap<Option<String>, (Option<f64>, Option<Vec<f64>>)> =
-            HashMap::new();
-
-        let mut initial_map_of_mole_numbers: HashMap<String, f64> = HashMap::new();
-        let subs = self.subs_data.substances.clone();
-
-        for (_, value) in full_map_of_mole_numbers.iter_mut() {
-            if let (Np, Some(inner_map)) = (value.0.clone(), &mut value.1) {
-                // For each required key, insert with 0.0 if not present
-                for key in &subs {
-                    inner_map.entry(key.clone()).or_insert(0.0);
-                }
-                let inner_map = inner_map.clone();
-                let vec_of_mole_nums = inner_map.values().cloned().collect::<Vec<f64>>();
-                map_of_mole_num_vecs.insert(None, (Np, Some(vec_of_mole_nums)));
-
-                // making initial map of mole numbers
-                for (keys, values) in inner_map.iter().clone() {
-                    *initial_map_of_mole_numbers
-                        .entry(keys.clone())
-                        .or_insert(0.0) += values;
-                }
-            }
-        }
-        //  println!("full_map_of_mole_numbers,: {:#?},\n map_of_mole_num_vecs {:?}, \n initial_map_of_mole_numbers {:?} ",full_map_of_mole_numbers, map_of_mole_num_vecs, initial_map_of_mole_numbers); panic!();
-
-        Ok((
-            full_map_of_mole_numbers,
-            map_of_mole_num_vecs,
-            initial_map_of_mole_numbers,
-        ))
+        self.phase_system
+            .create_full_map_of_mole_numbers(non_zero_number_of_moles)
     }
 }

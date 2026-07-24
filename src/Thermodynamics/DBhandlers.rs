@@ -75,6 +75,7 @@
 ///);
 /// ```
 pub mod NASAdata;
+pub mod fitting_reports;
 
 /// heat and mass transfer data from CEA (Chemical Equilibrium with Applications)
 /// # Examples
@@ -277,6 +278,8 @@ pub mod transport_api;
 //pub use transport_api::{TransportCalculator, TransportError, LambdaUnit, ViscosityUnit};
 pub mod Diffusion;
 pub mod NASAdata_fitting;
+#[cfg(test)]
+mod NASAdata_fitting_lm_tests;
 mod NASAdata_tests;
 mod NIST_parser_tests;
 pub mod NISTdata_fitting;

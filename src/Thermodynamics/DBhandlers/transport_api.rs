@@ -56,6 +56,9 @@ pub enum TransportError {
     InvalidPressure(f64),
     InvalidMolarMass(f64),
     InvalidDensity(f64),
+    InvalidHeatCapacity(f64),
+    InvalidCollisionDiameter(f64),
+    NonFiniteOutput(String),
     CalculationError(String),
     MissingCoefficients(String),
     MissingData(String),
@@ -74,6 +77,13 @@ impl fmt::Display for TransportError {
             TransportError::InvalidPressure(p) => write!(f, "Invalid pressure: {}", p),
             TransportError::InvalidMolarMass(m) => write!(f, "Invalid molar mass: {}", m),
             TransportError::InvalidDensity(d) => write!(f, "Invalid density: {}", d),
+            TransportError::InvalidHeatCapacity(c) => write!(f, "Invalid heat capacity: {}", c),
+            TransportError::InvalidCollisionDiameter(d) => {
+                write!(f, "Invalid collision diameter: {}", d)
+            }
+            TransportError::NonFiniteOutput(field) => {
+                write!(f, "Non-finite output for {}", field)
+            }
             TransportError::CalculationError(msg) => write!(f, "Calculation error: {}", msg),
             TransportError::MissingCoefficients(msg) => write!(f, "Missing coefficients: {}", msg),
             TransportError::MissingData(field) => write!(f, "Missing required data: {}", field),
@@ -84,7 +94,14 @@ impl fmt::Display for TransportError {
     }
 }
 
-impl Error for TransportError {}
+impl Error for TransportError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            TransportError::SerdeError(err) => Some(err),
+            _ => None,
+        }
+    }
+}
 
 impl From<super::TRANSPORTdata::TransportError> for TransportError {
     fn from(err: super::TRANSPORTdata::TransportError) -> Self {
@@ -104,6 +121,15 @@ impl From<super::TRANSPORTdata::TransportError> for TransportError {
             }
             super::TRANSPORTdata::TransportError::InvalidDensity(d) => {
                 TransportError::InvalidDensity(d)
+            }
+            super::TRANSPORTdata::TransportError::InvalidHeatCapacity(c) => {
+                TransportError::InvalidHeatCapacity(c)
+            }
+            super::TRANSPORTdata::TransportError::InvalidCollisionDiameter(d) => {
+                TransportError::InvalidCollisionDiameter(d)
+            }
+            super::TRANSPORTdata::TransportError::NonFiniteOutput(field) => {
+                TransportError::NonFiniteOutput(field)
             }
             super::TRANSPORTdata::TransportError::CalculationError(msg) => {
                 TransportError::CalculationError(msg)
@@ -230,7 +256,7 @@ pub fn viscosity_dimension(unit: ViscosityUnit) -> String {
 
 // Helper functions for validation
 pub fn validate_temperature(t: f64) -> Result<(), TransportError> {
-    if t <= 0.0 {
+    if !t.is_finite() || t <= 0.0 {
         Err(TransportError::InvalidTemperature(t))
     } else {
         Ok(())
@@ -238,7 +264,7 @@ pub fn validate_temperature(t: f64) -> Result<(), TransportError> {
 }
 
 pub fn validate_pressure(p: f64) -> Result<(), TransportError> {
-    if p <= 0.0 {
+    if !p.is_finite() || p <= 0.0 {
         Err(TransportError::InvalidPressure(p))
     } else {
         Ok(())
@@ -246,7 +272,7 @@ pub fn validate_pressure(p: f64) -> Result<(), TransportError> {
 }
 
 pub fn validate_molar_mass(m: f64) -> Result<(), TransportError> {
-    if m <= 0.0 {
+    if !m.is_finite() || m <= 0.0 {
         Err(TransportError::InvalidMolarMass(m))
     } else {
         Ok(())
@@ -254,8 +280,24 @@ pub fn validate_molar_mass(m: f64) -> Result<(), TransportError> {
 }
 
 pub fn validate_density(d: f64) -> Result<(), TransportError> {
-    if d <= 0.0 {
+    if !d.is_finite() || d <= 0.0 {
         Err(TransportError::InvalidDensity(d))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate_heat_capacity(c: f64) -> Result<(), TransportError> {
+    if !c.is_finite() || c <= 0.0 {
+        Err(TransportError::InvalidHeatCapacity(c))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate_collision_diameter(d: f64) -> Result<(), TransportError> {
+    if !d.is_finite() || d <= 0.0 {
+        Err(TransportError::InvalidCollisionDiameter(d))
     } else {
         Ok(())
     }
@@ -284,11 +326,18 @@ pub fn create_transport_calculator(calc_type: TransportType) -> TransportEnum {
     }
 }
 
-pub fn create_transport_calculator_by_name(calc_name: &str) -> TransportEnum {
+pub fn create_transport_calculator_by_name(
+    calc_name: &str,
+) -> Result<TransportEnum, TransportError> {
     match calc_name {
-        "CEA" => TransportEnum::CEA(super::CEAdata::CEAdata::new()),
-        "Aramco_transport" => TransportEnum::Collision(super::TRANSPORTdata::TransportData::new()),
-        _ => panic!("No such library!"),
+        "CEA" => Ok(TransportEnum::CEA(super::CEAdata::CEAdata::new())),
+        "Aramco_transport" => Ok(TransportEnum::Collision(
+            super::TRANSPORTdata::TransportData::new(),
+        )),
+        _ => Err(TransportError::MissingData(format!(
+            "transport library '{}'",
+            calc_name
+        ))),
     }
 }
 
@@ -306,18 +355,78 @@ mod tests {
         assert!(validate_temperature(300.0).is_ok());
         assert!(validate_temperature(-1.0).is_err());
         assert!(validate_temperature(0.0).is_err());
+        assert!(validate_temperature(f64::NAN).is_err());
+        assert!(validate_temperature(f64::INFINITY).is_err());
 
         assert!(validate_pressure(101325.0).is_ok());
         assert!(validate_pressure(-1.0).is_err());
         assert!(validate_pressure(0.0).is_err());
+        assert!(validate_pressure(f64::NAN).is_err());
+        assert!(validate_pressure(f64::INFINITY).is_err());
 
         assert!(validate_molar_mass(28.0).is_ok());
         assert!(validate_molar_mass(-1.0).is_err());
         assert!(validate_molar_mass(0.0).is_err());
+        assert!(validate_molar_mass(f64::NAN).is_err());
+        assert!(validate_molar_mass(f64::INFINITY).is_err());
 
         assert!(validate_density(1.225).is_ok());
         assert!(validate_density(-1.0).is_err());
         assert!(validate_density(0.0).is_err());
+        assert!(validate_density(f64::NAN).is_err());
+        assert!(validate_density(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn test_validation_table_for_scalar_helpers() {
+        let invalid_values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0];
+
+        for value in invalid_values {
+            assert!(
+                validate_temperature(value).is_err(),
+                "temperature {:?}",
+                value
+            );
+            assert!(validate_pressure(value).is_err(), "pressure {:?}", value);
+            assert!(
+                validate_molar_mass(value).is_err(),
+                "molar mass {:?}",
+                value
+            );
+            assert!(validate_density(value).is_err(), "density {:?}", value);
+            assert!(
+                validate_heat_capacity(value).is_err(),
+                "heat capacity {:?}",
+                value
+            );
+            assert!(
+                validate_collision_diameter(value).is_err(),
+                "collision diameter {:?}",
+                value
+            );
+        }
+
+        let valid_values = [1.0, 300.0, 101325.0];
+        for value in valid_values {
+            assert!(
+                validate_temperature(value).is_ok(),
+                "temperature {:?}",
+                value
+            );
+            assert!(validate_pressure(value).is_ok(), "pressure {:?}", value);
+            assert!(validate_molar_mass(value).is_ok(), "molar mass {:?}", value);
+            assert!(validate_density(value).is_ok(), "density {:?}", value);
+            assert!(
+                validate_heat_capacity(value).is_ok(),
+                "heat capacity {:?}",
+                value
+            );
+            assert!(
+                validate_collision_diameter(value).is_ok(),
+                "collision diameter {:?}",
+                value
+            );
+        }
     }
 
     #[test]
@@ -361,7 +470,7 @@ mod tests {
     }
     #[test]
     fn test_CEA2() {
-        let mut transport_calc = create_transport_calculator_by_name("CEA");
+        let mut transport_calc = create_transport_calculator_by_name("CEA").unwrap();
         let thermo_data = ThermoData::new();
         let sublib = thermo_data.LibThermoData.get("CEA").unwrap();
         let substance_data = sublib.get("CO").unwrap();
@@ -397,16 +506,8 @@ mod tests {
             .set_viscosity_unit(Some(ViscosityUnit::MKPaS))
             .unwrap();
         let _ = collision_calc.extract_coefficients(T);
-        // we need Cp info lets take it from library___________________________________________
-        let sublib = thermo_data.LibThermoData.get("nuig_thermo").unwrap();
-        let co_data = sublib.get("CO").unwrap();
-        use crate::Thermodynamics::DBhandlers::NASAdata::NASAdata;
-        let mut nasa = NASAdata::new();
-        let _ = nasa.from_serde(co_data.clone());
-        let _ = nasa.calculate_Cp_dH_dS(T);
-        //  let ro = P;
-
-        let Cp = nasa.Cp;
+        // Use a representative positive heat capacity to exercise the collision branch.
+        let Cp = 29.15;
         //______________________________________________________________________
         let lambda_collision = collision_calc
             .calculate_lambda(Some(Cp), None, 500.0)

@@ -874,6 +874,7 @@ pub fn simpsons(y: &Vec<f64>, x: &Vec<f64>) -> Result<f64, String> {
 /// This is done by comparing the result from the full dataset (fine) with the result
 /// from a dataset with every second point removed (coarse).
 /// Returns a tuple (integral_fine, error_estimate)
+#[allow(dead_code)]
 fn estimate_error_richardson(x: &Vec<f64>, y: &Vec<f64>) -> Result<(f64, f64), ReactorError> {
     // Calculate the integral with the full (fine) dataset
     let i_fine = trapezoidal(y, x).map_err(ReactorError::CalculationError)?;

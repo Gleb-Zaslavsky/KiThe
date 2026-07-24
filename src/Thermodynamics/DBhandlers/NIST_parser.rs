@@ -39,30 +39,41 @@
 //! - Includes comprehensive error handling for network issues and parsing failures
 //! - Creates pretty-printed tables for data visualization
 
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, Response};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use thiserror::Error;
 use url::Url;
+
+const MAX_NIST_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 /// HTTP client trait for dependency injection
 pub trait HttpClient {
-    fn get_text(&self, url: &str) -> Result<String, reqwest::Error>;
+    fn get_response(&self, url: &str) -> Result<Response, reqwest::Error>;
 }
 
 // Implementation for the real reqwest client
 impl HttpClient for Client {
-    fn get_text(&self, url: &str) -> Result<String, reqwest::Error> {
-        self.get(url).send()?.text()
+    fn get_response(&self, url: &str) -> Result<Response, reqwest::Error> {
+        self.get(url).send()
     }
 }
 /// error types for the reqwest client
 #[derive(Debug, Error)]
 #[allow(dead_code)]
 pub enum NistError {
+    #[error("NIST parser configuration error: {0}")]
+    ConfigurationError(String),
     #[error("Network error: {0}")]
     NetworkError(#[from] reqwest::Error),
+    #[error("Unexpected HTTP status: {0}")]
+    HttpStatus(reqwest::StatusCode),
     #[error("URL parsing error: {0}")]
     UrlError(#[from] url::ParseError),
+    #[error("NIST response exceeded the accepted size limit: {actual} bytes > {limit} bytes")]
+    ResponseTooLarge { limit: usize, actual: usize },
+    #[error("Batch fetch failed for all {attempts} request(s): {last_error}")]
+    BatchAllFailed { attempts: usize, last_error: String },
     #[error("Substance not found")]
     SubstanceNotFound,
     #[error("Invalid data format")]
@@ -98,6 +109,37 @@ pub enum SearchType {
     All,
 }
 
+/// One item in a batch fetch report.
+#[derive(Debug)]
+pub struct NistBatchEntry {
+    pub substance: String,
+    pub search_type: SearchType,
+    pub phase: Phase,
+    pub result: Result<NistInput, NistError>,
+}
+
+/// Aggregated outcome for multiple NIST fetch requests.
+#[derive(Debug, Default)]
+pub struct NistBatchReport {
+    pub entries: Vec<NistBatchEntry>,
+}
+
+impl NistBatchReport {
+    pub fn successes(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.result.is_ok())
+            .count()
+    }
+
+    pub fn failures(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.result.is_err())
+            .count()
+    }
+}
+
 impl Phase {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -110,20 +152,40 @@ impl Phase {
 
 pub struct NistParser<C: HttpClient> {
     client: C,
+    base_url: Url,
 }
 
 impl NistParser<Client> {
+    pub fn try_new() -> Result<Self, NistError> {
+        let user_agent = format!("KiThe/{} NIST parser", env!("CARGO_PKG_VERSION"));
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(20))
+            .user_agent(user_agent)
+            .build()
+            .map_err(|err| NistError::ConfigurationError(err.to_string()))?;
+        let base_url = Url::parse("https://webbook.nist.gov").map_err(NistError::UrlError)?;
+        Ok(Self { client, base_url })
+    }
+
     pub fn new() -> Self {
-        Self {
-            client: Client::new(),
-        }
+        Self::try_new().expect("failed to build configured NIST HTTP client")
     }
 }
 
 impl<C: HttpClient> NistParser<C> {
     #[allow(dead_code)]
     pub fn with_client(client: C) -> Self {
-        Self { client }
+        Self {
+            client,
+            base_url: Url::parse("https://webbook.nist.gov")
+                .expect("default NIST base URL must be valid"),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_client_and_base_url(client: C, base_url: Url) -> Self {
+        Self { client, base_url }
     }
     ///////////////////////////////////TRAVELLING THE WEBSITE: http://webbook.nist.gov/cgi/cbook.cgi///////////////////////////////////////////
     pub fn get_data(
@@ -133,23 +195,16 @@ impl<C: HttpClient> NistParser<C> {
         phase: Phase,
     ) -> Result<NistInput, NistError> {
         let url = self.construct_url(substance)?;
-        println!("\n \n URL found: {}", url);
         let html = self.fetch_page(&url)?;
         if !self.check_substance_exists(&html) {
             return Err(NistError::SubstanceNotFound);
         }
 
         let url_of_substance = self.get_url_of_substance(&html, &url)?;
-        println!(
-            "\n \n URL of substance {} found: {}",
-            substance, url_of_substance
-        );
         let html_of_substance = self.fetch_page(&url_of_substance)?;
 
         let final_url = self.get_final_url(&html_of_substance, &url_of_substance, phase)?;
         let _html_of_phase = self.fetch_page(&final_url)?;
-        println!("\n \n Final URL found: {}", final_url);
-        //   println!("\n \n HTML of phase: {}", html_of_phase);
 
         let mut data = self.parse_data(&final_url, search_type, phase)?;
 
@@ -161,32 +216,102 @@ impl<C: HttpClient> NistParser<C> {
         Ok(data)
     }
 
+    /// Fetch multiple substances and collect a per-item report.
+    ///
+    /// The method only fails when every request fails, so callers can still
+    /// inspect partial success.
+    pub fn get_data_batch(
+        &self,
+        requests: &[(String, SearchType, Phase)],
+    ) -> Result<NistBatchReport, NistError> {
+        let mut report = NistBatchReport::default();
+        let mut last_error: Option<String> = None;
+
+        for (substance, search_type, phase) in requests {
+            let result = self.get_data(substance, *search_type, *phase);
+            if let Err(err) = &result {
+                last_error = Some(err.to_string());
+            }
+            report.entries.push(NistBatchEntry {
+                substance: substance.clone(),
+                search_type: *search_type,
+                phase: *phase,
+                result,
+            });
+        }
+
+        if report.successes() == 0 {
+            return Err(NistError::BatchAllFailed {
+                attempts: requests.len(),
+                last_error: last_error
+                    .unwrap_or_else(|| "no batch requests were executed".to_string()),
+            });
+        }
+
+        Ok(report)
+    }
+
     pub fn construct_url(&self, substance: &str) -> Result<Url, NistError> {
         let substance = substance.replace(' ', "");
+        let base = self.base_url.as_str().trim_end_matches('/');
 
         // Try to determine if it's a CAS number (contains '-')
         if substance.contains('-') {
             Ok(Url::parse(&format!(
-                "https://webbook.nist.gov/cgi/cbook.cgi?ID={}&Units=SI",
-                substance
+                "{base}/cgi/cbook.cgi?ID={substance}&Units=SI"
             ))?)
         } else if substance.chars().any(|c| c.is_ascii_digit()) {
             // If contains numbers, assume it's a chemical formula
             Ok(Url::parse(&format!(
-                "https://webbook.nist.gov/cgi/cbook.cgi?Formula={}&NoIon=on&Units=SI",
-                substance
+                "{base}/cgi/cbook.cgi?Formula={substance}&NoIon=on&Units=SI"
             ))?)
         } else {
             // Otherwise, assume it's a name
             Ok(Url::parse(&format!(
-                "https://webbook.nist.gov/cgi/cbook.cgi?Name={}&Units=SI",
-                substance
+                "{base}/cgi/cbook.cgi?Name={substance}&Units=SI"
             ))?)
         }
     }
 
-    fn fetch_page(&self, url: &Url) -> Result<String, NistError> {
-        Ok(self.client.get_text(url.as_str())?)
+    pub(crate) fn fetch_page(&self, url: &Url) -> Result<String, NistError> {
+        let response = self.client.get_response(url.as_str())?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(NistError::HttpStatus(status));
+        }
+
+        if let Some(content_length) = response.content_length() {
+            if content_length as usize > MAX_NIST_RESPONSE_BYTES {
+                return Err(NistError::ResponseTooLarge {
+                    limit: MAX_NIST_RESPONSE_BYTES,
+                    actual: content_length as usize,
+                });
+            }
+        }
+
+        let html = response.text()?;
+        if html.len() > MAX_NIST_RESPONSE_BYTES {
+            return Err(NistError::ResponseTooLarge {
+                limit: MAX_NIST_RESPONSE_BYTES,
+                actual: html.len(),
+            });
+        }
+        self.validate_html_content(&html)?;
+        Ok(html)
+    }
+
+    fn validate_html_content(&self, html: &str) -> Result<(), NistError> {
+        let trimmed = html.trim();
+        if trimmed.is_empty() {
+            return Err(NistError::InvalidDataFormat);
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        if !(lower.contains("<html") || lower.contains("<!doctype") || lower.contains("<body")) {
+            return Err(NistError::InvalidDataFormat);
+        }
+
+        Ok(())
     }
 
     fn check_substance_exists(&self, html: &str) -> bool {
@@ -209,7 +334,7 @@ impl<C: HttpClient> NistParser<C> {
         if let Ok(selector) = Selector::parse("ol li a") {
             if let Some(first_result) = document.select(&selector).next() {
                 if let Some(href) = first_result.value().attr("href") {
-                    return Ok(Url::parse(&format!("https://webbook.nist.gov{}", href))?);
+                    return self.base_url.join(href).map_err(NistError::UrlError);
                 }
             }
         }
@@ -269,7 +394,6 @@ impl<C: HttpClient> NistParser<C> {
         search_type: SearchType,
         phase: Phase,
     ) -> Result<NistInput, NistError> {
-        print!("\n \n Fetching data...");
         let html = self.fetch_page(url)?;
         let document = Html::parse_document(&html);
         //  println!("\n \n document: {:?}", document);
@@ -302,7 +426,6 @@ impl<C: HttpClient> NistParser<C> {
                 data.molar_mass = self.extract_molar_mass(&document)?;
             }
         }
-        println!("\n \n Data found: {:?} \n \n", data);
         Ok(data)
     }
 
@@ -331,7 +454,6 @@ impl<C: HttpClient> NistParser<C> {
             //attempt to select the first table element that
             //matches the table_selector from the document. document.select(&table_selector) returns an iterator over matching elements.
 
-            println!("\n \n found table: {:?} \n \n", table);
             #[allow(non_snake_case)]
             let mut headers_T: Vec<Vec<f64>> = Vec::new();
             // Parse headers
@@ -373,7 +495,6 @@ impl<C: HttpClient> NistParser<C> {
             }
 
             if !coefficients.is_empty() && !headers_T.is_empty() {
-                print!("Cp(T) parsed");
                 return Ok((Some(coefficients), Some(headers_T)));
             }
         }
@@ -389,7 +510,6 @@ impl<C: HttpClient> NistParser<C> {
         let table_selector = Selector::parse("table").unwrap();
 
         if let Some(table) = document.select(&table_selector).next() {
-            println!("\n \n table: {:?} \n \n", table);
             let mut dh = None;
             let mut ds = None;
 

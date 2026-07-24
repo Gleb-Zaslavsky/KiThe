@@ -1976,7 +1976,7 @@ pub struct ColumnStats {
     pub min: f64,
     pub max: f64,
 }
-use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::extract_f64_column;
+//use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::extract_f64_column;
 /// Статистика по колонке
 pub fn column_stats(df: &DataFrame, col: &str) -> Result<ColumnStats, TGADomainError> {
     let s = df

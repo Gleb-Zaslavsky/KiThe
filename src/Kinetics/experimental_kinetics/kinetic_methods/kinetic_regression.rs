@@ -60,7 +60,7 @@ pub fn linear_regression(x: &Array1<f64>, y: &Array1<f64>) -> LinearRegressionRe
 // Pearson correlation (через ndarray_stats)
 
 pub fn pearson(x: &Array1<f64>, y: &Array1<f64>) -> f64 {
-    let mut m = ndarray::stack(ndarray::Axis(0), &[x.view(), y.view()]).unwrap();
+    let m = ndarray::stack(ndarray::Axis(0), &[x.view(), y.view()]).unwrap();
 
     let corr = m.pearson_correlation().unwrap();
 

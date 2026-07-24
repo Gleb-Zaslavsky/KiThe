@@ -284,6 +284,7 @@ impl Zeldovich {
 
        }
     */
+    #[allow(dead_code)]
     fn solve_bvp(&mut self) {
         let eq_system = self.vec_of_eq.clone();
         let values = vec!["T".to_string(), "qs".to_string()];

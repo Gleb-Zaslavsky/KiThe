@@ -3,9 +3,28 @@ pub mod ChemEquilibrium;
 #[allow(non_snake_case)]
 /// handlers for different formats of thermodynamics and heat-mass transfer data
 pub mod DBhandlers;
+/// Conventional aliases for new code.
+///
+/// The legacy module names stay public for compatibility, but new call sites
+/// can prefer these snake_case paths.
+pub use ChemEquilibrium as chem_equilibrium;
+pub use DBhandlers as db_handlers;
+/// Typed scenario presets for common thermodynamics workflows.
+pub mod User_substances_presets;
+/// Pure symbolic adapters from phase data to equilibrium equations.
+pub mod phase_equilibrium_adapter;
+/// Ordered phase/component layout helpers for phase-solution thermodynamics.
+pub mod phase_layout;
+/// Canonical physical-state requests shared by library lookup and phase declarations.
+pub mod physical_state;
+/// Common thermodynamics prelude for compact imports.
+pub mod prelude;
+pub use User_substances_presets as user_substances_presets;
 ///
 pub mod User_PhaseOrSolution;
 pub mod User_PhaseOrSolution2;
+pub use User_PhaseOrSolution as user_phase_or_solution;
+pub use User_PhaseOrSolution2 as user_phase_or_solution2;
 mod User_PhaseOrSolution_tests;
 /// heat-mass transfer data agregator
 /// # Examples 1
@@ -97,7 +116,7 @@ mod User_PhaseOrSolution_tests;
 ///            user_subs.print_search_summary();
 ///            let datamap = user_subs.get_substance_result("CO").unwrap();
 ///            let Thermo = datamap.get(&WhatIsFound::Thermo).unwrap().as_ref().unwrap();
-///            let Calculator = Thermo.calculator.as_ref().unwrap();
+///            let Calculator = Thermo.calculator().unwrap();
 ///            let Cp;
 ///            match Calculator {
 ///                CalculatorType::Thermo(thermo) => {
@@ -127,7 +146,7 @@ mod User_PhaseOrSolution_tests;
 ///                .unwrap()
 ///                .as_ref()
 ///                .unwrap();
-///            let Calculator = Transport.calculator.as_ref().unwrap();
+///            let Calculator = Transport.calculator().unwrap();
 ///            match Calculator {
 ///                CalculatorType::Transport(transport) => {
 ///                    // Test transport calculations
@@ -151,7 +170,8 @@ mod User_PhaseOrSolution_tests;
 /// ```
 pub mod User_substances;
 pub mod User_substances2;
-pub mod User_substances3;
+pub use User_substances as user_substances;
+pub use User_substances2 as user_substances2;
 /// Error handling for User_substances modules
 pub mod User_substances_error;
 /// Error handling tests
@@ -162,9 +182,16 @@ mod User_substances_tests2;
 
 /// main functionality to open thermodynamics and heat-mass transfer libraries
 pub mod thermo_lib_api;
-/// calculations of thermodynamic properties, creating closures and symbolic expressions
-pub mod thermo_properties_api;
-/// calculations of heat-mass transfer properties, creating closures and symbolic expressions
-pub mod transport_properties_api;
 
 mod dG_dS;
+
+#[cfg(test)]
+mod alias_tests {
+    #[test]
+    fn conventional_aliases_are_available() {
+        let _ = std::any::type_name::<
+            dyn crate::Thermodynamics::db_handlers::thermo_api::ThermoCalculator,
+        >();
+        let _ = std::any::type_name::<crate::Thermodynamics::user_substances::SubsData>();
+    }
+}

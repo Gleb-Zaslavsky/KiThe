@@ -350,6 +350,7 @@ impl NrbvpHandoffConfig {
     }
 
     /// Override the generated callback backend while preserving legacy solver settings.
+    #[allow(dead_code)]
     pub(crate) fn with_solver_backend_config(
         mut self,
         solver_backend_config: ReactorBvpSolverConfig,

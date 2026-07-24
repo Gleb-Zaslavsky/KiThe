@@ -99,6 +99,7 @@ impl VyazovkinSolver {
     /// Iterates over all ordered pairs (i, j) with i ≠ j and accumulates
     /// `J(E,T_i) / J(E,T_j)`.  Kept for correctness verification against
     /// `solve_layer_optimized`.
+    #[allow(dead_code)]
     fn solve_layer(
         &self,
         grid: &ConversionGrid,
@@ -230,6 +231,7 @@ impl VyazovkinSolver {
     }
     /// Low-level functional Φ(E) evaluated at a single candidate energy `e`
     /// for layer `k`.  Used internally; exposed for debugging and plotting.
+    #[allow(dead_code)]
     fn functional(&self, grid: &ConversionGrid, k: usize, e: f64) -> f64 {
         let r = 8.314;
 

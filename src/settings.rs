@@ -28,7 +28,7 @@
 //! | "Reactbase" | "reactbase" | Reactbase.json |
 //! | "Dict Reaction" | "dict_reaction" | dict_reaction.json |
 
-use crate::library_manager::{LibraryConfig, with_library_manager, with_library_manager_mut};
+use crate::library_manager::{with_library_manager, with_library_manager_mut};
 use std::collections::HashMap;
 
 /// User-friendly settings interface for managing library versions.
@@ -250,10 +250,10 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::library_manager::LibraryConfig;
     use crate::library_manager::LibraryManager;
     use std::io::Write;
     use tempfile::NamedTempFile;
-
     fn create_test_manager() -> LibraryManager {
         let (substance_file, keys_file, elements_file, react_file, dict_file) = create_test_files();
         let mut config_file = NamedTempFile::new().unwrap();
@@ -264,6 +264,7 @@ mod tests {
             elements: elements_file.path().to_str().unwrap().to_string(),
             reactbase: react_file.path().to_str().unwrap().to_string(),
             dict_reaction: dict_file.path().to_str().unwrap().to_string(),
+            thermo_write_journal: "thermo_write_journal.json".to_string(),
             problems_folder: "problems".to_string(),
         };
 

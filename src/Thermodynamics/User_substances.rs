@@ -44,14 +44,17 @@ use crate::Thermodynamics::DBhandlers::transport_api::{
 };
 use crate::Thermodynamics::User_substances_error::SimpleExceptionLogger;
 use crate::Thermodynamics::User_substances_error::{SubsDataError, SubsDataResult};
-use crate::Thermodynamics::thermo_lib_api::ThermoData;
+pub use crate::Thermodynamics::physical_state::PhysicalState as Phases;
+use crate::Thermodynamics::thermo_lib_api::{
+    LibraryCapability, LibraryId, ResolvedThermoRecord, ThermoData, ThermoRepository,
+};
 use std::fmt;
 
-//use RustedSciThe::symbolic::symbolic_engine::Expr;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::DMatrix;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 /*
  * User Substances Module - Comprehensive Thermodynamic and Transport Property Management
  *
@@ -144,6 +147,81 @@ pub enum DataType {
     /// Viscosity symbolic expression
     Visc_sym,
 }
+#[allow(non_camel_case_types)]
+/// Canonical property identity without representation-specific suffixes.
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
+pub enum PropertyKind {
+    /// Heat capacity at constant pressure.
+    Cp,
+    /// Enthalpy.
+    dH,
+    /// Entropy.
+    dS,
+    /// Chemical potential.
+    dmu,
+    /// Thermal conductivity.
+    Lambda,
+    /// Dynamic viscosity.
+    Visc,
+}
+
+impl PropertyKind {
+    /// Returns the numeric representation key for this property kind.
+    pub fn numeric_type(self) -> DataType {
+        match self {
+            PropertyKind::Cp => DataType::Cp,
+            PropertyKind::dH => DataType::dH,
+            PropertyKind::dS => DataType::dS,
+            PropertyKind::dmu => DataType::dmu,
+            PropertyKind::Lambda => DataType::Lambda,
+            PropertyKind::Visc => DataType::Visc,
+        }
+    }
+
+    /// Returns the closure representation key for this property kind.
+    pub fn function_type(self) -> DataType {
+        match self {
+            PropertyKind::Cp => DataType::Cp_fun,
+            PropertyKind::dH => DataType::dH_fun,
+            PropertyKind::dS => DataType::dS_fun,
+            PropertyKind::dmu => DataType::dmu_fun,
+            PropertyKind::Lambda => DataType::Lambda_fun,
+            PropertyKind::Visc => DataType::Visc_fun,
+        }
+    }
+
+    /// Returns the symbolic representation key for this property kind.
+    pub fn symbolic_type(self) -> DataType {
+        match self {
+            PropertyKind::Cp => DataType::Cp_sym,
+            PropertyKind::dH => DataType::dH_sym,
+            PropertyKind::dS => DataType::dS_sym,
+            PropertyKind::dmu => DataType::dmu_sym,
+            PropertyKind::Lambda => DataType::Lambda_sym,
+            PropertyKind::Visc => DataType::Visc_sym,
+        }
+    }
+
+    /// Returns `true` when the property belongs to the transport branch.
+    pub fn is_transport(self) -> bool {
+        matches!(self, PropertyKind::Lambda | PropertyKind::Visc)
+    }
+
+    /// Returns the canonical identity from a representation-specific key.
+    pub fn from_data_type(data_type: DataType) -> Option<Self> {
+        match data_type {
+            DataType::Cp | DataType::Cp_fun | DataType::Cp_sym => Some(PropertyKind::Cp),
+            DataType::dH | DataType::dH_fun | DataType::dH_sym => Some(PropertyKind::dH),
+            DataType::dS | DataType::dS_fun | DataType::dS_sym => Some(PropertyKind::dS),
+            DataType::dmu | DataType::dmu_fun | DataType::dmu_sym => Some(PropertyKind::dmu),
+            DataType::Lambda | DataType::Lambda_fun | DataType::Lambda_sym => {
+                Some(PropertyKind::Lambda)
+            }
+            DataType::Visc | DataType::Visc_fun | DataType::Visc_sym => Some(PropertyKind::Visc),
+        }
+    }
+}
+
 /// Wrapper enum for different types of property calculators
 ///
 /// Encapsulates either thermodynamic calculators (for Cp, dH, dS) or
@@ -167,25 +245,286 @@ pub enum WhatIsFound {
     /// No data found in any searched library
     NotFound,
 }
+
+/// Canonical per-property search state for one substance.
+#[derive(Debug, Clone)]
+pub enum PropertySearchState {
+    NotSearched,
+    Found(SearchResult),
+    Missing,
+    Failed(String),
+}
+
+impl PropertySearchState {
+    /// Returns `true` when the property has not been searched yet.
+    pub fn is_pending(&self) -> bool {
+        matches!(self, PropertySearchState::NotSearched)
+    }
+
+    /// Returns `true` when the property has been resolved successfully.
+    pub fn is_resolved(&self) -> bool {
+        matches!(self, PropertySearchState::Found(_))
+    }
+
+    /// Returns `true` when the property lookup ended in a missing-record state.
+    pub fn is_missing(&self) -> bool {
+        matches!(self, PropertySearchState::Missing)
+    }
+
+    /// Returns `true` when the property lookup failed with an error message.
+    pub fn is_failed(&self) -> bool {
+        matches!(self, PropertySearchState::Failed(_))
+    }
+}
+
+/// Explicit readiness state for a derived numeric cache entry.
+///
+/// This keeps the public read-only API from confusing a missing cache entry
+/// with a valid numeric zero.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DerivedValueState<'a, T: ?Sized> {
+    /// No calculated value is available yet.
+    NotCalculated,
+    /// A concrete calculated value exists.
+    Ready(&'a T),
+}
+
+impl<'a, T: ?Sized> DerivedValueState<'a, T> {
+    /// Returns `true` when the entry has not been calculated yet.
+    pub fn is_not_calculated(&self) -> bool {
+        matches!(self, DerivedValueState::NotCalculated)
+    }
+
+    /// Returns `true` when the entry contains a calculated value.
+    pub fn is_ready(&self) -> bool {
+        matches!(self, DerivedValueState::Ready(_))
+    }
+
+    /// Returns the calculated value when it exists.
+    pub fn value(&self) -> Option<&'a T> {
+        match self {
+            DerivedValueState::Ready(value) => Some(*value),
+            DerivedValueState::NotCalculated => None,
+        }
+    }
+}
+
+/// Transport calculation input mode.
+///
+/// The CEA branch does not require pressure or molar mass inputs, so we keep
+/// that branch explicit instead of smuggling dummy values through the solver.
+#[derive(Debug, Clone)]
+pub(crate) enum TransportCalculationMode {
+    Cea,
+    Standard {
+        pressure: f64,
+        molar_mass: f64,
+        pressure_unit: Option<String>,
+        molar_mass_unit: Option<String>,
+    },
+}
+
+/// Canonical search state for a single substance.
+#[derive(Debug, Clone)]
+pub struct SubstanceSearchState {
+    pub thermo: PropertySearchState,
+    pub transport: PropertySearchState,
+}
+
+impl SubstanceSearchState {
+    /// Returns the canonical thermo search state.
+    pub fn thermo(&self) -> &PropertySearchState {
+        &self.thermo
+    }
+
+    /// Returns the canonical transport search state.
+    pub fn transport(&self) -> &PropertySearchState {
+        &self.transport
+    }
+
+    /// Returns the canonical state for one property, if the property is known.
+    pub fn property_state(&self, found_kind: WhatIsFound) -> Option<&PropertySearchState> {
+        match found_kind {
+            WhatIsFound::Thermo => Some(&self.thermo),
+            WhatIsFound::Transport => Some(&self.transport),
+            WhatIsFound::NotFound => None,
+        }
+    }
+
+    /// Returns the canonical found record for one property, if present.
+    pub fn result(&self, found_kind: WhatIsFound) -> Option<&SearchResult> {
+        match self.property_state(found_kind)? {
+            PropertySearchState::Found(result) => Some(result),
+            PropertySearchState::NotSearched
+            | PropertySearchState::Missing
+            | PropertySearchState::Failed(_) => None,
+        }
+    }
+
+    /// Returns a failure message for one property, if present.
+    pub fn failure(&self, found_kind: WhatIsFound) -> Option<&str> {
+        match self.property_state(found_kind)? {
+            PropertySearchState::Failed(message) => Some(message.as_str()),
+            PropertySearchState::NotSearched
+            | PropertySearchState::Found(_)
+            | PropertySearchState::Missing => None,
+        }
+    }
+
+    pub(crate) fn new() -> Self {
+        Self {
+            thermo: PropertySearchState::NotSearched,
+            transport: PropertySearchState::NotSearched,
+        }
+    }
+
+    pub(crate) fn set_found(
+        &mut self,
+        found_kind: WhatIsFound,
+        result: SearchResult,
+        overwrite: bool,
+    ) {
+        let target = match found_kind {
+            WhatIsFound::Thermo => &mut self.thermo,
+            WhatIsFound::Transport => &mut self.transport,
+            WhatIsFound::NotFound => return,
+        };
+
+        if overwrite
+            || matches!(
+                target,
+                PropertySearchState::NotSearched | PropertySearchState::Missing
+            )
+        {
+            *target = PropertySearchState::Found(result);
+        }
+    }
+
+    pub(crate) fn mark_missing(&mut self) {
+        if matches!(self.thermo, PropertySearchState::NotSearched)
+            && matches!(self.transport, PropertySearchState::NotSearched)
+        {
+            self.thermo = PropertySearchState::Missing;
+            self.transport = PropertySearchState::Missing;
+        }
+    }
+
+    pub(crate) fn to_compat_map(&self) -> HashMap<WhatIsFound, Option<SearchResult>> {
+        let mut map = HashMap::new();
+        match self.thermo() {
+            PropertySearchState::Found(result) => {
+                map.insert(WhatIsFound::Thermo, Some(result.clone()));
+            }
+            PropertySearchState::Missing | PropertySearchState::Failed(_) => {
+                map.insert(WhatIsFound::NotFound, None);
+            }
+            PropertySearchState::NotSearched => {}
+        }
+        match self.transport() {
+            PropertySearchState::Found(result) => {
+                map.insert(WhatIsFound::Transport, Some(result.clone()));
+            }
+            PropertySearchState::Missing | PropertySearchState::Failed(_) => {
+                map.entry(WhatIsFound::NotFound).or_insert(None);
+            }
+            PropertySearchState::NotSearched => {}
+        }
+        map
+    }
+
+    /// Returns `true` when both properties were explicitly marked as missing.
+    pub(crate) fn is_missing(&self) -> bool {
+        matches!(self.thermo, PropertySearchState::Missing)
+            && matches!(self.transport, PropertySearchState::Missing)
+    }
+
+    /// Returns `true` when at least one property was found in a priority library.
+    pub(crate) fn has_priority_found(&self) -> bool {
+        matches!(
+            &self.thermo,
+            PropertySearchState::Found(SearchResult {
+                priority_type: LibraryPriority::Priority,
+                ..
+            })
+        ) || matches!(
+            &self.transport,
+            PropertySearchState::Found(SearchResult {
+                priority_type: LibraryPriority::Priority,
+                ..
+            })
+        )
+    }
+
+    /// Returns `true` when at least one property was found in a permitted library.
+    pub(crate) fn has_permitted_found(&self) -> bool {
+        matches!(
+            &self.thermo,
+            PropertySearchState::Found(SearchResult {
+                priority_type: LibraryPriority::Permitted,
+                ..
+            })
+        ) || matches!(
+            &self.transport,
+            PropertySearchState::Found(SearchResult {
+                priority_type: LibraryPriority::Permitted,
+                ..
+            })
+        )
+    }
+}
 /// Complete search result for a substance in a specific library
 ///
 /// Contains all information needed to work with found substance data,
 /// including the source library, priority level, raw data, and initialized calculator
 #[derive(Debug, Clone)]
 pub struct SearchResult {
-    /// Name of the library where the substance was found
-    pub library: String,
-    /// Priority level of the library (Priority, Permitted, Explicit)
-    pub priority_type: LibraryPriority,
-    /// Raw JSON data from the library
-    pub data: Value,
-    /// Initialized calculator instance for property calculations
-    pub calculator: Option<CalculatorType>,
+    /// Name of the library where the substance was found.
+    pub(crate) library: String,
+    /// Exact key selected from the source library.
+    pub(crate) record_key: String,
+    /// Priority level of the library (Priority, Permitted, Explicit).
+    pub(crate) priority_type: LibraryPriority,
+    /// Raw JSON data from the library.
+    pub(crate) data: Value,
+    /// Initialized calculator instance for property calculations.
+    pub(crate) calculator: Option<CalculatorType>,
+}
+
+impl SearchResult {
+    /// Returns the source library name for the canonical record.
+    pub fn library(&self) -> &str {
+        &self.library
+    }
+
+    /// Returns the exact source-record key, which may include a state tag.
+    pub fn record_key(&self) -> &str {
+        &self.record_key
+    }
+
+    /// Returns the library priority captured when the record was found.
+    pub fn priority_type(&self) -> LibraryPriority {
+        self.priority_type
+    }
+
+    /// Returns the raw JSON payload captured from the library.
+    pub fn data(&self) -> &Value {
+        &self.data
+    }
+
+    /// Returns the attached calculator, if present.
+    pub fn calculator(&self) -> Option<&CalculatorType> {
+        self.calculator.as_ref()
+    }
+
+    /// Returns the attached calculator mutably.
+    pub(crate) fn calculator_mut(&mut self) -> Option<&mut CalculatorType> {
+        self.calculator.as_mut()
+    }
 }
 /// Library priority levels for hierarchical searching
 ///
 /// Defines the search order and preference for different databases
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LibraryPriority {
     /// High-priority libraries searched first (most trusted/accurate data)
     Priority,
@@ -195,20 +534,6 @@ pub enum LibraryPriority {
     Explicit,
 }
 
-/// Physical phases for substance classification
-///
-/// Used to specify the physical state when multiple phase data exists
-#[derive(Debug, Clone, Copy)]
-pub enum Phases {
-    /// Liquid phase
-    Liquid,
-    /// Gas/vapor phase
-    Gas,
-    /// Solid/crystalline phase
-    Solid,
-    /// Condensed phase (liquid + solid)
-    Condensed,
-}
 /// Main structure for comprehensive substance property management
 ///
 /// `SubsData` is the central hub for managing thermodynamic and transport properties
@@ -236,7 +561,7 @@ pub enum Phases {
 /// ### Physical Properties
 /// - `P`, `T`: Pressure and temperature conditions
 /// - `map_of_phases`: Physical phase information for each substance
-/// - `hasmap_of_molar_mass`: Molecular weights
+/// - `molar_mass_by_substance`: Molecular weights
 /// - `elem_composition_matrix`: Elemental composition data
 ///
 /// ## Usage Pattern
@@ -248,59 +573,67 @@ pub enum Phases {
 /// 5. Access results through getter methods
 pub struct SubsData {
     /// System pressure [Pa] for property calculations
-    pub P: Option<f64>,
+    pub(crate) P: Option<f64>,
     /// Pressure unit (e.g., "Pa", "atm", "bar")
-    pub P_unit: Option<String>,
+    pub(crate) P_unit: Option<String>,
     /// System temperature [K] for property calculations
-    pub T: Option<f64>,
+    pub(crate) T: Option<f64>,
     /// Molar mass unit (e.g., "g/mol", "kg/mol")
-    pub Molar_mass_unit: Option<String>,
+    pub(crate) Molar_mass_unit: Option<String>,
     /// List of chemical substances to search for and analyze
-    pub substances: Vec<String>,
+    pub(crate) substances: Vec<String>,
     /// Maps library names to their search priority levels
-    pub library_priorities: HashMap<String, LibraryPriority>,
+    pub(crate) library_priorities: HashMap<String, LibraryPriority>,
     /// Direct substance-to-library mappings that bypass normal search hierarchy
-    pub explicit_search_insructions: HashMap<String, String>,
+    pub(crate) explicit_search_instructions: HashMap<String, String>,
     /// Density values for each substance [kg/m³]
-    pub ro_map: Option<HashMap<String, f64>>,
+    pub(crate) ro_map: Option<HashMap<String, f64>>,
     /// Symbolic expressions for density calculations
-    pub ro_map_sym: Option<HashMap<String, Box<Expr>>>,
-    /// Physical phase specification for each substance
-    pub map_of_phases: HashMap<String, Option<Phases>>,
+    pub(crate) ro_map_sym: Option<HashMap<String, Box<Expr>>>,
+    /// Physical phase context for each substance, used by phase models and
+    /// live NIST fallback. It is not a local-library lookup filter.
+    pub(crate) map_of_phases: HashMap<String, Option<Phases>>,
+    /// Optional explicit physical-state filters for local thermo-record lookup.
+    /// An absent entry means "search all records by the requested substance
+    /// name", preserving the normal unconstrained lookup contract.
+    physical_state_requirements: HashMap<String, Phases>,
+    /// Canonical search state for each substance.
+    pub(crate) search_states: HashMap<String, SubstanceSearchState>,
     /// Complete search results with library provenance and calculators
-    pub search_results: HashMap<String, HashMap<WhatIsFound, Option<SearchResult>>>,
+    pub(crate) search_results: HashMap<String, HashMap<WhatIsFound, Option<SearchResult>>>,
     /// Interface to all thermodynamic and transport databases
-    pub thermo_data: ThermoData,
+    pub(crate) thermo_data: ThermoData,
     /// Calculated thermodynamic property values at specific conditions
-    pub therm_map_of_properties_values: HashMap<String, HashMap<DataType, Option<f64>>>,
+    pub(crate) therm_map_of_properties_values: HashMap<String, HashMap<DataType, Option<f64>>>,
     /// Function closures for temperature-dependent thermodynamic calculations
-    pub therm_map_of_fun:
+    pub(crate) therm_map_of_fun:
         HashMap<String, HashMap<DataType, Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>>,
     /// Symbolic expressions for analytical thermodynamic calculations
-    pub therm_map_of_sym: HashMap<String, HashMap<DataType, Option<Box<Expr>>>>,
+    pub(crate) therm_map_of_sym: HashMap<String, HashMap<DataType, Option<Box<Expr>>>>,
     /// Calculated transport property values at specific conditions
-    pub transport_map_of_properties_values: HashMap<String, HashMap<DataType, Option<f64>>>,
+    pub(crate) transport_map_of_properties_values: HashMap<String, HashMap<DataType, Option<f64>>>,
     /// Function closures for temperature-dependent transport calculations
-    pub transport_map_of_fun:
+    pub(crate) transport_map_of_fun:
         HashMap<String, HashMap<DataType, Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>>,
     /// Symbolic expressions for analytical transport calculations
-    pub transport_map_of_sym: HashMap<String, HashMap<DataType, Option<Box<Expr>>>>,
+    pub(crate) transport_map_of_sym: HashMap<String, HashMap<DataType, Option<Box<Expr>>>>,
     /// Matrix of elemental composition for all substances
-    pub elem_composition_matrix: Option<DMatrix<f64>>,
+    pub(crate) elem_composition_matrix: Option<DMatrix<f64>>,
     /// Molar masses for each substance [g/mol or specified unit]
-    pub hasmap_of_molar_mass: HashMap<String, f64>,
+    pub(crate) molar_mass_by_substance: HashMap<String, f64>,
     /// Multi-component diffusion coefficient data and calculations
-    pub diffusion_data: Option<MultiSubstanceDiffusion>,
+    pub(crate) diffusion_data: Option<MultiSubstanceDiffusion>,
     /// List of unique chemical elements present in all substances
-    pub unique_elements: Vec<String>,
+    pub(crate) unique_elements: Vec<String>,
     /// Error logging system for tracking calculation failures
-    pub logger: SimpleExceptionLogger,
+    pub(crate) logger: SimpleExceptionLogger,
 }
 impl fmt::Debug for SubsData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SubsData")
             .field("substances", &self.substances)
             .field("library_priorities", &self.library_priorities)
+            .field("search_states", &self.search_states)
             .field("search_results", &self.search_results)
             // Skip thermo_data as it might be large
             .field(
@@ -312,46 +645,47 @@ impl fmt::Debug for SubsData {
             .finish()
     }
 }
+
+/// Clone the shape of a cached function map without attempting to duplicate closures.
+///
+/// The cache remains structurally intact so callers can rebuild it explicitly after cloning.
+fn clone_function_cache(
+    source: &HashMap<String, HashMap<DataType, Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>>,
+) -> HashMap<String, HashMap<DataType, Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>> {
+    let mut cloned = HashMap::with_capacity(source.len());
+
+    for (substance, type_map) in source {
+        let mut cloned_type_map = HashMap::with_capacity(type_map.len());
+        for (data_type, _) in type_map {
+            cloned_type_map.insert(*data_type, None);
+        }
+        cloned.insert(substance.clone(), cloned_type_map);
+    }
+
+    cloned
+}
+
 impl Clone for SubsData {
     fn clone(&self) -> Self {
-        // Create a new empty map for the functions
-        let mut new_therm_map_of_fun = HashMap::new();
+        // Closure caches are intentionally reset during clone.
+        // Callers can rebuild them explicitly when they actually need executable functions.
+        let new_therm_map_of_fun = clone_function_cache(&self.therm_map_of_fun);
+        let new_transport_map_of_fun = clone_function_cache(&self.transport_map_of_fun);
 
-        // We can't directly clone the functions, so we'll need to handle this field specially
-        // For now, we'll create an empty map structure that matches the original
-        for (substance, type_map) in &self.therm_map_of_fun {
-            let mut new_type_map = HashMap::new();
-            for (data_type, _) in type_map {
-                // We can't clone the functions, so we'll just insert None for each entry
-                new_type_map.insert(*data_type, None);
-            }
-            new_therm_map_of_fun.insert(substance.clone(), new_type_map);
-        }
-        // Create a new empty map for the functions
-        let new_transport_map_of_fun = HashMap::new();
-
-        // We can't directly clone the functions, so we'll need to handle this field specially
-        // For now, we'll create an empty map structure that matches the original
-        for (substance, type_map) in &self.therm_map_of_fun {
-            let mut new_type_map = HashMap::new();
-            for (data_type, _) in type_map {
-                // We can't clone the functions, so we'll just insert None for each entry
-                new_type_map.insert(*data_type, None);
-            }
-            new_therm_map_of_fun.insert(substance.clone(), new_type_map);
-        }
-        let mut sd = SubsData {
+        let sd = SubsData {
             P: self.P,
             P_unit: self.P_unit.clone(),
             T: self.T.clone(),
             Molar_mass_unit: self.Molar_mass_unit.clone(),
             substances: self.substances.clone(),
             library_priorities: self.library_priorities.clone(),
-            explicit_search_insructions: self.explicit_search_insructions.clone(),
+            explicit_search_instructions: self.explicit_search_instructions.clone(),
             ro_map: self.ro_map.clone(),
             ro_map_sym: self.ro_map_sym.clone(),
             map_of_phases: self.map_of_phases.clone(),
-            search_results: self.search_results.clone(),
+            physical_state_requirements: self.physical_state_requirements.clone(),
+            search_states: self.search_states.clone(),
+            search_results: self.get_all_results(),
             thermo_data: self.thermo_data.clone(),
             therm_map_of_properties_values: self.therm_map_of_properties_values.clone(),
             therm_map_of_fun: new_therm_map_of_fun,
@@ -360,17 +694,413 @@ impl Clone for SubsData {
             transport_map_of_fun: new_transport_map_of_fun,
             transport_map_of_sym: self.transport_map_of_sym.clone(),
             elem_composition_matrix: self.elem_composition_matrix.clone(),
-            hasmap_of_molar_mass: self.hasmap_of_molar_mass.clone(),
+            molar_mass_by_substance: self.molar_mass_by_substance.clone(),
             diffusion_data: self.diffusion_data.clone(),
             unique_elements: self.unique_elements.clone(),
             logger: self.logger.clone(),
         };
-        let _ = sd.calculate_transport_map_of_functions();
-        let _ = sd.calculate_therm_map_of_fun();
         sd
     }
 }
 impl SubsData {
+    /// Creates an empty query bound to an explicitly supplied immutable catalog.
+    ///
+    /// This is the construction path for higher-level systems that resolve
+    /// multiple phase payloads under one repository lifecycle.
+    pub fn from_thermo_repository(repository: Arc<ThermoRepository>) -> Self {
+        let mut data = Self::empty();
+        data.thermo_data = ThermoData::from_repository(repository);
+        data
+    }
+
+    /// Returns the current query substances as a read-only slice.
+    pub fn substances(&self) -> &[String] {
+        &self.substances
+    }
+
+    /// Returns the configured library priority map.
+    pub fn library_priorities(&self) -> &HashMap<String, LibraryPriority> {
+        &self.library_priorities
+    }
+
+    /// Returns the direct substance-to-library instructions.
+    pub fn explicit_search_instructions(&self) -> &HashMap<String, String> {
+        &self.explicit_search_instructions
+    }
+
+    /// Returns the direct substance-to-library instructions under a shorter
+    /// canonical name.
+    pub fn explicit_search_map(&self) -> &HashMap<String, String> {
+        &self.explicit_search_instructions
+    }
+
+    /// Returns the configured pressure value, if present.
+    pub fn pressure(&self) -> Option<f64> {
+        self.P
+    }
+
+    /// Returns the configured pressure unit, if present.
+    pub fn pressure_unit(&self) -> Option<&str> {
+        self.P_unit.as_deref()
+    }
+
+    /// Returns the configured temperature value, if present.
+    pub fn temperature(&self) -> Option<f64> {
+        self.T
+    }
+
+    /// Returns the configured molar-mass unit, if present.
+    pub fn molar_mass_unit(&self) -> Option<&str> {
+        self.Molar_mass_unit.as_deref()
+    }
+
+    /// Returns the configured phase hints for substances.
+    pub fn phases(&self) -> &HashMap<String, Option<Phases>> {
+        &self.map_of_phases
+    }
+
+    /// Returns the canonical lookup state map.
+    pub fn search_states(&self) -> &HashMap<String, SubstanceSearchState> {
+        &self.search_states
+    }
+
+    /// Returns the canonical thermodynamic value cache.
+    pub fn therm_values(&self) -> &HashMap<String, HashMap<DataType, Option<f64>>> {
+        &self.therm_map_of_properties_values
+    }
+
+    /// Returns the canonical thermodynamic closure cache.
+    pub fn therm_functions(
+        &self,
+    ) -> &HashMap<String, HashMap<DataType, Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>> {
+        &self.therm_map_of_fun
+    }
+
+    /// Returns the readiness state of a thermodynamic closure cache entry.
+    pub fn therm_function_state(
+        &self,
+        substance: &str,
+        data_type: DataType,
+    ) -> DerivedValueState<'_, dyn Fn(f64) -> f64 + Send + Sync> {
+        self.derived_function_state(&self.therm_map_of_fun, substance, data_type)
+    }
+
+    /// Returns the canonical thermodynamic symbolic cache.
+    pub fn therm_symbolic(&self) -> &HashMap<String, HashMap<DataType, Option<Box<Expr>>>> {
+        &self.therm_map_of_sym
+    }
+
+    /// Returns the readiness state for a canonical property kind.
+    pub fn property_value_state(
+        &self,
+        substance: &str,
+        kind: PropertyKind,
+    ) -> DerivedValueState<'_, f64> {
+        if kind.is_transport() {
+            self.transport_value_state(substance, kind.numeric_type())
+        } else {
+            self.therm_value_state(substance, kind.numeric_type())
+        }
+    }
+
+    /// Returns the readiness state for a canonical property closure.
+    pub fn property_function_state(
+        &self,
+        substance: &str,
+        kind: PropertyKind,
+    ) -> DerivedValueState<'_, dyn Fn(f64) -> f64 + Send + Sync> {
+        if kind.is_transport() {
+            self.transport_function_state(substance, kind.function_type())
+        } else {
+            self.therm_function_state(substance, kind.function_type())
+        }
+    }
+
+    /// Returns the readiness state for a canonical property symbolic expression.
+    pub fn property_symbolic_state(
+        &self,
+        substance: &str,
+        kind: PropertyKind,
+    ) -> DerivedValueState<'_, Expr> {
+        if kind.is_transport() {
+            self.transport_symbolic_state(substance, kind.symbolic_type())
+        } else {
+            self.therm_symbolic_state(substance, kind.symbolic_type())
+        }
+    }
+
+    /// Returns the canonical transport value cache.
+    pub fn transport_values(&self) -> &HashMap<String, HashMap<DataType, Option<f64>>> {
+        &self.transport_map_of_properties_values
+    }
+
+    /// Returns the readiness state of a thermodynamic numeric cache entry.
+    pub fn therm_value_state(
+        &self,
+        substance: &str,
+        data_type: DataType,
+    ) -> DerivedValueState<'_, f64> {
+        self.derived_value_state(&self.therm_map_of_properties_values, substance, data_type)
+    }
+
+    /// Returns the readiness state of a transport numeric cache entry.
+    pub fn transport_value_state(
+        &self,
+        substance: &str,
+        data_type: DataType,
+    ) -> DerivedValueState<'_, f64> {
+        self.derived_value_state(
+            &self.transport_map_of_properties_values,
+            substance,
+            data_type,
+        )
+    }
+
+    /// Returns the readiness state of a thermodynamic symbolic cache entry.
+    pub fn therm_symbolic_state(
+        &self,
+        substance: &str,
+        data_type: DataType,
+    ) -> DerivedValueState<'_, Expr> {
+        self.derived_boxed_value_state(&self.therm_map_of_sym, substance, data_type)
+    }
+
+    /// Returns the readiness state of a transport symbolic cache entry.
+    pub fn transport_symbolic_state(
+        &self,
+        substance: &str,
+        data_type: DataType,
+    ) -> DerivedValueState<'_, Expr> {
+        self.derived_boxed_value_state(&self.transport_map_of_sym, substance, data_type)
+    }
+
+    /// Returns the canonical transport closure cache.
+    pub fn transport_functions(
+        &self,
+    ) -> &HashMap<String, HashMap<DataType, Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>> {
+        &self.transport_map_of_fun
+    }
+
+    /// Returns the readiness state of a transport closure cache entry.
+    pub fn transport_function_state(
+        &self,
+        substance: &str,
+        data_type: DataType,
+    ) -> DerivedValueState<'_, dyn Fn(f64) -> f64 + Send + Sync> {
+        self.derived_function_state(&self.transport_map_of_fun, substance, data_type)
+    }
+
+    /// Returns the canonical transport symbolic cache.
+    pub fn transport_symbolic(&self) -> &HashMap<String, HashMap<DataType, Option<Box<Expr>>>> {
+        &self.transport_map_of_sym
+    }
+
+    /// Returns the molar mass map.
+    pub fn molar_masses(&self) -> &HashMap<String, f64> {
+        &self.molar_mass_by_substance
+    }
+
+    /// Returns the molar mass map under a canonical accessor name.
+    pub fn molar_mass_map(&self) -> &HashMap<String, f64> {
+        &self.molar_mass_by_substance
+    }
+
+    /// Returns a single molar mass by substance name.
+    pub fn molar_mass_of(&self, substance: &str) -> Option<f64> {
+        self.molar_mass_by_substance.get(substance).copied()
+    }
+
+    /// Returns the unique elements list.
+    pub fn unique_elements(&self) -> &[String] {
+        &self.unique_elements
+    }
+
+    /// Returns the element composition matrix, if it has been built.
+    pub fn element_composition_matrix(&self) -> Option<&DMatrix<f64>> {
+        self.elem_composition_matrix.as_ref()
+    }
+
+    /// Returns the diffusion model, if it has been initialized.
+    pub fn diffusion_data(&self) -> Option<&MultiSubstanceDiffusion> {
+        self.diffusion_data.as_ref()
+    }
+
+    /// Returns the immutable thermodynamic and transport repository handle.
+    pub fn thermo_data(&self) -> &ThermoData {
+        &self.thermo_data
+    }
+
+    /// Returns the diagnostics sink.
+    pub fn logger(&self) -> &SimpleExceptionLogger {
+        &self.logger
+    }
+
+    /// Maps a nested cache entry to an explicit readiness state.
+    fn derived_value_state<'a>(
+        &'a self,
+        cache: &'a HashMap<String, HashMap<DataType, Option<f64>>>,
+        substance: &str,
+        data_type: DataType,
+    ) -> DerivedValueState<'a, f64> {
+        cache
+            .get(substance)
+            .and_then(|property_map| property_map.get(&data_type))
+            .and_then(|value| value.as_ref())
+            .map_or(DerivedValueState::NotCalculated, DerivedValueState::Ready)
+    }
+
+    /// Maps a nested boxed-expression cache entry to an explicit readiness state.
+    fn derived_boxed_value_state<'a, T>(
+        &'a self,
+        cache: &'a HashMap<String, HashMap<DataType, Option<Box<T>>>>,
+        substance: &str,
+        data_type: DataType,
+    ) -> DerivedValueState<'a, T> {
+        cache
+            .get(substance)
+            .and_then(|property_map| property_map.get(&data_type))
+            .and_then(|value| value.as_ref())
+            .map(|value| value.as_ref())
+            .map_or(DerivedValueState::NotCalculated, DerivedValueState::Ready)
+    }
+
+    /// Maps a nested boxed-closure cache entry to an explicit readiness state.
+    fn derived_function_state<'a>(
+        &'a self,
+        cache: &'a HashMap<
+            String,
+            HashMap<DataType, Option<Box<dyn Fn(f64) -> f64 + Send + Sync>>>,
+        >,
+        substance: &str,
+        data_type: DataType,
+    ) -> DerivedValueState<'a, dyn Fn(f64) -> f64 + Send + Sync> {
+        cache
+            .get(substance)
+            .and_then(|property_map| property_map.get(&data_type))
+            .and_then(|value| value.as_deref())
+            .map_or(DerivedValueState::NotCalculated, DerivedValueState::Ready)
+    }
+
+    pub(crate) fn sync_search_state_view(&mut self, substance: &str) {
+        if let Some(state) = self.search_states.get(substance) {
+            self.search_results
+                .insert(substance.to_string(), state.to_compat_map());
+        }
+    }
+
+    pub(crate) fn store_search_result(
+        &mut self,
+        substance: &str,
+        found_kind: WhatIsFound,
+        library: String,
+        priority_type: LibraryPriority,
+        data: Value,
+        calculator: CalculatorType,
+        overwrite: bool,
+    ) {
+        let search_result = SearchResult {
+            library,
+            record_key: substance.to_string(),
+            priority_type,
+            data,
+            calculator: Some(calculator),
+        };
+        let state = self
+            .search_states
+            .entry(substance.to_string())
+            .or_insert_with(SubstanceSearchState::new);
+        state.set_found(found_kind, search_result, overwrite);
+        self.sync_search_state_view(substance);
+    }
+
+    /// Stores a result selected through physical-state-aware record lookup.
+    fn store_resolved_search_result(
+        &mut self,
+        substance: &str,
+        found_kind: WhatIsFound,
+        library: String,
+        record_key: String,
+        priority_type: LibraryPriority,
+        data: Value,
+        calculator: CalculatorType,
+        overwrite: bool,
+    ) {
+        let search_result = SearchResult {
+            library,
+            record_key,
+            priority_type,
+            data,
+            calculator: Some(calculator),
+        };
+        let state = self
+            .search_states
+            .entry(substance.to_string())
+            .or_insert_with(SubstanceSearchState::new);
+        state.set_found(found_kind, search_result, overwrite);
+        self.sync_search_state_view(substance);
+    }
+
+    /// Sets an explicit physical-state requirement for one requested substance.
+    ///
+    /// Changing the requirement changes record selection, therefore all
+    /// lookup-derived values are invalidated transactionally before the next
+    /// search. A state is a selection constraint, not a request to mutate the
+    /// JSON record name by hand.
+    pub fn set_substance_physical_state(&mut self, substance: String, state: Phases) {
+        self.physical_state_requirements.insert(substance, state);
+        self.invalidate_lookup_dependent_state();
+    }
+
+    /// Replaces all physical-state requirements as one lookup transaction.
+    ///
+    /// This is the phase-system entry point: it prevents a caller from
+    /// accidentally publishing search results after only a subset of one
+    /// phase's component constraints has been updated.
+    pub fn set_physical_state_requirements(&mut self, states: HashMap<String, Phases>) {
+        self.physical_state_requirements = states;
+        self.invalidate_lookup_dependent_state();
+    }
+
+    /// Clears an explicit physical-state requirement for one substance.
+    pub fn clear_substance_physical_state(&mut self, substance: &str) {
+        if self.physical_state_requirements.remove(substance).is_some() {
+            self.invalidate_lookup_dependent_state();
+        }
+    }
+
+    /// Returns the current physical-state requirement, if one was set.
+    pub fn substance_physical_state(&self, substance: &str) -> Option<Phases> {
+        self.physical_state_requirements.get(substance).copied()
+    }
+
+    fn resolve_library_record(
+        &self,
+        library: &str,
+        substance: &str,
+    ) -> SubsDataResult<Option<ResolvedThermoRecord>> {
+        let query = crate::Thermodynamics::physical_state::ThermoRecordQuery::new(substance)
+            .with_physical_state_opt(self.substance_physical_state(substance));
+        let resolved = self
+            .thermo_data
+            .resolve_thermo_record(library, &query)
+            .map_err(|error| SubsDataError::CalculationFailed {
+                substance: substance.to_string(),
+                operation: "physical-state-aware library lookup".to_string(),
+                reason: error.to_string(),
+                source: None,
+            })?;
+        Ok(resolved)
+    }
+
+    pub(crate) fn insert_not_found_if_absent(&mut self, substance: &str) {
+        let state = self
+            .search_states
+            .entry(substance.to_string())
+            .or_insert_with(SubstanceSearchState::new);
+        state.mark_missing();
+        self.sync_search_state_view(substance);
+    }
+
     pub fn new() -> Self {
         Self {
             P: None,
@@ -379,11 +1109,13 @@ impl SubsData {
             Molar_mass_unit: None,
             substances: Vec::new(),
             library_priorities: HashMap::new(),
-            explicit_search_insructions: HashMap::new(),
+            explicit_search_instructions: HashMap::new(),
+            search_states: HashMap::new(),
             search_results: HashMap::new(),
             ro_map: None,
             ro_map_sym: None,
             map_of_phases: HashMap::new(),
+            physical_state_requirements: HashMap::new(),
             thermo_data: ThermoData::new(),
             therm_map_of_properties_values: HashMap::new(),
             therm_map_of_fun: HashMap::new(),
@@ -392,7 +1124,7 @@ impl SubsData {
             transport_map_of_fun: HashMap::new(),
             transport_map_of_sym: HashMap::new(),
             elem_composition_matrix: None,
-            hasmap_of_molar_mass: HashMap::new(),
+            molar_mass_by_substance: HashMap::new(),
             diffusion_data: None,
             unique_elements: Vec::new(),
             logger: SimpleExceptionLogger::new(),
@@ -407,11 +1139,13 @@ impl SubsData {
             Molar_mass_unit: None,
             substances: Vec::new(),
             library_priorities: HashMap::new(),
-            explicit_search_insructions: HashMap::new(),
+            explicit_search_instructions: HashMap::new(),
+            search_states: HashMap::new(),
             search_results: HashMap::new(),
             ro_map: None,
             ro_map_sym: None,
             map_of_phases: HashMap::new(),
+            physical_state_requirements: HashMap::new(),
             thermo_data: ThermoData::empty(),
             therm_map_of_properties_values: HashMap::new(),
             therm_map_of_fun: HashMap::new(),
@@ -420,7 +1154,7 @@ impl SubsData {
             transport_map_of_fun: HashMap::new(),
             transport_map_of_sym: HashMap::new(),
             elem_composition_matrix: None,
-            hasmap_of_molar_mass: HashMap::new(),
+            molar_mass_by_substance: HashMap::new(),
             diffusion_data: None,
             unique_elements: Vec::new(),
             logger: SimpleExceptionLogger::new(),
@@ -428,7 +1162,81 @@ impl SubsData {
     }
     ////////////////////////////SETTERS////////////////////////////////////
     pub fn set_substances(&mut self, substances: Vec<String>) {
+        self.invalidate_substance_dependent_state();
         self.substances = substances;
+    }
+
+    /// Dependency graph for cache invalidation:
+    /// - substances -> lookup results, thermo caches, transport caches,
+    ///   phase maps, composition, molar mass, diffusion, derived views
+    /// - lookup instructions -> search results and every derived cache
+    /// - temperature -> thermo and transport property caches
+    /// - pressure / supplied molar masses -> transport caches and diffusion
+    /// This keeps the invalidation policy explicit and centralized.
+    /// Clears all caches that are tied to the current substance list.
+    ///
+    /// This keeps stale search results and derived properties from surviving
+    /// after the user changes the set of substances under analysis.
+    fn invalidate_substance_dependent_state(&mut self) {
+        self.search_states.clear();
+        self.search_results.clear();
+        self.therm_map_of_properties_values.clear();
+        self.therm_map_of_fun.clear();
+        self.therm_map_of_sym.clear();
+        self.transport_map_of_properties_values.clear();
+        self.transport_map_of_fun.clear();
+        self.transport_map_of_sym.clear();
+        self.elem_composition_matrix = None;
+        self.molar_mass_by_substance.clear();
+        self.diffusion_data = None;
+        self.unique_elements.clear();
+        self.ro_map = None;
+        self.ro_map_sym = None;
+        self.map_of_phases.clear();
+        self.physical_state_requirements.clear();
+    }
+
+    /// Clears lookup-related caches after changing library routing rules.
+    ///
+    /// Library priorities and explicit lookup instructions affect which
+    /// records are visible, so search results and every derived cache must be
+    /// rebuilt after those inputs change.
+    fn invalidate_lookup_dependent_state(&mut self) {
+        self.search_states.clear();
+        self.search_results.clear();
+        self.therm_map_of_properties_values.clear();
+        self.therm_map_of_fun.clear();
+        self.therm_map_of_sym.clear();
+        self.transport_map_of_properties_values.clear();
+        self.transport_map_of_fun.clear();
+        self.transport_map_of_sym.clear();
+        self.elem_composition_matrix = None;
+        self.molar_mass_by_substance.clear();
+        self.diffusion_data = None;
+        self.unique_elements.clear();
+        self.ro_map = None;
+        self.ro_map_sym = None;
+    }
+
+    /// Clears caches that depend on temperature-dependent calculations.
+    fn invalidate_temperature_dependent_state(&mut self) {
+        self.therm_map_of_properties_values.clear();
+        self.transport_map_of_properties_values.clear();
+        self.transport_map_of_fun.clear();
+        self.transport_map_of_sym.clear();
+        self.ro_map = None;
+        self.ro_map_sym = None;
+        self.diffusion_data = None;
+    }
+
+    /// Clears caches that depend on pressure or manually supplied molar masses.
+    fn invalidate_pressure_and_molar_mass_dependent_state(&mut self) {
+        self.transport_map_of_properties_values.clear();
+        self.transport_map_of_fun.clear();
+        self.transport_map_of_sym.clear();
+        self.ro_map = None;
+        self.ro_map_sym = None;
+        self.diffusion_data = None;
     }
 
     ////////////////////////SEARCH AND PRIORITY HANDLING///////////////////////////////
@@ -450,7 +1258,14 @@ impl SubsData {
     /// subs_data.set_library_priority("NIST".to_string(), LibraryPriority::Permitted);
     /// ```
     pub fn set_library_priority(&mut self, library: String, priority: LibraryPriority) {
-        self.library_priorities.insert(library, priority);
+        let canonical_library = ThermoData::canonical_library_name(&library);
+        self.library_priorities.insert(canonical_library, priority);
+        self.invalidate_lookup_dependent_state();
+    }
+
+    /// Sets the priority level for a typed library identifier.
+    pub fn set_library_priority_id(&mut self, library: LibraryId, priority: LibraryPriority) {
+        self.set_library_priority(library.canonical_name().to_string(), priority);
     }
 
     /// Sets the same priority level for multiple libraries simultaneously
@@ -477,7 +1292,21 @@ impl SubsData {
         priority: LibraryPriority,
     ) {
         for library in libraries {
-            self.library_priorities.insert(library, priority.clone());
+            let canonical_library = ThermoData::canonical_library_name(&library);
+            self.library_priorities
+                .insert(canonical_library, priority.clone());
+        }
+        self.invalidate_lookup_dependent_state();
+    }
+
+    /// Sets the same priority for multiple typed library identifiers.
+    pub fn set_multiple_library_priorities_ids(
+        &mut self,
+        libraries: Vec<LibraryId>,
+        priority: LibraryPriority,
+    ) {
+        for library in libraries {
+            self.set_library_priority_id(library, priority);
         }
     }
 
@@ -498,8 +1327,25 @@ impl SubsData {
     /// explicit_map.insert("CO2".to_string(), "NASA_gas".to_string());
     /// subs_data.set_explicis_searh_instructions(explicit_map);
     /// ```
+    pub fn set_explicit_search_instructions(&mut self, direct_search: HashMap<String, String>) {
+        self.explicit_search_instructions = direct_search
+            .into_iter()
+            .map(|(substance, library)| (substance, ThermoData::canonical_library_name(&library)))
+            .collect();
+        self.invalidate_lookup_dependent_state();
+    }
+
+    /// Legacy spelling retained for compatibility with older callers.
+    #[deprecated(note = "Use set_explicit_search_instructions")]
     pub fn set_explicis_searh_instructions(&mut self, direct_search: HashMap<String, String>) {
-        self.explicit_search_insructions = direct_search;
+        self.set_explicit_search_instructions(direct_search);
+    }
+
+    /// Sets a single explicit search instruction using typed library identifiers.
+    pub fn set_explicit_search_instruction(&mut self, substance: String, library: LibraryId) {
+        self.explicit_search_instructions
+            .insert(substance, library.canonical_name().to_string());
+        self.invalidate_lookup_dependent_state();
     }
 
     /// Creates the appropriate calculator instance for a given library
@@ -514,29 +1360,23 @@ impl SubsData {
     ///
     /// # Returns
     ///
-    /// * `Some(CalculatorType)` - Appropriate calculator for the library
-    /// * Panics if library type is not recognized
+    /// * `Ok(CalculatorType)` - Appropriate calculator for the library
+    /// * `Err(SubsDataError::UnsupportedLibrary)` if the library type is not recognized
     ///
     /// # Supported Libraries
     ///
     /// **Thermodynamic**: NASA, NIST, NASA7, NUIG_thermo, Cantera databases
     /// **Transport**: CEA, Aramco_transport
-    pub fn create_calculator(&self, library: &str) -> Option<CalculatorType> {
-        match ThermoData::what_handler_to_use(library).as_str() {
-            "NASA"
-            | "NIST"
-            | "NASA7"
-            | "NUIG_thermo"
-            | "Cantera_nasa_base_gas"
-            | "Cantera_nasa_base_cond"
-            | "NASA_gas"
-            | "NASA_cond" => Some(CalculatorType::Thermo(create_thermal_by_name(library))),
-            "transport" | "CEA" | "Aramco_transport" => Some(CalculatorType::Transport(
-                create_transport_calculator_by_name(library),
+    pub fn create_calculator(&self, library: &str) -> SubsDataResult<CalculatorType> {
+        let canonical_library = ThermoData::canonical_library_name(library);
+        match ThermoData::library_capability(&canonical_library) {
+            Some(LibraryCapability::Thermo) => Ok(CalculatorType::Thermo(create_thermal_by_name(
+                &canonical_library,
+            ))),
+            Some(LibraryCapability::Transport) => Ok(CalculatorType::Transport(
+                create_transport_calculator_by_name(&canonical_library)?,
             )),
-            _ => {
-                panic!("not found calculator for library: {}", library);
-            }
+            None => Err(SubsDataError::UnsupportedLibrary(library.to_string())),
         }
     }
 
@@ -569,265 +1409,205 @@ impl SubsData {
     /// subs_data.search_substances()?;
     /// ```
     pub fn search_substances(&mut self) -> SubsDataResult<()> {
-        println!("library priorities: {:?}  \n", self.library_priorities);
-        // Get all priority libraries
-        let priority_libs: Vec<String> = self
-            .library_priorities
-            .iter()
-            .filter(move |&(_, &ref p)| *p == LibraryPriority::Priority)
-            .map(|(lib, _)| lib.clone())
-            .collect();
-        println!(
-            "\n search substances in Priority libraries: {} \n  ",
-            priority_libs.join(", ")
-        );
-        // Get all permitted libraries
-        let permitted_libs: Vec<String> = self
-            .library_priorities
-            .iter()
-            .filter(move |&(_, &ref p)| *p == LibraryPriority::Permitted)
-            .map(|(lib, _)| lib.clone())
-            .collect();
-        println!(
-            "\n  search substances  in Permitted libraries: {} \n  ",
-            permitted_libs.join(", ")
-        );
-        let subs_to_search_explicit_instruction: Vec<String> =
-            self.explicit_search_insructions.keys().cloned().collect();
-        let subs_to_search = &mut self.substances.clone();
-        // Remove substances that have explicit search instructions
-        subs_to_search.retain(|subs_i| !subs_to_search_explicit_instruction.contains(subs_i));
-        // Search for each substance
-        for substance in subs_to_search {
-            println!("\n \n search substance {} \n \n ", substance);
-            let mut found = false;
-            // Try priority libraries first
-            for lib in &priority_libs {
-                println!(
-                    "\n \n search substance {} in priority library: {} \n \n ",
-                    substance, lib
-                );
-                if let Some(lib_data) = self.thermo_data.LibThermoData.get(lib) {
-                    if let Some(substance_data) = lib_data.get(substance) {
+        let previous_search_states = self.search_states.clone();
+        let result = (|| -> SubsDataResult<()> {
+            // Get all priority libraries
+            let mut priority_libs: Vec<String> = self
+                .library_priorities
+                .iter()
+                .filter(move |&(_, &ref p)| *p == LibraryPriority::Priority)
+                .map(|(lib, _)| ThermoData::canonical_library_name(lib))
+                .collect();
+            priority_libs.sort();
+            priority_libs.dedup();
+            // Get all permitted libraries
+            let mut permitted_libs: Vec<String> = self
+                .library_priorities
+                .iter()
+                .filter(move |&(_, &ref p)| *p == LibraryPriority::Permitted)
+                .map(|(lib, _)| ThermoData::canonical_library_name(lib))
+                .collect();
+            permitted_libs.sort();
+            permitted_libs.dedup();
+            let subs_to_search_explicit_instruction: HashSet<String> =
+                self.explicit_search_instructions.keys().cloned().collect();
+            let mut subs_to_search = self.substances.clone();
+            // Use a set for explicit lookup filtering so repeated membership
+            // checks stay linear instead of quadratic as the input grows.
+            subs_to_search.retain(|subs_i| !subs_to_search_explicit_instruction.contains(subs_i));
+            // Search for each substance
+            for substance in subs_to_search {
+                let mut found_thermo = false;
+                let mut found_transport = false;
+                // Try priority libraries first
+                for lib in &priority_libs {
+                    if let Some(resolved_record) = self.resolve_library_record(lib, &substance)? {
+                        let substance_data = &resolved_record.data;
                         // Create the calculator for this property
-                        let mut calculator = self.create_calculator(lib);
+                        let mut calculator = self.create_calculator(lib)?;
 
-                        // Initialize the calculator if one was created
-                        if let Some(calc_type) = calculator.as_mut() {
-                            match calc_type {
-                                CalculatorType::Thermo(thermo) => {
-                                    thermo.from_serde(substance_data.clone())?;
-                                    print!("\n \n instance of thermal props struct:  ");
-                                    let _ = thermo.print_instance();
-                                    self.search_results
-                                        .entry(substance.clone()) // insert a new entry if it doesn't exist
-                                        .or_insert_with(HashMap::new)
-                                        .insert(
-                                            WhatIsFound::Thermo,
-                                            Some(SearchResult {
-                                                library: lib.clone(),
-                                                priority_type: LibraryPriority::Priority,
-                                                data: substance_data.clone(),
-                                                calculator,
-                                            }),
-                                        );
-                                }
-                                CalculatorType::Transport(transport) => {
-                                    transport.from_serde(substance_data.clone())?;
-                                    print!("\n \n instance of transport props struct:  ");
-                                    let _ = transport.print_instance();
-                                    self.search_results
-                                        .entry(substance.clone()) // insert a new entry if it doesn't exist
-                                        .or_insert_with(HashMap::new)
-                                        .insert(
-                                            WhatIsFound::Transport,
-                                            Some(SearchResult {
-                                                library: lib.clone(),
-                                                priority_type: LibraryPriority::Priority,
-                                                data: substance_data.clone(),
-                                                calculator,
-                                            }),
-                                        );
-                                }
-                            }
-                        }
-
-                        println!(
-                            "\n  substance {} found in priority library {} \n  {:?}  \n",
-                            substance,
-                            lib,
-                            self.search_results.get(substance).unwrap()
-                        );
-                        found = true;
-                        //  break;
-                    }
-                }
-            }
-
-            // If not found in priority libraries, try permitted libraries
-            if !found {
-                for lib in &permitted_libs {
-                    println!(
-                        "\n \n search substance {} in Permitted library: {} \n \n ",
-                        substance, lib
-                    );
-                    if let Some(lib_data) = self.thermo_data.LibThermoData.get(lib) {
-                        if let Some(substance_data) = lib_data.get(substance) {
-                            let mut calculator = self.create_calculator(lib);
-                            //  let mut data_to_insert = HashMap::new();
-                            // Initialize the calculator if one was created
-                            if let Some(calc_type) = calculator.as_mut() {
-                                match calc_type {
-                                    CalculatorType::Thermo(thermo) => {
-                                        thermo.newinstance()?;
-                                        thermo.from_serde(substance_data.clone())?;
-                                        let _ = thermo.print_instance();
-                                        self.search_results
-                                            .entry(substance.clone()) // insert a new entry if it doesn't exist
-                                            .or_insert_with(HashMap::new)
-                                            .insert(
-                                                WhatIsFound::Thermo,
-                                                Some(SearchResult {
-                                                    library: lib.clone(),
-                                                    priority_type: LibraryPriority::Permitted,
-                                                    data: substance_data.clone(),
-                                                    calculator,
-                                                }),
-                                            );
-                                        assert!(
-                                            &self
-                                                .search_results
-                                                .get(substance)
-                                                .unwrap()
-                                                .get(&WhatIsFound::Thermo)
-                                                .unwrap()
-                                                .is_some()
-                                        );
-                                    }
-                                    CalculatorType::Transport(transport) => {
-                                        //   let _ = transport.newinstance();
-                                        transport.from_serde(substance_data.clone())?;
-                                        let _ = transport.print_instance();
-
-                                        self.search_results
-                                            .entry(substance.clone()) // insert a new entry if it doesn't exist
-                                            .or_insert_with(HashMap::new)
-                                            .insert(
-                                                WhatIsFound::Transport,
-                                                Some(SearchResult {
-                                                    library: lib.clone(),
-                                                    priority_type: LibraryPriority::Permitted,
-                                                    data: substance_data.clone(),
-                                                    calculator,
-                                                }),
-                                            );
-
-                                        assert!(
-                                            &self
-                                                .search_results
-                                                .get(substance)
-                                                .unwrap()
-                                                .get(&WhatIsFound::Transport)
-                                                .unwrap()
-                                                .is_some()
-                                        );
-                                    }
-                                }
-                            }
-
-                            println!(
-                                "\n  substance {} found in permitted library {} \n  {:?}  \n",
-                                substance,
-                                lib,
-                                self.search_results.get(substance).unwrap()
-                            );
-                            found = true;
-                            //  break;
-                        }
-                    }
-                }
-            }
-
-            // If still not found, mark as NotFound
-            if !found {
-                println!("\n  substance {} not found \n ", substance);
-                let data_to_insert = HashMap::from([(WhatIsFound::NotFound, None)]);
-                self.search_results
-                    .insert(substance.clone(), data_to_insert);
-            }
-        } // end of for loop
-        // now let's check if we have any explicit search instructions
-        for (substance, library) in &self.explicit_search_insructions {
-            let mut found = false;
-            if let Some(lib_data) = self.thermo_data.LibThermoData.get(library) {
-                if let Some(substance_data) = lib_data.get(substance) {
-                    // Create the calculator for this property
-                    let mut calculator = self.create_calculator(library);
-                    // Initialize the calculator if one was created
-                    if let Some(calc_type) = calculator.as_mut() {
-                        match calc_type {
+                        match &mut calculator {
                             CalculatorType::Thermo(thermo) => {
+                                if found_thermo {
+                                    continue;
+                                }
                                 thermo.from_serde(substance_data.clone())?;
-                                print!("\n \n instance of thermal props struct:  ");
-                                let _ = thermo.print_instance();
-                                self.search_results
-                                    .entry(substance.clone()) // insert a new entry if it doesn't exist
-                                    .or_insert_with(HashMap::new)
-                                    .insert(
-                                        WhatIsFound::Thermo,
-                                        Some(SearchResult {
-                                            library: library.clone(),
-                                            priority_type: LibraryPriority::Priority,
-                                            data: substance_data.clone(),
-                                            calculator,
-                                        }),
-                                    );
+                                self.store_resolved_search_result(
+                                    &substance,
+                                    WhatIsFound::Thermo,
+                                    lib.clone(),
+                                    resolved_record.record_key.clone(),
+                                    LibraryPriority::Priority,
+                                    substance_data.clone(),
+                                    calculator.clone(),
+                                    false,
+                                );
+                                found_thermo = true;
                             }
                             CalculatorType::Transport(transport) => {
+                                if found_transport {
+                                    continue;
+                                }
                                 transport.from_serde(substance_data.clone())?;
-                                print!("\n \n instance of transport props struct:  ");
-                                let _ = transport.print_instance();
-                                self.search_results
-                                    .entry(substance.clone()) // insert a new entry if it doesn't exist
-                                    .or_insert_with(HashMap::new)
-                                    .insert(
-                                        WhatIsFound::Transport,
-                                        Some(SearchResult {
-                                            library: library.clone(),
-                                            priority_type: LibraryPriority::Priority,
-                                            data: substance_data.clone(),
-                                            calculator,
-                                        }),
-                                    );
+                                self.store_resolved_search_result(
+                                    &substance,
+                                    WhatIsFound::Transport,
+                                    lib.clone(),
+                                    resolved_record.record_key.clone(),
+                                    LibraryPriority::Priority,
+                                    substance_data.clone(),
+                                    calculator.clone(),
+                                    false,
+                                );
+                                found_transport = true;
                             }
                         }
                     }
+                }
 
-                    println!(
-                        "\n  substance {} found in priority library {} \n  {:?}  \n",
-                        substance,
-                        library,
-                        self.search_results.get(substance).unwrap()
-                    );
-                    found = true;
-                    //  break;
-                } // if let Some(substance_data) 
-            } // if let Some(lib_data
-            // If still not found, mark as NotFound
-            if !found {
-                println!("\n  substance {} not found \n ", substance);
-                let data_to_insert = HashMap::from([(WhatIsFound::NotFound, None)]);
-                self.search_results
-                    .insert(substance.clone(), data_to_insert);
-            }
-        } // for loop
-        Ok(())
+                // If one of the properties is still missing, try permitted libraries.
+                if !found_thermo || !found_transport {
+                    for lib in &permitted_libs {
+                        if let Some(resolved_record) =
+                            self.resolve_library_record(lib, &substance)?
+                        {
+                            let substance_data = &resolved_record.data;
+                            let mut calculator = self.create_calculator(lib)?;
+                            match &mut calculator {
+                                CalculatorType::Thermo(thermo) => {
+                                    if found_thermo {
+                                        continue;
+                                    }
+                                    thermo.newinstance()?;
+                                    thermo.from_serde(substance_data.clone())?;
+                                    self.store_resolved_search_result(
+                                        &substance,
+                                        WhatIsFound::Thermo,
+                                        lib.clone(),
+                                        resolved_record.record_key.clone(),
+                                        LibraryPriority::Permitted,
+                                        substance_data.clone(),
+                                        calculator.clone(),
+                                        false,
+                                    );
+                                    found_thermo = true;
+                                }
+                                CalculatorType::Transport(transport) => {
+                                    if found_transport {
+                                        continue;
+                                    }
+                                    //   let _ = transport.newinstance();
+                                    transport.from_serde(substance_data.clone())?;
+                                    self.store_resolved_search_result(
+                                        &substance,
+                                        WhatIsFound::Transport,
+                                        lib.clone(),
+                                        resolved_record.record_key.clone(),
+                                        LibraryPriority::Permitted,
+                                        substance_data.clone(),
+                                        calculator.clone(),
+                                        false,
+                                    );
+                                    found_transport = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // If neither property was found, mark the substance as missing.
+                if !found_thermo && !found_transport {
+                    self.insert_not_found_if_absent(&substance);
+                }
+            } // end of for loop
+            // now let's check if we have any explicit search instructions
+            let explicit_search_instructions: Vec<(String, String)> = self
+                .explicit_search_instructions
+                .iter()
+                .map(|(substance, library)| {
+                    (
+                        substance.clone(),
+                        ThermoData::canonical_library_name(library),
+                    )
+                })
+                .collect();
+            for (substance, library) in explicit_search_instructions {
+                let mut found_thermo = false;
+                let mut found_transport = false;
+                if let Some(resolved_record) = self.resolve_library_record(&library, &substance)? {
+                    let substance_data = &resolved_record.data;
+                    // Create the calculator for this property
+                    let mut calculator = self.create_calculator(&library)?;
+                    match &mut calculator {
+                        CalculatorType::Thermo(thermo) => {
+                            thermo.from_serde(substance_data.clone())?;
+                            self.store_resolved_search_result(
+                                &substance,
+                                WhatIsFound::Thermo,
+                                library.clone(),
+                                resolved_record.record_key.clone(),
+                                LibraryPriority::Explicit,
+                                substance_data.clone(),
+                                calculator.clone(),
+                                true,
+                            );
+                            found_thermo = true;
+                        }
+                        CalculatorType::Transport(transport) => {
+                            transport.from_serde(substance_data.clone())?;
+                            self.store_resolved_search_result(
+                                &substance,
+                                WhatIsFound::Transport,
+                                library.clone(),
+                                resolved_record.record_key.clone(),
+                                LibraryPriority::Explicit,
+                                substance_data.clone(),
+                                calculator.clone(),
+                                true,
+                            );
+                            found_transport = true;
+                        }
+                    }
+                }
+                // If explicit lookup missed both properties, keep any previous hits intact.
+                if !found_thermo && !found_transport && !self.search_states.contains_key(&substance)
+                {
+                    self.insert_not_found_if_absent(&substance);
+                }
+            } // for loop
+            Ok(())
+        })();
+        if result.is_err() {
+            self.search_states = previous_search_states;
+            self.search_results = self.get_all_results();
+        }
+        result
     }
     /////////////////////////////////////GETTERS////////////////////////////////////
-    /// Retrieves the complete search results for a specific substance
+    /// Retrieves a compatibility snapshot of the complete search results for a
+    /// specific substance.
     ///
-    /// Returns all found data types (thermodynamic and/or transport) for the substance,
-    /// including library information and calculator instances.
+    /// The snapshot is reconstructed from the canonical typed search state.
     ///
     /// # Arguments
     ///
@@ -843,47 +1623,130 @@ impl SubsData {
     /// ```rust
     /// if let Some(results) = subs_data.get_substance_result("CO2") {
     ///     if let Some(Some(thermo_result)) = results.get(&WhatIsFound::Thermo) {
-    ///         println!("Found CO2 thermodynamic data in: {}", thermo_result.library);
+    ///         println!(
+    ///             "Found CO2 thermodynamic data in: {}",
+    ///             thermo_result.library()
+    ///         );
     ///     }
     /// }
     /// ```
     pub fn get_substance_result(
         &self,
         substance: &str,
-    ) -> Option<&HashMap<WhatIsFound, Option<SearchResult>>> {
-        self.search_results.get(substance)
+    ) -> Option<HashMap<WhatIsFound, Option<SearchResult>>> {
+        self.search_states
+            .get(substance)
+            .map(SubstanceSearchState::to_compat_map)
     }
 
-    /// Retrieves mutable search results for a specific substance
+    /// Retrieve the canonical typed search state for one substance.
+    pub fn get_substance_search_state(&self, substance: &str) -> Option<&SubstanceSearchState> {
+        self.search_states.get(substance)
+    }
+
+    /// Retrieve the canonical found record for one substance and property.
     ///
-    /// Provides mutable access to search results, allowing modification of
-    /// calculator instances or result data. Used internally for calculator operations.
-    ///
-    /// # Arguments
-    ///
-    /// * `substance` - Name of the substance to query
-    ///
-    /// # Returns
-    ///
-    /// * `Some(&mut HashMap)` - Mutable reference to search results
-    /// * `None` - Substance was not searched or found
-    pub fn get_substance_result_mut(
-        &mut self,
+    /// This is the direct read-only accessor for canonical lookup data.
+    pub fn get_search_result(
+        &self,
         substance: &str,
-    ) -> Option<&mut HashMap<WhatIsFound, Option<SearchResult>>> {
-        self.search_results.get_mut(substance)
+        found_kind: WhatIsFound,
+    ) -> Option<&SearchResult> {
+        self.get_canonical_search_result(substance, found_kind)
     }
 
-    /// Returns all search results for all substances
+    /// Retrieve the canonical found record for one substance and property.
     ///
-    /// Provides access to the complete search results database, useful for
-    /// comprehensive analysis or debugging of the search process.
+    /// This keeps read paths anchored to the typed search state instead of the
+    /// legacy compatibility snapshot.
+    pub(crate) fn get_canonical_search_result(
+        &self,
+        substance: &str,
+        found_kind: WhatIsFound,
+    ) -> Option<&SearchResult> {
+        self.search_states.get(substance)?.result(found_kind)
+    }
+
+    /// Retrieve the source library name for one canonical found record.
+    pub(crate) fn get_canonical_search_library(
+        &self,
+        substance: &str,
+        found_kind: WhatIsFound,
+    ) -> SubsDataResult<String> {
+        self.get_canonical_search_result(substance, found_kind)
+            .map(|result| result.library().to_string())
+            .ok_or_else(|| SubsDataError::CalculatorNotAvailable {
+                substance: substance.to_string(),
+                calc_type: match found_kind {
+                    WhatIsFound::Thermo => "Thermo".to_string(),
+                    WhatIsFound::Transport => "Transport".to_string(),
+                    WhatIsFound::NotFound => "NotFound".to_string(),
+                },
+            })
+    }
+
+    /// Returns a compatibility snapshot of all search results for all substances.
+    ///
+    /// The returned map is reconstructed from the canonical typed state.
     ///
     /// # Returns
     ///
     /// Reference to the complete search results HashMap
-    pub fn get_all_results(&self) -> &HashMap<String, HashMap<WhatIsFound, Option<SearchResult>>> {
-        &self.search_results
+    pub fn get_all_results(&self) -> HashMap<String, HashMap<WhatIsFound, Option<SearchResult>>> {
+        self.search_states
+            .iter()
+            .map(|(substance, state)| (substance.clone(), state.to_compat_map()))
+            .collect()
+    }
+
+    /// Retrieve all canonical typed search states.
+    pub fn get_all_search_states(&self) -> &HashMap<String, SubstanceSearchState> {
+        &self.search_states
+    }
+
+    /// Returns a mutable canonical search result for the requested property.
+    ///
+    /// This helper intentionally bypasses the legacy compatibility map.
+    pub(crate) fn get_canonical_search_result_mut(
+        &mut self,
+        substance: &str,
+        found_kind: WhatIsFound,
+    ) -> SubsDataResult<&mut SearchResult> {
+        let state = self
+            .search_states
+            .get_mut(substance)
+            .ok_or_else(|| SubsDataError::SubstanceNotFound(substance.to_string()))?;
+
+        // If the canonical search state says the substance is missing entirely,
+        // keep that contract visible to all mutable lookup callers.
+        if state.is_missing() {
+            return Err(SubsDataError::SubstanceNotFound(substance.to_string()));
+        }
+
+        let slot = match found_kind {
+            WhatIsFound::Thermo => &mut state.thermo,
+            WhatIsFound::Transport => &mut state.transport,
+            WhatIsFound::NotFound => {
+                return Err(SubsDataError::CalculatorNotAvailable {
+                    substance: substance.to_string(),
+                    calc_type: "NotFound".to_string(),
+                });
+            }
+        };
+
+        match slot {
+            PropertySearchState::Found(result) => Ok(result),
+            PropertySearchState::NotSearched
+            | PropertySearchState::Missing
+            | PropertySearchState::Failed(_) => Err(SubsDataError::CalculatorNotAvailable {
+                substance: substance.to_string(),
+                calc_type: match found_kind {
+                    WhatIsFound::Thermo => "Thermo".to_string(),
+                    WhatIsFound::Transport => "Transport".to_string(),
+                    WhatIsFound::NotFound => "NotFound".to_string(),
+                },
+            }),
+        }
     }
 
     /// Returns a list of substances that were not found in any library
@@ -904,9 +1767,9 @@ impl SubsData {
     /// }
     /// ```
     pub fn get_not_found_substances(&self) -> Vec<String> {
-        self.search_results
+        self.search_states
             .iter()
-            .filter(|(_, result)| result.get(&WhatIsFound::NotFound).is_some())
+            .filter(|(_, state)| state.is_missing())
             .map(|(substance, _)| substance.clone())
             .collect()
     }
@@ -927,15 +1790,9 @@ impl SubsData {
     /// println!("High-quality data available for: {:?}", priority_found);
     /// ```
     pub fn get_priority_found_substances(&self) -> Vec<String> {
-        self.search_results
+        self.search_states
             .iter()
-            .filter(|(_, result)| result.values().any(|result| {
-                if let Some(result) = result.as_ref() {
-                    matches!(result, SearchResult { priority_type, .. } if *priority_type == LibraryPriority::Priority)
-                } else {
-                    false
-                }
-                 }))
+            .filter(|(_, state)| state.has_priority_found())
             .map(|(substance, _)| substance.clone())
             .collect()
     }
@@ -963,25 +1820,43 @@ impl SubsData {
         found_substances: Vec<String>,
     ) -> SubsDataResult<Vec<String>> {
         for substance in &found_substances {
-            if let Some(thermo_data) = self.thermo_data.hashmap_of_thermo_data.get(substance) {
-                for (library, data) in thermo_data {
-                    let mut calculator = self.create_calculator(library);
+            let library_data_pairs: Vec<(String, Value)> = self
+                .thermo_data
+                .hashmap_of_thermo_data
+                .get(substance)
+                .map(|thermo_data| {
+                    let mut libraries: Vec<String> = thermo_data.keys().cloned().collect();
+                    libraries.sort();
+                    libraries
+                        .into_iter()
+                        .filter_map(|library| {
+                            thermo_data
+                                .get(&library)
+                                .cloned()
+                                .map(|data| (library, data))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
 
-                    if let Some(CalculatorType::Thermo(thermo)) = calculator.as_mut() {
-                        thermo.from_serde(data.clone())?;
-                        self.search_results
-                            .entry(substance.clone())
-                            .or_insert_with(HashMap::new)
-                            .insert(
-                                WhatIsFound::Thermo,
-                                Some(SearchResult {
-                                    library: library.clone(),
-                                    priority_type: LibraryPriority::Priority,
-                                    data: data.clone(),
-                                    calculator,
-                                }),
-                            );
-                    }
+            for (library, data) in library_data_pairs {
+                let mut calculator = self.create_calculator(&library)?;
+
+                if let CalculatorType::Thermo(thermo) = &mut calculator {
+                    thermo.from_serde(data.clone())?;
+                    let search_result = SearchResult {
+                        library: library.clone(),
+                        record_key: substance.clone(),
+                        priority_type: LibraryPriority::Priority,
+                        data: data.clone(),
+                        calculator: Some(calculator.clone()),
+                    };
+                    let state = self
+                        .search_states
+                        .entry(substance.clone())
+                        .or_insert_with(SubstanceSearchState::new);
+                    state.set_found(WhatIsFound::Thermo, search_result, true);
+                    self.sync_search_state_view(substance);
                 }
             }
         }
@@ -999,17 +1874,11 @@ impl SubsData {
     /// }
     /// ```
     pub fn get_permitted_found_substances(&self) -> Vec<String> {
-        self.search_results
-        .iter()
-        .filter(|(_, result)| result.values().any(|result| {
-            if let Some(result) = result.as_ref() {
-                matches!(result, SearchResult { priority_type, .. } if *priority_type == LibraryPriority::Permitted)
-            } else {
-                false
-            }
-             }))
-        .map(|(substance, _)| substance.clone())
-        .collect()
+        self.search_states
+            .iter()
+            .filter(|(_, state)| state.has_permitted_found())
+            .map(|(substance, _)| substance.clone())
+            .collect()
     }
 
     /// Retrieves a function closure for calculating thermodynamic properties
@@ -1038,11 +1907,11 @@ impl SubsData {
         &self,
         substance: &str,
         data_type: DataType,
-    ) -> Option<&Box<dyn Fn(f64) -> f64 + Send + Sync>> {
+    ) -> Option<&(dyn Fn(f64) -> f64 + Send + Sync)> {
         self.therm_map_of_fun
             .get(substance)
             .and_then(|map| map.get(&data_type))
-            .and_then(|opt| opt.as_ref())
+            .and_then(|opt| opt.as_deref())
     }
 
     /// Retrieves a symbolic expression for thermodynamic property calculations
@@ -1068,40 +1937,25 @@ impl SubsData {
     ///     let cp_derivative = cp_expr.diff("T"); // Symbolic differentiation
     /// }
     /// ```
-    pub fn get_thermo_symbolic(&self, substance: &str, data_type: DataType) -> Option<&Box<Expr>> {
+    pub fn get_thermo_symbolic(&self, substance: &str, data_type: DataType) -> Option<&Expr> {
         self.therm_map_of_sym
             .get(substance)
             .and_then(|map| map.get(&data_type))
-            .and_then(|opt| opt.as_ref())
+            .and_then(|opt| opt.as_deref())
     }
     ///////////////////////////////////////THERMAL PROPERTIES////////////////////////////////////
 
     /// Generic calculator access pattern - reduces boilerplate for calculator operations
-    fn with_thermo_calculator<F, R>(&mut self, substance: &str, f: F) -> SubsDataResult<R>
+    pub(crate) fn with_thermo_calculator<F, R>(
+        &mut self,
+        substance: &str,
+        f: F,
+    ) -> SubsDataResult<R>
     where
         F: FnOnce(&mut dyn ThermoCalculator) -> Result<R, ThermoError>,
     {
-        let datamap = self
-            .get_substance_result_mut(substance)
-            .ok_or_else(|| SubsDataError::SubstanceNotFound(substance.to_string()))?;
-
-        if datamap.contains_key(&WhatIsFound::NotFound) {
-            return Err(SubsDataError::SubstanceNotFound(substance.to_string()));
-        }
-
-        let search_result = datamap
-            .get_mut(&WhatIsFound::Thermo)
-            .ok_or_else(|| SubsDataError::CalculatorNotAvailable {
-                substance: substance.to_string(),
-                calc_type: "Thermo".to_string(),
-            })?
-            .as_mut()
-            .ok_or_else(|| SubsDataError::CalculatorNotAvailable {
-                substance: substance.to_string(),
-                calc_type: "Thermo".to_string(),
-            })?;
-
-        let calculator = search_result.calculator.as_mut().ok_or_else(|| {
+        let search_result = self.get_canonical_search_result_mut(substance, WhatIsFound::Thermo)?;
+        let calculator = search_result.calculator_mut().ok_or_else(|| {
             SubsDataError::CalculatorNotAvailable {
                 substance: substance.to_string(),
                 calc_type: "Thermo".to_string(),
@@ -1221,7 +2075,7 @@ impl SubsData {
         &mut self,
         substance: &str,
         temperature: f64,
-    ) -> SubsDataResult<(bool)> {
+    ) -> SubsDataResult<bool> {
         let check_flag = self.is_coeffs_valid_for_T(substance, temperature);
         match check_flag {
             Ok(flag) => match flag {
@@ -1256,22 +2110,10 @@ impl SubsData {
     ) -> SubsDataResult<Vec<String>> {
         let mut subs_with_changed_coeffs = Vec::new();
         for substance in self.substances.clone() {
-            let result = self.extract_coeffs_if_current_coeffs_not_valid(&substance, temperature);
-            match result {
-                Ok(flag) => {
-                    (if flag {
-                        subs_with_changed_coeffs.push(substance.clone())
-                    } else {
-                    })
-                }
-                Err(_) => {}
+            let flag = self.extract_coeffs_if_current_coeffs_not_valid(&substance, temperature)?;
+            if flag {
+                subs_with_changed_coeffs.push(substance.clone());
             }
-
-            self.log_and_propagate(
-                result,
-                &substance,
-                "extract_coeffs_if_current_coeffs_not_valid_for_all_subs",
-            )?;
         }
         Ok(subs_with_changed_coeffs)
     }
@@ -1517,28 +2359,27 @@ impl SubsData {
             return Err(SubsDataError::InvalidTemperature(temperature));
         }
 
-        let datamap = self
-            .search_results
-            .get(substance)
+        let state = self
+            .get_substance_search_state(substance)
             .ok_or_else(|| SubsDataError::SubstanceNotFound(substance.to_string()))?;
 
-        // Check if substance was marked as not found
-        if datamap.contains_key(&WhatIsFound::NotFound) {
+        // Check if the canonical typed state explicitly marks this substance as missing.
+        if state.is_missing() {
             return Err(SubsDataError::SubstanceNotFound(substance.to_string()));
         }
 
-        let search_result = datamap.get(&WhatIsFound::Thermo).ok_or_else(|| {
-            SubsDataError::CalculatorNotAvailable {
+        let search_result = self
+            .get_canonical_search_result(substance, WhatIsFound::Thermo)
+            .ok_or_else(|| SubsDataError::CalculatorNotAvailable {
                 substance: substance.to_string(),
                 calc_type: "Thermo".to_string(),
-            }
-        })?;
+            })?;
 
         match search_result {
-            Some(SearchResult {
+            SearchResult {
                 calculator: Some(CalculatorType::Thermo(thermo)),
                 ..
-            }) => {
+            } => {
                 let mut thermo = thermo.clone();
 
                 thermo.calculate_Cp_dH_dS(temperature)?;
@@ -1547,22 +2388,25 @@ impl SubsData {
                 let dh = thermo.get_dh()?;
                 let ds = thermo.get_ds()?;
 
+                Self::validate_finite("Cp", cp)?;
+                Self::validate_finite("dH", dh)?;
+                Self::validate_finite("dS", ds)?;
+
                 Ok((cp, dh, ds))
             }
-            Some(SearchResult {
+            SearchResult {
                 calculator: Some(CalculatorType::Transport(_)),
                 ..
-            }) => Err(SubsDataError::CalculatorNotAvailable {
+            } => Err(SubsDataError::CalculatorNotAvailable {
                 substance: substance.to_string(),
                 calc_type: "Thermo (found Transport instead)".to_string(),
             }),
-            Some(SearchResult {
+            SearchResult {
                 calculator: None, ..
-            }) => Err(SubsDataError::CalculatorNotAvailable {
+            } => Err(SubsDataError::CalculatorNotAvailable {
                 substance: substance.to_string(),
                 calc_type: "Thermo".to_string(),
             }),
-            None => Err(SubsDataError::SubstanceNotFound(substance.to_string())),
         }
     }
 
@@ -1584,9 +2428,40 @@ impl SubsData {
     /// molar_masses.insert("H2O".to_string(), 18.015);
     /// subs_data.set_M(molar_masses, Some("g/mol".to_string()));
     /// ```
-    pub fn set_M(&mut self, M_map: HashMap<String, f64>, M_unit: Option<String>) {
-        self.hasmap_of_molar_mass = M_map;
+    fn validate_finite(field: &str, value: f64) -> SubsDataResult<()> {
+        if value.is_finite() {
+            Ok(())
+        } else {
+            Err(SubsDataError::InvalidPhysicalValue {
+                field: field.to_string(),
+                value,
+            })
+        }
+    }
+
+    fn validate_finite_positive(field: &str, value: f64) -> SubsDataResult<()> {
+        if value.is_finite() && value > 0.0 {
+            Ok(())
+        } else {
+            Err(SubsDataError::InvalidPhysicalValue {
+                field: field.to_string(),
+                value,
+            })
+        }
+    }
+
+    pub fn set_M(
+        &mut self,
+        M_map: HashMap<String, f64>,
+        M_unit: Option<String>,
+    ) -> SubsDataResult<()> {
+        for (substance, molar_mass) in &M_map {
+            Self::validate_finite_positive(&format!("molar_mass:{}", substance), *molar_mass)?;
+        }
+        self.molar_mass_by_substance = M_map;
         self.Molar_mass_unit = M_unit;
+        self.invalidate_pressure_and_molar_mass_dependent_state();
+        Ok(())
     }
     /// Sets system pressure with optional unit specification
     ///
@@ -1604,9 +2479,12 @@ impl SubsData {
     /// subs_data.set_P(101325.0, Some("Pa".to_string())); // Standard atmospheric pressure
     /// subs_data.set_P(1.0, Some("atm".to_string()));      // Alternative specification
     /// ```
-    pub fn set_P(&mut self, P: f64, P_unit: Option<String>) {
+    pub fn set_P(&mut self, P: f64, P_unit: Option<String>) -> SubsDataResult<()> {
+        Self::validate_finite_positive("pressure", P)?;
         self.P = Some(P);
         self.P_unit = P_unit;
+        self.invalidate_pressure_and_molar_mass_dependent_state();
+        Ok(())
     }
 
     /// Sets system temperature for property calculations
@@ -1623,8 +2501,18 @@ impl SubsData {
     /// ```rust
     /// subs_data.set_T(298.15); // Standard temperature (25°C)
     /// ```
-    pub fn set_T(&mut self, T: f64) {
+    pub fn set_T(&mut self, T: f64) -> SubsDataResult<()> {
+        Self::validate_finite_positive("temperature", T)?;
+
+        // Avoid invalidating derived caches when the user re-applies the same
+        // temperature value. This keeps repeated UI updates and roundtrips cheap.
+        if self.T == Some(T) {
+            return Ok(());
+        }
+
         self.T = Some(T);
+        self.invalidate_temperature_dependent_state();
+        Ok(())
     }
 
     /// Generic utility for building property maps with error handling
@@ -1647,36 +2535,24 @@ impl SubsData {
     ///
     /// # Returns
     ///
-    /// * `Ok(())` - Property map built successfully (with possible individual failures)
-    /// * `Err(SubsDataError)` - Critical error in map building process
+    /// * `Ok(())` - Property map built successfully
+    /// * `Err(SubsDataError)` - The first substance-level failure encountered
     pub fn build_property_map<T, F>(
         &mut self,
         calculator_fn: F,
         target_map: &mut HashMap<String, HashMap<DataType, Option<T>>>,
-        property_types: &[DataType],
-        empty_value_fn: fn() -> Option<T>,
+        _property_types: &[DataType],
+        _empty_value_fn: fn() -> Option<T>,
     ) -> SubsDataResult<()>
     where
         F: Fn(&mut Self, &str) -> SubsDataResult<HashMap<DataType, Option<T>>>,
     {
+        let mut rebuilt_map = HashMap::new();
         for substance in self.substances.clone() {
-            match calculator_fn(self, &substance) {
-                Ok(properties) => {
-                    target_map.insert(substance, properties);
-                }
-                Err(e) => {
-                    let mut empty_map = HashMap::new();
-                    for &prop_type in property_types {
-                        empty_map.insert(prop_type, empty_value_fn());
-                    }
-                    target_map.insert(substance.clone(), empty_map);
-                    println!(
-                        "Warning: Failed to calculate properties for {}: {}",
-                        substance, e
-                    );
-                }
-            }
+            let properties = calculator_fn(self, &substance)?;
+            rebuilt_map.insert(substance, properties);
         }
+        *target_map = rebuilt_map;
         Ok(())
     }
 
@@ -1726,18 +2602,9 @@ impl SubsData {
         let mut temp_map = HashMap::new();
         for substance in self.substances.clone() {
             let result = self.calculate_single_thermo_properties(&substance, temperature);
-            match self.log_and_propagate(result, &substance, "calculate_therm_map_of_properties") {
-                Ok(properties) => {
-                    temp_map.insert(substance, properties);
-                }
-                Err(_) => {
-                    let mut empty_map = HashMap::new();
-                    empty_map.insert(DataType::Cp, None);
-                    empty_map.insert(DataType::dH, None);
-                    empty_map.insert(DataType::dS, None);
-                    temp_map.insert(substance, empty_map);
-                }
-            }
+            let properties =
+                self.log_and_propagate(result, &substance, "calculate_therm_map_of_properties")?;
+            temp_map.insert(substance, properties);
         }
         self.therm_map_of_properties_values = temp_map;
         Ok(())
@@ -1788,18 +2655,9 @@ impl SubsData {
         let mut temp_map = HashMap::new();
         for substance in self.substances.clone() {
             let result = self.calculate_single_thermo_functions(&substance);
-            match self.log_and_propagate(result, &substance, "calculate_therm_map_of_fun") {
-                Ok(properties) => {
-                    temp_map.insert(substance, properties);
-                }
-                Err(_) => {
-                    let mut empty_map = HashMap::new();
-                    empty_map.insert(DataType::Cp_fun, None);
-                    empty_map.insert(DataType::dH_fun, None);
-                    empty_map.insert(DataType::dS_fun, None);
-                    temp_map.insert(substance, empty_map);
-                }
-            }
+            let properties =
+                self.log_and_propagate(result, &substance, "calculate_therm_map_of_fun")?;
+            temp_map.insert(substance, properties);
         }
         self.therm_map_of_fun = temp_map;
         Ok(())
@@ -1850,18 +2708,9 @@ impl SubsData {
         let mut temp_map = HashMap::new();
         for substance in self.substances.clone() {
             let result = self.calculate_single_thermo_symbolic(&substance);
-            match self.log_and_propagate(result, &substance, "calculate_therm_map_of_sym") {
-                Ok(properties) => {
-                    temp_map.insert(substance, properties);
-                }
-                Err(_) => {
-                    let mut empty_map = HashMap::new();
-                    empty_map.insert(DataType::Cp_sym, None);
-                    empty_map.insert(DataType::dH_sym, None);
-                    empty_map.insert(DataType::dS_sym, None);
-                    temp_map.insert(substance, empty_map);
-                }
-            }
+            let properties =
+                self.log_and_propagate(result, &substance, "calculate_therm_map_of_sym")?;
+            temp_map.insert(substance, properties);
         }
         self.therm_map_of_sym = temp_map;
         Ok(())

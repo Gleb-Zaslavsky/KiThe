@@ -301,7 +301,7 @@ fn parse_usize_slice(formula: &str, start: usize, end: usize) -> KineticsResult<
         )
     })
 }
-
+#[allow(dead_code)]
 fn after_bracket_stoichio(end_bracket: usize, formula: String) -> KineticsResult<usize> {
     let mut end_of_stoichio_after_bracket = end_bracket + 1;
     while end_of_stoichio_after_bracket < formula.len()

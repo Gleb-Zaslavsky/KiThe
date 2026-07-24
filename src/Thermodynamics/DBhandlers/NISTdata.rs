@@ -39,7 +39,9 @@
 //! - Uses Shomate equation format optimized for accurate thermodynamic predictions
 //! - Supports both numerical and symbolic computation modes
 
-use crate::Thermodynamics::DBhandlers::NIST_parser::{NistInput, NistParser, Phase, SearchType};
+use crate::Thermodynamics::DBhandlers::NIST_parser::{
+    NistError as NistParserError, NistInput, NistParser, Phase, SearchType,
+};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use prettytable::{Cell, Row, Table};
 use serde_json::Value;
@@ -58,6 +60,9 @@ const e4: Expr = Expr::Const(4.0);
 pub enum NISTError {
     NoCoefficientsFound { temperature: f64, range: String },
     InvalidTemperatureRange,
+    SchemaError(String),
+    ParserSetupError(String),
+    ParserError(NistParserError),
     SerdeError(serde_json::Error),
     UnsupportedUnit(String),
     SymbolicError(String),
@@ -77,8 +82,15 @@ impl fmt::Display for NISTError {
             NISTError::InvalidTemperatureRange => {
                 write!(f, "Invalid temperature range in coefficient data")
             }
+            NISTError::SchemaError(msg) => {
+                write!(f, "Invalid NIST coefficient schema: {}", msg)
+            }
+            NISTError::ParserSetupError(msg) => {
+                write!(f, "Failed to initialize NIST parser: {}", msg)
+            }
+            NISTError::ParserError(err) => write!(f, "Failed to retrieve NIST data: {}", err),
             NISTError::SerdeError(msg) => {
-                write!(f, "Failed to deserialize NASA data: {}", msg)
+                write!(f, "Failed to deserialize NIST data: {}", msg)
             }
             NISTError::UnsupportedUnit(unit) => {
                 write!(
@@ -105,7 +117,15 @@ pub struct FittingReport {
     pub T_range: Option<(f64, f64)>,
 }
 
-impl Error for NISTError {}
+impl Error for NISTError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            NISTError::SerdeError(err) => Some(err),
+            NISTError::ParserError(err) => Some(err),
+            _ => None,
+        }
+    }
+}
 
 impl From<serde_json::Error> for NISTError {
     fn from(err: serde_json::Error) -> Self {
@@ -204,8 +224,55 @@ impl NISTdata {
     }
 
     pub fn parse_coefficients(&mut self) -> Result<(), NISTError> {
-        for (i, T_pairs) in self.input.T.clone().unwrap().iter().enumerate() {
-            let coeffs = self.input.cp.clone().unwrap()[i].clone();
+        let temps =
+            self.input.T.as_ref().ok_or_else(|| {
+                NISTError::SchemaError("missing temperature intervals".to_string())
+            })?;
+        let coeff_sets = self
+            .input
+            .cp
+            .as_ref()
+            .ok_or_else(|| NISTError::SchemaError("missing coefficient table".to_string()))?;
+        if temps.len() != coeff_sets.len() {
+            return Err(NISTError::SchemaError(format!(
+                "temperature interval count ({}) does not match coefficient count ({})",
+                temps.len(),
+                coeff_sets.len()
+            )));
+        }
+
+        self.coeffs_map.clear();
+        for (i, T_pairs) in temps.iter().enumerate() {
+            if T_pairs.len() != 2 {
+                return Err(NISTError::SchemaError(format!(
+                    "interval {} must contain exactly two bounds",
+                    i
+                )));
+            }
+            if !T_pairs[0].is_finite() || !T_pairs[1].is_finite() || T_pairs[0] > T_pairs[1] {
+                return Err(NISTError::SchemaError(format!(
+                    "interval {} has invalid bounds [{}, {}]",
+                    i, T_pairs[0], T_pairs[1]
+                )));
+            }
+
+            let coeffs = coeff_sets
+                .get(i)
+                .ok_or_else(|| NISTError::SchemaError(format!("missing coefficient row {}", i)))?;
+            if coeffs.len() < 8 {
+                return Err(NISTError::SchemaError(format!(
+                    "interval {} has only {} coefficients",
+                    i,
+                    coeffs.len()
+                )));
+            }
+            if coeffs.iter().take(8).any(|value| !value.is_finite()) {
+                return Err(NISTError::SchemaError(format!(
+                    "interval {} contains non-finite coefficients",
+                    i
+                )));
+            }
+
             let (a, b, c, d, e, f, g, h) = (
                 coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5], coeffs[6],
                 coeffs[7],
@@ -274,17 +341,15 @@ impl NISTdata {
         search_type: SearchType,
         phase: Phase,
     ) -> Result<(), NISTError> {
-        let parser_instance = NistParser::new();
+        let parser_instance =
+            NistParser::try_new().map_err(|err| NISTError::ParserSetupError(err.to_string()))?;
         match parser_instance.get_data(&sub_name, search_type, phase) {
             Ok(input) => {
                 self.input = input;
                 self.parse_coefficients()?;
                 Ok(())
             }
-            Err(e) => Err(NISTError::NoCoefficientsFound {
-                temperature: 0.0, // Default temperature since we don't have a specific one
-                range: format!("Failed to get data for {}: {}", sub_name, e),
-            }),
+            Err(e) => Err(NISTError::ParserError(e)),
         }
     }
 
@@ -394,11 +459,18 @@ impl NISTdata {
     }
 
     pub fn pretty_print(&self) -> Result<(), NISTError> {
-        let temps = self.input.T.clone().expect("no temperature parsed");
-        let coeffs = self.input.cp.clone().expect("no coefficients parsed");
+        let temps =
+            self.input.T.as_ref().ok_or_else(|| {
+                NISTError::SchemaError("no temperature intervals parsed".to_string())
+            })?;
+        let coeffs = self
+            .input
+            .cp
+            .as_ref()
+            .ok_or_else(|| NISTError::SchemaError("no coefficients parsed".to_string()))?;
         let mut table = Table::new();
         let mut header_row = vec![Cell::new("Coefficients")];
-        for T in temps.clone() {
+        for T in temps.iter() {
             let Tstr = format!("{:} - {:}   ", T[0], T[1]);
             header_row.push(Cell::new(&Tstr));
         }
@@ -416,9 +488,15 @@ impl NISTdata {
         table.printstd();
 
         let mut table = Table::new();
-        let M = self.input.molar_mass.clone().expect("no molar mass parsed");
+        let M = self
+            .input
+            .molar_mass
+            .ok_or_else(|| NISTError::SchemaError("no molar mass parsed".to_string()))?;
         let dH = self.input.dh.unwrap_or(0.0); // Use 0.0 for simple substances
-        let dS = self.input.ds.clone().expect("no dS parsed");
+        let dS = self
+            .input
+            .ds
+            .ok_or_else(|| NISTError::SchemaError("no entropy parsed".to_string()))?;
         let header_row = vec![Cell::new("Molar mass"), Cell::new("dH"), Cell::new("dS")];
         table.add_row(Row::new(header_row));
         let row = vec![
@@ -807,15 +885,12 @@ impl ThermoCalculator for NISTdata {
         phase: Phase,
     ) -> Result<(), ThermoError> {
         self.get_data_from_NIST(sub_name, search_type, phase)?;
-        println!(
-            "Cp found {:?}\n for temperature ranges {:?}\n",
-            self.input.cp, self.input.T
-        );
-
         Ok(())
     }
     fn get_coefficients(&self) -> Result<Vec<f64>, ThermoError> {
-        let (a, b, c, d, e, f, g, h) = self.coeffs.unwrap();
+        let (a, b, c, d, e, f, g, h) = self.coeffs.ok_or_else(|| {
+            ThermoError::CalculationError("NIST coefficients are not initialized".to_string())
+        })?;
         Ok(vec![a, b, c, d, e, f, g, h])
     }
 
@@ -889,5 +964,102 @@ impl ThermoCalculator for NISTdata {
     fn is_coeffs_valid_for_T(&self, T: f64) -> Result<bool, ThermoError> {
         let flag = self.is_this_T_from_current_T_range(T);
         Ok(flag)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Thermodynamics::DBhandlers::thermo_api::ThermoCalculator;
+
+    fn base_input() -> NistInput {
+        NistInput {
+            cp: Some(vec![vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]]),
+            T: Some(vec![vec![298.0, 1000.0]]),
+            dh: Some(42.0),
+            ds: Some(100.0),
+            molar_mass: Some(18.015),
+        }
+    }
+
+    #[test]
+    fn test_parse_coefficients_rejects_invalid_schema_variants() {
+        let mut nist = NISTdata::new();
+
+        // Missing temperature table must fail early.
+        nist.input = NistInput {
+            cp: Some(vec![vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]]),
+            T: None,
+            dh: None,
+            ds: None,
+            molar_mass: None,
+        };
+        assert!(matches!(
+            nist.parse_coefficients(),
+            Err(NISTError::SchemaError(msg)) if msg.contains("missing temperature intervals")
+        ));
+
+        // A reversed interval is invalid even if the coefficient table exists.
+        nist.input = NistInput {
+            cp: Some(vec![vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]]),
+            T: Some(vec![vec![1000.0, 298.0]]),
+            dh: None,
+            ds: None,
+            molar_mass: None,
+        };
+        assert!(matches!(
+            nist.parse_coefficients(),
+            Err(NISTError::SchemaError(msg)) if msg.contains("invalid bounds")
+        ));
+
+        // Too few coefficients must be rejected before anything gets cached.
+        nist.input = NistInput {
+            cp: Some(vec![vec![1.0, 2.0, 3.0]]),
+            T: Some(vec![vec![298.0, 1000.0]]),
+            dh: None,
+            ds: None,
+            molar_mass: None,
+        };
+        assert!(matches!(
+            nist.parse_coefficients(),
+            Err(NISTError::SchemaError(msg)) if msg.contains("only 3 coefficients")
+        ));
+
+        // Non-finite values must be rejected as well.
+        nist.input = NistInput {
+            cp: Some(vec![vec![1.0, 2.0, 3.0, 4.0, 5.0, f64::NAN, 7.0, 8.0]]),
+            T: Some(vec![vec![298.0, 1000.0]]),
+            dh: None,
+            ds: None,
+            molar_mass: None,
+        };
+        assert!(matches!(
+            nist.parse_coefficients(),
+            Err(NISTError::SchemaError(msg)) if msg.contains("non-finite coefficients")
+        ));
+    }
+
+    #[test]
+    fn test_pretty_print_and_get_coefficients_require_initialized_schema() {
+        let nist = NISTdata::new();
+
+        assert!(matches!(
+            nist.pretty_print(),
+            Err(NISTError::SchemaError(msg)) if msg.contains("no temperature intervals parsed")
+        ));
+        assert!(matches!(
+            <NISTdata as ThermoCalculator>::get_coefficients(&nist),
+            Err(ThermoError::CalculationError(msg)) if msg.contains("not initialized")
+        ));
+    }
+
+    #[test]
+    fn test_parse_coefficients_populates_valid_schema() {
+        let mut nist = NISTdata::new();
+        nist.input = base_input();
+
+        assert!(nist.parse_coefficients().is_ok());
+        assert_eq!(nist.coeffs_map.len(), 1);
+        assert!(nist.coeffs_map.contains_key(&0));
     }
 }

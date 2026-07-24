@@ -1,6 +1,7 @@
 use crate::Thermodynamics::DBhandlers::NASAdata::{
     Coeffs, Cp, Cp_sym, NASAError, NASAdata, dh, dh_sym, ds, ds_sym,
 };
+use crate::Thermodynamics::DBhandlers::fitting_reports::compare_property_series;
 
 use RustedSciThe::numerical::optimization::fitting_features::SewTwoFunctions;
 use RustedSciThe::numerical::optimization::sym_fitting::Fitting;
@@ -55,10 +56,8 @@ pub fn fit_nasa7_stable(
     s_si: &[f64],
     allow_cp_offset: bool,
     lambda: f64,
-) -> FitResult {
-    assert_eq!(temps_K.len(), cp_si.len());
-    assert_eq!(temps_K.len(), h_si.len());
-    assert_eq!(temps_K.len(), s_si.len());
+) -> Result<FitResult, NASAError> {
+    validate_fit_inputs("NASA", temps_K, cp_si, h_si, s_si)?;
     let n = temps_K.len();
     let cols = if allow_cp_offset { 8 } else { 7 };
     let rows = 3 * n;
@@ -184,8 +183,14 @@ pub fn fit_nasa7_stable(
     // --- Tikhonov regularized solution via SVD ---
     // X = U * S * V^T
     // theta_scaled = V * diag( s_i / (s_i^2 + lambda) ) * U^T * y
-    let u_opt = svd.u.as_ref().expect("SVD did not compute U");
-    let v_t_opt = svd.v_t.as_ref().expect("SVD did not compute V^T");
+    let u_opt = svd
+        .u
+        .as_ref()
+        .ok_or_else(|| NASAError::FittingError("SVD did not compute U".to_string()))?;
+    let v_t_opt = svd
+        .v_t
+        .as_ref()
+        .ok_or_else(|| NASAError::FittingError("SVD did not compute V^T".to_string()))?;
 
     // compute u^T * y  (u is rows x cols? but u has size rows x r, we use full U with same cols)
     // nalgebra's U has dimensions rows x min(rows,cols); Vt is min(rows,cols) x cols
@@ -262,7 +267,25 @@ pub fn fit_nasa7_stable(
         singular_values,
     };
 
-    FitResult { coeffs, stats }
+    if coeffs.iter().any(|value| !value.is_finite())
+        || !stats.r2_cp.is_finite()
+        || !stats.r2_h.is_finite()
+        || !stats.r2_s.is_finite()
+        || !stats.rmse_cp.is_finite()
+        || !stats.rmse_h.is_finite()
+        || !stats.rmse_s.is_finite()
+        || !stats.maxabs_cp.is_finite()
+        || !stats.maxabs_h.is_finite()
+        || !stats.maxabs_s.is_finite()
+        || !stats.cond_number.is_finite()
+        || stats.singular_values.iter().any(|value| !value.is_finite())
+    {
+        return Err(NASAError::FittingError(
+            "NASA fitting produced non-finite coefficients or diagnostics".to_string(),
+        ));
+    }
+
+    Ok(FitResult { coeffs, stats })
 }
 
 /// Check whether fit is acceptable using thresholds (adjust as desired)
@@ -381,6 +404,75 @@ fn max_abs_err(obs: &[f64], pred: &[f64]) -> f64 {
         .fold(0.0, f64::max)
 }
 
+fn validate_fit_inputs(
+    label: &str,
+    temps_K: &[f64],
+    cp_si: &[f64],
+    h_si: &[f64],
+    s_si: &[f64],
+) -> Result<(), NASAError> {
+    if temps_K.len() != cp_si.len() || temps_K.len() != h_si.len() || temps_K.len() != s_si.len() {
+        return Err(NASAError::FittingError(format!(
+            "{} fitting input lengths must match: temps={}, cp={}, h={}, s={}",
+            label,
+            temps_K.len(),
+            cp_si.len(),
+            h_si.len(),
+            s_si.len()
+        )));
+    }
+
+    let validate_slice = |name: &str, values: &[f64]| -> Result<(), NASAError> {
+        if let Some((idx, value)) = values
+            .iter()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(NASAError::FittingError(format!(
+                "{} fitting input contains non-finite {} at index {}: {}",
+                label, name, idx, value
+            )));
+        }
+        Ok(())
+    };
+
+    validate_slice("temperature", temps_K)?;
+    validate_slice("Cp", cp_si)?;
+    validate_slice("H", h_si)?;
+    validate_slice("S", s_si)?;
+    Ok(())
+}
+
+fn validate_temperature_bounds(label: &str, T_min: f64, T_max: f64) -> Result<(), NASAError> {
+    if !T_min.is_finite() || !T_max.is_finite() {
+        return Err(NASAError::FittingError(format!(
+            "{} fitting bounds must be finite, got T_min={}, T_max={}",
+            label, T_min, T_max
+        )));
+    }
+    if T_min >= T_max {
+        return Err(NASAError::FittingError(format!(
+            "{} fitting bounds must satisfy T_min < T_max, got T_min={}, T_max={}",
+            label, T_min, T_max
+        )));
+    }
+    Ok(())
+}
+
+fn validate_coeffs_finite(label: &str, coeffs: &[f64]) -> Result<(), NASAError> {
+    if let Some((idx, value)) = coeffs
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(NASAError::FittingError(format!(
+            "{} coefficients must be finite, coefficient {} = {}",
+            label, idx, value
+        )));
+    }
+    Ok(())
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 /// Fit NASA-7 coefficients (a1..a7) using stacked linear least squares.
 ///
@@ -398,10 +490,8 @@ pub fn fit_nasa7(
     h_si: &[f64],
     s_si: &[f64],
     allow_cp_offset: bool,
-) -> Vec<f64> {
-    assert_eq!(temps_K.len(), cp_si.len());
-    assert_eq!(temps_K.len(), h_si.len());
-    assert_eq!(temps_K.len(), s_si.len());
+) -> Result<Vec<f64>, NASAError> {
+    validate_fit_inputs("NASA", temps_K, cp_si, h_si, s_si)?;
 
     let n = temps_K.len();
     let p = if allow_cp_offset { 8 } else { 7 }; // columns
@@ -493,9 +583,11 @@ pub fn fit_nasa7(
 
     // Solve via SVD
     let svd = X.svd(true, true);
-    let theta = svd.solve(&y, 1e-12).expect("SVD solve failed");
+    let theta = svd
+        .solve(&y, 1e-12)
+        .map_err(|e| NASAError::FittingError(format!("SVD solve failed: {}", e)))?;
 
-    theta.data.as_vec().clone()
+    Ok(theta.data.as_vec().clone())
 }
 
 /// compute standard deviation (population std)
@@ -516,7 +608,85 @@ fn scale_row(X: &mut DMatrix<f64>, y: &mut DVector<f64>, row: usize, w: f64) {
     y[row] *= w;
 }
 
+pub(crate) type Nasa7Coefficients = (f64, f64, f64, f64, f64, f64, f64);
+
+/// Returns the shared NASA-7 vector when adjacent ranges describe the same polynomial.
+///
+/// Re-fitting an already global polynomial is both unnecessary and numerically harmful:
+/// the NASA basis is ill-conditioned in raw Kelvin powers, so an optimizer may move far
+/// in coefficient space while changing the sampled property values only slightly.
+fn identical_adjacent_coefficients(
+    coeffs_min: &Coeffs,
+    coeffs_max: &Coeffs,
+) -> Option<Nasa7Coefficients> {
+    (coeffs_min.coeff == coeffs_max.coeff).then_some(coeffs_min.coeff)
+}
+
+/// Extracts a finite, complete result from RustedSciThe's LM fitting wrapper.
+///
+/// `Fitting::solve()` records an unsuccessful termination by leaving its result
+/// empty. Convert that state into the typed thermodynamics error expected by the
+/// public fitting methods instead of panicking on an `Option::unwrap()`.
+fn lm_solution(
+    fitting: &Fitting,
+    stage: &str,
+    expected_coefficients: &[&str],
+) -> Result<(HashMap<String, f64>, f64), NASAError> {
+    let solution = fitting
+        .solution_map()
+        .ok_or_else(|| NASAError::FittingError(format!("{stage} LM solver did not converge")))?;
+    let r_squared = fitting.r_squared().ok_or_else(|| {
+        NASAError::FittingError(format!("{stage} LM solver did not produce R squared"))
+    })?;
+
+    if !r_squared.is_finite() {
+        return Err(NASAError::FittingError(format!(
+            "{stage} LM solver produced non-finite R squared: {r_squared}"
+        )));
+    }
+    for &name in expected_coefficients {
+        let value = solution.get(name).ok_or_else(|| {
+            NASAError::FittingError(format!(
+                "{stage} LM solution is missing coefficient `{name}`"
+            ))
+        })?;
+        if !value.is_finite() {
+            return Err(NASAError::FittingError(format!(
+                "{stage} LM solution produced non-finite coefficient `{name}`: {value}"
+            )));
+        }
+    }
+
+    Ok((solution, r_squared))
+}
+
 impl NASAdata {
+    /// Builds quality reports for a known NASA-7 vector without running another fit.
+    pub(crate) fn reports_for_coefficients(
+        &self,
+        temps: &[f64],
+        cp_vals: &[f64],
+        h_vals: &[f64],
+        s_vals: &[f64],
+        coeffs: Nasa7Coefficients,
+    ) -> Result<HashMap<String, FittingReport>, NASAError> {
+        let (a, b, c, d, e, f, g) = coeffs;
+        let mut reports = HashMap::new();
+        reports.insert(
+            "Cp fitting report".to_string(),
+            self.direct_compare2(cp_vals, temps, Cp_sym(a, b, c, d, e))?,
+        );
+        reports.insert(
+            "dh fitting report".to_string(),
+            self.direct_compare2(h_vals, temps, dh_sym(a, b, c, d, e, f))?,
+        );
+        reports.insert(
+            "ds fitting report".to_string(),
+            self.direct_compare2(s_vals, temps, ds_sym(a, b, c, d, e, g))?,
+        );
+        Ok(reports)
+    }
+
     /// Generates thermodynamic data from two adjacent NASA coefficient ranges
     ///
     /// Creates temperature points and calculates Cp, H, S values using original coefficients
@@ -536,11 +706,41 @@ impl NASAdata {
         T_min: f64,
         T_max: f64,
     ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>), NASAError> {
+        validate_temperature_bounds("NASA adjacent", T_min, T_max)?;
         let (_, T_center) = (coeffs_min.T.0, coeffs_min.T.1);
         let (T_center_check, _) = (coeffs_max.T.0, coeffs_max.T.1);
         if T_center != T_center_check {
             return Err(NASAError::InvalidTemperatureRange);
         }
+        if coeffs_min.T.0 >= coeffs_min.T.1 || coeffs_max.T.0 >= coeffs_max.T.1 {
+            return Err(NASAError::FittingError(
+                "NASA interval bounds must be strictly ordered".to_string(),
+            ));
+        }
+        validate_coeffs_finite(
+            "NASA lower interval",
+            &[
+                coeffs_min.coeff.0,
+                coeffs_min.coeff.1,
+                coeffs_min.coeff.2,
+                coeffs_min.coeff.3,
+                coeffs_min.coeff.4,
+                coeffs_min.coeff.5,
+                coeffs_min.coeff.6,
+            ],
+        )?;
+        validate_coeffs_finite(
+            "NASA upper interval",
+            &[
+                coeffs_max.coeff.0,
+                coeffs_max.coeff.1,
+                coeffs_max.coeff.2,
+                coeffs_max.coeff.3,
+                coeffs_max.coeff.4,
+                coeffs_max.coeff.5,
+                coeffs_max.coeff.6,
+            ],
+        )?;
 
         let a = coeffs_min.coeff.0;
         let b = coeffs_min.coeff.1;
@@ -625,12 +825,31 @@ impl NASAdata {
         T_min: f64,
         T_max: f64,
     ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>), NASAError> {
+        validate_temperature_bounds("NASA non-adjacent", T_min, T_max)?;
         let mut Tvec: Vec<f64> = Vec::new();
         let mut cp_vec: Vec<f64> = Vec::new();
         let mut h_vec: Vec<f64> = Vec::new();
         let mut s_vec: Vec<f64> = Vec::new();
 
         for coeff in coeffs.iter() {
+            if coeff.T.0 >= coeff.T.1 {
+                return Err(NASAError::FittingError(format!(
+                    "NASA interval bounds must be strictly ordered, got {:?}",
+                    coeff.T
+                )));
+            }
+            validate_coeffs_finite(
+                "NASA interval",
+                &[
+                    coeff.coeff.0,
+                    coeff.coeff.1,
+                    coeff.coeff.2,
+                    coeff.coeff.3,
+                    coeff.coeff.4,
+                    coeff.coeff.5,
+                    coeff.coeff.6,
+                ],
+            )?;
             let (T_min_r, T_max_r) = (coeff.T.0, coeff.T.1);
             let mut Tleft = T_min_r;
             let mut Tright = T_max_r;
@@ -703,13 +922,27 @@ impl NASAdata {
         T_min: f64,
         T_max: f64,
     ) -> Result<(), NASAError> {
-        let mut report_map: HashMap<String, FittingReport> = HashMap::new();
+        let preserved_coeffs = identical_adjacent_coefficients(&coeffs_min, &coeffs_max);
         let (temps, cp_vals, h_vals, s_vals) =
             Self::prepare_fit_data_for_2_range_fitting(coeffs_min, coeffs_max, T_min, T_max)?;
 
-        let coeffs = fit_nasa7(&temps, &cp_vals, &h_vals, &s_vals, false);
-        println!("a..g = {:?}", coeffs);
-        assert_eq!(coeffs.len(), 7);
+        // Identical source polynomials are already the exact global solution. Preserve
+        // their coefficients bit-for-bit instead of sending them through an SVD solve.
+        if let Some(coeffs) = preserved_coeffs {
+            self.coeffs = coeffs;
+            let report_map =
+                self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
+            Self::print_quality_table(&report_map);
+            return Ok(());
+        }
+
+        let coeffs = fit_nasa7(&temps, &cp_vals, &h_vals, &s_vals, false)?;
+        if coeffs.len() != 7 {
+            return Err(NASAError::FittingError(format!(
+                "NASA solver returned {} coefficients instead of 7",
+                coeffs.len()
+            )));
+        }
         let a = coeffs[0];
         let b = coeffs[1];
         let c = coeffs[2];
@@ -718,18 +951,10 @@ impl NASAdata {
         let f = coeffs[5];
         let g = coeffs[6];
 
-        let Cp_sym = Cp_sym(a, b, c, d, e);
-        let dh_sym = dh_sym(a, b, c, d, e, f);
-        let ds_sym = ds_sym(a, b, c, d, e, g);
-        let c_fitting_report = self.direct_compare2(&cp_vals, &temps, Cp_sym);
-        report_map.insert("Cp fitting report".to_string(), c_fitting_report);
-        let dh_fitting_report = self.direct_compare2(&h_vals, &temps, dh_sym);
-        report_map.insert("dh fitting report".to_string(), dh_fitting_report);
-        let ds_fitting_report = self.direct_compare2(&s_vals, &temps, ds_sym);
-        report_map.insert("ds fitting report".to_string(), ds_fitting_report);
-
         let coeffs = (a, b, c, d, e, f, g);
         self.coeffs = coeffs;
+        let report_map =
+            self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
         Self::print_quality_table(&report_map);
         Ok(())
     }
@@ -740,7 +965,6 @@ impl NASAdata {
         T_min: f64,
         T_max: f64,
     ) -> Result<HashMap<String, FittingReport>, NASAError> {
-        let mut report_map: HashMap<String, FittingReport> = HashMap::new();
         let mut Tvec: Vec<f64> = Vec::new();
         let mut cp_vec: Vec<f64> = Vec::new();
         let mut h_vec: Vec<f64> = Vec::new();
@@ -802,14 +1026,20 @@ impl NASAdata {
             h_vec.extend(h_vals);
             s_vec.extend(s_vals);
         }
-        assert_eq!(Tvec.len(), cp_vec.len());
-        assert_eq!(Tvec.len(), h_vec.len());
-        assert_eq!(Tvec.len(), s_vec.len());
+        if Tvec.len() != cp_vec.len() || Tvec.len() != h_vec.len() || Tvec.len() != s_vec.len() {
+            return Err(NASAError::FittingError(
+                "NASA non-adjacent fitting assembled inconsistent sample lengths".to_string(),
+            ));
+        }
 
         //  let coeffs = fit_nasa7(&Tvec, &cp_vec, &h_vec, &s_vec, false);
-        let coeffs = fit_nasa7_stable(&Tvec, &cp_vec, &h_vec, &s_vec, false, 1e-9).coeffs;
-        println!("a..g = {:?}", coeffs);
-        assert_eq!(coeffs.len(), 7);
+        let coeffs = fit_nasa7_stable(&Tvec, &cp_vec, &h_vec, &s_vec, false, 1e-9)?.coeffs;
+        if coeffs.len() != 7 {
+            return Err(NASAError::FittingError(format!(
+                "NASA solver returned {} coefficients instead of 7",
+                coeffs.len()
+            )));
+        }
         let a = coeffs[0];
         let b = coeffs[1];
         let c = coeffs[2];
@@ -818,18 +1048,9 @@ impl NASAdata {
         let f = coeffs[5];
         let g = coeffs[6];
 
-        let Cp_sym = Cp_sym(a, b, c, d, e);
-        let dh_sym = dh_sym(a, b, c, d, e, f);
-        let ds_sym = ds_sym(a, b, c, d, e, g);
-        let c_fitting_report = self.direct_compare2(&cp_vec, &Tvec, Cp_sym);
-        report_map.insert("Cp fitting report".to_string(), c_fitting_report);
-        let dh_fitting_report = self.direct_compare2(&h_vec, &Tvec, dh_sym);
-        report_map.insert("dh fitting report".to_string(), dh_fitting_report);
-        let ds_fitting_report = self.direct_compare2(&s_vec, &Tvec, ds_sym);
-        report_map.insert("ds fitting report".to_string(), ds_fitting_report);
-
         let coeffs = (a, b, c, d, e, f, g);
         self.coeffs = coeffs;
+        let report_map = self.reports_for_coefficients(&Tvec, &cp_vec, &h_vec, &s_vec, coeffs)?;
         Self::print_quality_table(&report_map);
 
         Ok(report_map)
@@ -837,14 +1058,16 @@ impl NASAdata {
 
     ///////////////////////////////////////////////////////////////////
 
-    /// Weighted sum fitting method for simultaneous optimization
+    /// Stacked weighted LM fitting for simultaneous optimization
     ///
-    /// Fits NASA-7 coefficients by optimizing a weighted combination:
-    /// Y = Cp + 1e-3*dH + 1e-1*dS
+    /// Fits one NASA-7 vector against separate `Cp`, `dH`, and `dS` residual
+    /// families. Each family is scaled to a comparable numerical magnitude, but
+    /// it remains an independent residual block in the LM objective.
     ///
-    /// This approach optimizes all thermodynamic properties simultaneously rather than
-    /// sequentially, potentially providing better overall consistency. The weights
-    /// account for the different scales of the properties (dH is typically large).
+    /// Keeping the residuals separate gives LM direct information about each
+    /// property instead of only their weighted scalar sum. The existing
+    /// property-wise reports already rejected inaccurate final fits; the stacked
+    /// objective improves the optimization formulation itself.
     ///
     /// # Arguments
     /// * `coeffs_min` - Coefficients for lower temperature range
@@ -862,7 +1085,7 @@ impl NASAdata {
         T_min: f64,
         T_max: f64,
     ) -> Result<HashMap<String, FittingReport>, NASAError> {
-        let mut report_map: HashMap<String, FittingReport> = HashMap::new();
+        let preserved_coeffs = identical_adjacent_coefficients(&coeffs_min, &coeffs_max);
         let (_, T_center) = (coeffs_min.T.0, coeffs_min.T.1);
         let (T_center_check, _) = (coeffs_max.T.0, coeffs_max.T.1);
         if T_center != T_center_check {
@@ -874,14 +1097,17 @@ impl NASAdata {
             T_min,
             T_max,
         )?;
-        // Create combined function Y = Cp + a*dH + b*dS
-
+        if let Some(coeffs) = preserved_coeffs {
+            self.coeffs = coeffs;
+            let report_map =
+                self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
+            Self::print_quality_table(&report_map);
+            return Ok(report_map);
+        }
+        // Scale the three residual families without collapsing them into one value.
         let w_cp = 1.0;
         let w_h = 1e-3;
         let w_s = 1e-1;
-        // let combined_func_to_fit = Expr::parse_expression(
-        //      "1.987* (a + b * t + c * t^2 + d * t^3 + e * t^4) + 1e-3 * 1.987 *t* (a + b * t/2 + (c/3) * t^2 + (d/4) * t^3 + (e/5) * t^4 + f/t) + 1e-1 * 1.987 * (a* ln( t ) + b * t + c * t^2 / 2 + d * t^3 / 3.0 + e * t^4 / 4.0 + g)"
-        //   ).simplify_();
         let Cp_func_to_fit =
             Expr::parse_expression("1.987* (a + b * t + c * t^2 + d * t^3 + e * t^4)");
         let dh_func_to_fit = Expr::parse_expression(
@@ -890,22 +1116,15 @@ impl NASAdata {
         let ds_func_to_fit = Expr::parse_expression(
             "1.987 * (a* ln( t ) + b * t + c * t^2 / 2 + d * t^3 / 3.0 + e * t^4 / 4.0 + g)",
         );
-        let combined_func_to_fit = Expr::Const(w_cp) * Cp_func_to_fit.clone()
-            + Expr::Const(w_h) * dh_func_to_fit.clone()
-            + Expr::Const(w_s) * ds_func_to_fit.clone();
-        let y_data = w_cp * DVector::from_vec(cp_vals.clone())
-            + w_h * DVector::from_vec(h_vals.clone())
-            + w_s * DVector::from_vec(s_vals.clone());
-        let mut sew = SewTwoFunctions {
-            f1: Expr::Const(0.0),
-            f2: Expr::Const(0.0),
-            x_left: 0.0,
-            x_central: 0.0,
-            n_points: 0,
-            x_right: 0.0,
-            fitting_data: (temps.clone(), y_data.data.as_vec().clone()),
-            fitting: Fitting::new(),
-        };
+        let weighted_equations = vec![
+            Expr::Const(w_cp) * Cp_func_to_fit.clone(),
+            Expr::Const(w_h) * dh_func_to_fit.clone(),
+            Expr::Const(w_s) * ds_func_to_fit.clone(),
+        ];
+        // RustedSciThe stores multi-equation targets in equation-major order.
+        let mut weighted_targets = cp_vals.iter().map(|value| w_cp * value).collect::<Vec<_>>();
+        weighted_targets.extend(h_vals.iter().map(|value| w_h * value));
+        weighted_targets.extend(s_vals.iter().map(|value| w_s * value));
         let initial_guess = vec![
             (coeffs_min.coeff.0 + coeffs_max.coeff.0) / 2.0,
             (coeffs_min.coeff.1 + coeffs_max.coeff.1) / 2.0,
@@ -915,54 +1134,44 @@ impl NASAdata {
             (coeffs_min.coeff.5 + coeffs_max.coeff.5) / 2.0,
             (coeffs_min.coeff.6 + coeffs_max.coeff.6) / 2.0,
         ];
+        let unknowns = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+            "e".to_string(),
+            "f".to_string(),
+            "g".to_string(),
+        ];
+        let fitting = Fitting::new()
+            .with_data(temps.clone(), weighted_targets)
+            .with_equations(weighted_equations)
+            .with_unknowns(unknowns)
+            .with_arg("t".to_string())
+            .with_initial_guess(initial_guess)
+            .with_tolerance(1e-10)
+            .with_f_tolerance(1e-12)
+            .with_g_tolerance(1e-12)
+            .with_max_iterations(1000)
+            .build();
+        let (map_of_solutions, r_squared) = lm_solution(
+            &fitting,
+            "NASA adjacent simultaneous",
+            &["a", "b", "c", "d", "e", "f", "g"],
+        )?;
+        println!("r_squared for stacked fitting: {r_squared}");
+        let a = map_of_solutions["a"];
+        let b = map_of_solutions["b"];
+        let c = map_of_solutions["c"];
+        let d = map_of_solutions["d"];
+        let e = map_of_solutions["e"];
+        let f = map_of_solutions["f"];
+        let g = map_of_solutions["g"];
 
-        sew.fit(
-            combined_func_to_fit.clone(),
-            Some(vec![
-                "a".to_string(),
-                "b".to_string(),
-                "c".to_string(),
-                "d".to_string(),
-                "e".to_string(),
-                "f".to_string(),
-                "g".to_string(),
-            ]),
-            "t".to_string(),
-            initial_guess,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-
-        let r_squared = sew.get_r_ssquared();
-        println!("r_squared for combined fitting: {}", r_squared.unwrap());
-
-        let map_of_solutions = sew.get_map_of_solutions().unwrap();
-        let a = *map_of_solutions.get("a").unwrap();
-        let b = *map_of_solutions.get("b").unwrap();
-        let c = *map_of_solutions.get("c").unwrap();
-        let d = *map_of_solutions.get("d").unwrap();
-        let e = *map_of_solutions.get("e").unwrap();
-        let f = *map_of_solutions.get("f").unwrap();
-        let g = *map_of_solutions.get("g").unwrap();
-
-        self.coeffs = (a, b, c, d, e, f, g);
-
-        let combined_func_to_fit = combined_func_to_fit.set_variable_from_map(&map_of_solutions);
-        let comb_func_fitting_report =
-            self.direct_compare2(&y_data.data.as_vec().clone(), &temps, combined_func_to_fit);
-        report_map.insert("weighted function".to_string(), comb_func_fitting_report);
-        let Cp_sym = Cp_sym(a, b, c, d, e);
-        let ds_sym = ds_sym(a, b, c, d, e, g);
-        let dh_sym = dh_sym(a, b, c, d, e, f);
-        let ds_fitting_report = self.direct_compare2(&s_vals, &temps, ds_sym);
-        report_map.insert("ds fitting report".to_string(), ds_fitting_report);
-        let dh_fitting_report = self.direct_compare2(&h_vals, &temps, dh_sym);
-        report_map.insert("dh fitting report".to_string(), dh_fitting_report);
-        let c_fitting_report = self.direct_compare2(&cp_vals, &temps, Cp_sym);
-        report_map.insert("Cp fitting report".to_string(), c_fitting_report);
+        let coeffs = (a, b, c, d, e, f, g);
+        self.coeffs = coeffs;
+        let report_map =
+            self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
         Self::print_quality_table(&report_map);
 
         Ok(report_map)
@@ -986,7 +1195,6 @@ impl NASAdata {
         T_min: f64,
         T_max: f64,
     ) -> Result<HashMap<String, FittingReport>, NASAError> {
-        let mut report_map: HashMap<String, FittingReport> = HashMap::new();
         let (temps, cp_vals, h_vals, s_vals) =
             Self::prepare_fit_data_for_non_adjacent_fitting(coeffs.clone(), T_min, T_max)?;
 
@@ -1040,21 +1248,24 @@ impl NASAdata {
             None,
         );
 
-        let r_squared = sew.get_r_ssquared();
-        println!("r_squared for s: {}", r_squared.unwrap());
-        if 1.0 - r_squared.unwrap() >= 5.0e-2 {
+        let (map_of_solutions_6_coeffs, r_squared) = lm_solution(
+            &sew.fitting,
+            "NASA non-adjacent entropy",
+            &["a", "b", "c", "d", "e", "g"],
+        )?;
+        println!("r_squared for s: {r_squared}");
+        if 1.0 - r_squared >= 5.0e-2 {
             return Err(NASAError::FittingError(format!(
                 "Poor entropy fitting quality: R² = {:.6}",
-                r_squared.unwrap()
+                r_squared
             )));
         }
-        let map_of_solutions_6_coeffs = sew.get_map_of_solutions().unwrap();
-        let a = *map_of_solutions_6_coeffs.get("a").unwrap();
-        let b = *map_of_solutions_6_coeffs.get("b").unwrap();
-        let c = *map_of_solutions_6_coeffs.get("c").unwrap();
-        let d = *map_of_solutions_6_coeffs.get("d").unwrap();
-        let e = *map_of_solutions_6_coeffs.get("e").unwrap();
-        let g = *map_of_solutions_6_coeffs.get("g").unwrap();
+        let a = map_of_solutions_6_coeffs["a"];
+        let b = map_of_solutions_6_coeffs["b"];
+        let c = map_of_solutions_6_coeffs["c"];
+        let d = map_of_solutions_6_coeffs["d"];
+        let e = map_of_solutions_6_coeffs["e"];
+        let g = map_of_solutions_6_coeffs["g"];
         /////////////////// fitting h ///////////////////////
         let dh_func_to_fit = Expr::parse_expression(
             "1.987 *t* (a + b * t/2 + (c/3) * t^2 + (d/4) * t^3 + (e/5) * t^4 + f/t)",
@@ -1091,27 +1302,20 @@ impl NASAdata {
             None,
             None,
         );
-        let r_squared = sew2.get_r_ssquared();
-        println!("r_squared for h: {}", r_squared.unwrap());
-        if 1.0 - r_squared.unwrap() >= 5.0e-2 {
+        let (f_map, r_squared) = lm_solution(&sew2.fitting, "NASA non-adjacent enthalpy", &["f"])?;
+        println!("r_squared for h: {r_squared}");
+        if 1.0 - r_squared >= 5.0e-2 {
             return Err(NASAError::FittingError(format!(
                 "Poor enthalpy fitting quality: R² = {:.6}",
-                r_squared.unwrap()
+                r_squared
             )));
         }
-        let f_map = sew2.get_map_of_solutions().unwrap();
-        let f = *f_map.get("f").unwrap();
-        self.coeffs = (a, b, c, d, e, f, g);
-        ////////////////////////////ensure that fitting is correct///////////////
-        let Cp_sym = Cp_sym(a, b, c, d, e);
-        let ds_sym = ds_sym(a, b, c, d, e, g);
-        let dh_sym = dh_sym(a, b, c, d, e, f);
-        let ds_fitting_report = self.direct_compare2(&s_vals, &temps, ds_sym);
-        report_map.insert("ds fitting report".to_string(), ds_fitting_report);
-        let dh_fitting_report = self.direct_compare2(&h_vals, &temps, dh_sym);
-        report_map.insert("dh fitting report".to_string(), dh_fitting_report);
-        let c_fitting_report = self.direct_compare2(&cp_vals, &temps, Cp_sym);
-        report_map.insert("Cp fitting report".to_string(), c_fitting_report);
+        let f = f_map["f"];
+        let coeffs = (a, b, c, d, e, f, g);
+        self.coeffs = coeffs;
+        // Validate the published coefficients against every raw property family.
+        let report_map =
+            self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
         Self::print_quality_table(&report_map);
 
         Ok(report_map.clone())
@@ -1139,7 +1343,7 @@ impl NASAdata {
         T_min: f64,
         T_max: f64,
     ) -> Result<HashMap<String, FittingReport>, NASAError> {
-        let mut report_map: HashMap<String, FittingReport> = HashMap::new();
+        let preserved_coeffs = identical_adjacent_coefficients(&coeffs_min, &coeffs_max);
         let (_, T_center) = (coeffs_min.T.0, coeffs_min.T.1);
         let (T_center_check, _) = (coeffs_max.T.0, coeffs_max.T.1);
         if T_center != T_center_check {
@@ -1151,6 +1355,13 @@ impl NASAdata {
             T_min,
             T_max,
         )?;
+        if let Some(coeffs) = preserved_coeffs {
+            self.coeffs = coeffs;
+            let report_map =
+                self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
+            Self::print_quality_table(&report_map);
+            return Ok(report_map);
+        }
         /////////////////////////////fitting ds//////////////////////////////////
 
         let ds_func_to_fit = Expr::parse_expression(
@@ -1195,21 +1406,24 @@ impl NASAdata {
             None,
         );
 
-        let r_squared = sew.get_r_ssquared();
-        println!("r_squared for s: {}", r_squared.unwrap());
-        if 1.0 - r_squared.unwrap() >= 5.0e-2 {
+        let (map_of_solutions_6_coeffs, r_squared) = lm_solution(
+            &sew.fitting,
+            "NASA adjacent sequential entropy",
+            &["a", "b", "c", "d", "e", "g"],
+        )?;
+        println!("r_squared for s: {r_squared}");
+        if 1.0 - r_squared >= 5.0e-2 {
             return Err(NASAError::FittingError(format!(
                 "Poor entropy fitting quality: R² = {:.6}",
-                r_squared.unwrap()
+                r_squared
             )));
         }
-        let map_of_solutions_6_coeffs = sew.get_map_of_solutions().unwrap();
-        let a = *map_of_solutions_6_coeffs.get("a").unwrap();
-        let b = *map_of_solutions_6_coeffs.get("b").unwrap();
-        let c = *map_of_solutions_6_coeffs.get("c").unwrap();
-        let d = *map_of_solutions_6_coeffs.get("d").unwrap();
-        let e = *map_of_solutions_6_coeffs.get("e").unwrap();
-        let g = *map_of_solutions_6_coeffs.get("g").unwrap();
+        let a = map_of_solutions_6_coeffs["a"];
+        let b = map_of_solutions_6_coeffs["b"];
+        let c = map_of_solutions_6_coeffs["c"];
+        let d = map_of_solutions_6_coeffs["d"];
+        let e = map_of_solutions_6_coeffs["e"];
+        let g = map_of_solutions_6_coeffs["g"];
         /////////////////// fitting h ///////////////////////
         let dh_func_to_fit = Expr::parse_expression(
             "1.987 *t* (a + b * t/2 + (c/3) * t^2 + (d/4) * t^3 + (e/5) * t^4 + f/t)",
@@ -1238,27 +1452,21 @@ impl NASAdata {
             None,
             None,
         );
-        let r_squared = sew2.get_r_ssquared();
-        println!("r_squared for h: {}", r_squared.unwrap());
-        if 1.0 - r_squared.unwrap() >= 5.0e-2 {
+        let (f_map, r_squared) =
+            lm_solution(&sew2.fitting, "NASA adjacent sequential enthalpy", &["f"])?;
+        println!("r_squared for h: {r_squared}");
+        if 1.0 - r_squared >= 5.0e-2 {
             return Err(NASAError::FittingError(format!(
                 "Poor enthalpy fitting quality: R² = {:.6}",
-                r_squared.unwrap()
+                r_squared
             )));
         }
-        let f_map = sew2.get_map_of_solutions().unwrap();
-        let f = *f_map.get("f").unwrap();
-        self.coeffs = (a, b, c, d, e, f, g);
-        ////////////////////////////ensure that fitting is correct///////////////
-        let Cp_sym = Cp_sym(a, b, c, d, e);
-        let ds_sym = ds_sym(a, b, c, d, e, g);
-        let dh_sym = dh_sym(a, b, c, d, e, f);
-        let ds_fitting_report = self.direct_compare2(&s_vals, &temps, ds_sym);
-        report_map.insert("ds fitting report".to_string(), ds_fitting_report);
-        let dh_fitting_report = self.direct_compare2(&h_vals, &temps, dh_sym);
-        report_map.insert("dh fitting report".to_string(), dh_fitting_report);
-        let c_fitting_report = self.direct_compare2(&cp_vals, &temps, Cp_sym);
-        report_map.insert("Cp fitting report".to_string(), c_fitting_report);
+        let f = f_map["f"];
+        let coeffs = (a, b, c, d, e, f, g);
+        self.coeffs = coeffs;
+        // Validate the published coefficients against every raw property family.
+        let report_map =
+            self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
 
         // Print fitting quality report table
         Self::print_quality_table(&report_map);
@@ -1283,55 +1491,15 @@ impl NASAdata {
         y_data: &[f64],
         T_vec: &[f64],
         fit_function: Expr,
-    ) -> FittingReport {
-        let n = y_data.len();
-
-        let fitted_data_func = fit_function.lambdify1D();
-        let y_data_fitted = T_vec
-            .iter()
-            .map(|&T| fitted_data_func(T))
-            .collect::<Vec<f64>>();
-        assert_eq!(y_data.len(), y_data_fitted.len());
-        let mut l1_norm = 0.0;
-        let mut l2_norm = 0.0;
-        let mut max_norm: f64 = 0.0;
-        let mut map_of_residuals: HashMap<usize, (f64, f64)> = HashMap::new();
-
-        for (i, (y, y_fit)) in y_data.iter().zip(y_data_fitted.iter()).enumerate() {
-            let diff = (y - y_fit).abs();
-            l1_norm += diff;
-            l2_norm += diff * diff;
-            let rel_diff = diff / y.powf(2.0);
-            if rel_diff.abs() > 10e-2 {
-                map_of_residuals.insert(i, (T_vec[i], rel_diff));
-            }
-            max_norm = max_norm.max((diff / y).abs());
-        }
-
-        l1_norm = l1_norm / (2.0 * n as f64);
-        l2_norm = l2_norm.sqrt() / (2.0 * n as f64);
-
-        let mut T_range: Option<(f64, f64)> = None;
-        if !map_of_residuals.is_empty() {
-            let max_T = *map_of_residuals
-                .iter()
-                .map(|(_, (T, _))| T)
-                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                .unwrap();
-            let min_T = *map_of_residuals
-                .iter()
-                .map(|(_, (T, _))| T)
-                .min_by(|a, b| a.partial_cmp(b).unwrap())
-                .unwrap();
-            T_range = Some((min_T, max_T));
-        }
-
-        FittingReport {
-            l2_norm,
-            max_norm,
-            number_of_significant_points: map_of_residuals.len(),
-            T_range,
-        }
+    ) -> Result<FittingReport, NASAError> {
+        let report = compare_property_series(y_data, T_vec, fit_function)
+            .map_err(|err| NASAError::FittingError(err.to_string()))?;
+        Ok(FittingReport {
+            l2_norm: report.l2_norm,
+            max_norm: report.max_norm,
+            number_of_significant_points: report.number_of_significant_points,
+            T_range: report.t_range,
+        })
     }
 
     /// Prints a formatted table of fitting quality metrics
@@ -1386,4 +1554,75 @@ pub struct FittingReport {
     pub number_of_significant_points: usize,
     /// Temperature range where significant deviations occur [K]
     pub T_range: Option<(f64, f64)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    #[test]
+    fn test_fit_nasa7_rejects_bad_inputs() {
+        let temps = [300.0, 400.0, 500.0];
+        let cp = [10.0, 11.0];
+        let h = [1.0, 2.0, 3.0];
+        let s = [4.0, 5.0, 6.0];
+
+        let err = fit_nasa7(&temps, &cp, &h, &s, false).unwrap_err();
+        assert!(matches!(err, NASAError::FittingError(_)));
+
+        let cp_bad = [10.0, f64::NAN, 12.0];
+        let err = fit_nasa7(&temps, &cp_bad, &h, &s, false).unwrap_err();
+        assert!(matches!(err, NASAError::FittingError(_)));
+    }
+
+    #[test]
+    fn test_fit_nasa7_stable_recovers_known_coeffs() {
+        let coeffs = [2.5, 1.0e-3, -2.0e-6, 3.0e-9, -4.0e-12, 8.0, 1.2];
+        let temps = [300.0, 400.0, 500.0, 600.0, 700.0, 800.0];
+        let cp: Vec<f64> = temps.iter().map(|&t| nasa7_cp_si(t, &coeffs)).collect();
+        let h: Vec<f64> = temps.iter().map(|&t| nasa7_h_si(t, &coeffs)).collect();
+        let s: Vec<f64> = temps.iter().map(|&t| nasa7_s_si(t, &coeffs)).collect();
+
+        let fitted =
+            fit_nasa7_stable(&temps, &cp, &h, &s, false, 1e-10).expect("stable fit should succeed");
+        assert_eq!(fitted.coeffs.len(), 7);
+        assert!(fit_ok(&fitted.stats));
+        for (expected, actual) in coeffs.iter().zip(fitted.coeffs.iter()) {
+            assert_relative_eq!(*expected, *actual, epsilon = 1e-2);
+        }
+    }
+
+    #[test]
+    fn test_prepare_fit_data_for_2_range_fitting_keeps_boundary_once() {
+        let coeffs_min = Coeffs {
+            T: (300.0, 500.0),
+            coeff: (2.0, 1.0e-3, 0.0, 0.0, 0.0, 5.0, 1.0),
+        };
+        let coeffs_max = Coeffs {
+            T: (500.0, 900.0),
+            coeff: (2.0, 1.0e-3, 0.0, 0.0, 0.0, 5.0, 1.0),
+        };
+
+        let (temps, cp, h, s) =
+            NASAdata::prepare_fit_data_for_2_range_fitting(coeffs_min, coeffs_max, 300.0, 700.0)
+                .expect("boundary-aware preparation should succeed");
+
+        assert_eq!(temps.len(), cp.len());
+        assert_eq!(temps.len(), h.len());
+        assert_eq!(temps.len(), s.len());
+        assert_eq!(temps.iter().filter(|&&t| t == 500.0).count(), 1);
+        assert!(temps.windows(2).all(|window| window[0] < window[1]));
+    }
+
+    #[test]
+    fn test_lm_solution_converts_missing_backend_result_into_typed_error() {
+        let fitting = Fitting::new();
+        let error = lm_solution(&fitting, "test stage", &["a"])
+            .expect_err("an unsolved fitting backend must not look successful");
+
+        assert!(
+            matches!(error, NASAError::FittingError(message) if message.contains("did not converge"))
+        );
+    }
 }

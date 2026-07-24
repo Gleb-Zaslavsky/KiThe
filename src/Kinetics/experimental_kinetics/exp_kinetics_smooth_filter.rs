@@ -433,7 +433,7 @@ impl TGADataset {
             }
         }
 
-        let mut new_df = df
+        let new_df = df
             .with_column(Series::new(out_col.clone().into(), out).into())?
             .clone();
         let new_df = if is_drop {

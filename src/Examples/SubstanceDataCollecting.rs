@@ -36,11 +36,11 @@ pub fn collecting_thermo_data(thermotask: usize) {
             let Cp = 33.8;
             // Test transport calculations
             println!("\n \n Transport properties:");
-            user_subs.set_M(
+            let _ = user_subs.set_M(
                 HashMap::from([("H2O".to_string(), 18.0), ("CO".to_string(), 32.0)]),
                 None,
             );
-            user_subs.set_P(1e5, None);
+            let _ = user_subs.set_P(1e5, None);
             user_subs
                 .extract_thermal_coeffs(substances[0].as_str(), 400.0)
                 .unwrap();
@@ -83,16 +83,16 @@ pub fn collecting_thermo_data(thermotask: usize) {
 
             // Check that values were stored
             for substance in &["H2O", "CO"] {
-                let property_map = user_subs.therm_map_of_properties_values.get(*substance);
-                assert!(property_map.is_some());
+                let cp_state = user_subs.therm_value_state(substance, DataType::Cp);
+                let dh_state = user_subs.therm_value_state(substance, DataType::dH);
+                let ds_state = user_subs.therm_value_state(substance, DataType::dS);
 
-                let property_map = property_map.unwrap();
-                assert!(property_map.get(&DataType::Cp).unwrap().is_some());
-                assert!(property_map.get(&DataType::dH).unwrap().is_some());
-                assert!(property_map.get(&DataType::dS).unwrap().is_some());
+                assert!(cp_state.is_ready());
+                assert!(dh_state.is_ready());
+                assert!(ds_state.is_ready());
 
-                // Check that values are reasonable
-                assert!(property_map.get(&DataType::Cp).unwrap().unwrap() > 0.0);
+                // Check that values are reasonable.
+                assert!(cp_state.value().copied().unwrap() > 0.0);
             }
             user_subs.print_search_summary();
         }
@@ -113,14 +113,14 @@ pub fn collecting_thermo_data(thermotask: usize) {
             );
 
             // Perform the search
-            user_subs.search_substances();
+            let _ = user_subs.search_substances();
             user_subs.extract_thermal_coeffs("CO", 400.0).unwrap();
             user_subs.extract_thermal_coeffs("H2O", 400.0).unwrap();
             // Print full summary
             user_subs.print_search_summary();
             let datamap = user_subs.get_substance_result("CO").unwrap();
             let Thermo = datamap.get(&WhatIsFound::Thermo).unwrap().as_ref().unwrap();
-            let Calculator = Thermo.calculator.as_ref().unwrap();
+            let Calculator = Thermo.calculator().unwrap();
             let Cp;
             match Calculator {
                 CalculatorType::Thermo(thermo) => {
@@ -150,7 +150,7 @@ pub fn collecting_thermo_data(thermotask: usize) {
                 .unwrap()
                 .as_ref()
                 .unwrap();
-            let Calculator = Transport.calculator.as_ref().unwrap();
+            let Calculator = Transport.calculator().unwrap();
             match Calculator {
                 CalculatorType::Transport(transport) => {
                     // Test transport calculations

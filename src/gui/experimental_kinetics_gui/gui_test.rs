@@ -1,11 +1,7 @@
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
 
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
-use crate::gui::experimental_kinetics_gui::controller_kinetics::DirectProblemDialogState;
-use crate::gui::experimental_kinetics_gui::controller_methods::KineticMethodsWindowState;
-use crate::gui::experimental_kinetics_gui::controller_table::ColumnManagerState;
-use crate::gui::experimental_kinetics_gui::interaction::SelectionRect;
-use crate::gui::experimental_kinetics_gui::test_options::TestOptions;
+
 use std::path::Path;
 
 const TEST_DATA_PATH: &str = "src/assets/TGAexample.txt";
@@ -61,6 +57,11 @@ pub fn load_model_with_two_curves() -> PlotModel {
 
 #[cfg(test)]
 mod tests {
+    use crate::gui::experimental_kinetics_gui::controller_kinetics::DirectProblemDialogState;
+    use crate::gui::experimental_kinetics_gui::controller_methods::KineticMethodsWindowState;
+    use crate::gui::experimental_kinetics_gui::controller_table::ColumnManagerState;
+    use crate::gui::experimental_kinetics_gui::interaction::SelectionRect;
+    use crate::gui::experimental_kinetics_gui::test_options::TestOptions;
 
     use super::*;
     use crate::Kinetics::experimental_kinetics::exp_engine_api::XY;

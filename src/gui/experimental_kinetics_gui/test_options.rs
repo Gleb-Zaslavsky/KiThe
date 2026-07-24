@@ -6,6 +6,7 @@ use crate::gui::experimental_kinetics_gui::gui_test::load_model_with_one_curve;
 use crate::gui::experimental_kinetics_gui::help_view::{HelpDoc, HelpLanguage};
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
 use crate::gui::experimental_kinetics_gui::settings::{CalibrationLine, Settings};
+use log::{info, warn};
 use std::collections::HashSet;
 
 pub struct TestOptions {
@@ -147,10 +148,10 @@ impl TestOptions {
     /// Main UI display function
     pub fn show(ui: &mut egui::Ui, model: &mut PlotModel, test_options: &mut TestOptions) {
         if ui.button("Run Tests").clicked() {
-            println!("Stub: Run Tests");
+            info!("Stub: Run Tests");
         }
         if ui.button("Load testing data").clicked() {
-            println!("Stub: Load testing data");
+            info!("Stub: Load testing data");
             model.push_testing_data();
         }
         if ui.button("Create synthetic data").clicked() {
@@ -168,7 +169,7 @@ impl TestOptions {
 
         ui.separator();
         if ui.button("Help").clicked() {
-            println!("Opening help window");
+            info!("Opening help window");
             test_options.show_help_window = true;
             let _ = test_options.reload_help();
             ui.ctx().request_repaint();
@@ -270,7 +271,7 @@ impl TestOptions {
                 ui.horizontal(|ui| {
                     if ui.button("Save Settings").clicked() {
                         if let Err(e) = self.apply_settings(model) {
-                            eprintln!("Error applying settings: {:?}", e);
+                            warn!("Error applying settings: {:?}", e);
                             model.push_message(&format!("Error: {:?}", e)).ok();
                         } else {
                             model.push_message("Settings saved successfully").ok();

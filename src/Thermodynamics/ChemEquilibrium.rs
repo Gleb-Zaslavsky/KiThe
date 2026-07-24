@@ -1,87 +1,84 @@
-pub mod Chem_eq_K_eq;
-pub mod Chem_eq_K_eq2;
-pub mod Chem_eq_K_eq3;
-pub mod Chem_eq_K_eq_test;
-pub mod Chem_eq_K_eq_test2;
-pub mod ClassicalThermodynamics;
-pub mod ClassicalThermodynamics2;
-pub mod ClassicalThermodynamics3;
-/// dG and S functions
-pub mod ClassicalThermodynamicsCalculations;
-/// Constructing nonlinear equations
-pub mod ClassicalThermodynamicsEquations;
-/// pretty printing of equations and results of calculations
-pub mod ClassicalThermodynamicsOutput;
-/// Aggregation of equations and their solution
-pub mod ClassicalThermodynamicsSolver;
-///module for chemical equilibrium and classical thermodynamics
-/// # Examples
-/// ```
-/// use KiThe::Thermodynamics::ChemEquilibrium::ClassicalThermodynamics2::Thermodynamics;
-/// use RustedSciThe::symbolic::symbolic_engine::Expr;
-/// use KiThe::Thermodynamics::User_substances::Phases;
-/// use approx::assert_relative_eq;
-/// use KiThe::Thermodynamics::User_substances::LibraryPriority;
-/// use KiThe::Thermodynamics::User_substances::SubsData;
-/// // calculating Gibbs free energy withoun concentration correction RT*ln(P/P°) + RT*ln(w_i)
-/// let subs =  vec!["CO".to_string(), "CO2".to_string()];
-/// // calling instance of strucutre SubsData created to search substances data in the databases, store
-/// // search results and calculate thermo properties
-/// let mut subdata = SubsData::new();
-/// // Set up library priorities
-/// subdata.set_multiple_library_priorities(
-///    vec!["NASA_gas".to_string()],
-///    LibraryPriority::Priority,
-/// );
-/// subdata.map_of_phases.insert(subs[0].clone(), Some(Phases::Gas));
-/// subdata.map_of_phases.insert(subs[1].clone(), Some(Phases::Gas));
-/// subdata.substances = subs.clone();
-/// // Perform the search
-/// subdata.search_substances();
-/// // Calling instance of structure Thermodynamics to calculate thermo dG
-/// let mut thermo = Thermodynamics::new();  
-/// // Set up basic parameters
-/// thermo.set_T(400.0);
-/// thermo.set_P(101325.0, None);
-/// let concentration = Some(vec![0.5, 0.5]);
-/// // Add test substances
-/// thermo.vec_of_substances = subs.clone();   
-/// // Set up phases
+//! Chemical equilibrium and thermodynamics module index.
+//!
+//! The modern typed equilibrium stack lives alongside a small legacy surface
+//! that is kept only while older call sites are being retired.
 
-/// // savng  the search results in the structure Thermodynamics
-/// thermo.subdata = subdata;
-/// // Calculate Gibbs free energy
-///thermo.calculate_Gibbs_free_energy(400.0,  concentration.clone());
-/// //  Calculate symbolic Gibbs free energy
-/// thermo.calculate_Gibbs_sym(400.0, Some(vec![Expr::Var("w1".to_string()), Expr::Var("w2".to_string())]));
-/// // getting the results of the calculation
-/// thermo.calculate_Gibbs_fun( 400.0);
-/// let map_of_gibbs = thermo.dG.clone();
-/// let map_of_gibbs_sym = thermo.dG_sym.clone();
-/// let map_of_gibbs_fun = thermo.clone().dG_fun;
-///    for substance in &thermo.vec_of_substances {
-///        println!("substance: {:?}", substance);
-///        println!("map_of_gibbs: {:?}", map_of_gibbs[substance]);
-///        println!("map_of_gibbs_sym: {:?}", map_of_gibbs_sym[substance]);
-///    
-///    }
-///    for substance in &thermo.vec_of_substances {
-///        let dG_value = map_of_gibbs[substance];
-///
-///        let dG_from_fun = map_of_gibbs_fun.get(substance).unwrap()(400.0, concentration.clone());
-///        assert_relative_eq!(dG_value, dG_from_fun, epsilon = 1e-8);
-///
-///        let dG_sym = map_of_gibbs_sym[substance].clone();
-///        let dG_sym = dG_sym.set_variable("P", 101325.0);
-///  
-///        let dG_from_sym  = dG_sym.lambdify_owned(vec!["T", "w1", "w2"]);
-///        let dG_from_sym  = dG_from_sym(vec![400.0, 0.5, 0.5]);
-///        assert_relative_eq!(dG_value, dG_from_sym, epsilon = 1e-8);
-///    
-///    }
-/// ```
-mod ClassicalThermodynamics_tests;
-mod ClassicalThermodynamics_tests2;
-mod ClassicalThermodynamics_tests3;
+/// Legacy handwritten nonlinear solver.
 pub mod NR_Legacy;
+/// Small helper examples retained for compatibility during the transition.
 pub mod easy_equilibrium;
+
+/// Immutable global/local projection for one fixed active phase set.
+pub(crate) mod equilibrium_active_set;
+/// Shared activity-model contract for numerical and symbolic equilibrium paths.
+pub mod equilibrium_activity;
+/// Internal bridge between solver policy and concrete backend execution.
+pub(crate) mod equilibrium_backend_adapter;
+/// Canonical phase-qualified component identity shared by bridge and solver.
+pub mod equilibrium_component;
+/// Cross-validation reports comparing canonical and independent K_eq results.
+pub mod equilibrium_constant_cross_validation;
+/// Independent reaction-extent/equilibrium-constant domain model.
+pub mod equilibrium_constant_problem;
+/// Independent small-system extent solver for equilibrium-constant validation.
+pub mod equilibrium_constant_solver;
+#[cfg(test)]
+mod equilibrium_constant_solver_tests;
+#[cfg(test)]
+mod equilibrium_constant_tests;
+/// Policies and reports for equilibrium-constant validation.
+pub mod equilibrium_constant_validation;
+#[cfg(test)]
+mod equilibrium_golden_fixtures_tests;
+/// Typed, validated input data for the canonical equilibrium formulation.
+pub mod equilibrium_ids;
+/// Temporary adapter around the historical hand-written nonlinear methods.
+pub(crate) mod equilibrium_legacy_backend;
+/// Canonical chemical-equilibrium solver using logarithmic species moles.
+pub mod equilibrium_log_moles;
+#[cfg(test)]
+mod equilibrium_log_moles_tests;
+#[cfg(test)]
+mod equilibrium_log_moles_tests2;
+/// Canonical typed layout and physical initial composition for multiphase problems.
+pub mod equilibrium_multiphase_domain;
+#[cfg(test)]
+mod equilibrium_multiphase_domain_tests;
+#[cfg(test)]
+mod equilibrium_multiphase_story_tests;
+/// Reaction-basis construction, equilibrium errors, and temporary legacy backends.
+pub mod equilibrium_nonlinear;
+#[cfg(test)]
+mod equilibrium_offline_regression_matrix_tests;
+/// Typed, validated equilibrium problem construction and previews.
+pub mod equilibrium_problem;
+#[cfg(test)]
+mod equilibrium_problem_tests;
+/// Typed reaction-basis contract for independent validation.
+pub mod equilibrium_reaction_basis;
+/// RustedSciThe symbolic nonlinear-solver adapters for equilibrium.
+pub mod equilibrium_rst_backend;
+#[cfg(test)]
+mod equilibrium_rst_backend_tests;
+#[cfg(test)]
+mod equilibrium_rst_matrix_tests;
+/// Explicit nonlinear-backend policies and fallback diagnostics.
+pub mod equilibrium_solver_policy;
+/// Postprocessing for range-temperature equilibrium sweeps.
+pub mod equilibrium_temperature_postprocessing;
+/// Backend-independent validation for reconstructed equilibrium candidates.
+pub mod equilibrium_validation;
+#[cfg(test)]
+mod equilibrium_validation_tests;
+#[cfg(test)]
+mod equilibrium_workflow_tests;
+/// Problem construction, phase-control, and gas-equilibrium workflows.
+pub mod equilibrium_workflows;
+/// Typed boundary from resolved phase data to equilibrium problem construction.
+pub mod phase_equilibrium_problem;
+#[cfg(test)]
+mod phase_equilibrium_problem_tests;
+/// Immutable phase-aware result assembled from one accepted bridge solve.
+pub mod phase_equilibrium_solution;
+/// Narrow fixed-pressure, fixed-temperature public workflow facade.
+pub mod phase_equilibrium_workflow;

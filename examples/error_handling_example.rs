@@ -9,18 +9,18 @@ use KiThe::Thermodynamics::User_substances_error::{SubsDataError, SubsDataResult
 fn main() -> SubsDataResult<()> {
     // Create a new SubsData instance
     let mut subs_data = SubsData::new();
-    subs_data.substances = vec![
+    subs_data.set_substances(vec![
         "CO".to_string(),
         "H2O".to_string(),
         "InvalidSubstance".to_string(),
-    ];
+    ]);
 
     // Set library priorities
     subs_data
         .set_multiple_library_priorities(vec!["NASA_gas".to_string()], LibraryPriority::Priority);
 
     // Perform the search
-    subs_data.search_substances();
+    subs_data.search_substances()?;
 
     // Example 1: Proper error handling for coefficient extraction
     match subs_data.extract_thermal_coeffs("CO", 400.0) {
@@ -82,6 +82,7 @@ fn main() -> SubsDataResult<()> {
 }
 
 /// Helper function demonstrating error propagation in user code
+#[allow(dead_code)]
 fn calculate_properties_for_substances(
     subs_data: &mut SubsData,
     substances: &[String],
@@ -102,6 +103,7 @@ fn calculate_properties_for_substances(
 }
 
 /// Example of custom error handling for specific use cases
+#[allow(dead_code)]
 fn safe_property_calculation(
     subs_data: &mut SubsData,
     substance: &str,

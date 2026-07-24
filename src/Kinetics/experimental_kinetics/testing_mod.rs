@@ -2,8 +2,7 @@ use polars::prelude::{DataFrame, LazyFrame, PolarsResult};
 
 use crate::Kinetics::experimental_kinetics::experiment_series_main::{ExperimentMeta, TGASeries};
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    AffectedColumns, ColumnMeta, ColumnNature, ColumnOrigin, History, TGADataset, TGADomainError,
-    TGASchema, Unit,
+    AffectedColumns, ColumnMeta, ColumnNature, History, TGADataset, TGADomainError, TGASchema, Unit,
 };
 use polars::prelude::*;
 use rand::rngs::StdRng;
@@ -302,7 +301,7 @@ impl VirtualTGA {
             }
         }
     }
-
+    #[allow(dead_code)]
     fn generate_voltage(
         time: &[f64],
         temperature: &[f64],
@@ -658,7 +657,7 @@ impl PipelineInvariantTest {
 pub mod tests_afvanced_config {
     use super::*;
     use approx::assert_relative_eq;
-    use polars::chunked_array::temporal::conversion;
+
     const R: f64 = 8.314;
     use crate::Kinetics::experimental_kinetics::kinetic_methods::kinetic_regression::linear_regression;
     use ndarray::Array1;
@@ -1010,7 +1009,7 @@ mod tests {
     use super::*;
     #[test]
     fn cut_interval_keeps_column_lengths_equal() {
-        let cfg = VirtualTGAConfig {
+        let _cfg = VirtualTGAConfig {
             n_points: 10_000,
             dt: 0.1,
             temperature: 600.0,
@@ -1163,7 +1162,7 @@ mod tests {
 
 #[cfg(test)]
 mod tests2 {
-    use super::*;
+
     use crate::Kinetics::experimental_kinetics::exp_engine_api::ViewRange;
     use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
     use crate::Kinetics::experimental_kinetics::one_experiment_dataset_test::tests::{
@@ -1253,7 +1252,7 @@ mod tests2 {
 #[cfg(test)]
 mod synthetic_dataset_tests {
     use super::*;
-
+    use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{ColumnOrigin, Unit};
     #[test]
     fn create_from_synthetic_data_sets_schema_fields() {
         let virtual_tga = VirtualTGA {

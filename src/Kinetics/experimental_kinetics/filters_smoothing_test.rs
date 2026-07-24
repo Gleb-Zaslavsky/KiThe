@@ -1085,7 +1085,7 @@ mod tests {
             .unwrap()
             .spline_resample_columns("time", "new_time", &["mass"], 300, SplineKind::Cosine)
             .unwrap();
-        let inv = PipelineInvariantTest::from_lazy(&ds.frame).unwrap();
+        let _inv = PipelineInvariantTest::from_lazy(&ds.frame).unwrap();
         let mass = ds.get_mass().unwrap();
         println!("mass {:?}", mass);
         let df = ds.frame.collect().unwrap();

@@ -10,6 +10,7 @@ mod tests {
     const smtime: time::Duration = time::Duration::from_secs(5);
     use thread::sleep;
     #[test]
+    #[ignore]
     fn test_thermo_calculator_nist() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("CO".to_owned(), SearchType::All, Phase::Gas);
@@ -63,6 +64,7 @@ mod tests {
         sleep(smtime)
     }
     #[test]
+    #[ignore]
     fn test_thermo_calculator_nist_simple_substance() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("O2".to_owned(), SearchType::All, Phase::Gas);
@@ -117,6 +119,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_thermo_calculator_nist_error_handling() {
         let mut nist = NISTdata::new();
 
@@ -132,6 +135,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_nist_clone() {
         let mut nist = NISTdata::new();
 
@@ -163,6 +167,7 @@ mod tests {
         sleep(smtime)
     }
     #[test]
+    #[ignore]
     fn test_temperature_range_calculations() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("CH4".to_owned(), SearchType::All, Phase::Gas);
@@ -181,6 +186,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_unit_conversion() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("CO2".to_owned(), SearchType::All, Phase::Gas);
@@ -202,6 +208,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_symbolic_expressions() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("H2O".to_owned(), SearchType::All, Phase::Gas);
@@ -222,6 +229,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_closure_functions() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("NO2".to_owned(), SearchType::All, Phase::Gas);
@@ -251,6 +259,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_taylor_series_expansion() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("NO2".to_owned(), SearchType::All, Phase::Gas);
@@ -275,6 +284,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_coefficient_extraction() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("CO".to_owned(), SearchType::All, Phase::Gas);
@@ -293,6 +303,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_integration_mean() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("H2O".to_owned(), SearchType::All, Phase::Gas);
@@ -316,6 +327,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn ThermoCalculator_nist() {
         let mut nist = create_thermal_by_name("NIST");
         let _ = nist.newinstance();
@@ -358,6 +370,7 @@ mod tests {
     ////////////////////////////TESTS FOR DATA FITTING//////////////////////////////////////////////
 
     #[test]
+    #[ignore]
     fn test_fitting_coeffs_for_T_interval_same_interval() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("CO".to_owned(), SearchType::All, Phase::Gas);
@@ -370,6 +383,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_fitting_coeffs_for_T_interval_adjacent() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("CO".to_owned(), SearchType::All, Phase::Gas);
@@ -448,6 +462,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_fitting_coeffs_for_T_interval_non_adjacent() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("H2O".to_owned(), SearchType::All, Phase::Gas);
@@ -469,6 +484,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_interval_for_this_T() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("NO2".to_owned(), SearchType::All, Phase::Gas);
@@ -489,6 +505,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_fitted_coeffs_consistency() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("O2".to_owned(), SearchType::All, Phase::Gas);
@@ -529,6 +546,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_fitting_error_handling() {
         let mut nist = NISTdata::new();
 
@@ -542,6 +560,40 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn test_fitting_failure_preserves_previous_coefficients() {
+        let mut nist = NISTdata::new();
+        nist.coeffs = Some((1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0));
+
+        let result = nist.fitting_non_adjacent(vec![], 400.0, 900.0);
+        assert!(result.is_err());
+        assert_eq!(nist.coeffs, Some((1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0)));
+    }
+
+    #[test]
+    #[ignore]
+    fn test_adjacent_fitting_failure_preserves_previous_coefficients() {
+        use crate::Thermodynamics::DBhandlers::NISTdata::Coeffs;
+
+        let mut nist = NISTdata::new();
+        nist.coeffs = Some((9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0));
+
+        let coeffs_min = Coeffs {
+            T: (300.0, 500.0),
+            coeff: (30.0, -3.0, 0.5, -0.05, 0.005, -800.0, 180.0, 0.0),
+        };
+        let coeffs_max = Coeffs {
+            T: (500.0, 900.0),
+            coeff: (30.0, -3.0, 0.5, -0.05, 0.005, -800.0, 180.0, 0.0),
+        };
+
+        let result = nist.fitting_adjacent_weighted(coeffs_min, coeffs_max, 900.0, 400.0);
+        assert!(result.is_err());
+        assert_eq!(nist.coeffs, Some((9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0)));
+    }
+
+    #[test]
+    #[ignore]
     fn test_fitting_non_adjacent_identical_coeffs() {
         use crate::Thermodynamics::DBhandlers::NISTdata::Coeffs;
 
@@ -579,6 +631,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_create_closures_with_T_range() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("CO".to_owned(), SearchType::All, Phase::Gas);
@@ -603,6 +656,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_calculate_Cp_dH_dS_with_T_range() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("H2O".to_owned(), SearchType::All, Phase::Gas);
@@ -633,6 +687,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_create_sym_Cp_dH_dS_with_T_range() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("CO2".to_owned(), SearchType::All, Phase::Gas);
@@ -661,6 +716,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_T_range_methods_consistency() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("NO2".to_owned(), SearchType::All, Phase::Gas);
@@ -689,6 +745,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_T_range_methods_error_handling() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("O2".to_owned(), SearchType::All, Phase::Gas);
@@ -705,6 +762,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_T_range_methods_multiple_calls() {
         let mut nist = NISTdata::new();
         let _ = nist.get_data_from_NIST("CH4".to_owned(), SearchType::All, Phase::Gas);

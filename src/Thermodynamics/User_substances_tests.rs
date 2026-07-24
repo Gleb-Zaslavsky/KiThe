@@ -5,8 +5,10 @@ mod tests {
     use crate::Thermodynamics::DBhandlers::thermo_api::ThermoCalculator;
     use crate::Thermodynamics::DBhandlers::transport_api::TransportCalculator;
     use crate::Thermodynamics::User_substances::{
-        CalculatorType, DataType, LibraryPriority, Phases, SearchResult, SubsData, WhatIsFound,
+        CalculatorType, DataType, LibraryPriority, Phases, PropertyKind, SearchResult, SubsData,
+        WhatIsFound,
     };
+    use crate::Thermodynamics::thermo_lib_api::LibraryId;
     use std::collections::HashMap;
 
     #[test]
@@ -57,11 +59,11 @@ mod tests {
             .extract_transport_coeffs(substances[1].as_str(), 400.0)
             .unwrap();
         // Test transport calculations
-        user_subs.set_M(
+        let _ = user_subs.set_M(
             HashMap::from([("H2O".to_string(), 18.0), ("CO".to_string(), 32.0)]),
             None,
         );
-        user_subs.set_P(1e5, None);
+        let _ = user_subs.set_P(1e5, None);
         if let Ok((lambda, viscosity)) =
             user_subs.calculate_transport_properties("H2O", 400.0, Some(Cp), None)
         {
@@ -75,6 +77,30 @@ mod tests {
 
         // Print full summary
         user_subs.print_search_summary();
+    }
+
+    #[test]
+    fn physical_state_requirement_selects_the_nasa_condensed_liquid_record() {
+        let mut substances = SubsData::new();
+        substances.set_substances(vec!["Fe".to_string()]);
+        substances.set_substance_physical_state("Fe".to_string(), Phases::Liquid);
+        substances.set_library_priority("NASA_cond".to_string(), LibraryPriority::Priority);
+
+        substances.search_substances().unwrap();
+
+        let record = substances
+            .get_search_result("Fe", WhatIsFound::Thermo)
+            .expect("NASA condensed should contain a liquid iron record");
+        assert_eq!(record.library(), "NASA_cond");
+        assert_eq!(record.record_key(), "Fe(L)");
+
+        let summary = substances.search_summary_report();
+        assert!(
+            summary
+                .rows()
+                .iter()
+                .any(|row| row.substance() == "Fe" && row.record_key() == "Fe(L)")
+        );
     }
     #[test]
     fn test_user_substances_with_calculators_own_functions() {
@@ -111,7 +137,7 @@ mod tests {
         user_subs.print_search_summary();
         let datamap = user_subs.get_substance_result("CO").unwrap();
         let Thermo = datamap.get(&WhatIsFound::Thermo).unwrap().as_ref().unwrap();
-        let Calculator = Thermo.calculator.as_ref().unwrap();
+        let Calculator = Thermo.calculator().unwrap();
         let Cp;
         match Calculator {
             CalculatorType::Thermo(thermo) => {
@@ -141,7 +167,7 @@ mod tests {
             .unwrap()
             .as_ref()
             .unwrap();
-        let Calculator = Transport.calculator.as_ref().unwrap();
+        let Calculator = Transport.calculator().unwrap();
         match Calculator {
             CalculatorType::Transport(transport) => {
                 // Test transport calculations
@@ -192,6 +218,120 @@ mod tests {
         assert_eq!(
             user_subs.library_priorities.get("NIST"),
             Some(&LibraryPriority::Priority)
+        );
+    }
+
+    #[test]
+    fn test_typed_library_identifiers_and_aliases_are_canonicalized() {
+        let mut user_subs = SubsData::new();
+
+        user_subs.set_library_priority(
+            "Cantera_nasa_base_gas".to_string(),
+            LibraryPriority::Priority,
+        );
+        user_subs.set_library_priority("Aramco_transpot".to_string(), LibraryPriority::Permitted);
+        user_subs.set_library_priority_id(LibraryId::NasaCond, LibraryPriority::Priority);
+        user_subs.set_explicit_search_instruction("CO2".to_string(), LibraryId::AramcoTransport);
+
+        assert_eq!(
+            user_subs.library_priorities().get("NASA_gas"),
+            Some(&LibraryPriority::Priority)
+        );
+        assert_eq!(
+            user_subs.library_priorities().get("Aramco_transport"),
+            Some(&LibraryPriority::Permitted)
+        );
+        assert_eq!(
+            user_subs.library_priorities().get("NASA_cond"),
+            Some(&LibraryPriority::Priority)
+        );
+        assert_eq!(
+            user_subs
+                .explicit_search_instructions()
+                .get("CO2")
+                .map(String::as_str),
+            Some("Aramco_transport")
+        );
+
+        assert!(matches!(
+            user_subs
+                .create_calculator("Cantera_nasa_base_gas")
+                .unwrap(),
+            CalculatorType::Thermo(_)
+        ));
+        assert!(matches!(
+            user_subs.create_calculator("Aramco_transpot").unwrap(),
+            CalculatorType::Transport(_)
+        ));
+    }
+
+    #[test]
+    fn test_canonical_read_only_accessors_expose_the_clean_api() {
+        let mut user_subs = SubsData::new();
+        user_subs.set_explicit_search_instruction("H2O".to_string(), LibraryId::NasaGas);
+        user_subs
+            .molar_mass_by_substance
+            .insert("H2O".to_string(), 18.015);
+
+        assert_eq!(
+            user_subs
+                .explicit_search_map()
+                .get("H2O")
+                .map(String::as_str),
+            Some("NASA_gas")
+        );
+        assert_eq!(user_subs.molar_mass_map().get("H2O"), Some(&18.015));
+        assert_eq!(user_subs.molar_mass_of("H2O"), Some(18.015));
+        assert_eq!(user_subs.molar_mass_of("CO2"), None);
+    }
+
+    #[test]
+    fn test_deprecated_explicit_search_alias_forwards_to_canonical_method() {
+        let mut canonical = SubsData::new();
+        canonical.set_explicit_search_instruction("H2O".to_string(), LibraryId::NasaGas);
+
+        let mut legacy = SubsData::new();
+        legacy.set_explicit_search_instructions(HashMap::from([(
+            "H2O".to_string(),
+            "NASA_gas".to_string(),
+        )]));
+
+        assert_eq!(
+            canonical.explicit_search_map(),
+            legacy.explicit_search_map()
+        );
+        assert_eq!(
+            legacy.explicit_search_map().get("H2O").map(String::as_str),
+            Some("NASA_gas")
+        );
+    }
+
+    #[test]
+    fn test_property_kind_separates_identity_from_representation() {
+        assert_eq!(PropertyKind::Cp.numeric_type(), DataType::Cp);
+        assert_eq!(PropertyKind::Cp.function_type(), DataType::Cp_fun);
+        assert_eq!(PropertyKind::Cp.symbolic_type(), DataType::Cp_sym);
+        assert_eq!(PropertyKind::Lambda.numeric_type(), DataType::Lambda);
+        assert_eq!(
+            PropertyKind::from_data_type(DataType::Visc_sym),
+            Some(PropertyKind::Visc)
+        );
+
+        let subs_data = SubsData::new();
+        assert!(
+            subs_data
+                .property_value_state("H2O", PropertyKind::Cp)
+                .is_not_calculated()
+        );
+        assert!(
+            subs_data
+                .property_function_state("H2O", PropertyKind::Lambda)
+                .is_not_calculated()
+        );
+        assert!(
+            subs_data
+                .property_symbolic_state("H2O", PropertyKind::Visc)
+                .is_not_calculated()
         );
     }
 
@@ -321,11 +461,11 @@ mod tests {
 
         // Perform search
         let _ = user_subs.search_substances().unwrap();
-        user_subs.set_M(
+        let _ = user_subs.set_M(
             HashMap::from([("H2O".to_string(), 18.0), ("CO".to_string(), 32.0)]),
             None,
         );
-        user_subs.set_P(1e5, None);
+        let _ = user_subs.set_P(1e5, None);
         user_subs.extract_transport_coeffs("H2O", 400.0).unwrap();
         user_subs.extract_transport_coeffs("CO", 400.0).unwrap();
         // Test for substances that should have transport data
@@ -417,6 +557,12 @@ mod tests {
 
             let result_map = search_result.unwrap();
             assert!(result_map.contains_key(&WhatIsFound::Thermo));
+
+            let typed_state = user_subs.get_substance_search_state(substance).unwrap();
+            assert!(matches!(
+                typed_state.thermo,
+                crate::Thermodynamics::User_substances::PropertySearchState::Found(_)
+            ));
         }
     }
 
@@ -446,6 +592,11 @@ mod tests {
 
                 let result_map = search_result.unwrap();
                 assert!(result_map.contains_key(&WhatIsFound::Thermo));
+                let typed_state = user_subs.get_substance_search_state(substance).unwrap();
+                assert!(matches!(
+                    typed_state.thermo,
+                    crate::Thermodynamics::User_substances::PropertySearchState::Found(_)
+                ));
                 let property_map = user_subs.therm_map_of_properties_values.get(substance);
                 assert!(property_map.is_some());
 
@@ -589,22 +740,30 @@ mod tests {
 
         // Verify that we have data for all substances
         for substance in &["H2O", "CO", "CH4"] {
+            let substance = *substance;
             // Check if found in any library
             let result = user_subs.get_substance_result(substance);
             assert!(result.is_some());
 
             // If found, check that we have property values
             if let Some(_map) = result {
-                let property_map = user_subs.therm_map_of_properties_values.get(*substance);
+                let property_map = user_subs.therm_map_of_properties_values.get(substance);
                 assert!(property_map.is_some());
 
-                // Check that we have at least one function
-                let function_map = user_subs.therm_map_of_fun.get(*substance);
-                assert!(function_map.is_some());
+                // Check that we have at least one function through the explicit readiness API.
+                assert!(
+                    user_subs
+                        .therm_function_state(substance, DataType::Cp_fun)
+                        .is_ready()
+                );
 
-                // Check that we have at least one symbolic expression
-                let sym_map = user_subs.therm_map_of_sym.get(*substance);
-                assert!(sym_map.is_some());
+                // Check that we have at least one symbolic expression through the explicit
+                // readiness API.
+                assert!(
+                    user_subs
+                        .therm_symbolic_state(substance, DataType::Cp_sym)
+                        .is_ready()
+                );
             }
         }
     }
@@ -614,8 +773,10 @@ mod tests {
 mod tests2 {
 
     use crate::Thermodynamics::User_substances::{
-        DataType, LibraryPriority, Phases, SubsData, WhatIsFound,
+        CalculatorType, DataType, DerivedValueState, LibraryPriority, Phases, PropertySearchState,
+        SearchResult, SubsData, WhatIsFound,
     };
+    use crate::Thermodynamics::thermo_lib_api::ThermoData;
     use approx::assert_relative_eq;
     use core::panic;
     use std::collections::HashMap;
@@ -640,14 +801,14 @@ mod tests2 {
         user_subs.set_library_priority("NUIG_thermo".to_string(), LibraryPriority::Permitted);
 
         // Set pressure and molar mass
-        user_subs.set_P(1.0, Some("atm".to_string()));
+        let _ = user_subs.set_P(1.0, Some("atm".to_string()));
 
         let molar_masses = HashMap::from([
             ("H2O".to_string(), 18.01528),
             ("CO2".to_string(), 44.01),
             ("CH4".to_string(), 16.04),
         ]);
-        user_subs.set_M(molar_masses, Some("g/mol".to_string()));
+        let _ = user_subs.set_M(molar_masses, Some("g/mol".to_string()));
 
         user_subs
     }
@@ -657,7 +818,725 @@ mod tests2 {
         let user_subs = SubsData::new();
         assert!(user_subs.substances.is_empty());
         assert!(user_subs.library_priorities.is_empty());
-        assert!(user_subs.search_results.is_empty());
+        assert!(user_subs.search_states.is_empty());
+    }
+
+    #[test]
+    fn test_search_state_view_tracks_found_and_missing() {
+        let mut user_subs = SubsData::new();
+
+        user_subs.store_search_result(
+            "H2O",
+            WhatIsFound::Thermo,
+            "NASA_gas".to_string(),
+            LibraryPriority::Priority,
+            serde_json::Value::String("payload".to_string()),
+            CalculatorType::Thermo(
+                crate::Thermodynamics::DBhandlers::thermo_api::ThermoEnum::NASA(
+                    crate::Thermodynamics::DBhandlers::NASAdata::NASAdata::new(),
+                ),
+            ),
+            false,
+        );
+
+        let typed_state = user_subs.get_substance_search_state("H2O").unwrap();
+        assert!(matches!(typed_state.thermo, PropertySearchState::Found(_)));
+        assert!(matches!(
+            typed_state.transport,
+            PropertySearchState::NotSearched
+        ));
+
+        let compat = user_subs.get_substance_result("H2O").unwrap();
+        assert!(compat.get(&WhatIsFound::Thermo).is_some());
+
+        user_subs.insert_not_found_if_absent("CO2");
+        let missing_state = user_subs.get_substance_search_state("CO2").unwrap();
+        assert!(matches!(missing_state.thermo, PropertySearchState::Missing));
+        assert!(matches!(
+            missing_state.transport,
+            PropertySearchState::Missing
+        ));
+    }
+
+    #[test]
+    fn test_search_state_based_getters_ignore_stale_compat_view() {
+        let mut user_subs = SubsData::new();
+
+        user_subs.store_search_result(
+            "N2",
+            WhatIsFound::Thermo,
+            "NASA_gas".to_string(),
+            LibraryPriority::Priority,
+            serde_json::Value::String("payload".to_string()),
+            CalculatorType::Thermo(
+                crate::Thermodynamics::DBhandlers::thermo_api::ThermoEnum::NASA(
+                    crate::Thermodynamics::DBhandlers::NASAdata::NASAdata::new(),
+                ),
+            ),
+            false,
+        );
+        user_subs.store_search_result(
+            "Ar",
+            WhatIsFound::Transport,
+            "Aramco_transport".to_string(),
+            LibraryPriority::Permitted,
+            serde_json::Value::String("payload".to_string()),
+            CalculatorType::Transport(
+                crate::Thermodynamics::DBhandlers::transport_api::TransportEnum::Collision(
+                    crate::Thermodynamics::DBhandlers::TRANSPORTdata::TransportData::new(),
+                ),
+            ),
+            false,
+        );
+
+        // Corrupt the compatibility view on purpose to prove that the getters
+        // now read the canonical typed state instead of the legacy map.
+        user_subs.search_results.clear();
+
+        let compat = user_subs.get_substance_result("N2").unwrap();
+        assert!(compat.contains_key(&WhatIsFound::Thermo));
+
+        let priority_found = user_subs.get_priority_found_substances();
+        assert_eq!(priority_found, vec!["N2".to_string()]);
+
+        let permitted_found = user_subs.get_permitted_found_substances();
+        assert_eq!(permitted_found, vec!["Ar".to_string()]);
+
+        let not_found = user_subs.get_not_found_substances();
+        assert!(not_found.is_empty());
+    }
+
+    #[test]
+    fn test_set_substances_invalidates_dependent_state() {
+        let mut user_subs = create_test_subsdata();
+
+        user_subs.store_search_result(
+            "H2O",
+            WhatIsFound::Thermo,
+            "NASA_gas".to_string(),
+            LibraryPriority::Priority,
+            serde_json::Value::Null,
+            CalculatorType::Thermo(
+                crate::Thermodynamics::DBhandlers::thermo_api::ThermoEnum::NASA(
+                    crate::Thermodynamics::DBhandlers::NASAdata::NASAdata::new(),
+                ),
+            ),
+            false,
+        );
+        user_subs.therm_map_of_properties_values.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Cp, Some(42.0))]),
+        );
+        user_subs
+            .therm_map_of_fun
+            .insert("H2O".to_string(), HashMap::from([(DataType::Cp_fun, None)]));
+        user_subs
+            .therm_map_of_sym
+            .insert("H2O".to_string(), HashMap::from([(DataType::Cp_sym, None)]));
+        user_subs.transport_map_of_properties_values.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda, Some(0.5))]),
+        );
+        user_subs.transport_map_of_fun.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda_fun, None)]),
+        );
+        user_subs.transport_map_of_sym.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda_sym, None)]),
+        );
+        user_subs.elem_composition_matrix = Some(nalgebra::DMatrix::from_element(1, 1, 1.0));
+        user_subs
+            .molar_mass_by_substance
+            .insert("H2O".to_string(), 18.0);
+        user_subs.diffusion_data = Some(
+            crate::Thermodynamics::DBhandlers::Diffusion::MultiSubstanceDiffusion::new(
+                300.0, 101325.0,
+            )
+            .expect("test diffusion state should be constructible"),
+        );
+        user_subs.unique_elements = vec!["H".to_string(), "O".to_string()];
+        user_subs.ro_map = Some(HashMap::from([("H2O".to_string(), 1.0)]));
+        user_subs
+            .map_of_phases
+            .insert("H2O".to_string(), Some(Phases::Gas));
+
+        user_subs.set_substances(vec!["CO2".to_string(), "CO".to_string()]);
+
+        assert!(user_subs.search_states.is_empty());
+        assert!(user_subs.therm_map_of_properties_values.is_empty());
+        assert!(user_subs.therm_map_of_fun.is_empty());
+        assert!(user_subs.therm_map_of_sym.is_empty());
+        assert!(user_subs.transport_map_of_properties_values.is_empty());
+        assert!(user_subs.transport_map_of_fun.is_empty());
+        assert!(user_subs.transport_map_of_sym.is_empty());
+        assert!(user_subs.elem_composition_matrix.is_none());
+        assert!(user_subs.molar_mass_by_substance.is_empty());
+        assert!(user_subs.diffusion_data.is_none());
+        assert!(user_subs.unique_elements.is_empty());
+        assert!(user_subs.ro_map.is_none());
+        assert!(user_subs.map_of_phases.is_empty());
+        assert_eq!(
+            user_subs.substances,
+            vec!["CO2".to_string(), "CO".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_search_substances_rolls_back_on_failure() {
+        let mut user_subs = create_test_subsdata();
+
+        std::sync::Arc::make_mut(&mut user_subs.thermo_data.LibThermoData).insert(
+            "bad_lib".to_string(),
+            HashMap::from([("CH4".to_string(), serde_json::Value::Null)]),
+        );
+
+        let _ = user_subs.set_explicit_search_instructions(HashMap::from([(
+            "CH4".to_string(),
+            "bad_lib".to_string(),
+        )]));
+
+        // Keep a known-good canonical snapshot after the lookup invalidation
+        // done by the setter above. The rollback contract should restore this
+        // exact state if the explicit lookup path fails.
+        user_subs.store_search_result(
+            "H2O",
+            WhatIsFound::Thermo,
+            "sentinel_library".to_string(),
+            LibraryPriority::Priority,
+            serde_json::Value::String("sentinel".to_string()),
+            CalculatorType::Thermo(
+                crate::Thermodynamics::DBhandlers::thermo_api::ThermoEnum::NASA(
+                    crate::Thermodynamics::DBhandlers::NASAdata::NASAdata::new(),
+                ),
+            ),
+            false,
+        );
+
+        let err = user_subs.search_substances().unwrap_err();
+        assert!(
+            err.to_string().contains("bad_lib")
+                || err.to_string().to_lowercase().contains("library")
+        );
+
+        let h2o_state = user_subs.get_substance_search_state("H2O").unwrap();
+        let thermo = h2o_state.result(WhatIsFound::Thermo).unwrap();
+        assert_eq!(thermo.library(), "sentinel_library");
+        let direct_thermo = user_subs
+            .get_search_result("H2O", WhatIsFound::Thermo)
+            .unwrap();
+        assert_eq!(direct_thermo.library(), "sentinel_library");
+        let h2o = user_subs.get_substance_result("H2O").unwrap();
+        let thermo = h2o.get(&WhatIsFound::Thermo).unwrap().as_ref().unwrap();
+        assert_eq!(thermo.library(), "sentinel_library");
+        assert_eq!(
+            thermo.data(),
+            &serde_json::Value::String("sentinel".to_string())
+        );
+        assert!(user_subs.get_substance_search_state("CO2").is_none());
+        assert!(user_subs.get_substance_search_state("CH4").is_none());
+    }
+
+    #[test]
+    fn test_lookup_mutations_invalidate_search_and_derived_state() {
+        let mut user_subs = create_test_subsdata();
+
+        user_subs.store_search_result(
+            "H2O",
+            WhatIsFound::Thermo,
+            "NASA_gas".to_string(),
+            LibraryPriority::Priority,
+            serde_json::Value::Null,
+            CalculatorType::Thermo(
+                crate::Thermodynamics::DBhandlers::thermo_api::ThermoEnum::NASA(
+                    crate::Thermodynamics::DBhandlers::NASAdata::NASAdata::new(),
+                ),
+            ),
+            false,
+        );
+        user_subs.therm_map_of_properties_values.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Cp, Some(42.0))]),
+        );
+        user_subs.transport_map_of_properties_values.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda, Some(0.5))]),
+        );
+        user_subs
+            .therm_map_of_fun
+            .insert("H2O".to_string(), HashMap::from([(DataType::Cp_fun, None)]));
+        user_subs.transport_map_of_fun.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda_fun, None)]),
+        );
+        user_subs
+            .therm_map_of_sym
+            .insert("H2O".to_string(), HashMap::from([(DataType::Cp_sym, None)]));
+        user_subs.transport_map_of_sym.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda_sym, None)]),
+        );
+        user_subs.elem_composition_matrix = Some(nalgebra::DMatrix::from_element(1, 1, 1.0));
+        user_subs
+            .molar_mass_by_substance
+            .insert("H2O".to_string(), 18.0);
+        user_subs.unique_elements = vec!["H".to_string(), "O".to_string()];
+        user_subs.ro_map = Some(HashMap::from([("H2O".to_string(), 1.0)]));
+        user_subs.ro_map_sym = Some(HashMap::from([(
+            "H2O".to_string(),
+            Box::new(RustedSciThe::symbolic::symbolic_engine::Expr::Const(1.0)),
+        )]));
+        user_subs.diffusion_data = Some(
+            crate::Thermodynamics::DBhandlers::Diffusion::MultiSubstanceDiffusion::new(
+                300.0, 101325.0,
+            )
+            .expect("test diffusion state should be constructible"),
+        );
+
+        user_subs.set_library_priority("NASA_gas".to_string(), LibraryPriority::Permitted);
+
+        assert!(user_subs.search_states.is_empty());
+        assert!(user_subs.therm_map_of_properties_values.is_empty());
+        assert!(user_subs.transport_map_of_properties_values.is_empty());
+        assert!(user_subs.therm_map_of_fun.is_empty());
+        assert!(user_subs.transport_map_of_fun.is_empty());
+        assert!(user_subs.therm_map_of_sym.is_empty());
+        assert!(user_subs.transport_map_of_sym.is_empty());
+        assert!(user_subs.elem_composition_matrix.is_none());
+        assert!(user_subs.molar_mass_by_substance.is_empty());
+        assert!(user_subs.unique_elements.is_empty());
+        assert!(user_subs.ro_map.is_none());
+        assert!(user_subs.ro_map_sym.is_none());
+        assert!(user_subs.diffusion_data.is_none());
+
+        user_subs.store_search_result(
+            "CO",
+            WhatIsFound::Transport,
+            "Aramco_transport".to_string(),
+            LibraryPriority::Permitted,
+            serde_json::Value::Null,
+            CalculatorType::Transport(
+                crate::Thermodynamics::DBhandlers::transport_api::TransportEnum::Collision(
+                    crate::Thermodynamics::DBhandlers::TRANSPORTdata::TransportData::new(),
+                ),
+            ),
+            false,
+        );
+        user_subs.transport_map_of_properties_values.insert(
+            "CO".to_string(),
+            HashMap::from([(DataType::Lambda, Some(0.2))]),
+        );
+
+        let _ = user_subs.set_explicit_search_instructions(HashMap::from([(
+            "CO".to_string(),
+            "NASA_gas".to_string(),
+        )]));
+
+        assert!(user_subs.search_states.is_empty());
+        assert!(user_subs.transport_map_of_properties_values.is_empty());
+        assert!(user_subs.transport_map_of_fun.is_empty());
+        assert!(user_subs.transport_map_of_sym.is_empty());
+    }
+
+    #[test]
+    fn test_temperature_pressure_and_molar_mass_setters_invalidate_only_dependent_state() {
+        let mut user_subs = create_test_subsdata();
+
+        user_subs.store_search_result(
+            "H2O",
+            WhatIsFound::Thermo,
+            "NASA_gas".to_string(),
+            LibraryPriority::Priority,
+            serde_json::Value::Null,
+            CalculatorType::Thermo(
+                crate::Thermodynamics::DBhandlers::thermo_api::ThermoEnum::NASA(
+                    crate::Thermodynamics::DBhandlers::NASAdata::NASAdata::new(),
+                ),
+            ),
+            false,
+        );
+        user_subs.therm_map_of_properties_values.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Cp, Some(42.0))]),
+        );
+        user_subs.transport_map_of_properties_values.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda, Some(0.5))]),
+        );
+        user_subs.transport_map_of_fun.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda_fun, None)]),
+        );
+        user_subs.transport_map_of_sym.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda_sym, None)]),
+        );
+        user_subs.ro_map = Some(HashMap::from([("H2O".to_string(), 1.0)]));
+        user_subs.ro_map_sym = Some(HashMap::from([(
+            "H2O".to_string(),
+            Box::new(RustedSciThe::symbolic::symbolic_engine::Expr::Const(1.0)),
+        )]));
+        user_subs.diffusion_data = Some(
+            crate::Thermodynamics::DBhandlers::Diffusion::MultiSubstanceDiffusion::new(
+                300.0, 101325.0,
+            )
+            .expect("test diffusion state should be constructible"),
+        );
+
+        user_subs.set_T(500.0).unwrap();
+
+        assert!(user_subs.get_substance_search_state("H2O").is_some());
+        assert!(user_subs.therm_map_of_properties_values.is_empty());
+        assert!(user_subs.transport_map_of_properties_values.is_empty());
+        assert!(user_subs.transport_map_of_fun.is_empty());
+        assert!(user_subs.transport_map_of_sym.is_empty());
+        assert!(user_subs.ro_map.is_none());
+        assert!(user_subs.ro_map_sym.is_none());
+        assert!(user_subs.diffusion_data.is_none());
+
+        user_subs.transport_map_of_properties_values.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda, Some(0.5))]),
+        );
+        user_subs.transport_map_of_fun.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda_fun, None)]),
+        );
+        user_subs.transport_map_of_sym.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda_sym, None)]),
+        );
+        user_subs.ro_map = Some(HashMap::from([("H2O".to_string(), 1.0)]));
+        user_subs.ro_map_sym = Some(HashMap::from([(
+            "H2O".to_string(),
+            Box::new(RustedSciThe::symbolic::symbolic_engine::Expr::Const(1.0)),
+        )]));
+        user_subs.diffusion_data = Some(
+            crate::Thermodynamics::DBhandlers::Diffusion::MultiSubstanceDiffusion::new(
+                300.0, 101325.0,
+            )
+            .expect("test diffusion state should be constructible"),
+        );
+
+        user_subs.set_P(2.0e5, None).unwrap();
+        assert!(user_subs.get_substance_search_state("H2O").is_some());
+        assert!(user_subs.transport_map_of_properties_values.is_empty());
+        assert!(user_subs.transport_map_of_fun.is_empty());
+        assert!(user_subs.transport_map_of_sym.is_empty());
+        assert!(user_subs.ro_map.is_none());
+        assert!(user_subs.ro_map_sym.is_none());
+        assert!(user_subs.diffusion_data.is_none());
+
+        let mut molar_masses = HashMap::new();
+        molar_masses.insert("H2O".to_string(), 18.01528);
+        user_subs
+            .set_M(molar_masses, Some("g/mol".to_string()))
+            .unwrap();
+        assert!(user_subs.get_substance_search_state("H2O").is_some());
+        assert!(user_subs.transport_map_of_properties_values.is_empty());
+        assert!(user_subs.transport_map_of_fun.is_empty());
+        assert!(user_subs.transport_map_of_sym.is_empty());
+        assert!(user_subs.ro_map.is_none());
+        assert!(user_subs.ro_map_sym.is_none());
+        assert!(user_subs.diffusion_data.is_none());
+    }
+
+    #[test]
+    fn test_invalidation_turns_calculated_entries_back_into_not_calculated_states() {
+        let mut user_subs = SubsData::new();
+
+        user_subs.therm_map_of_properties_values.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Cp, Some(123.4)), (DataType::dH, Some(55.0))]),
+        );
+        user_subs.therm_map_of_fun.insert(
+            "H2O".to_string(),
+            HashMap::from([(
+                DataType::Cp_fun,
+                Some(Box::new(|t: f64| t + 1.0) as Box<dyn Fn(f64) -> f64 + Send + Sync>),
+            )]),
+        );
+        user_subs.therm_map_of_sym.insert(
+            "H2O".to_string(),
+            HashMap::from([(
+                DataType::Cp_sym,
+                Some(Box::new(
+                    RustedSciThe::symbolic::symbolic_engine::Expr::Const(1.0),
+                )),
+            )]),
+        );
+        user_subs.transport_map_of_properties_values.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda, Some(0.56))]),
+        );
+        user_subs.transport_map_of_fun.insert(
+            "H2O".to_string(),
+            HashMap::from([(
+                DataType::Lambda_fun,
+                Some(Box::new(|t: f64| t * 2.0) as Box<dyn Fn(f64) -> f64 + Send + Sync>),
+            )]),
+        );
+        user_subs.transport_map_of_sym.insert(
+            "H2O".to_string(),
+            HashMap::from([(
+                DataType::Lambda_sym,
+                Some(Box::new(
+                    RustedSciThe::symbolic::symbolic_engine::Expr::Const(2.0),
+                )),
+            )]),
+        );
+
+        assert!(user_subs.therm_value_state("H2O", DataType::Cp).is_ready());
+        assert!(
+            user_subs
+                .therm_function_state("H2O", DataType::Cp_fun)
+                .is_ready()
+        );
+        assert!(
+            user_subs
+                .transport_value_state("H2O", DataType::Lambda)
+                .is_ready()
+        );
+        assert!(
+            user_subs
+                .transport_function_state("H2O", DataType::Lambda_fun)
+                .is_ready()
+        );
+        assert!(
+            user_subs
+                .transport_symbolic_state("H2O", DataType::Lambda_sym)
+                .is_ready()
+        );
+
+        // A temperature change must invalidate temperature-bound numeric and
+        // transport caches explicitly, instead of leaving behind zero-like
+        // placeholders that still look ready to callers.
+        user_subs.set_T(450.0).unwrap();
+
+        assert!(
+            user_subs
+                .therm_value_state("H2O", DataType::Cp)
+                .is_not_calculated()
+        );
+        assert!(
+            user_subs
+                .therm_value_state("H2O", DataType::dH)
+                .is_not_calculated()
+        );
+        assert!(
+            user_subs
+                .transport_value_state("H2O", DataType::Lambda)
+                .is_not_calculated()
+        );
+        assert!(
+            user_subs
+                .transport_function_state("H2O", DataType::Lambda_fun)
+                .is_not_calculated()
+        );
+        assert!(
+            user_subs
+                .transport_symbolic_state("H2O", DataType::Lambda_sym)
+                .is_not_calculated()
+        );
+        assert!(
+            user_subs
+                .therm_function_state("H2O", DataType::Cp_fun)
+                .is_ready()
+        );
+        assert!(
+            user_subs
+                .therm_symbolic_state("H2O", DataType::Cp_sym)
+                .is_ready()
+        );
+    }
+
+    #[test]
+    fn test_mutation_path_invariant_covers_current_input_setters() {
+        // Substance list changes must clear every dependent cache.
+        {
+            let mut user_subs = create_test_subsdata();
+            user_subs.store_search_result(
+                "H2O",
+                WhatIsFound::Thermo,
+                "NASA_gas".to_string(),
+                LibraryPriority::Priority,
+                serde_json::Value::Null,
+                CalculatorType::Thermo(
+                    crate::Thermodynamics::DBhandlers::thermo_api::ThermoEnum::NASA(
+                        crate::Thermodynamics::DBhandlers::NASAdata::NASAdata::new(),
+                    ),
+                ),
+                false,
+            );
+            user_subs.therm_map_of_properties_values.insert(
+                "H2O".to_string(),
+                HashMap::from([(DataType::Cp, Some(42.0))]),
+            );
+            user_subs.set_substances(vec!["CO2".to_string()]);
+            assert!(user_subs.search_states.is_empty());
+            assert!(user_subs.therm_map_of_properties_values.is_empty());
+            assert!(user_subs.transport_map_of_properties_values.is_empty());
+            assert!(user_subs.elem_composition_matrix.is_none());
+            assert!(user_subs.molar_mass_by_substance.is_empty());
+            assert!(user_subs.diffusion_data.is_none());
+        }
+
+        // Library routing changes must clear lookup results and all derived caches.
+        {
+            let mut user_subs = create_test_subsdata();
+            user_subs.store_search_result(
+                "H2O",
+                WhatIsFound::Thermo,
+                "NASA_gas".to_string(),
+                LibraryPriority::Priority,
+                serde_json::Value::Null,
+                CalculatorType::Thermo(
+                    crate::Thermodynamics::DBhandlers::thermo_api::ThermoEnum::NASA(
+                        crate::Thermodynamics::DBhandlers::NASAdata::NASAdata::new(),
+                    ),
+                ),
+                false,
+            );
+            user_subs.therm_map_of_properties_values.insert(
+                "H2O".to_string(),
+                HashMap::from([(DataType::Cp, Some(42.0))]),
+            );
+            user_subs.set_library_priority("NASA_gas".to_string(), LibraryPriority::Permitted);
+            assert!(user_subs.search_states.is_empty());
+            assert!(user_subs.therm_map_of_properties_values.is_empty());
+
+            user_subs.store_search_result(
+                "CO",
+                WhatIsFound::Transport,
+                "Aramco_transport".to_string(),
+                LibraryPriority::Permitted,
+                serde_json::Value::Null,
+                CalculatorType::Transport(
+                    crate::Thermodynamics::DBhandlers::transport_api::TransportEnum::Collision(
+                        crate::Thermodynamics::DBhandlers::TRANSPORTdata::TransportData::new(),
+                    ),
+                ),
+                false,
+            );
+            user_subs.set_multiple_library_priorities(
+                vec!["NASA_gas".to_string(), "Aramco_transport".to_string()],
+                LibraryPriority::Priority,
+            );
+            assert!(user_subs.search_states.is_empty());
+
+            user_subs.store_search_result(
+                "CO",
+                WhatIsFound::Transport,
+                "Aramco_transport".to_string(),
+                LibraryPriority::Permitted,
+                serde_json::Value::Null,
+                CalculatorType::Transport(
+                    crate::Thermodynamics::DBhandlers::transport_api::TransportEnum::Collision(
+                        crate::Thermodynamics::DBhandlers::TRANSPORTdata::TransportData::new(),
+                    ),
+                ),
+                false,
+            );
+            let _ = user_subs.set_explicit_search_instructions(HashMap::from([(
+                "CO".to_string(),
+                "NASA_gas".to_string(),
+            )]));
+            assert!(user_subs.search_states.is_empty());
+        }
+
+        // Temperature changes must keep search provenance but drop temperature-sensitive caches.
+        {
+            let mut user_subs = create_test_subsdata();
+            user_subs.store_search_result(
+                "H2O",
+                WhatIsFound::Thermo,
+                "NASA_gas".to_string(),
+                LibraryPriority::Priority,
+                serde_json::Value::Null,
+                CalculatorType::Thermo(
+                    crate::Thermodynamics::DBhandlers::thermo_api::ThermoEnum::NASA(
+                        crate::Thermodynamics::DBhandlers::NASAdata::NASAdata::new(),
+                    ),
+                ),
+                false,
+            );
+            user_subs.therm_map_of_properties_values.insert(
+                "H2O".to_string(),
+                HashMap::from([(DataType::Cp, Some(42.0))]),
+            );
+            user_subs.transport_map_of_properties_values.insert(
+                "H2O".to_string(),
+                HashMap::from([(DataType::Lambda, Some(0.5))]),
+            );
+            user_subs.ro_map = Some(HashMap::from([("H2O".to_string(), 1.0)]));
+            user_subs.diffusion_data = Some(
+                crate::Thermodynamics::DBhandlers::Diffusion::MultiSubstanceDiffusion::new(
+                    300.0, 101325.0,
+                )
+                .expect("test diffusion state should be constructible"),
+            );
+
+            user_subs.set_T(500.0).unwrap();
+            assert!(user_subs.get_substance_search_state("H2O").is_some());
+            assert!(user_subs.therm_map_of_properties_values.is_empty());
+            assert!(user_subs.transport_map_of_properties_values.is_empty());
+            assert!(user_subs.ro_map.is_none());
+            assert!(user_subs.diffusion_data.is_none());
+        }
+
+        // Pressure and molar-mass changes must keep lookup state but clear transport-dependent caches.
+        {
+            let mut user_subs = create_test_subsdata();
+            user_subs.store_search_result(
+                "H2O",
+                WhatIsFound::Transport,
+                "Aramco_transport".to_string(),
+                LibraryPriority::Permitted,
+                serde_json::Value::Null,
+                CalculatorType::Transport(
+                    crate::Thermodynamics::DBhandlers::transport_api::TransportEnum::Collision(
+                        crate::Thermodynamics::DBhandlers::TRANSPORTdata::TransportData::new(),
+                    ),
+                ),
+                false,
+            );
+            user_subs.transport_map_of_properties_values.insert(
+                "H2O".to_string(),
+                HashMap::from([(DataType::Lambda, Some(0.5))]),
+            );
+            user_subs.transport_map_of_fun.insert(
+                "H2O".to_string(),
+                HashMap::from([(DataType::Lambda_fun, None)]),
+            );
+            user_subs.ro_map = Some(HashMap::from([("H2O".to_string(), 1.0)]));
+            user_subs.diffusion_data = Some(
+                crate::Thermodynamics::DBhandlers::Diffusion::MultiSubstanceDiffusion::new(
+                    300.0, 101325.0,
+                )
+                .expect("test diffusion state should be constructible"),
+            );
+
+            user_subs.set_P(2.0e5, Some("Pa".to_string())).unwrap();
+            assert!(user_subs.get_substance_search_state("H2O").is_some());
+            assert_eq!(user_subs.P, Some(2.0e5));
+            assert_eq!(user_subs.P_unit.as_deref(), Some("Pa"));
+            assert!(user_subs.transport_map_of_properties_values.is_empty());
+            assert!(user_subs.transport_map_of_fun.is_empty());
+            assert!(user_subs.ro_map.is_none());
+            assert!(user_subs.diffusion_data.is_none());
+
+            let mut molar_masses = HashMap::new();
+            molar_masses.insert("H2O".to_string(), 18.01528);
+            user_subs
+                .set_M(molar_masses, Some("g/mol".to_string()))
+                .unwrap();
+            assert!(user_subs.get_substance_search_state("H2O").is_some());
+            assert_eq!(user_subs.Molar_mass_unit.as_deref(), Some("g/mol"));
+            assert!(user_subs.transport_map_of_properties_values.is_empty());
+            assert!(user_subs.transport_map_of_fun.is_empty());
+            assert!(user_subs.ro_map.is_none());
+            assert!(user_subs.diffusion_data.is_none());
+        }
     }
 
     #[test]
@@ -692,10 +1571,11 @@ mod tests2 {
         ];
         user_subs.set_multiple_library_priorities(libraries.clone(), LibraryPriority::Priority);
 
-        // Verify all libraries were set
+        // The API canonicalizes library names before storing them.
         for lib in libraries {
+            let canonical = ThermoData::canonical_library_name(&lib);
             assert_eq!(
-                *user_subs.library_priorities.get(&lib).unwrap(),
+                *user_subs.library_priorities.get(&canonical).unwrap(),
                 LibraryPriority::Priority
             );
         }
@@ -709,7 +1589,7 @@ mod tests2 {
         let _ = user_subs.search_substances().unwrap();
 
         // Check that results were populated
-        assert!(!user_subs.search_results.is_empty());
+        assert!(!user_subs.search_states.is_empty());
 
         // At least some substances should be found
         let not_found = user_subs.get_not_found_substances();
@@ -717,13 +1597,227 @@ mod tests2 {
     }
 
     #[test]
+    fn test_explicit_search_keeps_explicit_provenance() {
+        let mut user_subs = create_test_subsdata();
+        let _ = user_subs.set_explicit_search_instructions(HashMap::from([(
+            "H2O".to_string(),
+            "NASA_gas".to_string(),
+        )]));
+
+        let _ = user_subs.search_substances().unwrap();
+
+        let result_map = user_subs
+            .get_substance_result("H2O")
+            .expect("H2O should be present after explicit lookup");
+        let explicit = result_map
+            .get(&WhatIsFound::Thermo)
+            .and_then(|result| result.as_ref())
+            .expect("Thermo result should exist");
+
+        assert_eq!(explicit.priority_type(), LibraryPriority::Explicit);
+        assert_eq!(explicit.library(), "NASA_gas");
+    }
+
+    #[test]
+    fn test_same_priority_libraries_resolve_in_documented_order() {
+        let mut user_subs = create_test_subsdata();
+        user_subs.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        user_subs.set_library_priority("NUIG_thermo".to_string(), LibraryPriority::Priority);
+
+        user_subs.search_substances().unwrap();
+
+        let result_map = user_subs
+            .get_substance_result("H2O")
+            .expect("H2O should be present after the search");
+        let thermo = result_map
+            .get(&WhatIsFound::Thermo)
+            .and_then(|result| result.as_ref())
+            .expect("Thermo result should exist for H2O");
+
+        // The search contract is alphabetical order inside each priority tier.
+        // NASA_gas must win over NUIG_thermo when both are equally preferred.
+        assert_eq!(thermo.priority_type(), LibraryPriority::Priority);
+        assert_eq!(thermo.library(), "NASA_gas");
+    }
+
+    #[test]
+    fn test_search_substances_keeps_thermo_and_transport_separate() {
+        let mut user_subs = SubsData::new();
+        user_subs.substances = vec!["CO".to_string()];
+        user_subs
+            .map_of_phases
+            .insert("CO".to_string(), Some(Phases::Gas));
+        user_subs.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        user_subs.set_library_priority("Aramco_transport".to_string(), LibraryPriority::Permitted);
+
+        let _ = user_subs.search_substances().unwrap();
+
+        let result_map = user_subs
+            .get_substance_result("CO")
+            .expect("CO should be present after lookup");
+        let thermo = result_map
+            .get(&WhatIsFound::Thermo)
+            .and_then(|result| result.as_ref())
+            .expect("Thermo result should exist");
+        let transport = result_map
+            .get(&WhatIsFound::Transport)
+            .and_then(|result| result.as_ref())
+            .expect("Transport result should exist");
+
+        assert_eq!(thermo.priority_type(), LibraryPriority::Priority);
+        assert_eq!(transport.priority_type(), LibraryPriority::Permitted);
+    }
+
+    #[test]
     fn test_get_substance_result() {
         let mut user_subs = create_test_subsdata();
         let _ = user_subs.search_substances().unwrap();
 
-        // Get result for a specific substance
+        // Get result for a specific substance through the compatibility view.
         let result = user_subs.get_substance_result("H2O");
         assert!(result.is_some());
+        assert!(
+            user_subs
+                .get_substance_search_state("H2O")
+                .is_some_and(|state| state.thermo().is_resolved())
+        );
+    }
+
+    #[test]
+    fn test_read_only_getters_expose_canonical_state() {
+        let mut user_subs = SubsData::new();
+        user_subs.set_substances(vec!["H2O".to_string(), "CO2".to_string()]);
+        user_subs.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        let _ = user_subs.set_explicit_search_instructions(HashMap::from([(
+            "CO2".to_string(),
+            "NASA_gas".to_string(),
+        )]));
+
+        assert_eq!(
+            user_subs.substances(),
+            &["H2O".to_string(), "CO2".to_string()]
+        );
+        assert_eq!(
+            user_subs.library_priorities().get("NASA_gas"),
+            Some(&LibraryPriority::Priority)
+        );
+        assert_eq!(
+            user_subs.explicit_search_instructions().get("CO2"),
+            Some(&"NASA_gas".to_string())
+        );
+        assert!(user_subs.temperature().is_none());
+        assert!(user_subs.pressure().is_none());
+        assert!(user_subs.phases().is_empty());
+        assert!(user_subs.search_states().is_empty());
+        assert!(user_subs.therm_values().is_empty());
+        assert!(user_subs.transport_values().is_empty());
+        assert!(user_subs.molar_masses().is_empty());
+        assert!(user_subs.unique_elements().is_empty());
+        assert!(user_subs.element_composition_matrix().is_none());
+        assert!(user_subs.diffusion_data().is_none());
+    }
+
+    #[test]
+    fn test_property_search_state_helpers_distinguish_pending_and_resolved() {
+        let pending = PropertySearchState::NotSearched;
+        assert!(pending.is_pending());
+        assert!(!pending.is_resolved());
+        assert!(!pending.is_missing());
+        assert!(!pending.is_failed());
+
+        let resolved = PropertySearchState::Found(SearchResult {
+            library: "sentinel_library".to_string(),
+            record_key: "sentinel_record".to_string(),
+            priority_type: LibraryPriority::Priority,
+            data: serde_json::Value::Null,
+            calculator: None,
+        });
+        assert!(!resolved.is_pending());
+        assert!(resolved.is_resolved());
+        assert!(!resolved.is_missing());
+        assert!(!resolved.is_failed());
+
+        let missing = PropertySearchState::Missing;
+        assert!(missing.is_missing());
+        assert!(!missing.is_pending());
+
+        let failed = PropertySearchState::Failed("boom".to_string());
+        assert!(failed.is_failed());
+        assert!(!failed.is_resolved());
+    }
+
+    #[test]
+    fn test_derived_value_state_reports_not_calculated_and_ready() {
+        let mut user_subs = SubsData::new();
+
+        assert!(
+            user_subs
+                .therm_value_state("H2O", DataType::Cp)
+                .is_not_calculated()
+        );
+        assert!(
+            user_subs
+                .transport_value_state("H2O", DataType::Lambda)
+                .is_not_calculated()
+        );
+
+        user_subs.therm_map_of_properties_values.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Cp, Some(123.4))]),
+        );
+        user_subs.transport_map_of_properties_values.insert(
+            "H2O".to_string(),
+            HashMap::from([(DataType::Lambda, Some(0.56))]),
+        );
+
+        let therm_state = user_subs.therm_value_state("H2O", DataType::Cp);
+        assert!(therm_state.is_ready());
+        assert_eq!(therm_state.value(), Some(&123.4));
+
+        let transport_state = user_subs.transport_value_state("H2O", DataType::Lambda);
+        assert!(transport_state.is_ready());
+        assert_eq!(transport_state.value(), Some(&0.56));
+    }
+
+    #[test]
+    fn test_derived_function_and_symbolic_state_reports_not_calculated_and_ready() {
+        let mut user_subs = SubsData::new();
+
+        assert!(
+            user_subs
+                .therm_function_state("H2O", DataType::Cp_fun)
+                .is_not_calculated()
+        );
+        assert!(
+            user_subs
+                .therm_symbolic_state("H2O", DataType::Cp_sym)
+                .is_not_calculated()
+        );
+
+        user_subs.therm_map_of_fun.insert(
+            "H2O".to_string(),
+            HashMap::from([(
+                DataType::Cp_fun,
+                Some(Box::new(|t: f64| t + 1.0) as Box<dyn Fn(f64) -> f64 + Send + Sync>),
+            )]),
+        );
+        user_subs.therm_map_of_sym.insert(
+            "H2O".to_string(),
+            HashMap::from([(
+                DataType::Cp_sym,
+                Some(Box::new(
+                    RustedSciThe::symbolic::symbolic_engine::Expr::Const(1.0),
+                )),
+            )]),
+        );
+
+        let fun_state = user_subs.therm_function_state("H2O", DataType::Cp_fun);
+        assert!(fun_state.is_ready());
+        assert_eq!(fun_state.value().map(|f| f(2.0)), Some(3.0));
+
+        let sym_state = user_subs.therm_symbolic_state("H2O", DataType::Cp_sym);
+        assert!(sym_state.is_ready());
+        assert!(matches!(sym_state.value(), Some(expr) if expr.to_string().contains('1')));
     }
 
     #[test]
@@ -748,15 +1842,12 @@ mod tests2 {
 
         // Find a substance that was found in the search
         let found_substances: Vec<String> = user_subs
-            .search_results
+            .get_all_search_states()
             .keys()
             .filter(|&s| {
-                if let Some(result_map) = user_subs.get_substance_result(s) {
-                    result_map.get(&WhatIsFound::Thermo).is_some()
-                        && result_map.get(&WhatIsFound::Thermo).unwrap().is_some()
-                } else {
-                    false
-                }
+                user_subs
+                    .get_substance_search_state(s)
+                    .is_some_and(|state| state.thermo().is_resolved())
             })
             .cloned()
             .collect();
@@ -775,15 +1866,12 @@ mod tests2 {
 
         // Find a substance that was found in the search
         let found_substances: Vec<String> = user_subs
-            .search_results
+            .get_all_search_states()
             .keys()
             .filter(|&s| {
-                if let Some(result_map) = user_subs.get_substance_result(s) {
-                    result_map.get(&WhatIsFound::Thermo).is_some()
-                        && result_map.get(&WhatIsFound::Thermo).unwrap().is_some()
-                } else {
-                    false
-                }
+                user_subs
+                    .get_substance_search_state(s)
+                    .is_some_and(|state| state.thermo().is_resolved())
             })
             .cloned()
             .collect();
@@ -818,12 +1906,12 @@ mod tests2 {
         // Check that the map was populated
         assert!(!user_subs.therm_map_of_properties_values.is_empty());
 
-        // Check values for found substances
+        // Check values for found substances through the explicit readiness API.
         for substance in user_subs.get_priority_found_substances() {
-            if let Some(props) = user_subs.therm_map_of_properties_values.get(&substance) {
-                if let Some(Some(cp)) = props.get(&DataType::Cp) {
-                    assert!(*cp > 0.0); // Heat capacity should be positive
-                }
+            let cp_state = user_subs.therm_value_state(&substance, DataType::Cp);
+            assert!(cp_state.is_ready(), "Cp should be ready for {}", substance);
+            if let Some(cp) = cp_state.value() {
+                assert!(*cp > 0.0); // Heat capacity should be positive
             }
         }
     }
@@ -841,23 +1929,50 @@ mod tests2 {
         let result = user_subs.calculate_therm_map_of_fun();
         assert!(result.is_ok());
 
-        // Check that the map was populated
-        assert!(!user_subs.therm_map_of_fun.is_empty());
+        // Check that the map was populated and query it through the explicit readiness API.
+        assert!(!user_subs.therm_functions().is_empty());
 
-        // Test a function for a found substance
+        // Test a function for a found substance without reaching into the raw nested map.
         for substance in user_subs.get_priority_found_substances() {
-            if let Some(fun_map) = user_subs.therm_map_of_fun.get(&substance) {
-                if let Some(Some(cp_fun)) = fun_map.get(&DataType::Cp_fun) {
-                    let cp_300 = cp_fun(300.0);
-                    let cp_400 = cp_fun(400.0);
+            let cp_fun_state = user_subs.therm_function_state(&substance, DataType::Cp_fun);
+            assert!(
+                cp_fun_state.is_ready(),
+                "Cp function should be ready for {}",
+                substance
+            );
+            if let Some(cp_fun) = cp_fun_state.value() {
+                let cp_300 = cp_fun(300.0);
+                let cp_400 = cp_fun(400.0);
 
-                    assert!(cp_300 > 0.0);
-                    assert!(cp_400 > 0.0);
-                    // Heat capacity typically increases with temperature
-                    // (though not always, so we don't assert this)
-                }
+                assert!(cp_300 > 0.0);
+                assert!(cp_400 > 0.0);
+                // Heat capacity typically increases with temperature
+                // (though not always, so we don't assert this)
             }
         }
+    }
+
+    #[test]
+    fn test_one_phase_gibbs_builders_do_not_publish_working_copy_caches() {
+        let mut user_subs = create_test_subsdata();
+        let _ = user_subs.search_substances().unwrap();
+        let _ = user_subs.extract_all_thermal_coeffs(298.15);
+
+        assert!(user_subs.therm_map_of_properties_values.is_empty());
+        assert!(user_subs.therm_functions().is_empty());
+        assert!(user_subs.therm_symbolic().is_empty());
+
+        let gibbs_fun = user_subs.calculate_Gibbs_fun_one_phase(101_325.0, 298.15);
+        assert!(gibbs_fun.is_ok());
+        assert!(user_subs.therm_functions().is_empty());
+        assert!(user_subs.therm_symbolic().is_empty());
+        assert!(user_subs.therm_map_of_properties_values.is_empty());
+
+        let gibbs_sym = user_subs.calculate_Gibbs_sym_one_phase(298.15, None, None);
+        assert!(gibbs_sym.is_ok());
+        assert!(user_subs.therm_functions().is_empty());
+        assert!(user_subs.therm_symbolic().is_empty());
+        assert!(user_subs.therm_map_of_properties_values.is_empty());
     }
 
     #[test]
@@ -873,8 +1988,15 @@ mod tests2 {
         let result = user_subs.calculate_therm_map_of_sym();
         assert!(result.is_ok());
 
-        // Check that the map was populated
-        assert!(!user_subs.therm_map_of_sym.is_empty());
+        // Check that the map was populated and readable through the explicit state API.
+        assert!(!user_subs.therm_symbolic().is_empty());
+        for substance in user_subs.get_priority_found_substances() {
+            assert!(
+                user_subs
+                    .therm_symbolic_state(&substance, DataType::Cp_sym)
+                    .is_ready()
+            );
+        }
     }
 
     #[test]
@@ -898,15 +2020,12 @@ mod tests2 {
 
         // Find a substance that has transport data
         let found_substances: Vec<String> = user_subs
-            .search_results
+            .get_all_search_states()
             .keys()
             .filter(|&s| {
-                if let Some(result_map) = user_subs.get_substance_result(s) {
-                    result_map.get(&WhatIsFound::Transport).is_some()
-                        && result_map.get(&WhatIsFound::Transport).unwrap().is_some()
-                } else {
-                    false
-                }
+                user_subs
+                    .get_substance_search_state(s)
+                    .is_some_and(|state| state.transport().is_resolved())
             })
             .cloned()
             .collect();
@@ -940,8 +2059,45 @@ mod tests2 {
         let mut user_subs = create_test_subsdata();
         let _ = user_subs.search_substances().unwrap();
 
-        // This just tests that the function runs without errors
+        let report = user_subs.search_summary_report();
+        assert_eq!(report.total_substances(), user_subs.substances.len());
+        assert_eq!(
+            report.priority_found() + report.permitted_found() + report.not_found(),
+            user_subs.substances.len()
+        );
+        assert!(!report.render_table().is_empty());
+
+        // This just tests that the formatting adapter runs without errors.
         user_subs.print_search_summary();
+    }
+
+    #[test]
+    fn test_search_summary_render_does_not_mutate_state() {
+        let mut user_subs = create_test_subsdata();
+        let _ = user_subs.search_substances().unwrap();
+
+        let before_states = user_subs
+            .get_all_search_states()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut before_states = before_states;
+        before_states.sort();
+        let before_count = user_subs.get_all_search_states().len();
+
+        let report = user_subs.search_summary_report();
+        let rendered = report.render_table();
+
+        assert!(!rendered.is_empty());
+        assert_eq!(before_count, user_subs.get_all_search_states().len());
+        let mut after_states = user_subs
+            .get_all_search_states()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        after_states.sort();
+        assert_eq!(before_states, after_states);
+        assert_eq!(report.total_substances(), before_count);
     }
 
     #[test]
@@ -970,7 +2126,7 @@ mod tests2 {
     }
 
     #[test]
-    fn test_clone() {
+    fn test_clone_preserves_state_but_requires_explicit_function_rebuild() {
         let mut user_subs = create_test_subsdata();
         let _ = user_subs.search_substances().unwrap();
 
@@ -979,22 +2135,63 @@ mod tests2 {
         let _ = user_subs.calculate_therm_map_of_properties(298.15);
         let _ = user_subs.calculate_therm_map_of_fun();
 
-        // Clone the instance
-        let cloned_subs = user_subs.clone();
+        let thermo_source = user_subs
+            .therm_map_of_fun
+            .keys()
+            .next()
+            .cloned()
+            .expect("expected at least one thermodynamic function cache entry");
 
-        // Check that basic properties were cloned correctly
+        // Clone the instance
+        let mut cloned_subs = user_subs.clone();
+
+        // Check that the read-only data was cloned correctly.
         assert_eq!(cloned_subs.substances, user_subs.substances);
         assert_eq!(cloned_subs.library_priorities, user_subs.library_priorities);
         assert_eq!(
-            cloned_subs.therm_map_of_properties_values.keys().count(),
-            user_subs.therm_map_of_properties_values.keys().count()
+            cloned_subs.therm_map_of_properties_values.len(),
+            user_subs.therm_map_of_properties_values.len()
+        );
+        assert_eq!(
+            cloned_subs.therm_map_of_sym.len(),
+            user_subs.therm_map_of_sym.len()
+        );
+        assert_eq!(
+            cloned_subs.search_results.len(),
+            user_subs.search_results.len()
         );
 
-        // Check that function maps have the same structure
+        // Closure caches keep their shape, but the executable closures themselves are intentionally reset.
         assert_eq!(
             cloned_subs.therm_map_of_fun.keys().count(),
             user_subs.therm_map_of_fun.keys().count()
         );
+        assert_eq!(
+            cloned_subs.transport_map_of_fun.keys().count(),
+            user_subs.transport_map_of_fun.keys().count()
+        );
+        assert!(
+            cloned_subs
+                .therm_map_of_fun
+                .get(&thermo_source)
+                .and_then(|map| map.get(&DataType::Cp_fun))
+                .is_some_and(|entry| entry.is_none())
+        );
+        if let Some(transport_source) = cloned_subs.transport_map_of_fun.keys().next().cloned() {
+            assert!(matches!(
+                cloned_subs.transport_function_state(&transport_source, DataType::Lambda_fun),
+                DerivedValueState::NotCalculated
+            ));
+        } else {
+            assert!(cloned_subs.transport_map_of_fun.is_empty());
+        }
+
+        // Rebuilding after clone should be explicit and should restore callable closures.
+        cloned_subs.calculate_therm_map_of_fun().unwrap();
+        assert!(matches!(
+            cloned_subs.get_thermo_function(&thermo_source, DataType::Cp_fun),
+            Some(_)
+        ));
     }
     #[test]
     fn test_if_not_found_go_NIST() {
@@ -1024,23 +2221,43 @@ mod tests2 {
         user_subs.set_library_priority("NUIG_thermo".to_string(), LibraryPriority::Permitted);
 
         // Set pressure and molar mass
-        user_subs.set_P(1.0, Some("atm".to_string()));
+        let _ = user_subs.set_P(1.0, Some("atm".to_string()));
         let _ = user_subs.search_substances().unwrap();
         user_subs.if_not_found_go_NIST().unwrap();
-        println!("\n\n Search results: {:#?}", user_subs.search_results);
-        assert!(user_subs.search_results.contains_key("NH4ClO4"));
-        assert!(user_subs.search_results.get("NH4ClO4").is_some());
+        println!(
+            "\n\n Search state: {:#?}",
+            user_subs.get_substance_search_state("NH4ClO4")
+        );
+        let nh4clo4_state = user_subs.get_substance_search_state("NH4ClO4");
+        assert!(nh4clo4_state.is_some());
+        assert!(matches!(
+            nh4clo4_state.unwrap().thermo,
+            PropertySearchState::Found(_)
+        ));
         assert!(
             user_subs
-                .search_results
-                .get("NH4ClO4")
-                .unwrap()
-                .contains_key(&WhatIsFound::Thermo)
+                .get_substance_search_state("NH4ClO4")
+                .is_some_and(|state| state.thermo().is_resolved())
         );
         let not_found = user_subs.get_not_found_substances();
         println!("Not found: {:#?}", not_found);
         //panic!("Test failed");
     }
+
+    #[test]
+    fn test_if_not_found_go_NIST_errors_when_no_thermo_fallback_is_enabled() {
+        let mut user_subs = SubsData::new();
+        user_subs.substances = vec!["Xe".to_string()];
+        user_subs.library_priorities.clear();
+        user_subs.set_library_priority("Aramco_transport".to_string(), LibraryPriority::Priority);
+        user_subs.insert_not_found_if_absent("Xe");
+
+        let result = user_subs.if_not_found_go_NIST();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("NIST data"));
+    }
+
     // Test the calculate_elem_composition_and_molar_mass function
     #[test]
     fn test_calculate_elem_composition_and_molar_mass() {
@@ -1061,14 +2278,14 @@ mod tests2 {
         assert!(user_subs.elem_composition_matrix.is_some());
 
         // Check that molar masses were calculated correctly
-        assert!(user_subs.hasmap_of_molar_mass.contains_key("H2O"));
-        assert!(user_subs.hasmap_of_molar_mass.contains_key("CO2"));
-        assert!(user_subs.hasmap_of_molar_mass.contains_key("CH4"));
+        assert!(user_subs.molar_mass_by_substance.contains_key("H2O"));
+        assert!(user_subs.molar_mass_by_substance.contains_key("CO2"));
+        assert!(user_subs.molar_mass_by_substance.contains_key("CH4"));
 
         // Check approximate molar mass values
-        let h2o_mass = user_subs.hasmap_of_molar_mass.get("H2O").unwrap();
-        let co2_mass = user_subs.hasmap_of_molar_mass.get("CO2").unwrap();
-        let ch4_mass = user_subs.hasmap_of_molar_mass.get("CH4").unwrap();
+        let h2o_mass = user_subs.molar_mass_by_substance.get("H2O").unwrap();
+        let co2_mass = user_subs.molar_mass_by_substance.get("CO2").unwrap();
+        let ch4_mass = user_subs.molar_mass_by_substance.get("CH4").unwrap();
 
         assert_relative_eq!(*h2o_mass, 18.0, epsilon = 0.1);
         assert_relative_eq!(*co2_mass, 44.0, epsilon = 0.1);
@@ -1098,7 +2315,7 @@ mod tests2 {
         assert!(result.is_ok());
 
         // Check that molar mass for methanol is correct
-        if let Some(meoh_mass) = user_subs_with_groups.hasmap_of_molar_mass.get("MeOH") {
+        if let Some(meoh_mass) = user_subs_with_groups.molar_mass_by_substance.get("MeOH") {
             assert_relative_eq!(*meoh_mass, 32.0, epsilon = 0.1); // CH3OH = 32 g/mol
         } else {
             panic!("Molar mass for MeOH not calculated");
@@ -1157,11 +2374,11 @@ mod tests2 {
         let result = user_subs.calculate_elem_composition_and_molar_mass(None);
         assert!(result.is_ok());
         assert!(user_subs.elem_composition_matrix.is_some());
-        assert!(!user_subs.hasmap_of_molar_mass.is_empty());
+        assert!(!user_subs.molar_mass_by_substance.is_empty());
         // Check molar masses
-        let glucose_mass = user_subs.hasmap_of_molar_mass.get("C6H12O6").unwrap();
-        let ethanol_mass = user_subs.hasmap_of_molar_mass.get("C2H5OH").unwrap();
-        let ammonia_mass = user_subs.hasmap_of_molar_mass.get("NH3").unwrap();
+        let glucose_mass = user_subs.molar_mass_by_substance.get("C6H12O6").unwrap();
+        let ethanol_mass = user_subs.molar_mass_by_substance.get("C2H5OH").unwrap();
+        let ammonia_mass = user_subs.molar_mass_by_substance.get("NH3").unwrap();
 
         assert_relative_eq!(*glucose_mass, 180.0, epsilon = 0.5); // C6H12O6 = 180 g/mol
         assert_relative_eq!(*ethanol_mass, 46.0, epsilon = 0.5); // C2H5OH = 46 g/mol
@@ -1207,10 +2424,10 @@ mod tests2 {
             .calculate_elem_composition_and_molar_mass(None)
             .unwrap();
         assert!(user_subs.elem_composition_matrix.is_some());
-        assert!(!user_subs.hasmap_of_molar_mass.is_empty());
-        println!("Molar masses: {:?}", user_subs.hasmap_of_molar_mass);
+        assert!(!user_subs.molar_mass_by_substance.is_empty());
+        println!("Molar masses: {:?}", user_subs.molar_mass_by_substance);
         // Set pressure (required for transport calculations)
-        user_subs.set_P(1e5, None);
+        let _ = user_subs.set_P(1e5, None);
 
         // Extract thermal coefficients
         user_subs.extract_all_thermal_coeffs(400.0).unwrap();
@@ -1225,23 +2442,31 @@ mod tests2 {
         let result = user_subs.calculate_transport_map_of_properties(400.0);
         assert!(result.is_ok());
 
-        // Verify transport properties were calculated and stored
+        // Verify transport properties were calculated and stored through the explicit readiness API.
         for substance in &substances {
-            if let Some(transport_props) =
-                user_subs.transport_map_of_properties_values.get(substance)
-            {
-                if let Some(Some(lambda)) = transport_props.get(&DataType::Lambda) {
-                    println!("{} Lambda: {}", substance, lambda);
-                    assert!(*lambda > 0.0, "Lambda should be positive for {}", substance);
-                }
-                if let Some(Some(visc)) = transport_props.get(&DataType::Visc) {
-                    println!("{} Viscosity: {}", substance, visc);
-                    assert!(
-                        *visc > 0.0,
-                        "Viscosity should be positive for {}",
-                        substance
-                    );
-                }
+            let lambda_state = user_subs.transport_value_state(substance, DataType::Lambda);
+            let visc_state = user_subs.transport_value_state(substance, DataType::Visc);
+            assert!(
+                lambda_state.is_ready(),
+                "Lambda should be ready for {}",
+                substance
+            );
+            assert!(
+                visc_state.is_ready(),
+                "Viscosity should be ready for {}",
+                substance
+            );
+            if let Some(lambda) = lambda_state.value() {
+                println!("{} Lambda: {}", substance, lambda);
+                assert!(*lambda > 0.0, "Lambda should be positive for {}", substance);
+            }
+            if let Some(visc) = visc_state.value() {
+                println!("{} Viscosity: {}", substance, visc);
+                assert!(
+                    *visc > 0.0,
+                    "Viscosity should be positive for {}",
+                    substance
+                );
             }
         }
     }
@@ -1277,13 +2502,12 @@ mod tests2 {
             .calculate_elem_composition_and_molar_mass(None)
             .unwrap();
         assert!(user_subs.elem_composition_matrix.is_some());
-        assert!(!user_subs.hasmap_of_molar_mass.is_empty());
-        println!("Molar masses: {:?}", user_subs.hasmap_of_molar_mass);
+        assert!(!user_subs.molar_mass_by_substance.is_empty());
+        println!("Molar masses: {:?}", user_subs.molar_mass_by_substance);
         // Set pressure (required for transport calculations)
-        user_subs.set_P(1e5, None);
+        let _ = user_subs.set_P(1e5, None);
         //   println!("instance before clone: {:#?}", user_subs);
-        let search_results = &user_subs.search_results;
-        let H2O_results = search_results.get("H2O");
+        let H2O_results = user_subs.get_substance_result("H2O");
         assert!(H2O_results.is_some());
         let H2O_results = H2O_results.unwrap();
         assert!(H2O_results.get(&WhatIsFound::Thermo).is_some());
@@ -1306,23 +2530,31 @@ mod tests2 {
         let result = user_subs.calculate_transport_map_of_properties(400.0);
         assert!(result.is_ok());
 
-        // Verify transport properties were calculated and stored
+        // Verify transport properties were calculated and stored through the explicit readiness API.
         for substance in &substances {
-            if let Some(transport_props) =
-                user_subs.transport_map_of_properties_values.get(substance)
-            {
-                if let Some(Some(lambda)) = transport_props.get(&DataType::Lambda) {
-                    println!("{} Lambda: {}", substance, lambda);
-                    assert!(*lambda > 0.0, "Lambda should be positive for {}", substance);
-                }
-                if let Some(Some(visc)) = transport_props.get(&DataType::Visc) {
-                    println!("{} Viscosity: {}", substance, visc);
-                    assert!(
-                        *visc > 0.0,
-                        "Viscosity should be positive for {}",
-                        substance
-                    );
-                }
+            let lambda_state = user_subs.transport_value_state(substance, DataType::Lambda);
+            let visc_state = user_subs.transport_value_state(substance, DataType::Visc);
+            assert!(
+                lambda_state.is_ready(),
+                "Lambda should be ready for {}",
+                substance
+            );
+            assert!(
+                visc_state.is_ready(),
+                "Viscosity should be ready for {}",
+                substance
+            );
+            if let Some(lambda) = lambda_state.value() {
+                println!("{} Lambda: {}", substance, lambda);
+                assert!(*lambda > 0.0, "Lambda should be positive for {}", substance);
+            }
+            if let Some(visc) = visc_state.value() {
+                println!("{} Viscosity: {}", substance, visc);
+                assert!(
+                    *visc > 0.0,
+                    "Viscosity should be positive for {}",
+                    substance
+                );
             }
         }
     }
@@ -1435,7 +2667,7 @@ mod additional_error_tests {
         assert!(matches!(result, Err(SubsDataError::PressureNotSet)));
 
         // Set pressure but not molar mass
-        subs_data.set_P(101325.0, None);
+        let _ = subs_data.set_P(101325.0, None);
         let result = subs_data.calculate_transport_properties("CO", 400.0, Some(30.0), None);
         assert!(matches!(result, Err(SubsDataError::MolarMassNotFound(_))));
     }
@@ -1604,7 +2836,7 @@ mod logging_tests {
 
         let _ = subs_data.calculate_transport_properties("CO", 400.0, Some(30.0), None);
 
-        subs_data.set_P(101325.0, None);
+        let _ = subs_data.set_P(101325.0, None);
         let _ = subs_data.calculate_transport_properties("CO", 400.0, Some(30.0), None);
 
         let logs = subs_data.logger.get_logs();
@@ -1644,8 +2876,8 @@ mod logging_tests {
         }
 
         let _ = subs_data.search_substances();
-        subs_data.set_P(101325.0, None);
-        subs_data.set_M(
+        let _ = subs_data.set_P(101325.0, None);
+        let _ = subs_data.set_M(
             HashMap::from([
                 ("H2O".to_string(), 18.0),
                 ("CO".to_string(), 28.0),
@@ -1702,10 +2934,10 @@ mod logging_tests {
         let _ = subs_data.extract_thermal_coeffs("CO", -100.0);
         let _ = subs_data.calculate_transport_properties("CO", 400.0, Some(30.0), None);
 
-        subs_data.set_P(101325.0, None);
+        let _ = subs_data.set_P(101325.0, None);
         let _ = subs_data.calculate_transport_properties("CO", 400.0, Some(30.0), None);
 
-        subs_data.set_M(HashMap::from([("CO".to_string(), 28.0)]), None);
+        let _ = subs_data.set_M(HashMap::from([("CO".to_string(), 28.0)]), None);
         let _ = subs_data.calculate_transport_properties("FakeSubstance", 400.0, Some(30.0), None);
 
         let logs = subs_data.logger.get_logs();

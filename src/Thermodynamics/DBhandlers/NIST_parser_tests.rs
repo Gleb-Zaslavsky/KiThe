@@ -3,6 +3,15 @@ mod tests {
     use crate::Thermodynamics::DBhandlers::NIST_parser::{
         NistError, NistInput, NistParser, Phase, SearchType,
     };
+    use reqwest::blocking::Client;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::thread;
+    use std::time::Duration;
     // use std::collections::HashMap;
     /*
        // Mock HTTP client for testing
@@ -33,6 +42,94 @@ mod tests {
            }
        }
     */
+
+    fn build_timeout_client(timeout_ms: u64) -> Client {
+        Client::builder()
+            .connect_timeout(Duration::from_millis(timeout_ms))
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()
+            .expect("test client should be constructible")
+    }
+
+    fn http_response(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
+            status,
+            body.len(),
+            body
+        )
+    }
+
+    fn spawn_response_server(response: String) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_thread = Arc::clone(&hits);
+
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                hits_for_thread.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0_u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        (format!("http://{}", addr), hits)
+    }
+
+    fn spawn_hanging_server() -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_thread = Arc::clone(&hits);
+
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                hits_for_thread.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0_u8; 1024];
+                let _ = stream.read(&mut buf);
+                thread::sleep(Duration::from_secs(2));
+            }
+        });
+
+        (format!("http://{}", addr), hits)
+    }
+
+    fn spawn_threshold_server(
+        success_response: String,
+        success_requests: usize,
+    ) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_thread = Arc::clone(&hits);
+        let success_response = Arc::new(success_response);
+        let success_response_for_thread = Arc::clone(&success_response);
+
+        thread::spawn(move || {
+            for _ in 0..32 {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let current = hits_for_thread.fetch_add(1, Ordering::SeqCst) + 1;
+                    let mut buf = [0_u8; 1024];
+                    let _ = stream.read(&mut buf);
+                    let response = if current <= success_requests {
+                        success_response_for_thread.as_str().to_string()
+                    } else {
+                        http_response("404 Not Found", "missing")
+                    };
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                } else {
+                    break;
+                }
+            }
+        });
+
+        (format!("http://{}", addr), hits)
+    }
+
     #[test]
     fn test_url_construction() {
         let parser = NistParser::new();
@@ -73,6 +170,126 @@ mod tests {
     }
 
     #[test]
+    fn test_fetch_page_rejects_http_error_status() {
+        let (base_url, hits) = spawn_response_server(http_response("404 Not Found", "missing"));
+        let client = build_timeout_client(250);
+        let parser =
+            NistParser::with_client_and_base_url(client, url::Url::parse(&base_url).unwrap());
+        let url = url::Url::parse(&format!("{}/anything", base_url)).unwrap();
+
+        let result = parser.fetch_page(&url);
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(matches!(result, Err(NistError::HttpStatus(status)) if status.as_u16() == 404));
+    }
+
+    #[test]
+    fn test_fetch_page_rejects_plain_text_body() {
+        let (base_url, _) = spawn_response_server(http_response("200 OK", "plain text only"));
+        let client = build_timeout_client(250);
+        let parser =
+            NistParser::with_client_and_base_url(client, url::Url::parse(&base_url).unwrap());
+        let url = url::Url::parse(&format!("{}/anything", base_url)).unwrap();
+
+        let result = parser.fetch_page(&url);
+
+        assert!(matches!(result, Err(NistError::InvalidDataFormat)));
+    }
+
+    #[test]
+    fn test_fetch_page_rejects_oversized_body() {
+        let body = format!(
+            "<html><body>{}</body></html>",
+            "x".repeat(2 * 1024 * 1024 + 64)
+        );
+        let (base_url, _) = spawn_response_server(http_response("200 OK", &body));
+        let client = build_timeout_client(250);
+        let parser =
+            NistParser::with_client_and_base_url(client, url::Url::parse(&base_url).unwrap());
+        let url = url::Url::parse(&format!("{}/anything", base_url)).unwrap();
+
+        let result = parser.fetch_page(&url);
+
+        assert!(matches!(result, Err(NistError::ResponseTooLarge { .. })));
+    }
+
+    #[test]
+    fn test_fetch_page_times_out_on_hanging_server() {
+        let (base_url, hits) = spawn_hanging_server();
+        let client = build_timeout_client(100);
+        let parser =
+            NistParser::with_client_and_base_url(client, url::Url::parse(&base_url).unwrap());
+        let url = url::Url::parse(&format!("{}/anything", base_url)).unwrap();
+
+        let result = parser.fetch_page(&url);
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(matches!(result, Err(NistError::NetworkError(err)) if err.is_timeout()));
+    }
+
+    #[test]
+    fn test_get_data_batch_reports_partial_success() {
+        let success_body = http_response(
+            "200 OK",
+            r#"
+            <html>
+              <body>
+                <h1>Example substance</h1>
+                <ol>
+                  <li><a href="/cgi/cbook.cgi?ID=example-entry">Example result</a></li>
+                </ol>
+                <a href="/gas">Gas phase thermochemistry data</a>
+                <li>Molecular weight: 16.043</li>
+              </body>
+            </html>
+            "#,
+        );
+        let (base_url, hits) = spawn_threshold_server(success_body, 4);
+        let client = build_timeout_client(250);
+        let parser =
+            NistParser::with_client_and_base_url(client, url::Url::parse(&base_url).unwrap());
+        let requests = vec![
+            ("CH4".to_string(), SearchType::MolarMass, Phase::Gas),
+            ("H2O".to_string(), SearchType::MolarMass, Phase::Gas),
+        ];
+
+        let report = parser
+            .get_data_batch(&requests)
+            .expect("batch should partially succeed");
+
+        assert!(hits.load(Ordering::SeqCst) >= 5);
+        assert_eq!(report.entries.len(), 2);
+        assert_eq!(report.successes(), 1);
+        assert_eq!(report.failures(), 1);
+        assert!(report.entries[0].result.is_ok());
+        assert!(report.entries[1].result.is_err());
+        let _ = base_url;
+    }
+
+    #[test]
+    fn test_get_data_batch_fails_when_every_request_fails() {
+        let bad_body = http_response("404 Not Found", "missing");
+        let (base_url, hits) = spawn_threshold_server(bad_body, 0);
+        let client = build_timeout_client(250);
+        let parser =
+            NistParser::with_client_and_base_url(client, url::Url::parse(&base_url).unwrap());
+        let requests = vec![
+            ("CH4".to_string(), SearchType::MolarMass, Phase::Gas),
+            ("H2O".to_string(), SearchType::MolarMass, Phase::Gas),
+        ];
+
+        let result = parser.get_data_batch(&requests);
+
+        assert!(hits.load(Ordering::SeqCst) >= 1);
+        assert!(matches!(
+            result,
+            Err(NistError::BatchAllFailed { attempts, .. }) if attempts == requests.len()
+        ));
+        let _ = base_url;
+    }
+
+    #[test]
+    #[ignore = "live NIST integration test"]
     fn test_real_substance_fetch() {
         let parser = NistParser::new();
 
@@ -95,6 +312,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "live NIST integration test"]
     fn test_nonexistent_substance() {
         let parser = NistParser::new();
         let result = parser.get_data("NonexistentSubstance123", SearchType::MolarMass, Phase::Gas);
@@ -102,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "live NIST integration test"]
     fn test_thermodynamic_data() {
         let parser = NistParser::new();
 
@@ -113,6 +332,7 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "live NIST integration test"]
     fn test_simple_substance() {
         let parser = NistParser::new();
 
@@ -141,6 +361,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "live NIST integration test"]
     fn test_ch4_gas() {
         let parser = NistParser::new();
         let substance = "CH4";
@@ -156,6 +377,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "live NIST integration test"]
     fn test_nacl_solid() {
         let parser = NistParser::new();
         let substance = "NaCl";
@@ -171,6 +393,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "live NIST integration test"]
     fn test_nacl_liquid() {
         let parser = NistParser::new();
         let substance = "NaCl";

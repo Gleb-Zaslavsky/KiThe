@@ -35,13 +35,32 @@
 //! - **None**: Empty configuration for custom problem setup
 
 use crate::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
-use crate::ReactorsBVP::task_parser_reactor_BVP::SIMPLE_BVP_TEMPLATE;
+use crate::ReactorsBVP::task_parser_reactor_BVP::{
+    SIMPLE_BVP_TEMPLATE, validate_reactor_bvp_task_map,
+};
+use crate::ReactorsBVP::task_value_conversion::{UsizeConversionError, try_value_as_usize};
 use crate::cli::reactor_help::REACTOR_ENG_HELPER;
+use crate::gui::bvp_gui_config::{
+    AotToolchainRequest, BvpGuiConfig, BvpGuiMigrationReport, GuiAotCodegenBackend,
+    GuiExecutionBackend, aot_toolchain_request, normalize_bvp_solver_backend_section,
+    validate_aot_toolchain_fields,
+};
+pub use crate::gui::document_lifecycle::{
+    DocumentLifecycleState, GuiFileOperationKind, GuiFileOperationResult,
+};
 use crate::gui::gui_plot::PlotWindow;
 use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
 use eframe::egui;
 use log::{info, warn};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, mpsc};
+use tabled::{Table, Tabled};
+
+#[path = "combustion_execution.rs"]
+mod combustion_execution;
+#[path = "combustion_lifecycle.rs"]
+mod combustion_lifecycle;
 /*
 this is value enum from RustedSciThe::command_interpreter::task_parser
 pub enum Value {
@@ -121,15 +140,15 @@ impl std::fmt::Display for ProblemsEnum {
 /// * `String` - Single-line text input
 /// * `Float` - Drag value widget with 0.1 step size
 /// * `Integer` - Drag value widget with 1 step size
-/// * `Usize` - Drag value widget with automatic type conversion
+/// * `Usize` - Non-negative drag value widget
 /// * `Vector` - Multiple drag widgets for each vector element
 /// * `Boolean` - Checkbox widget
-/// * `Optional` - Collapsible section for nested values
+/// * `Optional` - Read/edit an existing typed payload without inventing its type
 fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) {
     match value {
         Value::String(s) => {
             if ui.text_edit_singleline(s).changed() {
-                println!("Field '{}' changed to: {}", field_name, s);
+                info!("Field '{}' changed to: {}", field_name, s);
             }
         }
         Value::Float(f) => {
@@ -145,19 +164,17 @@ fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) {
                 }))
                 .changed()
             {
-                println!("Field '{}' changed to: {}", field_name, f);
+                info!("Field '{}' changed to: {}", field_name, f);
             }
         }
         Value::Integer(i) => {
             if ui.add(egui::DragValue::new(i).speed(1)).changed() {
-                println!("Field '{}' changed to: {}", field_name, i);
+                info!("Field '{}' changed to: {}", field_name, i);
             }
         }
         Value::Usize(u) => {
-            let mut tmp = *u as i64;
-            if ui.add(egui::DragValue::new(&mut tmp).speed(1)).changed() {
-                *u = tmp as usize;
-                println!("Field '{}' changed to: {}", field_name, u);
+            if ui.add(egui::DragValue::new(u).speed(1)).changed() {
+                info!("Field '{}' changed to: {}", field_name, u);
             }
         }
         Value::Vector(vec) => {
@@ -174,32 +191,24 @@ fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) {
                     }))
                     .changed()
                 {
-                    println!("Field '{}[{}]' changed to: {}", field_name, i, v);
+                    info!("Field '{}[{}]' changed to: {}", field_name, i, v);
                 }
             }
         }
         Value::Boolean(b) => {
             if ui.checkbox(b, "").changed() {
-                println!("Field '{}' changed to: {}", field_name, b);
+                info!("Field '{}' changed to: {}", field_name, b);
             }
         }
         Value::Optional(opt) => {
             ui.horizontal(|ui| {
-                let mut is_some = opt.is_some();
-                if ui.checkbox(&mut is_some, "").changed() {
-                    if is_some && opt.is_none() {
-                        *opt = Some(Box::new(Value::Float(0.0)));
-                        println!("Field '{}' changed to Some", field_name);
-                    } else if !is_some && opt.is_some() {
-                        *opt = None;
-                        println!("Field '{}' changed to None", field_name);
-                    }
-                }
-
                 if let Some(inner) = opt {
                     ui.label("Some:");
                     render_value(ui, inner, field_name);
                 } else {
+                    // A generic `None` carries no information about its inner
+                    // type. Typed optional controls are responsible for
+                    // constructing parser-valid `Some` values.
                     ui.label("None");
                 }
             });
@@ -226,6 +235,7 @@ fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) {
 /// A tuple containing:
 /// * `bool` - Whether a new field should be added
 /// * `bool` - Whether the entire section should be deleted
+/// * `Vec<String>` - Field names whose deletion was requested
 ///
 /// # Safety
 ///
@@ -239,115 +249,137 @@ fn render_section(
     new_field_value: &mut String,
     help_map: Option<&[(&str, &str)]>,
     current_help: &mut String,
-) -> (bool, bool) {
+) -> (bool, bool, Vec<String>) {
     let mut add_field = false;
     let mut delete_section = false;
+    let mut requested_field_deletions = Vec::new();
 
-    ui.horizontal(|ui| {
-        let section_header = egui::CollapsingHeader::new(name)
-            .default_open(false)
-            .show(ui, |ui| {
-                let mut fields_to_delete = Vec::new();
+    ui.push_id(name, |ui| {
+        ui.horizontal(|ui| {
+            let section_header =
+                egui::CollapsingHeader::new(name)
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        let mut fields_to_delete = Vec::new();
+                        let mut field_names = sorted_section_field_names(section);
+                        for field_name in field_names.drain(..) {
+                            let Some(maybe_values) = section.get_mut(&field_name) else {
+                                continue;
+                            };
+                            ui.push_id((name, field_name.as_str()), |ui| {
+                                ui.horizontal(|ui| {
+                                    let field_label = ui.label(&field_name);
 
-                for (field_name, maybe_values) in section.iter_mut() {
-                    ui.horizontal(|ui| {
-                        let field_label = ui.label(field_name);
-
-                        // Update help info on hover
-                        if field_label.hovered() {
-                            if let Some(map) = help_map {
-                                let help_key = format!("{}.{}", name, field_name);
-                                if let Some((_, help_text)) =
-                                    map.iter().find(|(key, _)| *key == help_key)
-                                {
-                                    *current_help = help_text.to_string();
-                                }
-                            }
-                        }
-
-                        if let Some(values) = maybe_values {
-                            // Special handling for Vec<String> fields like substances
-                            if values.len() > 1
-                                && values.iter().all(|v| matches!(v, Value::String(_)))
-                            {
-                                let mut combined_text = values
-                                    .iter()
-                                    .filter_map(|v| {
-                                        if let Value::String(s) = v {
-                                            Some(s.as_str())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(", ");
-
-                                if ui.text_edit_singleline(&mut combined_text).changed() {
-                                    let new_substances: Vec<Value> = combined_text
-                                        .split(',')
-                                        .map(|s| Value::String(s.trim().to_string()))
-                                        .filter(|v| {
-                                            if let Value::String(s) = v {
-                                                !s.is_empty()
-                                            } else {
-                                                true
+                                    // Update help info on hover.
+                                    if field_label.hovered() {
+                                        if let Some(map) = help_map {
+                                            let help_key = format!("{}.{}", name, field_name);
+                                            if let Some((_, help_text)) =
+                                                map.iter().find(|(key, _)| *key == help_key)
+                                            {
+                                                *current_help = help_text.to_string();
                                             }
-                                        })
-                                        .collect();
-                                    *values = new_substances;
-                                    println!(
-                                        "Field '{}' changed to: {}",
-                                        field_name, combined_text
-                                    );
-                                }
-                            } else {
-                                for v in values.iter_mut() {
-                                    render_value(ui, v, field_name);
-                                }
+                                        }
+                                    }
+
+                                    if let Some(values) = maybe_values {
+                                        // Special handling for Vec<String> fields like substances.
+                                        if values.len() > 1
+                                            && values.iter().all(|v| matches!(v, Value::String(_)))
+                                        {
+                                            let mut combined_text = values
+                                                .iter()
+                                                .filter_map(|v| {
+                                                    if let Value::String(s) = v {
+                                                        Some(s.as_str())
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join(", ");
+
+                                            if ui.text_edit_singleline(&mut combined_text).changed()
+                                            {
+                                                let new_substances: Vec<Value> = combined_text
+                                                    .split(',')
+                                                    .map(|s| Value::String(s.trim().to_string()))
+                                                    .filter(|v| {
+                                                        if let Value::String(s) = v {
+                                                            !s.is_empty()
+                                                        } else {
+                                                            true
+                                                        }
+                                                    })
+                                                    .collect();
+                                                *values = new_substances;
+                                                info!(
+                                                    "Field '{}' changed to: {}",
+                                                    field_name, combined_text
+                                                );
+                                            }
+                                        } else {
+                                            for v in values.iter_mut() {
+                                                render_value(ui, v, &field_name);
+                                            }
+                                        }
+                                    } else {
+                                        ui.label("None");
+                                    }
+
+                                    if ui.button("❌").clicked() {
+                                        fields_to_delete.push(field_name.clone());
+                                    }
+                                });
+                            });
+                        }
+
+                        requested_field_deletions.extend(fields_to_delete);
+
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("New field:");
+                            ui.text_edit_singleline(new_field_name);
+                            ui.label("Value:");
+                            ui.text_edit_singleline(new_field_value);
+                            if ui.button("Add Field").clicked() {
+                                add_field = true;
                             }
-                        } else {
-                            ui.label("None");
-                        }
-
-                        if ui.button("❌").clicked() {
-                            fields_to_delete.push(field_name.clone());
-                        }
+                        });
                     });
-                }
 
-                // Delete fields outside the iterator
-                for field_name in fields_to_delete {
-                    section.remove(&field_name);
-                    println!("Deleted field: {}", field_name);
-                }
-
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("New field:");
-                    ui.text_edit_singleline(new_field_name);
-                    ui.label("Value:");
-                    ui.text_edit_singleline(new_field_value);
-                    if ui.button("Add Field").clicked() {
-                        add_field = true;
+            // Update help info on section header hover
+            if section_header.header_response.hovered() {
+                if let Some(map) = help_map {
+                    if let Some((_, help_text)) = map.iter().find(|(key, _)| *key == name) {
+                        *current_help = help_text.to_string();
                     }
-                });
-            });
-
-        // Update help info on section header hover
-        if section_header.header_response.hovered() {
-            if let Some(map) = help_map {
-                if let Some((_, help_text)) = map.iter().find(|(key, _)| *key == name) {
-                    *current_help = help_text.to_string();
                 }
             }
-        }
 
-        if ui.button("❌").clicked() {
-            delete_section = true;
-        }
+            if ui.button("❌").clicked() {
+                delete_section = true;
+            }
+        });
     });
 
-    (add_field, delete_section)
+    (add_field, delete_section, requested_field_deletions)
+}
+
+/// Returns section field names in a deterministic order for raw document rendering.
+pub(crate) fn sorted_section_field_names(
+    section: &HashMap<String, Option<Vec<Value>>>,
+) -> Vec<String> {
+    let mut field_names = section.keys().cloned().collect::<Vec<_>>();
+    field_names.sort();
+    field_names
+}
+
+/// Returns document section names in a deterministic order for raw GUI rendering.
+pub(crate) fn sorted_document_section_names(document: &DocumentMap) -> Vec<String> {
+    let mut section_names = document.keys().cloned().collect::<Vec<_>>();
+    section_names.sort();
+    section_names
 }
 
 const BVP_GRID_REFINEMENT_METHODS: &[&str] =
@@ -406,9 +438,7 @@ fn grid_refinement_slot_to_params(slot: Option<&Vec<Value>>) -> Option<Vec<f64>>
 }
 
 /// Reshapes a grid-refinement section into the single-method contract used by RST.
-fn normalize_grid_refinement_section(
-    section: &mut HashMap<String, Option<Vec<Value>>>,
-) -> String {
+fn normalize_grid_refinement_section(section: &mut HashMap<String, Option<Vec<Value>>>) -> String {
     let mut selected_method = None;
     let mut selected_params = None;
 
@@ -442,6 +472,7 @@ fn normalize_grid_refinement_section(
 }
 
 /// Returns whether a compatibility value explicitly disables adaptive refinement.
+#[allow(dead_code)]
 fn value_is_explicit_none(value: &Value) -> bool {
     matches!(value, Value::Optional(None))
         || matches!(value, Value::String(value) if value.trim().eq_ignore_ascii_case("none"))
@@ -453,6 +484,7 @@ fn value_is_explicit_none(value: &Value) -> bool {
 /// `adaptive_strategy` section, not from this field. Older task documents may
 /// still carry `adaptive: None`, so the marker is consumed once and translated
 /// into the native section-presence contract.
+#[allow(dead_code)]
 fn take_legacy_adaptive_marker(document: &mut DocumentMap) -> Option<bool> {
     let strategy_params = document.get_mut("strategy_params")?;
     let values = strategy_params.remove("adaptive")??;
@@ -478,18 +510,15 @@ fn set_bvp_adaptive_grid_enabled(document: &mut DocumentMap, enabled: bool) {
 
     let adaptive_strategy = ensure_section_mut(document, "adaptive_strategy");
     adaptive_strategy.insert("version".to_string(), Some(vec![Value::Usize(1)]));
-    let _ = ensure_field_slot(
-        adaptive_strategy,
-        "max_refinements",
-        Value::Usize(3),
-    );
-    normalize_usize_field(adaptive_strategy, "max_refinements");
+    let _ = ensure_field_slot(adaptive_strategy, "max_refinements", Value::Usize(3));
+    let _ = normalize_usize_field(adaptive_strategy, "max_refinements");
 
     let grid_refinement = ensure_section_mut(document, "grid_refinement");
     normalize_grid_refinement_section(grid_refinement);
 }
 
 /// Canonicalizes adaptive-grid state loaded from old or partially edited tasks.
+#[allow(dead_code)]
 fn normalize_bvp_adaptive_grid_settings(document: &mut DocumentMap) {
     let compatibility_marker = take_legacy_adaptive_marker(document);
     let has_native_payload = document
@@ -509,7 +538,6 @@ fn render_bvp_adaptive_grid_panel(
     help_map: Option<&[(&str, &str)]>,
     current_help: &mut String,
 ) {
-    normalize_bvp_adaptive_grid_settings(document);
     let mut enabled = document.contains_key("adaptive_strategy");
 
     ui.group(|ui| {
@@ -535,25 +563,41 @@ fn render_bvp_adaptive_grid_panel(
                     .num_columns(2)
                     .striped(true)
                     .show(ui, |ui| {
-                        let adaptive_strategy =
-                            ensure_section_mut(document, "adaptive_strategy");
-                        let current = adaptive_strategy
+                        let adaptive_strategy = ensure_section_mut(document, "adaptive_strategy");
+                        let current_result = adaptive_strategy
                             .get("max_refinements")
                             .and_then(|slot| slot.as_ref())
                             .and_then(|values| values.first())
-                            .and_then(value_as_usize)
-                            .unwrap_or(3);
-                        let mut max_refinements = current;
+                            .map(try_value_as_usize)
+                            .unwrap_or(Ok(3));
                         ui.label("Maximum grid refinements");
-                        if ui
-                            .add(egui::DragValue::new(&mut max_refinements).speed(1))
-                            .changed()
-                        {
-                            adaptive_strategy.insert(
-                                "max_refinements".to_string(),
-                                Some(vec![Value::Usize(max_refinements)]),
-                            );
-                            info!("Maximum grid refinements changed to: {}", max_refinements);
+                        match current_result {
+                            Ok(mut max_refinements) => {
+                                if ui
+                                    .add(egui::DragValue::new(&mut max_refinements).speed(1))
+                                    .changed()
+                                {
+                                    adaptive_strategy.insert(
+                                        "max_refinements".to_string(),
+                                        Some(vec![Value::Usize(max_refinements)]),
+                                    );
+                                    info!(
+                                        "Maximum grid refinements changed to: {}",
+                                        max_refinements
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(egui::Color32::RED, error.to_string());
+                                    if ui.button("Reset to 3").clicked() {
+                                        adaptive_strategy.insert(
+                                            "max_refinements".to_string(),
+                                            Some(vec![Value::Usize(3)]),
+                                        );
+                                    }
+                                });
+                            }
                         }
                         ui.end_row();
                     });
@@ -631,9 +675,8 @@ fn render_grid_refinement_section(
                             info!("Grid refinement strategy changed to: {}", selected_method);
                         }
 
-                        let method = selected_method;
                         let params = section
-                            .get_mut(&method)
+                            .get_mut(&selected_method)
                             .and_then(|slot| slot.as_mut())
                             .and_then(|values| values.first_mut())
                             .and_then(|value| match value {
@@ -686,6 +729,26 @@ fn render_grid_refinement_section(
     (false, delete_section)
 }
 
+/// Reads the current grid-refinement selection without mutating the document.
+#[allow(dead_code)]
+fn current_grid_refinement_state(
+    section: &HashMap<String, Option<Vec<Value>>>,
+) -> (String, Vec<f64>) {
+    for method in BVP_GRID_REFINEMENT_METHODS {
+        if let Some((_key, slot)) = section
+            .iter()
+            .find(|(key, _)| canonical_grid_refinement_method_name(key) == Some(*method))
+        {
+            let params = grid_refinement_slot_to_params(slot.as_ref())
+                .unwrap_or_else(|| default_grid_refinement_params(method));
+            return ((*method).to_string(), params);
+        }
+    }
+
+    let method = "pearson".to_string();
+    (method.clone(), default_grid_refinement_params(&method))
+}
+
 /// Serializes a parser value using the same DSL that `DocumentParser` accepts.
 fn value_to_document_string(value: &Value) -> String {
     match value {
@@ -734,6 +797,72 @@ fn ensure_section_mut<'a>(
         .or_insert_with(HashMap::new)
 }
 
+/// Insert a user-created section without replacing existing task data.
+pub(crate) fn insert_section_if_absent(
+    document: &mut DocumentMap,
+    section_name: String,
+) -> Result<(), String> {
+    match document.entry(section_name.clone()) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(HashMap::new());
+            Ok(())
+        }
+        std::collections::hash_map::Entry::Occupied(_) => Err(format!(
+            "Section `{}` already exists; existing data was preserved",
+            section_name
+        )),
+    }
+}
+
+/// Insert a user-created field without silently replacing its current value.
+pub(crate) fn insert_field_if_absent(
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    field_name: String,
+    value: Value,
+) -> Result<(), String> {
+    match section.entry(field_name.clone()) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(Some(vec![value]));
+            Ok(())
+        }
+        std::collections::hash_map::Entry::Occupied(_) => Err(format!(
+            "Field `{}` already exists; existing data was preserved",
+            field_name
+        )),
+    }
+}
+
+/// One destructive document edit awaiting explicit user confirmation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DocumentDeleteRequest {
+    Section { section: String },
+    Field { section: String, field: String },
+}
+
+impl DocumentDeleteRequest {
+    fn description(&self) -> String {
+        match self {
+            Self::Section { section } => format!("section `{}`", section),
+            Self::Field { section, field } => {
+                format!("field `{}.{}`", section, field)
+            }
+        }
+    }
+}
+
+/// Apply an already-authorized deletion and report whether data was removed.
+pub(crate) fn apply_document_deletion(
+    document: &mut DocumentMap,
+    request: &DocumentDeleteRequest,
+) -> bool {
+    match request {
+        DocumentDeleteRequest::Section { section } => document.remove(section).is_some(),
+        DocumentDeleteRequest::Field { section, field } => document
+            .get_mut(section)
+            .is_some_and(|section_map| section_map.remove(field).is_some()),
+    }
+}
+
 /// Ensures that a field slot exists and seeds a single default value if needed.
 fn ensure_field_slot<'a>(
     section: &'a mut HashMap<String, Option<Vec<Value>>>,
@@ -762,12 +891,15 @@ fn ensure_field_slot<'a>(
 /// routes.
 fn ensure_bvp_solver_backend_defaults(document: &mut DocumentMap) {
     let section = ensure_section_mut(document, "solver_settings");
-    normalize_matrix_backend_aliases(section);
+    let _ = normalize_matrix_backend_aliases(section);
     let defaults = [
         ("scheme", Value::String("forward".to_string())),
         ("strategy", Value::String("Damped".to_string())),
         ("linear_sys_method", Value::Optional(None)),
-        ("generated_backend", Value::String("banded_lambdify".to_string())),
+        (
+            "generated_backend",
+            Value::String("banded_lambdify".to_string()),
+        ),
         ("symbolic_backend", Value::String("AtomView".to_string())),
         ("banded_linear_solver", Value::String("auto".to_string())),
         ("refinement_steps", Value::Usize(5)),
@@ -784,33 +916,20 @@ fn ensure_bvp_solver_backend_defaults(document: &mut DocumentMap) {
         let _ = ensure_field_slot(section, field_name, default_value);
     }
 
-    normalize_usize_field(section, "max_iterations");
-    normalize_usize_field(section, "refinement_steps");
-    synchronize_exclusive_execution_backend(section);
-
-    // Canonical preset names encode the matrix route as a prefix. Keep that
-    // derived value aligned while preserving unknown custom backend names.
-    if string_field_value(section, "generated_backend").is_some_and(|backend| {
-        backend.starts_with("banded_") || backend.starts_with("sparse_")
-    }) {
-        sync_generated_backend_from_controls(section);
-    }
+    let _ = normalize_usize_field(section, "max_iterations");
+    let _ = normalize_usize_field(section, "refinement_steps");
+    normalize_bvp_solver_backend_section(section);
 }
 
-/// Coerces a solver counter-like value into a plain `usize`, if possible.
+/// Seeds the BVP document once during load or problem construction.
 ///
-/// The GUI and the text parser can temporarily carry counters in a few legacy
-/// shapes. Normalizing them here keeps the solver handoff strict without making
-/// the editor brittle.
-fn value_as_usize(value: &Value) -> Option<usize> {
-    match value {
-        Value::Usize(value) => Some(*value),
-        Value::Integer(value) if *value >= 0 => Some(*value as usize),
-        Value::Float(value) if value.is_finite() && *value >= 0.0 => Some(*value as usize),
-        Value::String(value) => value.trim().parse::<usize>().ok(),
-        Value::Optional(Some(inner)) => value_as_usize(inner.as_ref()),
-        _ => None,
-    }
+/// Rendering should stay read-only. This helper canonicalizes solver defaults
+/// and the adaptive-grid sections before widgets inspect the document.
+fn seed_bvp_document_defaults(document: &mut DocumentMap) {
+    // Reuse the typed GUI snapshot as the single canonical source for the
+    // seeded structured model, then write it back in one pass.
+    let (config, _) = BvpGuiConfig::from_document(document);
+    config.apply_to_document(document);
 }
 
 /// Normalizes numeric fields that must stay `usize` for the solver backend.
@@ -821,17 +940,44 @@ fn value_as_usize(value: &Value) -> Option<usize> {
 fn normalize_usize_field(
     section: &mut HashMap<String, Option<Vec<Value>>>,
     field_name: &str,
-) {
+) -> Result<(), UsizeConversionError> {
     let Some(values) = section.get_mut(field_name).and_then(|slot| slot.as_mut()) else {
-        return;
+        return Ok(());
     };
 
     if let Some(first) = values.first_mut() {
-        if let Some(value) = value_as_usize(first) {
-            *first = Value::Usize(value);
-            values.truncate(1);
-        }
+        let value = try_value_as_usize(first)?;
+        *first = Value::Usize(value);
+        values.truncate(1);
     }
+    Ok(())
+}
+
+/// Canonicalizes every integer field crossing from the GUI into reactor code.
+///
+/// Missing fields remain the responsibility of the typed physics/solver
+/// parsers. Present fields must satisfy the same non-lossy conversion contract
+/// regardless of which editor or compatibility document produced them.
+pub(crate) fn normalize_bvp_usize_fields(document: &mut DocumentMap) -> Result<(), String> {
+    const FIELDS: &[(&str, &str)] = &[
+        ("process_conditions", "n_steps"),
+        ("solver_settings", "max_iterations"),
+        ("solver_settings", "refinement_steps"),
+        ("strategy_params", "max_jac"),
+        ("strategy_params", "max_damp_iter"),
+        ("adaptive_strategy", "version"),
+        ("adaptive_strategy", "max_refinements"),
+    ];
+
+    for (section_name, field_name) in FIELDS {
+        let Some(section) = document.get_mut(*section_name) else {
+            continue;
+        };
+        normalize_usize_field(section, field_name).map_err(|error| {
+            format!("invalid integer field `{section_name}.{field_name}`: {error}")
+        })?;
+    }
+    Ok(())
 }
 
 fn string_field_value(
@@ -886,54 +1032,8 @@ fn normalize_matrix_backend_aliases(
     backend
 }
 
-const BVP_AOT_ONLY_FIELDS: &[&str] = &[
-    "aot_codegen_backend",
-    "aot_c_compiler",
-    "aot_build_policy",
-    "aot_build_profile",
-    "aot_compile_preset",
-    "aot_execution_policy",
-];
-
-/// Keeps Lambdify and AOT as mutually exclusive execution contracts.
+/// Executables that KiThe permits a task document to select directly.
 ///
-/// RustedSciThe intentionally treats backend selection and artifact lifecycle
-/// as independent controls. KiThe exposes a simpler exclusive choice, so its
-/// GUI must never submit `LambdifyOnly + BuildIfMissing`: that combination runs
-/// lambdified callbacks while still compiling an unused shared library.
-fn synchronize_exclusive_execution_backend(
-    section: &mut HashMap<String, Option<Vec<Value>>>,
-) {
-    let Some(generated_backend) = string_field_value(section, "generated_backend") else {
-        return;
-    };
-    let normalized = generated_backend.trim().to_ascii_lowercase();
-
-    if normalized.contains("_aot") || normalized.starts_with("aot_") {
-        set_string_field(section, "backend_policy", "aot_only");
-        let defaults = [
-            ("aot_codegen_backend", "C"),
-            ("aot_c_compiler", "tcc"),
-            ("aot_build_policy", "build_if_missing"),
-            ("aot_build_profile", "release"),
-            ("aot_compile_preset", "dev_fastest"),
-            ("aot_execution_policy", "auto"),
-        ];
-        for (field_name, default_value) in defaults {
-            let _ = ensure_field_slot(
-                section,
-                field_name,
-                Value::String(default_value.to_string()),
-            );
-        }
-    } else if normalized.contains("lambdify") {
-        set_string_field(section, "backend_policy", "lambdify_only");
-        for field_name in BVP_AOT_ONLY_FIELDS {
-            section.remove(*field_name);
-        }
-    }
-}
-
 fn optional_string_field_value(
     section: &HashMap<String, Option<Vec<Value>>>,
     field_name: &str,
@@ -990,43 +1090,6 @@ fn normalize_optional_string_field(
         Some(Value::String(_))
     ) {
         set_optional_string_field(section, field_name, current_value.as_deref());
-    }
-}
-
-/// Recomputes the low-level generated backend string from the visible backend controls.
-///
-/// This keeps the document compatible with the solver while allowing the GUI to
-/// expose a smaller, more direct control surface.
-fn sync_generated_backend_from_controls(section: &mut HashMap<String, Option<Vec<Value>>>) {
-    let Some(current_backend) = string_field_value(section, "generated_backend") else {
-        return;
-    };
-
-    let is_aot = current_backend.contains("_aot_");
-    let matrix_backend = string_field_value(section, "matrix_backend")
-        .unwrap_or_else(|| "Banded".to_string());
-    let compiler = string_field_value(section, "aot_c_compiler").unwrap_or_else(|| "tcc".to_string());
-
-    let next_backend = if is_aot {
-        match (matrix_backend.as_str(), compiler.as_str()) {
-            ("Sparse", "gcc") => "sparse_aot_gcc",
-            ("Sparse", "zig") => "sparse_aot_zig",
-            ("Sparse", _) => "sparse_aot_tcc",
-            (_, "gcc") => "banded_aot_gcc",
-            (_, "zig") => "banded_aot_zig",
-            _ => "banded_aot_tcc",
-        }
-    } else {
-        match matrix_backend.as_str() {
-            "Sparse" => "sparse_lambdify",
-            _ => "banded_lambdify",
-        }
-    };
-
-    if next_backend != current_backend {
-        set_string_field(section, "generated_backend", next_backend);
-        synchronize_exclusive_execution_backend(section);
-        println!("Field 'generated_backend' changed to: {}", next_backend);
     }
 }
 
@@ -1088,13 +1151,15 @@ fn render_solver_backend_optional_string_choice_row(
     }
 
     let mut selected_label = current_label.to_string();
-    egui::ComboBox::from_id_salt(format!("solver_settings.{}.{}", display_name, field_name))
-        .selected_text(selected_label.as_str())
-        .show_ui(ui, |ui| {
-            for (label, _) in choices {
-                ui.selectable_value(&mut selected_label, (*label).to_string(), *label);
-            }
-        });
+    let combo_response =
+        egui::ComboBox::from_id_salt(format!("solver_settings.{}.{}", display_name, field_name))
+            .selected_text(selected_label.as_str())
+            .show_ui(ui, |ui| {
+                for (label, _) in choices {
+                    ui.selectable_value(&mut selected_label, (*label).to_string(), *label);
+                }
+            });
+    let _ = combo_response.response.labelled_by(label_response.id);
 
     if selected_label != current_label {
         let selected_value = choices
@@ -1171,11 +1236,9 @@ fn render_solver_backend_usize_row(
         values
             .as_ref()
             .and_then(|values| values.first())
-            .and_then(value_as_usize)
-            .unwrap_or(default_value)
+            .map(try_value_as_usize)
+            .unwrap_or(Ok(default_value))
     };
-
-    normalize_usize_field(section, field_name);
 
     let label_response = ui.label(display_name);
     if label_response.hovered() {
@@ -1187,11 +1250,31 @@ fn render_solver_backend_usize_row(
         }
     }
 
-    let mut current_value = current_value;
-
-    if ui.add(egui::DragValue::new(&mut current_value).speed(1)).changed() {
-        section.insert(field_name.to_string(), Some(vec![Value::Usize(current_value)]));
-        println!("Field '{}' changed to: {}", field_name, current_value);
+    match current_value {
+        Ok(mut current_value) => {
+            let _ = normalize_usize_field(section, field_name);
+            if ui
+                .add(egui::DragValue::new(&mut current_value).speed(1))
+                .changed()
+            {
+                section.insert(
+                    field_name.to_string(),
+                    Some(vec![Value::Usize(current_value)]),
+                );
+                info!("Field '{}' changed to: {}", field_name, current_value);
+            }
+        }
+        Err(error) => {
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::RED, error.to_string());
+                if ui.button(format!("Reset to {default_value}")).clicked() {
+                    section.insert(
+                        field_name.to_string(),
+                        Some(vec![Value::Usize(default_value)]),
+                    );
+                }
+            });
+        }
     }
 
     ui.end_row();
@@ -1225,20 +1308,25 @@ fn render_solver_backend_choice_row(
     }
 
     let mut selected_value = current_value.clone();
-    egui::ComboBox::from_id_salt(format!("solver_settings.{}.{}", display_name, field_name))
-        .selected_text(selected_value.as_str())
-        .show_ui(ui, |ui| {
-            for choice in choices {
-                ui.selectable_value(&mut selected_value, (*choice).to_string(), *choice);
-            }
-        });
+    let combo_response =
+        egui::ComboBox::from_id_salt(format!("solver_settings.{}.{}", display_name, field_name))
+            .selected_text(selected_value.as_str())
+            .show_ui(ui, |ui| {
+                for choice in choices {
+                    ui.selectable_value(&mut selected_value, (*choice).to_string(), *choice);
+                }
+            });
+    let _ = combo_response.response.labelled_by(label_response.id);
 
     if selected_value != current_value {
         set_string_field(section, field_name, &selected_value);
-        println!("Field '{}' changed to: {}", field_name, selected_value);
+        info!("Field '{}' changed to: {}", field_name, selected_value);
 
-        if field_name == "matrix_backend" || field_name == "aot_c_compiler" {
-            sync_generated_backend_from_controls(section);
+        if field_name == "matrix_backend"
+            || field_name == "aot_codegen_backend"
+            || field_name == "aot_c_compiler"
+        {
+            normalize_bvp_solver_backend_section(section);
         }
     }
 
@@ -1253,12 +1341,13 @@ fn render_generated_backend_mode_row(
     help_map: Option<&[(&str, &str)]>,
     current_help: &mut String,
 ) -> bool {
-    let current_backend =
-        string_field_value(section, "generated_backend").unwrap_or_else(|| "banded_lambdify".to_string());
-    let current_mode = if current_backend.contains("_aot_") {
-        "AOT"
-    } else {
-        "Lambdify"
+    let current_backend = string_field_value(section, "generated_backend")
+        .unwrap_or_else(|| "banded_lambdify".to_string());
+    let current_mode = GuiExecutionBackend::from_generated_backend(&current_backend);
+    let current_label = match current_mode {
+        Some(GuiExecutionBackend::Aot) => "AOT".to_string(),
+        Some(GuiExecutionBackend::Lambdify) => "Lambdify".to_string(),
+        None => format!("Unsupported: {}", current_backend),
     };
 
     let label_response = ui.label("Residuals and Jacobian Backend");
@@ -1273,33 +1362,28 @@ fn render_generated_backend_mode_row(
         }
     }
 
-    let mut selected_mode = current_mode.to_string();
-    egui::ComboBox::from_id_salt("solver_settings.generated_backend.mode")
+    let mut selected_mode = current_label.clone();
+    let combo_response = egui::ComboBox::from_id_salt("solver_settings.generated_backend.mode")
         .selected_text(selected_mode.as_str())
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut selected_mode, "Lambdify".to_string(), "Lambdify");
             ui.selectable_value(&mut selected_mode, "AOT".to_string(), "AOT");
         });
+    let _ = combo_response.response.labelled_by(label_response.id);
 
-    let changed = selected_mode != current_mode;
+    let changed = selected_mode != current_label;
     if changed {
-        let matrix_backend = string_field_value(section, "matrix_backend")
-            .unwrap_or_else(|| "Banded".to_string());
-        let compiler = string_field_value(section, "aot_c_compiler")
-            .unwrap_or_else(|| "tcc".to_string());
-        let backend_name = match (selected_mode.as_str(), matrix_backend.as_str(), compiler.as_str()) {
-            ("AOT", "Sparse", "gcc") => "sparse_aot_gcc",
-            ("AOT", "Sparse", "zig") => "sparse_aot_zig",
-            ("AOT", "Sparse", _) => "sparse_aot_tcc",
-            ("AOT", _, "gcc") => "banded_aot_gcc",
-            ("AOT", _, "zig") => "banded_aot_zig",
-            ("AOT", _, _) => "banded_aot_tcc",
-            ("Lambdify", "Sparse", _) => "sparse_lambdify",
+        let matrix_backend =
+            string_field_value(section, "matrix_backend").unwrap_or_else(|| "Banded".to_string());
+        let backend_name = match (selected_mode.as_str(), matrix_backend.as_str()) {
+            ("AOT", "Sparse") => "sparse_aot_tcc",
+            ("AOT", _) => "banded_aot_tcc",
+            ("Lambdify", "Sparse") => "sparse_lambdify",
             _ => "banded_lambdify",
         };
         set_string_field(section, "generated_backend", backend_name);
-        synchronize_exclusive_execution_backend(section);
-        println!("Field 'generated_backend' changed to: {}", backend_name);
+        normalize_bvp_solver_backend_section(section);
+        info!("Field 'generated_backend' changed to: {}", backend_name);
     }
 
     ui.end_row();
@@ -1313,8 +1397,13 @@ fn render_bvp_solver_backend_panel(
     help_map: Option<&[(&str, &str)]>,
     current_help: &mut String,
 ) {
+    // Normalize persisted overrides before the widgets read the document.
+    // Story tests deliberately seed partially edited solver settings, so the
+    // render path must reconcile the backend contract even when the user has
+    // not changed a control yet.
     ensure_bvp_solver_backend_defaults(document);
     let section = ensure_section_mut(document, "solver_settings");
+    normalize_bvp_solver_backend_section(section);
 
     ui.separator();
     ui.label("Solver backend");
@@ -1337,7 +1426,11 @@ fn render_bvp_solver_backend_panel(
                 help_map,
                 current_help,
             );
-            let matrix_backend_before = normalize_matrix_backend_aliases(section).to_string();
+            let matrix_backend_before = string_field_value(section, "matrix_backend")
+                .as_deref()
+                .and_then(canonical_matrix_backend)
+                .unwrap_or("Banded")
+                .to_string();
             render_solver_backend_choice_row(
                 ui,
                 section,
@@ -1354,14 +1447,15 @@ fn render_bvp_solver_backend_panel(
                 .unwrap_or("Banded");
             set_string_field(section, "matrix_backend", matrix_backend_after);
             if matrix_backend_after != matrix_backend_before {
-                sync_generated_backend_from_controls(section);
+                normalize_bvp_solver_backend_section(section);
             }
-            render_solver_backend_row(
+            render_solver_backend_choice_row(
                 ui,
                 section,
                 "strategy",
                 "strategy",
-                Value::String("Damped".to_string()),
+                &["Damped"],
+                "Damped",
                 help_map,
                 current_help,
             );
@@ -1393,12 +1487,20 @@ fn render_bvp_solver_backend_panel(
                 help_map,
                 current_help,
             );
-            render_solver_backend_row(
+            render_solver_backend_optional_string_choice_row(
                 ui,
                 section,
                 "loglevel",
                 "loglevel",
-                Value::Optional(Some(Box::new(Value::String("info".to_string())))),
+                &[
+                    ("None", None),
+                    ("error", Some("error")),
+                    ("warn", Some("warn")),
+                    ("info", Some("info")),
+                    ("debug", Some("debug")),
+                    ("trace", Some("trace")),
+                ],
+                "info",
                 help_map,
                 current_help,
             );
@@ -1419,12 +1521,8 @@ fn render_bvp_solver_backend_panel(
         .num_columns(2)
         .striped(true)
         .show(ui, |ui| {
-            let aot_enabled = render_generated_backend_mode_row(
-                ui,
-                section,
-                help_map,
-                current_help,
-            );
+            let aot_enabled =
+                render_generated_backend_mode_row(ui, section, help_map, current_help);
             render_solver_backend_choice_row(
                 ui,
                 section,
@@ -1439,13 +1537,29 @@ fn render_bvp_solver_backend_panel(
                 render_solver_backend_choice_row(
                     ui,
                     section,
-                    "aot_c_compiler",
-                    "AOT compiler",
-                    &["tcc", "gcc", "zig"],
-                    "tcc",
+                    "aot_codegen_backend",
+                    "AOT codegen backend",
+                    &["C", "Zig", "Rust"],
+                    "C",
                     help_map,
                     current_help,
                 );
+                let codegen_is_c = string_field_value(section, "aot_codegen_backend")
+                    .as_deref()
+                    .and_then(GuiAotCodegenBackend::parse)
+                    == Some(GuiAotCodegenBackend::C);
+                if codegen_is_c {
+                    render_solver_backend_choice_row(
+                        ui,
+                        section,
+                        "aot_c_compiler",
+                        "C compiler",
+                        &["tcc", "gcc"],
+                        "tcc",
+                        help_map,
+                        current_help,
+                    );
+                }
                 render_solver_backend_choice_row(
                     ui,
                     section,
@@ -1531,10 +1645,7 @@ const BVP_PHYSICS_SECTIONS: &[&str] = &[
 ];
 
 /// Solver-level controls that are still stored in separate sections for readability.
-const BVP_SOLVER_ADVANCED_SECTIONS: &[&str] = &[
-    "rel_tolerance",
-    "strategy_params",
-];
+const BVP_SOLVER_ADVANCED_SECTIONS: &[&str] = &["rel_tolerance", "strategy_params"];
 
 const BVP_ADAPTIVE_SOLVER_SECTIONS: &[&str] = &["adaptive_strategy", "grid_refinement"];
 
@@ -1549,13 +1660,16 @@ fn is_bvp_structured_section(section_name: &str, species_sections: &[String]) ->
         || BVP_ADAPTIVE_SOLVER_SECTIONS.contains(&section_name)
         || BVP_INITIAL_GUESS_SECTIONS.contains(&section_name)
         || BVP_POSTPROCESSING_SECTIONS.contains(&section_name)
-        || species_sections.iter().any(|species| species == section_name)
+        || species_sections
+            .iter()
+            .any(|species| species == section_name)
 }
 
 /// Renders a titled group of BVP sections in the structured screen layout.
 ///
-/// The helper keeps the canonical sections visible up front while still
-/// reusing the generic per-section editor for data entry.
+/// The helper keeps the canonical sections visible up front while staying
+/// read-only with respect to absent data: missing sections are reported, but
+/// not materialized during rendering.
 fn render_bvp_section_group(
     ui: &mut egui::Ui,
     title: &str,
@@ -1565,6 +1679,7 @@ fn render_bvp_section_group(
     current_help: &mut String,
     new_field_names: &mut HashMap<String, String>,
     new_field_values: &mut HashMap<String, String>,
+    pending_deletion: &mut Option<DocumentDeleteRequest>,
 ) {
     ui.group(|ui| {
         ui.vertical(|ui| {
@@ -1573,9 +1688,19 @@ fn render_bvp_section_group(
 
             let mut sections_to_process = Vec::new();
             let mut sections_to_delete = Vec::new();
+            let mut fields_to_delete = Vec::new();
 
             for section_name in section_names {
-                let section = ensure_section_mut(document, section_name);
+                let Some(section) = document.get_mut(*section_name) else {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(160, 110, 20),
+                            format!("Missing canonical section: {}", section_name),
+                        );
+                    });
+                    continue;
+                };
+
                 let field_name = new_field_names
                     .entry((*section_name).to_string())
                     .or_insert_with(String::new);
@@ -1583,19 +1708,22 @@ fn render_bvp_section_group(
                     .entry((*section_name).to_string())
                     .or_insert_with(String::new);
 
-                let (add_field, delete_section) = if *section_name == "grid_refinement" {
-                    render_grid_refinement_section(ui, section, help_map, current_help)
-                } else {
-                    render_section(
-                        ui,
-                        section_name,
-                        section,
-                        field_name,
-                        field_value,
-                        help_map,
-                        current_help,
-                    )
-                };
+                let (add_field, delete_section, requested_fields) =
+                    if *section_name == "grid_refinement" {
+                        let (add_field, delete_section) =
+                            render_grid_refinement_section(ui, section, help_map, current_help);
+                        (add_field, delete_section, Vec::new())
+                    } else {
+                        render_section(
+                            ui,
+                            section_name,
+                            section,
+                            field_name,
+                            field_value,
+                            help_map,
+                            current_help,
+                        )
+                    };
 
                 if add_field {
                     sections_to_process.push((
@@ -1608,11 +1736,24 @@ fn render_bvp_section_group(
                 if delete_section {
                     sections_to_delete.push((*section_name).to_string());
                 }
+                fields_to_delete.extend(
+                    requested_fields
+                        .into_iter()
+                        .map(|field| ((*section_name).to_string(), field)),
+                );
             }
 
             for section_name in sections_to_delete {
-                document.remove(&section_name);
-                println!("Deleted section: {}", section_name);
+                if pending_deletion.is_none() {
+                    *pending_deletion = Some(DocumentDeleteRequest::Section {
+                        section: section_name,
+                    });
+                }
+            }
+            for (section, field) in fields_to_delete {
+                if pending_deletion.is_none() {
+                    *pending_deletion = Some(DocumentDeleteRequest::Field { section, field });
+                }
             }
 
             for (section_name, field_name, field_value) in sections_to_process {
@@ -1637,11 +1778,15 @@ fn render_bvp_section_group(
                         Value::String(field_value.clone())
                     };
 
-                    document
+                    let section = document
                         .entry(section_name.clone())
-                        .or_insert_with(HashMap::new)
-                        .insert(field_name.clone(), Some(vec![value]));
-                    println!("Added field '{}' to section '{}'", field_name, section_name);
+                        .or_insert_with(HashMap::new);
+                    match insert_field_if_absent(section, field_name.clone(), value) {
+                        Ok(()) => {
+                            info!("Added field '{}' to section '{}'", field_name, section_name)
+                        }
+                        Err(message) => warn!("{}", message),
+                    }
 
                     new_field_names.insert(section_name.clone(), String::new());
                     new_field_values.insert(section_name, String::new());
@@ -1654,7 +1799,8 @@ fn render_bvp_section_group(
 /// Renders a titled group of BVP sections whose names are known only at runtime.
 ///
 /// Species composition sections are the common example: the section names come
-/// from the task document rather than a static enum-like list.
+/// from the task document rather than a static enum-like list. Missing sections
+/// are reported rather than auto-created during render.
 fn render_bvp_dynamic_section_group(
     ui: &mut egui::Ui,
     title: &str,
@@ -1664,6 +1810,7 @@ fn render_bvp_dynamic_section_group(
     current_help: &mut String,
     new_field_names: &mut HashMap<String, String>,
     new_field_values: &mut HashMap<String, String>,
+    pending_deletion: &mut Option<DocumentDeleteRequest>,
 ) {
     if section_names.is_empty() {
         return;
@@ -1676,9 +1823,19 @@ fn render_bvp_dynamic_section_group(
 
             let mut sections_to_process = Vec::new();
             let mut sections_to_delete = Vec::new();
+            let mut fields_to_delete = Vec::new();
 
             for section_name in section_names {
-                let section = ensure_section_mut(document, section_name);
+                let Some(section) = document.get_mut(section_name) else {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(160, 110, 20),
+                            format!("Missing canonical section: {}", section_name),
+                        );
+                    });
+                    continue;
+                };
+
                 let field_name = new_field_names
                     .entry(section_name.clone())
                     .or_insert_with(String::new);
@@ -1686,7 +1843,7 @@ fn render_bvp_dynamic_section_group(
                     .entry(section_name.clone())
                     .or_insert_with(String::new);
 
-                let (add_field, delete_section) = render_section(
+                let (add_field, delete_section, requested_fields) = render_section(
                     ui,
                     section_name,
                     section,
@@ -1707,11 +1864,24 @@ fn render_bvp_dynamic_section_group(
                 if delete_section {
                     sections_to_delete.push(section_name.clone());
                 }
+                fields_to_delete.extend(
+                    requested_fields
+                        .into_iter()
+                        .map(|field| (section_name.clone(), field)),
+                );
             }
 
             for section_name in sections_to_delete {
-                document.remove(&section_name);
-                println!("Deleted section: {}", section_name);
+                if pending_deletion.is_none() {
+                    *pending_deletion = Some(DocumentDeleteRequest::Section {
+                        section: section_name,
+                    });
+                }
+            }
+            for (section, field) in fields_to_delete {
+                if pending_deletion.is_none() {
+                    *pending_deletion = Some(DocumentDeleteRequest::Field { section, field });
+                }
             }
 
             for (section_name, field_name, field_value) in sections_to_process {
@@ -1736,11 +1906,15 @@ fn render_bvp_dynamic_section_group(
                         Value::String(field_value.clone())
                     };
 
-                    document
+                    let section = document
                         .entry(section_name.clone())
-                        .or_insert_with(HashMap::new)
-                        .insert(field_name.clone(), Some(vec![value]));
-                    println!("Added field '{}' to section '{}'", field_name, section_name);
+                        .or_insert_with(HashMap::new);
+                    match insert_field_if_absent(section, field_name.clone(), value) {
+                        Ok(()) => {
+                            info!("Added field '{}' to section '{}'", field_name, section_name)
+                        }
+                        Err(message) => warn!("{}", message),
+                    }
 
                     new_field_names.insert(section_name.clone(), String::new());
                     new_field_values.insert(section_name, String::new());
@@ -1748,6 +1922,384 @@ fn render_bvp_dynamic_section_group(
             }
         });
     });
+}
+
+/// User-visible lifecycle of one GUI calculation request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CalculationState {
+    #[default]
+    Idle,
+    Running {
+        run_id: u64,
+    },
+    Cancelling {
+        run_id: u64,
+    },
+    Completed,
+    Failed,
+}
+
+impl CalculationState {
+    fn active_run_id(self) -> Option<u64> {
+        match self {
+            Self::Running { run_id } | Self::Cancelling { run_id } => Some(run_id),
+            Self::Idle | Self::Completed | Self::Failed => None,
+        }
+    }
+
+    fn is_active(self) -> bool {
+        self.active_run_id().is_some()
+    }
+}
+
+/// Owned plotting payload that can safely cross the worker-thread boundary.
+#[derive(Debug)]
+struct BvpPlotData {
+    arg: String,
+    values: Vec<String>,
+    x_mesh: nalgebra::DVector<f64>,
+    solution: nalgebra::DMatrix<f64>,
+}
+
+#[derive(Debug)]
+enum BvpWorkerOutcome {
+    Completed { plot: Option<BvpPlotData> },
+    Failed(String),
+    Cancelled,
+}
+
+#[derive(Debug)]
+struct BvpWorkerMessage {
+    run_id: u64,
+    outcome: BvpWorkerOutcome,
+}
+
+/// Cached, user-visible result of validating the current BVP document.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BvpGuiValidationReport {
+    pub issues: Vec<String>,
+}
+
+impl BvpGuiValidationReport {
+    pub(crate) fn is_valid(&self) -> bool {
+        self.issues.is_empty()
+    }
+
+    fn failure_message(&self) -> String {
+        format!(
+            "Calculation failed: task validation failed:\n- {}",
+            self.issues.join("\n- ")
+        )
+    }
+}
+
+/// One row in the BVP preview table.
+///
+/// The preview keeps the normalized document readable without mutating the
+/// loaded task state or inventing a new data model.
+#[derive(Clone, Debug, PartialEq, Eq, Tabled)]
+pub(crate) struct BvpPreviewParameterRow {
+    #[tabled(rename = "Section")]
+    pub(crate) section: String,
+    #[tabled(rename = "Field")]
+    pub(crate) field: String,
+    #[tabled(rename = "Value")]
+    pub(crate) value: String,
+}
+
+/// One row in the equation preview table.
+#[derive(Clone, Debug, PartialEq, Eq, Tabled)]
+pub(crate) struct BvpPreviewEquationRow {
+    #[tabled(rename = "#")]
+    pub(crate) index: usize,
+    #[tabled(rename = "Unknown")]
+    pub(crate) unknown: String,
+    #[tabled(rename = "Equation")]
+    pub(crate) equation: String,
+}
+
+/// Read-only snapshot used by the BVP preview action.
+///
+/// The snapshot is intentionally decoupled from egui so tests can inspect the
+/// table rows directly without capturing terminal output.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BvpTaskPreviewSnapshot {
+    pub(crate) validation_report: BvpGuiValidationReport,
+    pub(crate) parameter_rows: Vec<BvpPreviewParameterRow>,
+    pub(crate) equation_rows: Vec<BvpPreviewEquationRow>,
+    pub(crate) equation_build_error: Option<String>,
+}
+
+/// Validate and canonicalize one GUI document without starting solver work.
+fn validate_bvp_gui_document(
+    document: &DocumentMap,
+    problem: &ProblemsEnum,
+) -> (DocumentMap, BvpGuiValidationReport) {
+    let mut normalized = document.clone();
+    let mut report = BvpGuiValidationReport::default();
+
+    if let Err(error) = normalize_bvp_usize_fields(&mut normalized) {
+        report.issues.push(error);
+    }
+    if let Err(error) = validate_aot_toolchain_fields(&normalized) {
+        report.issues.push(format!("AOT security: {error}"));
+    }
+
+    match problem {
+        ProblemsEnum::BVPSimple => {
+            let reactor_report = validate_reactor_bvp_task_map(&normalized);
+            report.issues.extend(
+                reactor_report
+                    .issues
+                    .into_iter()
+                    .map(|issue| format!("{}: {}", issue.stage, issue.message)),
+            );
+        }
+        ProblemsEnum::None => report
+            .issues
+            .push("No calculation is available for the current problem type".to_string()),
+    }
+
+    (normalized, report)
+}
+
+fn bvp_preview_section_rank(section_name: &str, species_sections: &[String]) -> usize {
+    if section_name == "solver_settings" {
+        0
+    } else if BVP_PHYSICS_SECTIONS.contains(&section_name) {
+        1
+    } else if species_sections
+        .iter()
+        .any(|species| species == section_name)
+    {
+        2
+    } else if BVP_SOLVER_ADVANCED_SECTIONS.contains(&section_name) {
+        3
+    } else if BVP_ADAPTIVE_SOLVER_SECTIONS.contains(&section_name) {
+        4
+    } else if BVP_INITIAL_GUESS_SECTIONS.contains(&section_name) {
+        5
+    } else if BVP_POSTPROCESSING_SECTIONS.contains(&section_name) {
+        6
+    } else {
+        7
+    }
+}
+
+/// Collects the normalized BVP document into a table-friendly snapshot.
+///
+/// The preview keeps raw compatibility sections visible but sorts the canonical
+/// BVP groups first so users can scan the document in a predictable order.
+pub(crate) fn collect_bvp_preview_parameter_rows(
+    document: &DocumentMap,
+) -> Vec<BvpPreviewParameterRow> {
+    let species_sections = bvp_species_section_names(document);
+    let mut section_names = document.keys().cloned().collect::<Vec<_>>();
+    section_names.sort_by_key(|section_name| {
+        (
+            bvp_preview_section_rank(section_name, &species_sections),
+            section_name.clone(),
+        )
+    });
+
+    let mut rows = Vec::new();
+    for section_name in section_names {
+        let Some(section) = document.get(&section_name) else {
+            continue;
+        };
+        let mut field_names = section.keys().cloned().collect::<Vec<_>>();
+        field_names.sort();
+        for field_name in field_names {
+            let value = match section.get(&field_name).and_then(|slot| slot.as_ref()) {
+                Some(values) if !values.is_empty() => values_to_document_string(values),
+                Some(_) => "<empty>".to_string(),
+                None => "None".to_string(),
+            };
+            rows.push(BvpPreviewParameterRow {
+                section: section_name.clone(),
+                field: field_name,
+                value,
+            });
+        }
+    }
+    rows
+}
+
+/// Collects the assembled BVP equations into a stable table snapshot.
+///
+/// The row order follows the solver order so the preview matches the numerical
+/// system that will be handed to RustedSciThe.
+pub(crate) fn collect_bvp_preview_equation_rows(
+    reactor: &SimpleReactorTask,
+) -> Vec<BvpPreviewEquationRow> {
+    let equation_count = reactor
+        .solver
+        .eq_system
+        .len()
+        .min(reactor.solver.unknowns.len());
+
+    let mut rows = Vec::with_capacity(equation_count);
+    for index in 0..equation_count {
+        let unknown = reactor
+            .solver
+            .unknowns
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| format!("eq_{}", index + 1));
+        let equation = reactor.solver.eq_system[index].pretty_print();
+        rows.push(BvpPreviewEquationRow {
+            index: index + 1,
+            unknown,
+            equation,
+        });
+    }
+    rows
+}
+
+/// Builds a read-only preview snapshot for the current BVP task.
+///
+/// The builder uses the same validation and equation assembly path as a normal
+/// solve request, but it runs on a local clone and never mutates GUI state.
+pub(crate) fn build_bvp_task_preview_snapshot(
+    document: &DocumentMap,
+    problem: &ProblemsEnum,
+) -> BvpTaskPreviewSnapshot {
+    let (normalized_document, validation_report) = validate_bvp_gui_document(document, problem);
+    let parameter_rows = collect_bvp_preview_parameter_rows(&normalized_document);
+    let mut snapshot = BvpTaskPreviewSnapshot {
+        validation_report,
+        parameter_rows,
+        equation_rows: Vec::new(),
+        equation_build_error: None,
+    };
+
+    match problem {
+        ProblemsEnum::BVPSimple => {
+            let mut reactor = SimpleReactorTask::new();
+            if let Err(error) = reactor.set_reactor_params_from_hashmap(&normalized_document) {
+                snapshot.equation_build_error =
+                    Some(format!("Preview could not prepare the BVP task: {}", error));
+            } else if let Err(error) = reactor.setup_bvp() {
+                snapshot.equation_build_error = Some(format!(
+                    "Preview could not assemble BVP equations: {}",
+                    error
+                ));
+            } else {
+                snapshot.equation_rows = collect_bvp_preview_equation_rows(&reactor);
+            }
+        }
+        ProblemsEnum::None => {
+            snapshot.equation_build_error =
+                Some("Preview is only available for the BVP problem type.".to_string());
+        }
+    }
+
+    snapshot
+}
+
+/// Prints a BVP preview snapshot as a readable console report.
+///
+/// The output is intentionally side-effect free with respect to task data.
+pub(crate) fn print_bvp_task_preview(snapshot: &BvpTaskPreviewSnapshot) {
+    info!("=== BVP TASK PREVIEW ===");
+    if snapshot.validation_report.is_valid() {
+        info!("Validation: ok");
+    } else {
+        warn!("Validation issues:");
+        for issue in &snapshot.validation_report.issues {
+            warn!("- {}", issue);
+        }
+    }
+
+    info!("--- Normalized document ---");
+    if snapshot.parameter_rows.is_empty() {
+        info!("(no document fields to preview)");
+    } else {
+        info!(
+            "{}",
+            Table::new(snapshot.parameter_rows.clone()).to_string()
+        );
+    }
+
+    if let Some(error) = &snapshot.equation_build_error {
+        warn!("{}", error);
+    }
+
+    info!("--- Assembled equations ---");
+    if snapshot.equation_rows.is_empty() {
+        info!("(no equations to preview)");
+    } else {
+        info!("{}", Table::new(snapshot.equation_rows.clone()).to_string());
+    }
+}
+
+/// Execute one reactor task without touching egui state.
+fn execute_bvp_calculation(mut document: DocumentMap, problem: ProblemsEnum) -> BvpWorkerOutcome {
+    if let Err(message) = normalize_bvp_usize_fields(&mut document) {
+        return BvpWorkerOutcome::Failed(format!("Calculation blocked: {message}"));
+    }
+    if let Err(message) = validate_aot_toolchain_fields(&document) {
+        return BvpWorkerOutcome::Failed(format!("Calculation blocked: {}", message));
+    }
+
+    match problem {
+        ProblemsEnum::BVPSimple => {
+            info!("Starting BVP Simple calculation in worker thread.");
+            let gui_plot = document
+                .get("postprocessing")
+                .and_then(|postproc| postproc.get("gui_plot"))
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first())
+                .and_then(Value::as_boolean)
+                .unwrap_or(true);
+
+            let mut reactor = SimpleReactorTask::new();
+            if let Err(error) = reactor.solve_from_parsed(document) {
+                return BvpWorkerOutcome::Failed(format!("Calculation failed: {}", error));
+            }
+            if !gui_plot {
+                return BvpWorkerOutcome::Completed { plot: None };
+            }
+
+            let Some(solution) = reactor.solver.solution.take() else {
+                return BvpWorkerOutcome::Failed(
+                    "Calculation completed, but no solution matrix was returned.".to_string(),
+                );
+            };
+            let Some(x_mesh) = reactor.solver.x_mesh.take() else {
+                return BvpWorkerOutcome::Failed(
+                    "Calculation completed, but no mesh was returned.".to_string(),
+                );
+            };
+            let values = std::mem::take(&mut reactor.solver.unknowns);
+            if x_mesh.len() != solution.nrows() {
+                return BvpWorkerOutcome::Failed(format!(
+                    "Solver result shape mismatch: mesh has {} points but solution has {} rows",
+                    x_mesh.len(),
+                    solution.nrows()
+                ));
+            }
+            if values.len() != solution.ncols() {
+                return BvpWorkerOutcome::Failed(format!(
+                    "Solver result shape mismatch: {} unknowns but solution has {} columns",
+                    values.len(),
+                    solution.ncols()
+                ));
+            }
+
+            BvpWorkerOutcome::Completed {
+                plot: Some(BvpPlotData {
+                    arg: reactor.solver.arg_name.clone(),
+                    values,
+                    x_mesh,
+                    solution,
+                }),
+            }
+        }
+        ProblemsEnum::None => BvpWorkerOutcome::Failed(
+            "No calculation is available for the current problem type.".to_string(),
+        ),
+    }
 }
 
 /// Main application state for the combustion reactor GUI.
@@ -1764,6 +2316,7 @@ fn render_bvp_dynamic_section_group(
 /// * `new_field_values` - Per-section input buffers for new field values
 /// * `selected_problem` - Currently selected problem type
 /// * `current_file_path` - Path to the currently loaded/saved file (if any)
+/// * `document_lifecycle` - Typed file lifecycle state and latest load/save result
 /// * `show_help_window` - Flag controlling help window visibility
 ///
 /// # Design Notes
@@ -1778,11 +2331,26 @@ pub struct CombustionApp {
     pub new_field_values: HashMap<String, String>,
     pub selected_problem: ProblemsEnum,
     pub current_file_path: Option<std::path::PathBuf>,
+    pub(crate) document_lifecycle: DocumentLifecycleState,
     pub show_help_window: bool,
     pub current_help_info: String,
     pub last_run_message: Option<String>,
     pub last_run_is_error: bool,
     pub plot_window: Option<PlotWindow>,
+    pub(crate) pending_aot_confirmation: Option<AotToolchainRequest>,
+    pub(crate) pending_document_load: Option<std::path::PathBuf>,
+    pub(crate) pending_document_deletion: Option<DocumentDeleteRequest>,
+    pub(crate) pending_window_close: bool,
+    pub(crate) pending_problem_switch: Option<ProblemsEnum>,
+    confirmed_aot_request: Option<AotToolchainRequest>,
+    pub(crate) calculation_state: CalculationState,
+    calculation_receiver: Option<mpsc::Receiver<BvpWorkerMessage>>,
+    calculation_cancel: Option<Arc<AtomicBool>>,
+    next_run_id: u64,
+    validation_fingerprint: Option<String>,
+    pub(crate) validation_report: BvpGuiValidationReport,
+    pub(crate) bvp_gui_config: BvpGuiConfig,
+    pub(crate) bvp_gui_migration_report: BvpGuiMigrationReport,
 }
 
 impl CombustionApp {
@@ -1847,106 +2415,216 @@ impl CombustionApp {
         result
     }
 
-    /// Saves the current document to the specified file path.
+    /// Renders the typed BVP editor against a normalized working snapshot.
     ///
-    /// This method converts the document to string format and writes it to disk.
-    /// It provides console feedback about the success or failure of the operation.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The file path where the document should be saved
-    ///
-    /// # Error Handling
-    ///
-    /// File I/O errors are caught and logged to the console rather than
-    /// propagated, maintaining GUI stability.
-    pub fn save_document(&self, path: std::path::PathBuf) {
-        let content = self.document_to_string();
-        match std::fs::write(&path, content) {
-            Ok(_) => println!("Successfully saved to: {:?}", path),
-            Err(e) => println!("Error saving file: {}", e),
+    /// The visible editor works from the typed configuration, then commits the
+    /// edited snapshot back to the live document once the structured pass ends.
+    fn render_bvp_structured_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        help_map: Option<&[(&str, &str)]>,
+    ) {
+        let mut editor_document = self.document.clone();
+        render_bvp_solver_backend_panel(
+            ui,
+            &mut editor_document,
+            help_map,
+            &mut self.current_help_info,
+        );
+        render_bvp_section_group(
+            ui,
+            "Advanced solver settings",
+            BVP_SOLVER_ADVANCED_SECTIONS,
+            &mut editor_document,
+            help_map,
+            &mut self.current_help_info,
+            &mut self.new_field_names,
+            &mut self.new_field_values,
+            &mut self.pending_document_deletion,
+        );
+        render_bvp_adaptive_grid_panel(
+            ui,
+            &mut editor_document,
+            help_map,
+            &mut self.current_help_info,
+        );
+        render_bvp_section_group(
+            ui,
+            "Initial guess",
+            BVP_INITIAL_GUESS_SECTIONS,
+            &mut editor_document,
+            help_map,
+            &mut self.current_help_info,
+            &mut self.new_field_names,
+            &mut self.new_field_values,
+            &mut self.pending_document_deletion,
+        );
+        render_bvp_section_group(
+            ui,
+            "Postprocessing",
+            BVP_POSTPROCESSING_SECTIONS,
+            &mut editor_document,
+            help_map,
+            &mut self.current_help_info,
+            &mut self.new_field_names,
+            &mut self.new_field_values,
+            &mut self.pending_document_deletion,
+        );
+
+        self.document = editor_document;
+        self.sync_document_state_after_edit();
+    }
+
+    /// Render confirmation for deleting structured BVP data.
+    fn show_document_deletion_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(request) = self.pending_document_deletion.clone() else {
+            return;
+        };
+
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Confirm BVP data deletion")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Delete {}? This may make the reactor task incomplete.",
+                    request.description()
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel deletion").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("Confirm deletion").clicked() {
+                        confirm = true;
+                    }
+                });
+            });
+
+        if cancel {
+            self.pending_document_deletion = None;
+            self.last_run_message =
+                Some("Deletion cancelled; document data was preserved.".to_string());
+            self.last_run_is_error = false;
+        } else if confirm {
+            let removed = apply_document_deletion(&mut self.document, &request);
+            self.pending_document_deletion = None;
+            if removed {
+                self.last_run_message = Some(format!("Deleted {}.", request.description()));
+                self.last_run_is_error = false;
+            } else {
+                self.last_run_message = Some(format!(
+                    "Could not delete {}; it no longer exists.",
+                    request.description()
+                ));
+                self.last_run_is_error = true;
+            }
+            self.sync_document_state_after_edit();
         }
     }
 
-    /// Executes the appropriate calculation based on the selected problem type.
-    ///
-    /// This method dispatches to the correct solver based on the current problem
-    /// type selection. It passes the current document state to the solver,
-    /// allowing users to run calculations with their configured parameters.
-    ///
-    /// # Problem Type Dispatch
-    ///
-    /// * `BVPSimple` - Creates a SimpleReactorTask and calls solve_from_parsed()
-    /// * `None` - Shows a message that no calculation is available
-    ///
-    /// # Error Handling
-    ///
-    /// Solver errors are handled internally by the respective solver implementations.
-    /// This method focuses on dispatch logic rather than error propagation.
-    pub(crate) fn run_calculation(&mut self) {
-        self.plot_window = None;
-        self.last_run_message = Some("Running calculation...".to_string());
-        self.last_run_is_error = false;
-        if let Some(section) = self.document.get_mut("solver_settings") {
-            normalize_usize_field(section, "max_iterations");
-            normalize_usize_field(section, "refinement_steps");
+    /// Render confirmation for replacing the current task via Read Task.
+    fn show_document_load_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.pending_document_load.clone() else {
+            return;
+        };
+
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Confirm task load")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Load {}? This will replace the current task state.",
+                    path.display()
+                ));
+                ui.label("Confirm only if you want to discard unsaved edits or running work.");
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel load").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("Load task").clicked() {
+                        confirm = true;
+                    }
+                });
+            });
+
+        if cancel {
+            self.cancel_pending_document_load();
+        } else if confirm {
+            let _ = self.confirm_pending_document_load();
+        }
+    }
+
+    /// Render confirmation for closing the main window with unsaved work.
+    fn show_window_close_confirmation(&mut self, ctx: &egui::Context, open: &mut bool) {
+        if !self.pending_window_close {
+            return;
         }
 
-        match self.selected_problem {
-            ProblemsEnum::BVPSimple => {
-                info!("Starting BVP Simple calculation.");
-                let mut reactor = SimpleReactorTask::new();
-                if let Err(err) = reactor.solve_from_parsed(self.document.clone()) {
-                    warn!("Failed to solve reactor task: {}", err);
-                    self.last_run_message = Some(format!("Calculation failed: {}", err));
-                    self.last_run_is_error = true;
-                    return;
-                }
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Confirm window close")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Close the window and discard the current task state?");
+                ui.label("Confirm only if you do not need the unsaved changes anymore.");
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel close").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("Close window").clicked() {
+                        confirm = true;
+                    }
+                });
+            });
 
-                // The GUI should default to plotting solved BVP results unless the
-                // postprocessing section explicitly disables it.
-                let gui_plot = self
-                    .document
-                    .get("postprocessing")
-                    .and_then(|postproc| postproc.get("gui_plot"))
-                    .and_then(|slot| slot.as_ref())
-                    .and_then(|values| values.first())
-                    .and_then(|value| value.as_boolean())
-                    .unwrap_or(true);
-
-                if gui_plot {
-                    let Some(y) = reactor.solver.solution.clone() else {
-                        warn!("Solved BVP did not provide a solution matrix; skipping plot window.");
-                        self.last_run_message = Some(
-                            "Calculation completed, but no solution matrix was returned."
-                                .to_string(),
-                        );
-                        return;
-                    };
-                    let Some(x_mesh) = reactor.solver.x_mesh.clone() else {
-                        warn!("Solved BVP did not provide a mesh; skipping plot window.");
-                        self.last_run_message =
-                            Some("Calculation completed, but no mesh was returned.".to_string());
-                        return;
-                    };
-                    let arg = "x".to_owned();
-                    let values = reactor.solver.unknowns.clone();
-
-                    let t_result = x_mesh;
-                    let y_result =
-                        nalgebra::DMatrix::from_column_slice(y.nrows(), y.ncols(), y.as_slice());
-
-                    self.plot_window = Some(PlotWindow::new(arg, values, t_result, y_result));
-                }
-
-                self.last_run_message = Some("Calculation completed successfully.".to_string());
-
-                return;
+        if cancel {
+            self.cancel_pending_window_close();
+            *open = true;
+        } else if confirm {
+            if self.confirm_pending_window_close() {
+                *open = false;
             }
-            ProblemsEnum::None => {
-                println!("No calculation available for this problem type.");
-                self.last_run_message =
-                    Some("No calculation is available for the current problem type.".to_string());
+        } else {
+            *open = true;
+        }
+    }
+
+    /// Render confirmation for switching the active problem type.
+    fn show_problem_switch_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(requested_problem) = self.pending_problem_switch.clone() else {
+            return;
+        };
+
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Confirm problem switch")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Switching to {} will replace the current task state.",
+                    requested_problem
+                ));
+                ui.label("Confirm only if you want to discard the current edits or running work.");
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel switch").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("Switch problem").clicked() {
+                        confirm = true;
+                    }
+                });
+            });
+
+        if cancel {
+            self.cancel_pending_problem_switch();
+        } else if confirm {
+            if self.confirm_pending_problem_switch() {
+                info!("Switched to problem type: {}", self.selected_problem);
             }
         }
     }
@@ -1975,13 +2653,14 @@ impl CombustionApp {
             Some(template) => {
                 let mut parser = DocumentParser::new(template.to_string());
                 match parser.parse_document() {
-                    Ok(_) => println!("Parsed successfully"),
-                    Err(e) => println!("Error parsing template: {}", e),
+                    Ok(_) => info!("Parsed BVP template successfully"),
+                    Err(e) => warn!("Error parsing BVP template: {}", e),
                 }
                 parser.get_result().cloned().unwrap_or_else(HashMap::new)
             }
             None => HashMap::new(),
         };
+        let (bvp_gui_config, bvp_gui_migration_report) = BvpGuiConfig::from_document(&document);
 
         Self {
             document,
@@ -1990,11 +2669,26 @@ impl CombustionApp {
             new_field_values: HashMap::new(),
             selected_problem: problem,
             current_file_path: None,
+            document_lifecycle: DocumentLifecycleState::default(),
             show_help_window: false,
             current_help_info: String::new(),
             last_run_message: None,
             last_run_is_error: false,
             plot_window: None,
+            pending_aot_confirmation: None,
+            pending_document_load: None,
+            pending_document_deletion: None,
+            pending_window_close: false,
+            pending_problem_switch: None,
+            confirmed_aot_request: None,
+            calculation_state: CalculationState::Idle,
+            calculation_receiver: None,
+            calculation_cancel: None,
+            next_run_id: 1,
+            validation_fingerprint: None,
+            validation_report: BvpGuiValidationReport::default(),
+            bvp_gui_config,
+            bvp_gui_migration_report,
         }
         .with_seeded_defaults()
     }
@@ -2002,11 +2696,16 @@ impl CombustionApp {
     /// Seeds problem-specific defaults after constructing the app state.
     fn with_seeded_defaults(mut self) -> Self {
         if matches!(self.selected_problem, ProblemsEnum::BVPSimple) {
-            ensure_bvp_solver_backend_defaults(&mut self.document);
+            seed_bvp_document_defaults(&mut self.document);
         }
+        self.document_lifecycle
+            .mark_clean_snapshot(self.current_validation_fingerprint());
+        self.refresh_bvp_gui_snapshot();
         self
     }
 
+    /// Updates the active file path in both the compatibility field and the
+    /// explicit lifecycle state.
     /// Renders the main application window and handles all user interactions.
     ///
     /// This is the primary UI method that creates and manages the main application
@@ -2040,8 +2739,13 @@ impl CombustionApp {
     /// * Dynamic field and section addition/deletion
     /// * Input validation and type conversion
     pub fn show(&mut self, ctx: &egui::Context, open: &mut bool) {
+        self.poll_calculation_worker(ctx);
+        self.refresh_validation_report();
+        self.refresh_bvp_gui_snapshot();
+        let was_open = *open;
+        let mut window_open = *open;
         egui::Window::new("Gas-phase Combustion/Steady State Plug Flow")
-            .open(open)
+            .open(&mut window_open)
             .default_size(ctx.content_rect().size())
             .resizable(true)
             .collapsible(true)
@@ -2054,14 +2758,13 @@ impl CombustionApp {
                         .show_ui(ui, |ui| {
                             if ui.button("💾 Save").clicked() {
                                 if let Some(path) = &self.current_file_path {
-                                    self.save_document(path.clone());
+                                    let _ = self.save_document(path.clone());
                                 } else {
                                     if let Some(path) = rfd::FileDialog::new()
                                         .add_filter("text", &["txt"])
                                         .save_file()
                                     {
-                                        self.current_file_path = Some(path.clone());
-                                        self.save_document(path);
+                                        let _ = self.save_document(path);
                                     }
                                 }
                             }
@@ -2070,8 +2773,7 @@ impl CombustionApp {
                                     .add_filter("text", &["txt"])
                                     .save_file()
                                 {
-                                    self.current_file_path = Some(path.clone());
-                                    self.save_document(path);
+                                    let _ = self.save_document(path);
                                 }
                             }
                             if ui.button("❓ Help").clicked() {
@@ -2083,27 +2785,22 @@ impl CombustionApp {
 
                     // Problem selection dropdown
                     ui.label("Problem Type:");
-                    let old_problem = self.selected_problem.clone();
+                    let current_problem = self.selected_problem.clone();
+                    let mut ui_selected_problem = current_problem.clone();
                     egui::ComboBox::from_label("")
-                        .selected_text(format!("{}", self.selected_problem))
+                        .selected_text(format!("{}", current_problem))
                         .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut ui_selected_problem, ProblemsEnum::None, "None");
                             ui.selectable_value(
-                                &mut self.selected_problem,
-                                ProblemsEnum::None,
-                                "None",
-                            );
-                            ui.selectable_value(
-                                &mut self.selected_problem,
+                                &mut ui_selected_problem,
                                 ProblemsEnum::BVPSimple,
                                 "BVP Simple",
                             );
                         });
 
-                    // If problem changed, reload document
-                    if old_problem as u8 != self.selected_problem.clone() as u8 {
-                        let new_app = Self::new_with_problem(self.selected_problem.clone());
-                        self.document = new_app.document;
-                        println!("Switched to problem type: {}", self.selected_problem);
+                    // If problem changed, either switch immediately or queue confirmation.
+                    if ui_selected_problem != current_problem {
+                        let _ = self.request_problem_switch(ui_selected_problem);
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2113,35 +2810,14 @@ impl CombustionApp {
                                 .add_filter("all", &["*"])
                                 .pick_file()
                             {
-                                println!("Selected file: {:?}", path);
-                                match std::fs::read_to_string(&path) {
-                                    Ok(content) => {
-                                        let mut parser = DocumentParser::new(content);
-                                        match parser.parse_document() {
-                                            Ok(_) => {
-                                                if let Some(parsed_doc) = parser.get_result() {
-                                                    self.document = parsed_doc.clone();
-                                                    self.current_file_path = Some(path.clone());
-                                                    println!(
-                                                        "Successfully loaded and parsed file: {:?}",
-                                                        path
-                                                    );
-                                                } else {
-                                                    println!("Error: Parser returned no result");
-                                                }
-                                            }
-                                            Err(e) => println!("Error parsing file: {}", e),
-                                        }
-                                    }
-                                    Err(e) => println!("Error reading file: {}", e),
-                                }
+                                let _ = self.request_document_load(path);
                             }
                         }
-                    });
                 });
+            });
 
-                ui.separator();
-                ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(10.0);
 
                 // Main content area
                 ui.label("Gas-phase Combustion and Steady State Plug Flow Analysis");
@@ -2153,29 +2829,7 @@ impl CombustionApp {
                 };
 
                 if matches!(self.selected_problem, ProblemsEnum::BVPSimple) {
-                    render_bvp_solver_backend_panel(
-                        ui,
-                        &mut self.document,
-                        help_map,
-                        &mut self.current_help_info,
-                    );
-                    normalize_bvp_adaptive_grid_settings(&mut self.document);
-                    render_bvp_section_group(
-                        ui,
-                        "Advanced solver settings",
-                        BVP_SOLVER_ADVANCED_SECTIONS,
-                        &mut self.document,
-                        help_map,
-                        &mut self.current_help_info,
-                        &mut self.new_field_names,
-                        &mut self.new_field_values,
-                    );
-                    render_bvp_adaptive_grid_panel(
-                        ui,
-                        &mut self.document,
-                        help_map,
-                        &mut self.current_help_info,
-                    );
+                    self.render_bvp_structured_editor(ui, help_map);
                 }
 
                 ui.separator();
@@ -2200,6 +2854,18 @@ impl CombustionApp {
                         ),
                     );
                 });
+                if !self.bvp_gui_migration_report.warnings.is_empty() {
+                    ui.group(|ui| {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(150, 110, 20),
+                            "Compatibility notes",
+                        );
+                        for warning in &self.bvp_gui_migration_report.warnings {
+                            ui.label(format!("- {warning}"));
+                        }
+                    });
+                    ui.add_space(8.0);
+                }
                 ui.add_space(20.0);
 
                 // Render document sections
@@ -2215,6 +2881,7 @@ impl CombustionApp {
                             &mut self.current_help_info,
                             &mut self.new_field_names,
                             &mut self.new_field_values,
+                            &mut self.pending_document_deletion,
                         );
                         ui.add_space(8.0);
 
@@ -2227,31 +2894,9 @@ impl CombustionApp {
                             &mut self.current_help_info,
                             &mut self.new_field_names,
                             &mut self.new_field_values,
+                            &mut self.pending_document_deletion,
                         );
                         ui.add_space(8.0);
-
-                        render_bvp_section_group(
-                            ui,
-                            "Initial guess",
-                            BVP_INITIAL_GUESS_SECTIONS,
-                            &mut self.document,
-                            help_map,
-                            &mut self.current_help_info,
-                            &mut self.new_field_names,
-                            &mut self.new_field_values,
-                        );
-                        ui.add_space(8.0);
-
-                        render_bvp_section_group(
-                            ui,
-                            "Postprocessing",
-                            BVP_POSTPROCESSING_SECTIONS,
-                            &mut self.document,
-                            help_map,
-                            &mut self.current_help_info,
-                            &mut self.new_field_names,
-                            &mut self.new_field_values,
-                        );
 
                         ui.add_space(12.0);
                         egui::CollapsingHeader::new("Legacy raw document")
@@ -2259,12 +2904,18 @@ impl CombustionApp {
                             .show(ui, |ui| {
                                 let mut sections_to_process = Vec::new();
                                 let mut sections_to_delete = Vec::new();
+                                let mut fields_to_delete = Vec::new();
 
-                                for (section_name, section_data) in self.document.iter_mut() {
-                                    if is_bvp_structured_section(section_name, &bvp_species_sections)
+                                let section_names = sorted_document_section_names(&self.document);
+                                for section_name in section_names {
+                                    if is_bvp_structured_section(section_name.as_str(), &bvp_species_sections)
                                     {
                                         continue;
                                     }
+
+                                    let Some(section_data) = self.document.get_mut(&section_name) else {
+                                        continue;
+                                    };
 
                                     let field_name = self
                                         .new_field_names
@@ -2275,9 +2926,9 @@ impl CombustionApp {
                                         .entry(section_name.clone())
                                         .or_insert_with(String::new);
 
-                                    let (add_field, delete_section) = render_section(
+                                    let (add_field, delete_section, requested_fields) = render_section(
                                         ui,
-                                        section_name,
+                                        &section_name,
                                         section_data,
                                         field_name,
                                         field_value,
@@ -2296,11 +2947,22 @@ impl CombustionApp {
                                     if delete_section {
                                         sections_to_delete.push(section_name.clone());
                                     }
+                                    fields_to_delete.extend(
+                                        requested_fields
+                                            .into_iter()
+                                            .map(|field| (section_name.clone(), field)),
+                                    );
                                 }
 
                                 for section_name in sections_to_delete {
                                     self.document.remove(&section_name);
-                                    println!("Deleted section: {}", section_name);
+                                    info!("Deleted section: {}", section_name);
+                                }
+                                for (section, field) in fields_to_delete {
+                                    let request = DocumentDeleteRequest::Field { section, field };
+                                    if apply_document_deletion(&mut self.document, &request) {
+                                        info!("Deleted optional {}", request.description());
+                                    }
                                 }
 
                                 for (section_name, field_name, field_value) in sections_to_process {
@@ -2318,11 +2980,17 @@ impl CombustionApp {
                                         };
 
                                         if let Some(section) = self.document.get_mut(&section_name) {
-                                            section.insert(field_name.clone(), Some(vec![value]));
-                                            println!(
-                                                "Added field '{}' to section '{}' with value: {}",
-                                                field_name, section_name, field_value
-                                            );
+                                            match insert_field_if_absent(
+                                                section,
+                                                field_name.clone(),
+                                                value,
+                                            ) {
+                                                Ok(()) => info!(
+                                                    "Added field '{}' to section '{}' with value: {}",
+                                                    field_name, section_name, field_value
+                                                ),
+                                                Err(message) => warn!("{}", message),
+                                            }
                                         }
 
                                         self.new_field_names
@@ -2335,8 +3003,14 @@ impl CombustionApp {
                     } else {
                         let mut sections_to_process = Vec::new();
                         let mut sections_to_delete = Vec::new();
+                        let mut fields_to_delete = Vec::new();
 
-                        for (section_name, section_data) in self.document.iter_mut() {
+                        let section_names = sorted_document_section_names(&self.document);
+                        for section_name in section_names {
+                            let Some(section_data) = self.document.get_mut(&section_name) else {
+                                continue;
+                            };
+
                             let field_name = self
                                 .new_field_names
                                 .entry(section_name.clone())
@@ -2346,9 +3020,9 @@ impl CombustionApp {
                                 .entry(section_name.clone())
                                 .or_insert_with(String::new);
 
-                            let (add_field, delete_section) = render_section(
+                            let (add_field, delete_section, requested_fields) = render_section(
                                 ui,
-                                section_name,
+                                &section_name,
                                 section_data,
                                 field_name,
                                 field_value,
@@ -2367,12 +3041,23 @@ impl CombustionApp {
                             if delete_section {
                                 sections_to_delete.push(section_name.clone());
                             }
+                            fields_to_delete.extend(
+                                requested_fields
+                                    .into_iter()
+                                    .map(|field| (section_name.clone(), field)),
+                            );
                         }
 
                         // Delete sections outside the iterator
                         for section_name in sections_to_delete {
                             self.document.remove(&section_name);
-                            println!("Deleted section: {}", section_name);
+                            info!("Deleted section: {}", section_name);
+                        }
+                        for (section, field) in fields_to_delete {
+                            let request = DocumentDeleteRequest::Field { section, field };
+                            if apply_document_deletion(&mut self.document, &request) {
+                                info!("Deleted optional {}", request.description());
+                            }
                         }
 
                         // Process field additions
@@ -2389,11 +3074,17 @@ impl CombustionApp {
                                 };
 
                                 if let Some(section) = self.document.get_mut(&section_name) {
-                                    section.insert(field_name.clone(), Some(vec![value]));
-                                    println!(
-                                        "Added field '{}' to section '{}' with value: {}",
-                                        field_name, section_name, field_value
-                                    );
+                                    match insert_field_if_absent(
+                                        section,
+                                        field_name.clone(),
+                                        value,
+                                    ) {
+                                        Ok(()) => info!(
+                                            "Added field '{}' to section '{}' with value: {}",
+                                            field_name, section_name, field_value
+                                        ),
+                                        Err(message) => warn!("{}", message),
+                                    }
                                 }
 
                                 self.new_field_names
@@ -2402,6 +3093,7 @@ impl CombustionApp {
                             }
                         }
                     }
+                    self.sync_document_state_after_edit();
 
                     ui.separator();
                     ui.horizontal(|ui| {
@@ -2410,10 +3102,15 @@ impl CombustionApp {
                         if ui.button("Create Section").clicked()
                             && !self.new_section_name.is_empty()
                         {
-                            self.document
-                                .insert(self.new_section_name.clone(), HashMap::new());
-                            println!("Created new section: {}", self.new_section_name);
+                            match insert_section_if_absent(
+                                &mut self.document,
+                                self.new_section_name.clone(),
+                            ) {
+                                Ok(()) => info!("Created new section: {}", self.new_section_name),
+                                Err(message) => warn!("{}", message),
+                            }
                             self.new_section_name.clear();
+                            self.sync_document_state_after_edit();
                         }
                     });
                 });
@@ -2421,6 +3118,27 @@ impl CombustionApp {
                 // Big RUN CALCULATION button at the bottom
                 ui.separator();
                 ui.add_space(10.0);
+                self.refresh_document_lifecycle_dirty_state();
+                if self.document_lifecycle.dirty {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(180, 120, 20),
+                        "Unsaved changes",
+                    );
+                    ui.add_space(4.0);
+                }
+                if let Some(message) = self.document_lifecycle.last_status_text() {
+                    let status_color = if self.document_lifecycle.last_status_is_error() {
+                        egui::Color32::from_rgb(180, 30, 30)
+                    } else {
+                        egui::Color32::from_rgb(20, 120, 40)
+                    };
+                    ui.label(
+                        egui::RichText::new(message)
+                            .color(status_color)
+                            .size(14.0),
+                    );
+                    ui.add_space(4.0);
+                }
                 if let Some(message) = &self.last_run_message {
                     let status_color = if self.last_run_is_error {
                         egui::Color32::from_rgb(180, 30, 30)
@@ -2435,15 +3153,67 @@ impl CombustionApp {
                     ui.add_space(4.0);
                 }
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                    let button = egui::Button::new("🚀 RUN CALCULATION!")
-                        .min_size(egui::Vec2::new(200.0, 50.0))
-                        .fill(egui::Color32::from_rgb(160, 160, 160));
+                    let calculation_active = self.calculation_state.is_active();
+                    let task_valid = self.validation_report.is_valid();
+                    if !task_valid {
+                        ui.group(|ui| {
+                            ui.colored_label(egui::Color32::from_rgb(180, 30, 30), "Task validation");
+                            for issue in &self.validation_report.issues {
+                                ui.label(format!("- {issue}"));
+                            }
+                        });
+                        ui.add_space(4.0);
+                    }
+                    ui.horizontal_centered(|ui| {
+                        if matches!(self.selected_problem, ProblemsEnum::BVPSimple) {
+                            let preview_button = egui::Button::new("Preview Task")
+                                .min_size(egui::Vec2::new(160.0, 50.0))
+                                .fill(egui::Color32::from_rgb(140, 150, 180));
+                            if ui.add_sized([160.0, 50.0], preview_button).clicked() {
+                                self.preview_bvp_task();
+                            }
+                            ui.add_space(8.0);
+                        }
 
-                    if ui.add_sized([200.0, 50.0], button).clicked() {
-                        self.run_calculation();
+                        let button = egui::Button::new("🚀 RUN CALCULATION!")
+                            .min_size(egui::Vec2::new(200.0, 50.0))
+                            .fill(egui::Color32::from_rgb(160, 160, 160));
+
+                        if ui
+                            .add_enabled_ui(!calculation_active && task_valid, |ui| {
+                                ui.add_sized([200.0, 50.0], button)
+                            })
+                            .inner
+                            .clicked()
+                        {
+                            self.request_calculation();
+                        }
+                    });
+                    if calculation_active {
+                        let cancelling = matches!(
+                            self.calculation_state,
+                            CalculationState::Cancelling { .. }
+                        );
+                        if ui
+                            .add_enabled(!cancelling, egui::Button::new("Cancel calculation"))
+                            .clicked()
+                        {
+                            self.cancel_calculation();
+                        }
                     }
                 });
             });
+
+        if was_open && !window_open && !self.request_window_close() {
+            window_open = true;
+        }
+        *open = window_open;
+
+        self.show_aot_confirmation(ctx);
+        self.show_document_load_confirmation(ctx);
+        self.show_window_close_confirmation(ctx, open);
+        self.show_document_deletion_confirmation(ctx);
+        self.show_problem_switch_confirmation(ctx);
 
         // Help window
         if self.show_help_window {
@@ -2498,7 +3268,7 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     ("boundary_condition", "Initial values for all variables at the reactor inlet."),
     ("diffusion_coefficients", "Molecular diffusion coefficients for each chemical substance [m²/s]."),
     ("reactions", "Chemical reactions with Arrhenius kinetic parameters [A, n, E, Q]."),
-    ("solver_settings", "Structured solver backend controls. The core solve route and generated-backend knobs are exposed here as first-class document fields."),
+    ("solver_settings", "Structured solver backend controls. Residuals/Jacobian assembly is exclusive: choose Lambdify or AOT, then refine matrix and symbolic backends with explicit dropdowns."),
     ("bounds", "Variable bounds for solver convergence. Format: lower_bound, upper_bound for each variable type."),
     ("rel_tolerance", "Relative convergence tolerances for each variable type in the numerical solver."),
     ("strategy_params", "Advanced solver strategy parameters for damped Newton-Raphson method."),
@@ -2537,19 +3307,19 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     ("boundary_condition.T", "Initial/boundary temperature [K]. Type: Float. Range: 200-2000K. Starting temperature of the system"),
     // solver_settings fields
     ("solver_settings.scheme", "Spatial discretization scheme. Type: String. Options: forward, trapezoid. forward remains the lightest-weight route."),
-    ("solver_settings.method", "Linear algebra and matrix-storage backend. Type: String. Options: Banded, Sparse. KiThe keeps the lower-level matrix_backend alias synchronized automatically."),
+    ("solver_settings.method", "Linear algebra backend. Type: String. Options: Banded, Sparse. This is the canonical matrix-storage selector."),
     ("solver_settings.strategy", "Convergence strategy. Type: String. Options: Damped, Frozen, Naive. Damped remains the robust default."),
-    ("solver_settings.linear_sys_method", "Legacy linear-system method override. Type: Optional<String>. None/Auto lets Banded and Sparse backends choose their solver policy."),
+    ("solver_settings.linear_sys_method", "Optional linear-system override. Type: Optional<String>. Leave None for the default matrix-backend policy."),
     ("solver_settings.abs_tolerance", "Absolute convergence tolerance. Type: Float. Range: 1e-12 to 1e-3. Smaller=more accurate"),
     ("solver_settings.max_iterations", "Maximum solver iterations. Type: Usize. Range: 10-1000. Higher=more attempts to converge"),
     ("solver_settings.loglevel", "Logging verbosity level. Type: Optional<String>. Options: Some(info), Some(debug), None"),
     ("solver_settings.dont_save_log", "Disable log file saving. Type: Boolean. true=no log files, false=save logs"),
     ("solver_settings.generated_backend", "High-level solver preset used by the RustedSciThe backend. Type: String. Default: banded_lambdify."),
     ("solver_settings.matrix_backend", "Compatibility alias for solver_settings.method. The structured GUI synchronizes this field automatically."),
-    ("solver_settings.backend_policy", "Backend selection policy. Type: String. Options: lambdify_only, prefer_aot_then_lambdify, prefer_aot_then_numeric, aot_only, numeric_only."),
-    ("solver_settings.symbolic_backend", "Symbolic assembly backend. Type: String. Options: AtomView, ExprLegacy. AtomView is the modern default."),
-    ("solver_settings.aot_codegen_backend", "AOT code generation backend. Type: String. Options: C, Rust, Zig."),
-    ("solver_settings.aot_c_compiler", "AOT C compiler choice. Type: String. Options: tcc, gcc, zig."),
+    ("solver_settings.backend_policy", "Derived execution policy from the visible backend selector. KiThe writes lambdify_only or aot_only automatically."),
+    ("solver_settings.symbolic_backend", "Symbolic assembly backend. Type: String. Options: AtomView, ExprLegacy. AtomView is the default."),
+    ("solver_settings.aot_codegen_backend", "AOT code generation backend. Type: String. Options: C, Rust, Zig. Only visible when the execution backend is AOT."),
+    ("solver_settings.aot_c_compiler", "C compiler choice, visible only for the C codegen backend. Type: String. Options: tcc, gcc."),
     ("solver_settings.aot_build_policy", "AOT build lifecycle policy. Type: String. Options: use_if_available, build_if_missing, require_prebuilt, rebuild_always."),
     ("solver_settings.aot_build_profile", "AOT build profile. Type: String. Options: release, debug."),
     ("solver_settings.aot_compile_preset", "AOT compile preset. Type: String. Options: production, fast_build, dev_fastest."),

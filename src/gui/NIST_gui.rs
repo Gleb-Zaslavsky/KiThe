@@ -1,7 +1,9 @@
 use crate::Thermodynamics::DBhandlers::NIST_parser::{Phase, SearchType};
 use crate::Thermodynamics::DBhandlers::NISTdata::NISTdata;
 use crate::gui::gui_plot::PlotWindow;
+use crate::gui::read_only_snapshot::multiline as read_only_multiline;
 use eframe::egui;
+use log::warn;
 use nalgebra::{DMatrix, DVector};
 
 #[derive(Debug)]
@@ -158,12 +160,12 @@ impl NISTApp {
                         ));
                     }
                     Err(e) => {
-                        println!("Range calculation error: {}", e);
+                        warn!("Range calculation error: {}", e);
                     }
                 }
             }
             _ => {
-                println!("Invalid temperature range");
+                warn!("Invalid temperature range");
             }
         }
     }
@@ -180,11 +182,11 @@ impl NISTApp {
         for i in 0..n_points {
             let t = t0 + i as f64 * dt;
 
-            if let Err(e) = self.nist_data.extract_coefficients(t) {
+            if let Err(_) = self.nist_data.extract_coefficients(t) {
                 continue; // Skip temperatures outside coefficient ranges
             }
 
-            if let Err(e) = self.nist_data.calculate_cp_dh_ds(t) {
+            if let Err(_) = self.nist_data.calculate_cp_dh_ds(t) {
                 continue; // Skip calculation errors
             }
 
@@ -257,7 +259,7 @@ impl NISTApp {
                     egui::ScrollArea::vertical()
                         .max_height(300.0)
                         .show(ui, |ui| {
-                            ui.text_edit_multiline(&mut self.search_results);
+                            read_only_multiline(ui, &mut self.search_results, 12);
                         });
                 });
 

@@ -98,7 +98,13 @@ pub struct LibraryConfig {
     pub elements: String,
     pub reactbase: String,
     pub dict_reaction: String,
+    #[serde(default = "default_thermo_write_journal")]
+    pub thermo_write_journal: String,
     pub problems_folder: String,
+}
+
+fn default_thermo_write_journal() -> String {
+    "thermo_write_journal.json".to_string()
 }
 
 impl Default for LibraryConfig {
@@ -117,6 +123,7 @@ impl Default for LibraryConfig {
             elements: "elements.json".to_string(),
             reactbase: "Reactbase.json".to_string(),
             dict_reaction: "dict_reaction.json".to_string(),
+            thermo_write_journal: default_thermo_write_journal(),
             problems_folder: "problems".to_string(),
         }
     }
@@ -259,6 +266,14 @@ impl LibraryManager {
         &self.config.dict_reaction
     }
 
+    /// Returns the current path to the thermodynamics write journal JSON file.
+    ///
+    /// # Returns
+    /// String slice containing the file path (e.g., "thermo_write_journal.json")
+    pub fn thermo_write_journal_path(&self) -> &str {
+        &self.config.thermo_write_journal
+    }
+
     /// Returns the current path to the elements JSON file.
     ///
     /// # Returns
@@ -397,6 +412,30 @@ impl LibraryManager {
         }
     }
 
+    /// Updates the thermodynamics write journal file path.
+    ///
+    /// Validates that the new file exists before updating the configuration.
+    /// Automatically saves the configuration after successful update.
+    ///
+    /// # Arguments
+    /// * `path` - New file path for the thermo write journal
+    ///
+    /// # Returns
+    /// * `Ok(())` - If file exists and update was successful
+    /// * `Err(Box<dyn std::error::Error>)` - If file doesn't exist or save failed
+    pub fn set_thermo_write_journal(
+        &mut self,
+        path: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if Path::new(path).exists() {
+            self.config.thermo_write_journal = path.to_string();
+            self.save_config()?;
+            Ok(())
+        } else {
+            Err(format!("File does not exist: {}", path).into())
+        }
+    }
+
     /// Updates multiple library paths in a single atomic operation.
     ///
     /// This method validates all files exist before making any changes, ensuring
@@ -425,7 +464,7 @@ impl LibraryManager {
         &mut self,
         updates: HashMap<&str, &str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        for (key, path) in &updates {
+        for (_key, path) in &updates {
             if !Path::new(path).exists() {
                 return Err(format!("File does not exist: {}", path).into());
             }
@@ -826,7 +865,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
-
+    #[allow(dead_code)]
     fn setup_test_files() -> (NamedTempFile, NamedTempFile, NamedTempFile, NamedTempFile) {
         let mut substance_file = NamedTempFile::new().unwrap();
         let mut keys_file = NamedTempFile::new().unwrap();
@@ -870,6 +909,7 @@ mod tests {
             elements: temp_keys.path().to_str().unwrap().to_string(),
             reactbase: temp_react.path().to_str().unwrap().to_string(),
             dict_reaction: temp_dict.path().to_str().unwrap().to_string(),
+            thermo_write_journal: "thermo_write_journal.json".to_string(),
             problems_folder: "problems".to_string(),
         };
 
@@ -889,7 +929,7 @@ mod tests {
 
     #[test]
     fn test_update_libraries() {
-        let mut temp_config = NamedTempFile::new().unwrap();
+        let temp_config = NamedTempFile::new().unwrap();
         let mut temp_substance = NamedTempFile::new().unwrap();
         let mut temp_keys = NamedTempFile::new().unwrap();
 

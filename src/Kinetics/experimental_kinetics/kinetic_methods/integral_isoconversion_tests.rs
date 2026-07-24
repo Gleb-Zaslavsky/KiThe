@@ -15,12 +15,13 @@ pub mod tests {
     };
 
     use ndarray::{Array1, Array2};
-    use polars::prelude::NamedFromOwned;
+
     use rayon::prelude::*;
     use std::time::Instant;
     const R: f64 = 8.314462618;
 
     /// simulate first-order non-isothermal TGA and produce ConversionGrid
+    #[allow(dead_code)]
     pub fn simulate_tga_first_order(
         t0: f64,
         k0: f64,
@@ -336,7 +337,7 @@ pub mod tests {
     /// Each experiment runs at a fixed temperature T[i]; the "experiments" axis corresponds to
     /// different isothermal temperatures rather than different heating rates.
     pub fn simulate_tga_first_order_isothermal(
-        t0: f64,
+        _t0: f64,
         k0: f64,
         ea: f64,
         T: &[f64],

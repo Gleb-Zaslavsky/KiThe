@@ -293,6 +293,7 @@ mod tests2 {
 
     use crate::gui::combustion::{CombustionApp, ProblemsEnum};
     use RustedSciThe::command_interpreter::task_parser::{DocumentMap, Value};
+    #[allow(dead_code)]
     fn create_test_document() -> DocumentMap {
         let mut section1 = HashMap::new();
         section1.insert(
@@ -562,7 +563,7 @@ mod tests2 {
 
 #[cfg(test)]
 mod file_reading_tests {
-    use super::*;
+
     use crate::gui::combustion::CombustionApp;
     use RustedSciThe::command_interpreter::task_parser::{DocumentParser, Value};
     use std::fs::File;
@@ -791,13 +792,13 @@ mod file_reading_tests {
             Ok(_) => {
                 // Even if parsing succeeds, result might be empty or incomplete
                 if let Some(result) = parser.get_result() {
-                    println!("Parsed result: {:?}", result);
+                    log::info!("Parsed result: {:?}", result);
                 } else {
-                    println!("No result from parser");
+                    log::info!("No result from parser");
                 }
             }
             Err(e) => {
-                println!("Expected parsing error: {}", e);
+                log::info!("Expected parsing error: {}", e);
                 // This is expected behavior for invalid content
             }
         }
@@ -822,7 +823,7 @@ mod file_reading_tests {
 }
 #[cfg(test)]
 mod deletion_tests {
-    use super::*;
+
     use crate::gui::combustion::CombustionApp;
     use RustedSciThe::command_interpreter::task_parser::Value;
     use std::collections::HashMap;
@@ -890,8 +891,8 @@ mod deletion_tests {
 }
 #[cfg(test)]
 mod saving_tests {
-    use super::*;
-    use crate::gui::combustion::CombustionApp;
+
+    use crate::gui::combustion::{CombustionApp, GuiFileOperationResult};
     use RustedSciThe::command_interpreter::task_parser::{DocumentParser, Value};
     use std::collections::HashMap;
     use std::fs::File;
@@ -945,7 +946,10 @@ mod saving_tests {
         let file_path = temp_dir.path().join("test_save.txt");
 
         // Save document
-        app.save_document(file_path.clone());
+        match app.save_document(file_path.clone()) {
+            GuiFileOperationResult::Saved { path } => assert_eq!(path, file_path),
+            other => panic!("expected save success, got {other:?}"),
+        }
 
         // Verify file was created and contains expected content
         assert!(file_path.exists());
@@ -972,7 +976,10 @@ mod saving_tests {
         // Save to temporary file
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("save_reload_test.txt");
-        app.save_document(file_path.clone());
+        match app.save_document(file_path.clone()) {
+            GuiFileOperationResult::Saved { path } => assert_eq!(path, file_path),
+            other => panic!("expected save success, got {other:?}"),
+        }
 
         // Create new app and load the saved file
         let mut new_app = CombustionApp::new();

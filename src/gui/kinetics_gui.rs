@@ -27,6 +27,7 @@ use crate::Kinetics::kinetics_lib_api::KineticData;
 use crate::Kinetics::mechfinder_api::ReactionType as RType;
 use crate::Kinetics::mechfinder_api::{ReactionData, parse_kinetic_data_vec};
 use eframe::egui;
+use log::info;
 use std::collections::HashMap;
 
 /// Main application structure for the kinetics GUI
@@ -492,7 +493,7 @@ impl KineticsApp {
                             if ui.button("Saving reaction for calculation").clicked() {
                                 if let Some(reaction) = &self.selected_reaction_data {
                                     self.added_reactions.push(reaction.clone());
-                                    println!("Added reaction: {}", reaction.eq);
+                                    info!("Added reaction: {}", reaction.eq);
                                 }
                             }
                             if ui.button("Taking all reactions from mechanism").clicked() {
@@ -503,7 +504,7 @@ impl KineticsApp {
                                 {
                                     self.added_reactions.extend(parsed_reactions);
                                 }
-                                println!(
+                                info!(
                                     "Added {} reactions from mechanism {}",
                                     self.kinetic_data.LibKineticData.len(),
                                     self.selected_library
@@ -512,15 +513,15 @@ impl KineticsApp {
                         });
                         ui.horizontal(|ui| {
                             if ui.button("Searching reactions").clicked() {
-                                println!("Searching reactions");
+                                info!("Searching reactions");
                             }
                             if ui.button("Building sub-mechanism").clicked() {
-                                println!("Building sub-mechanism");
+                                info!("Building sub-mechanism");
                             }
                         });
                         ui.horizontal(|ui| {
                             if ui.button("Adding sub-mechanism to calculation").clicked() {
-                                println!("Adding sub-mechanism to calculation");
+                                info!("Adding sub-mechanism to calculation");
                             }
                         });
                         ui.separator();

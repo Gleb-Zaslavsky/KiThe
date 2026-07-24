@@ -2,7 +2,9 @@
 #[cfg(test)]
 mod tests {
 
-    use crate::Thermodynamics::User_substances::{DataType, LibraryPriority, Phases, SubsData};
+    use crate::Thermodynamics::User_substances::{
+        CalculatorType, DataType, LibraryPriority, Phases, SubsData, WhatIsFound,
+    };
 
     #[test]
     fn test_calculate_transport_map_of_properties() {
@@ -34,10 +36,10 @@ mod tests {
             .calculate_elem_composition_and_molar_mass(None)
             .unwrap();
         assert!(user_subs.elem_composition_matrix.is_some());
-        assert!(!user_subs.hasmap_of_molar_mass.is_empty());
-        println!("Molar masses: {:?}", user_subs.hasmap_of_molar_mass);
+        assert!(!user_subs.molar_mass_by_substance.is_empty());
+        println!("Molar masses: {:?}", user_subs.molar_mass_by_substance);
         // Set pressure (required for transport calculations)
-        user_subs.set_P(1e5, None);
+        let _ = user_subs.set_P(1e5, None);
 
         // Extract thermal coefficients
         user_subs.extract_all_thermal_coeffs(400.0).unwrap();
@@ -73,6 +75,7 @@ mod tests {
         }
         let _ = user_subs.calculate_therm_map_of_fun();
         let _ = user_subs.calculate_therm_map_of_sym();
+        let _ = user_subs.set_T(400.0);
         match user_subs.calculate_transport_map_of_sym() {
             Ok(_) => println!("Transport map of sym functions calculated successfully."),
             Err(e) => println!("Error calculating transport map of sym functions: {}", e),
@@ -82,34 +85,79 @@ mod tests {
             Err(e) => println!("Error calculating transport map of functions: {}", e),
         }
 
-        let clo_map = &user_subs.transport_map_of_fun;
-        let sym_map = &user_subs.transport_map_of_sym;
+        let clo_map = user_subs.transport_functions();
+        let sym_map = user_subs.transport_symbolic();
         assert!(!sym_map.is_empty());
         assert!(clo_map.contains_key("CO"));
 
-        // Check what's actually in the map
-        println!(
-            "Transport function map keys: {:?}",
-            clo_map.keys().collect::<Vec<_>>()
-        );
-        if let Some(co_map) = clo_map.get("CO") {
-            println!(
-                "CO function map keys: {:?}",
-                co_map.keys().collect::<Vec<_>>()
-            );
-            if let Some(lambda_fun) = co_map.get(&DataType::Lambda_fun) {
-                println!("Lambda function exists: {:?}", lambda_fun.is_some());
-                if lambda_fun.is_some() {
-                    println!("Lambda function test passed!");
-                } else {
-                    println!("Lambda function is None");
-                }
-            } else {
-                println!("Lambda_fun key not found in CO map");
-            }
-        } else {
-            println!("CO key not found in transport function map");
+        // Check the closure through the explicit readiness API instead of the raw map.
+        let lambda_fun_state = user_subs.transport_function_state("CO", DataType::Lambda_fun);
+        assert!(lambda_fun_state.is_ready());
+        if let Some(lambda_fun) = lambda_fun_state.value() {
+            let value_400 = lambda_fun(400.0);
+            assert!(value_400 > 0.0);
         }
+
+        // Symbolic transport cache should be reachable through the typed accessor too.
+        let lambda_sym_state = user_subs.transport_symbolic_state("CO", DataType::Lambda_sym);
+        assert!(lambda_sym_state.is_ready());
+
+        assert!(sym_map.get("CO").is_some());
+    }
+
+    #[test]
+    fn test_resolve_search_and_report_returns_typed_summary() {
+        let mut user_subs = SubsData::new();
+        let report = user_subs.resolve_search_and_report().unwrap();
+
+        assert_eq!(report.total_substances(), 0);
+        assert_eq!(report.priority_found(), 0);
+        assert_eq!(report.permitted_found(), 0);
+        assert_eq!(report.not_found(), 0);
+        assert!(report.rows().is_empty());
+        assert!(
+            report
+                .render_table()
+                .contains("no substances have been resolved yet")
+        );
+    }
+
+    #[test]
+    fn test_resolve_search_and_report_covers_explicit_and_fallback_paths() {
+        let mut user_subs = SubsData::new();
+        user_subs.substances = vec!["CO2".to_string(), "H2O".to_string()];
+        user_subs.store_search_result(
+            "CO2",
+            WhatIsFound::Thermo,
+            "NASA_gas".to_string(),
+            LibraryPriority::Explicit,
+            serde_json::Value::String("fixture".to_string()),
+            CalculatorType::Thermo(
+                crate::Thermodynamics::DBhandlers::thermo_api::ThermoEnum::NASA(
+                    crate::Thermodynamics::DBhandlers::NASAdata::NASAdata::new(),
+                ),
+            ),
+            true,
+        );
+        user_subs.insert_not_found_if_absent("H2O");
+
+        let report = user_subs.search_summary_report();
+        let rendered = report.render_table();
+
+        assert_eq!(report.total_substances(), 2);
+        assert!(rendered.contains("CO2"));
+        assert!(rendered.contains("NASA_gas"));
+        assert!(user_subs.get_all_search_states().contains_key("CO2"));
+        assert!(
+            user_subs
+                .get_search_result("CO2", WhatIsFound::Thermo)
+                .is_some()
+        );
+
+        // Rendering the same canonical report twice must stay deterministic.
+        let report_again = user_subs.search_summary_report();
+        assert_eq!(report, report_again);
+        assert_eq!(rendered, report_again.render_table());
     }
 
     #[test]
@@ -151,10 +199,11 @@ mod tests {
 
         // Verify coefficients were fitted for found substances
         for substance in &substances {
-            if let Some(result_map) = user_subs.search_results.get(substance) {
-                if result_map
-                    .contains_key(&crate::Thermodynamics::User_substances::WhatIsFound::Thermo)
-                {
+            if let Some(state) = user_subs.get_substance_search_state(substance) {
+                if matches!(
+                    state.thermo,
+                    crate::Thermodynamics::User_substances::PropertySearchState::Found(_)
+                ) {
                     println!("Fitted coefficients for {}", substance);
                 }
             }
@@ -190,26 +239,28 @@ mod tests {
 
         // Verify mean values were calculated
         for substance in &substances {
-            if let Some(props) = user_subs.therm_map_of_properties_values.get(substance) {
-                if let Some(Some(cp_mean)) = props.get(&DataType::Cp) {
-                    println!("{} Mean Cp (400-600K): {}", substance, cp_mean);
-                    assert!(
-                        *cp_mean > 0.0,
-                        "Mean Cp should be positive for {}",
-                        substance
-                    );
-                }
-                if let Some(Some(dh_mean)) = props.get(&DataType::dH) {
-                    println!("{} Mean dH (400-600K): {}", substance, dh_mean);
-                }
-                if let Some(Some(ds_mean)) = props.get(&DataType::dS) {
-                    println!("{} Mean dS (400-600K): {}", substance, ds_mean);
-                    assert!(
-                        *ds_mean > 0.0,
-                        "Mean dS should be positive for {}",
-                        substance
-                    );
-                }
+            let cp_state = user_subs.therm_value_state(substance, DataType::Cp);
+            let dh_state = user_subs.therm_value_state(substance, DataType::dH);
+            let ds_state = user_subs.therm_value_state(substance, DataType::dS);
+
+            if let Some(cp_mean) = cp_state.value() {
+                println!("{} Mean Cp (400-600K): {}", substance, cp_mean);
+                assert!(
+                    *cp_mean > 0.0,
+                    "Mean Cp should be positive for {}",
+                    substance
+                );
+            }
+            if let Some(dh_mean) = dh_state.value() {
+                println!("{} Mean dH (400-600K): {}", substance, dh_mean);
+            }
+            if let Some(ds_mean) = ds_state.value() {
+                println!("{} Mean dS (400-600K): {}", substance, ds_mean);
+                assert!(
+                    *ds_mean > 0.0,
+                    "Mean dS should be positive for {}",
+                    substance
+                );
             }
         }
     }
@@ -299,8 +350,8 @@ mod tests {
         );
 
         // Set temperature and pressure
-        user_subs.set_T(300.0);
-        user_subs.set_P(101325.0, None);
+        let _ = user_subs.set_T(300.0);
+        let _ = user_subs.set_P(101325.0, None);
 
         // Search substances
         user_subs.search_substances().unwrap();
@@ -338,8 +389,8 @@ mod tests {
         );
 
         // Set temperature and pressure
-        user_subs.set_T(300.0);
-        user_subs.set_P(101325.0, None);
+        let _ = user_subs.set_T(300.0);
+        let _ = user_subs.set_P(101325.0, None);
 
         // Search substances
         user_subs.search_substances().unwrap();
@@ -385,11 +436,11 @@ mod tests {
         );
 
         // Set temperature and pressure
-        user_subs.set_T(300.0);
-        user_subs.set_P(101325.0, None);
+        let _ = user_subs.set_T(300.0);
+        let _ = user_subs.set_P(101325.0, None);
 
         // Search substances
-        user_subs.search_substances().unwrap();
+        let _ = user_subs.search_substances().unwrap();
 
         // Calculate molar masses
         user_subs
@@ -444,8 +495,8 @@ mod tests {
         );
 
         // Set temperature and pressure
-        user_subs.set_T(300.0);
-        user_subs.set_P(101325.0, None);
+        let _ = user_subs.set_T(300.0);
+        let _ = user_subs.set_P(101325.0, None);
 
         // Search substances
         user_subs.search_substances().unwrap();
@@ -498,8 +549,8 @@ mod tests {
         );
 
         // Set temperature and pressure
-        user_subs.set_T(300.0);
-        user_subs.set_P(101325.0, None);
+        let _ = user_subs.set_T(300.0);
+        let _ = user_subs.set_P(101325.0, None);
 
         // Search substances
         user_subs.search_substances().unwrap();
@@ -553,8 +604,8 @@ mod tests {
         );
 
         // Set temperature and pressure
-        user_subs.set_T(300.0);
-        user_subs.set_P(101325.0, None);
+        let _ = user_subs.set_T(300.0);
+        let _ = user_subs.set_P(101325.0, None);
 
         // Search substances
         user_subs.search_substances().unwrap();
@@ -591,13 +642,13 @@ mod tests {
         assert!(result.is_err());
 
         // Test without temperature set
-        user_subs.substances = vec!["CO".to_string()];
-        user_subs.set_P(101325.0, None);
+        let _ = user_subs.substances = vec!["CO".to_string()];
+        let _ = user_subs.set_P(101325.0, None);
         let result = user_subs.initialize_diffusion_data();
         assert!(result.is_err());
 
         // Test without pressure set
-        user_subs.set_T(300.0);
+        let _ = user_subs.set_T(300.0);
         user_subs.P = None;
         let result = user_subs.initialize_diffusion_data();
         assert!(result.is_err());
@@ -623,8 +674,8 @@ mod tests {
         );
 
         // Set temperature and pressure
-        user_subs.set_T(300.0);
-        user_subs.set_P(101325.0, None);
+        let _ = user_subs.set_T(300.0);
+        let _ = user_subs.set_P(101325.0, None);
 
         // Search substances
         user_subs.search_substances().unwrap();

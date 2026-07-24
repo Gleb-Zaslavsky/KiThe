@@ -78,12 +78,14 @@
 use super::SimpleReactorBVP::{FastElemReact, SimpleReactorTask};
 use crate::ReactorsBVP::reactor_BVP_utils::InitialConfig;
 use crate::ReactorsBVP::reactor_BVP_utils::{BoundsConfig, ScalingConfig, ToleranceConfig};
+use crate::ReactorsBVP::task_value_conversion::try_value_as_usize;
 use crate::Utils::show_this_pic::show_image;
+use crate::gui::bvp_gui_config::normalize_bvp_solver_backend_section;
 use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
+use RustedSciThe::numerical::BVP_Damp::task_parser_damped;
 use log::info;
 use nalgebra::DMatrix;
 use std::collections::HashMap;
-use RustedSciThe::numerical::BVP_Damp::task_parser_damped;
 
 fn missing_field(section: &str, field: &str) -> crate::ReactorsBVP::SimpleReactorBVP::ReactorError {
     crate::ReactorsBVP::SimpleReactorBVP::ReactorError::MissingData(format!(
@@ -152,7 +154,11 @@ fn required_usize(
     let value = required_values(section, section_name, field)?
         .first()
         .ok_or_else(|| missing_field(section_name, field))?;
-    value_as_usize(value).ok_or_else(|| missing_field(section_name, field))
+    try_value_as_usize(value).map_err(|error| {
+        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(format!(
+            "invalid integer field `{section_name}.{field}`: {error}"
+        ))
+    })
 }
 
 fn optional_string(
@@ -174,19 +180,6 @@ fn optional_string(
                 .or_else(|| value.as_string().cloned())
         }
     })
-}
-
-// RustedSciThe's parser historically emits both Integer and Usize values.
-// Keeping this conversion local avoids relying on one exact parser variant.
-fn value_as_usize(value: &Value) -> Option<usize> {
-    match value {
-        Value::Usize(value) => Some(*value),
-        Value::Integer(value) if *value >= 0 => Some(*value as usize),
-        Value::Float(value) if value.is_finite() && *value >= 0.0 => Some(*value as usize),
-        Value::String(value) => value.trim().parse::<usize>().ok(),
-        Value::Optional(Some(inner)) => value_as_usize(inner),
-        _ => None,
-    }
 }
 
 fn required_vector_f64(
@@ -294,7 +287,11 @@ fn set_initial_guess_from_map_data(
 /// expects a small set of typed fields and canonical spellings.
 pub(crate) fn normalize_reactor_physics_task_map(task_map: &DocumentMap) -> DocumentMap {
     let mut normalized = task_map.clone();
-    normalize_exclusive_solver_backend(&mut normalized);
+    if let Some(section) = normalized.get_mut("solver_settings") {
+        // Use the shared backend normalizer so GUI rendering and parser handoff
+        // agree on the same exclusive Lambdify/AOT contract.
+        normalize_bvp_solver_backend_section(section);
+    }
     if let Some(grid_refinement) = normalized.get_mut("grid_refinement") {
         if let Some(values) = grid_refinement.remove("grcar_smooke") {
             grid_refinement
@@ -322,7 +319,7 @@ pub(crate) fn normalize_reactor_physics_task_map(task_map: &DocumentMap) -> Docu
     normalize_solver_counter_field(&mut normalized, "adaptive_strategy", "max_refinements");
     normalized
 }
-
+#[allow(dead_code)]
 const AOT_ONLY_SOLVER_FIELDS: &[&str] = &[
     "aot_codegen_backend",
     "aot_c_compiler",
@@ -331,108 +328,6 @@ const AOT_ONLY_SOLVER_FIELDS: &[&str] = &[
     "aot_compile_preset",
     "aot_execution_policy",
 ];
-
-#[derive(Clone, Copy)]
-enum ExclusiveSolverBackend {
-    Lambdify,
-    Aot,
-}
-
-/// Normalize KiThe's exclusive execution choice before invoking RustedSciThe.
-///
-/// RustedSciThe permits artifact lifecycle and callback selection to be
-/// configured independently. KiThe intentionally exposes Lambdify/AOT as an
-/// exclusive choice, so old documents containing `lambdify_only` together with
-/// `build_if_missing` are reduced to one coherent backend contract here.
-fn normalize_exclusive_solver_backend(document: &mut DocumentMap) {
-    let Some(section) = document.get_mut("solver_settings") else {
-        return;
-    };
-
-    let generated_backend = section
-        .get("generated_backend")
-        .and_then(|slot| slot.as_ref())
-        .and_then(|values| values.first())
-        .and_then(Value::as_string)
-        .map(|value| value.trim().to_ascii_lowercase());
-    let backend_policy = section
-        .get("backend_policy")
-        .and_then(|slot| slot.as_ref())
-        .and_then(|values| values.first())
-        .and_then(Value::as_string)
-        .map(|value| value.trim().to_ascii_lowercase());
-
-    let generated_backend_mode = generated_backend
-        .as_deref()
-        .and_then(|backend| {
-            if backend.contains("_aot") || backend.starts_with("aot_") {
-                Some(ExclusiveSolverBackend::Aot)
-            } else if backend.contains("lambdify") {
-                Some(ExclusiveSolverBackend::Lambdify)
-            } else {
-                None
-            }
-        });
-    // Preserve explicit unknown presets so the native typed parser can reject
-    // them instead of silently changing user intent.
-    if generated_backend.is_some() && generated_backend_mode.is_none() {
-        return;
-    }
-
-    let backend = generated_backend_mode
-        .or_else(|| match backend_policy.as_deref() {
-            Some("aot_only") => Some(ExclusiveSolverBackend::Aot),
-            Some("lambdify_only") => Some(ExclusiveSolverBackend::Lambdify),
-            _ => None,
-        })
-        .unwrap_or(ExclusiveSolverBackend::Lambdify);
-
-    let method = section
-        .get("method")
-        .and_then(|slot| slot.as_ref())
-        .and_then(|values| values.first())
-        .and_then(Value::as_string)
-        .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_else(|| "banded".to_string());
-    let matrix_prefix = if method == "sparse" { "sparse" } else { "banded" };
-
-    match backend {
-        ExclusiveSolverBackend::Lambdify => {
-            section.insert(
-                "generated_backend".to_string(),
-                Some(vec![Value::String(format!("{matrix_prefix}_lambdify"))]),
-            );
-            section.insert(
-                "backend_policy".to_string(),
-                Some(vec![Value::String("lambdify_only".to_string())]),
-            );
-            for field_name in AOT_ONLY_SOLVER_FIELDS {
-                section.remove(*field_name);
-            }
-        }
-        ExclusiveSolverBackend::Aot => {
-            if generated_backend.is_none() {
-                let compiler = section
-                    .get("aot_c_compiler")
-                    .and_then(|slot| slot.as_ref())
-                    .and_then(|values| values.first())
-                    .and_then(Value::as_string)
-                    .map(|value| value.trim().to_ascii_lowercase())
-                    .unwrap_or_else(|| "tcc".to_string());
-                section.insert(
-                    "generated_backend".to_string(),
-                    Some(vec![Value::String(format!(
-                        "{matrix_prefix}_aot_{compiler}"
-                    ))]),
-                );
-            }
-            section.insert(
-                "backend_policy".to_string(),
-                Some(vec![Value::String("aot_only".to_string())]),
-            );
-        }
-    }
-}
 
 /// Returns true when the task explicitly disables adaptive grid refinement.
 ///
@@ -481,8 +376,11 @@ fn normalize_solver_counter_field(
     };
 
     if let Some(first) = values.first_mut() {
-        if let Some(value) = value_as_usize(first) {
-            *first = Value::Integer(value as i64);
+        if let Ok(value) = try_value_as_usize(first) {
+            let Ok(value) = i64::try_from(value) else {
+                return;
+            };
+            *first = Value::Integer(value);
             values.truncate(1);
         }
     }
@@ -590,25 +488,27 @@ fn solve_and_store_nrbvp(
     initial_guess: DMatrix<f64>,
 ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
     let solver_task_map = normalize_reactor_physics_task_map(task_map);
-    let damped_spec = task_parser_damped::parse_bvp_damped_solver_settings_from_document(&solver_task_map)
-        .map_err(|err| {
-            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
-                format!("RustedSciThe rejected solver settings: {err}"),
-            )
-        })?;
+    let damped_spec =
+        task_parser_damped::parse_bvp_damped_solver_settings_from_document(&solver_task_map)
+            .map_err(|err| {
+                crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(format!(
+                    "RustedSciThe rejected solver settings: {err}"
+                ))
+            })?;
     // The typed RST options already contain tolerances, bounds, and backend
     // execution details, so the KiThe handoff only needs to pass them through.
-    let solver_options = damped_spec
-        .build_solver_options()
-        .map_err(|err| crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
-            format!("RustedSciThe rejected solver settings: {err}")
-        ))?;
+    let solver_options = damped_spec.build_solver_options().map_err(|err| {
+        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(format!(
+            "RustedSciThe rejected solver settings: {err}"
+        ))
+    })?;
     // The backend still expects the reactor-specific expanded maps, so we keep
     // this small compatibility bridge until RustedSciThe accepts them directly.
     let tolerance_config = tolerance_config_from_damped_spec(&damped_spec)?;
     let bounds_config = bounds_config_from_damped_spec(&damped_spec)?;
     let full_bounds = Some(bounds_config.to_full_bounds_map(&reactor.kindata.substances));
-    let full_rel_tolerance = Some(tolerance_config.to_full_tolerance_map(&reactor.kindata.substances));
+    let full_rel_tolerance =
+        Some(tolerance_config.to_full_tolerance_map(&reactor.kindata.substances));
 
     let solver = &reactor.solver;
     let mut nr = solver.build_nrbvp_backend(
@@ -662,6 +562,146 @@ fn solve_and_store_nrbvp(
     Ok(())
 }
 
+/// One independently actionable problem found during task preflight.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BvpTaskValidationIssue {
+    pub stage: &'static str,
+    pub message: String,
+}
+
+/// Typed result of validating a reactor task without starting Newton iterations.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BvpTaskValidationReport {
+    pub issues: Vec<BvpTaskValidationIssue>,
+}
+
+impl BvpTaskValidationReport {
+    #[allow(dead_code)]
+    pub fn is_valid(&self) -> bool {
+        self.issues.is_empty()
+    }
+
+    fn push_error(&mut self, stage: &'static str, error: impl std::fmt::Display) {
+        self.issues.push(BvpTaskValidationIssue {
+            stage,
+            message: error.to_string(),
+        });
+    }
+}
+
+/// Validates all parser-owned task contracts without assembling or solving the BVP.
+///
+/// The stages are intentionally independent where possible so one preflight can
+/// report both physical-data and solver-settings problems. Equation assembly and
+/// Newton iterations remain worker-only operations.
+pub(crate) fn validate_reactor_bvp_task_map(task_map: &DocumentMap) -> BvpTaskValidationReport {
+    let mut report = BvpTaskValidationReport::default();
+    let mut reactor = SimpleReactorTask::new();
+
+    let physics_valid = match reactor.set_reactor_params_from_hashmap(task_map) {
+        Ok(()) => match reactor.check_task() {
+            Ok(()) => true,
+            Err(error) => {
+                report.push_error("physics", error);
+                false
+            }
+        },
+        Err(error) => {
+            report.push_error("physics", error);
+            false
+        }
+    };
+
+    let run_settings = match parse_physics_run_settings_from_map(task_map) {
+        Ok(settings) => Some(settings),
+        Err(error) => {
+            report.push_error("run settings", error);
+            None
+        }
+    };
+
+    if let Err(error) = parse_postprocessing_settings(task_map) {
+        report.push_error("postprocessing", error);
+    }
+
+    if physics_valid {
+        if let Some((_, _, n_steps, _)) = run_settings.as_ref() {
+            let unknown_count = reactor
+                .kindata
+                .substances
+                .len()
+                .checked_mul(2)
+                .and_then(|count| count.checked_add(2));
+            match unknown_count {
+                Some(unknown_count) => {
+                    if let Err(error) =
+                        set_initial_guess_from_map_data(task_map, *n_steps, unknown_count)
+                    {
+                        report.push_error("initial guess", error);
+                    }
+                }
+                None => report.push_error(
+                    "initial guess",
+                    "unknown count overflowed while validating the initial guess",
+                ),
+            }
+        }
+    }
+
+    let normalized = normalize_reactor_physics_task_map(task_map);
+    match task_parser_damped::parse_bvp_damped_solver_settings_from_document(&normalized) {
+        Ok(spec) => {
+            if let Err(error) = spec.build_solver_options() {
+                report.push_error("solver settings", error);
+            }
+            if let Err(error) = tolerance_config_from_damped_spec(&spec) {
+                report.push_error("solver tolerances", error);
+            }
+            if let Err(error) = bounds_config_from_damped_spec(&spec) {
+                report.push_error("solver bounds", error);
+            }
+        }
+        Err(error) => report.push_error("solver settings", error),
+    }
+
+    report
+}
+
+/// Parsed postprocessing switches, independent from solver output.
+struct PostprocessingSettings {
+    plot: bool,
+    gnuplot: bool,
+    save: bool,
+    save_to_csv: bool,
+    filename: Option<String>,
+    return_to_dimension: bool,
+    no_plots_in_terminal: bool,
+}
+
+/// Parse postprocessing settings without reading or mutating a solution.
+fn parse_postprocessing_settings(
+    task_hashmap: &DocumentMap,
+) -> Result<PostprocessingSettings, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let section = required_section(task_hashmap, "postprocessing")?;
+    let optional_bool = |field: &str, default: bool| match section.get(field) {
+        Some(_) => required_bool(section, "postprocessing", field),
+        None => Ok(default),
+    };
+
+    // `gui_plot` is consumed by the desktop handoff rather than the reactor,
+    // but it is still part of the same typed task section.
+    let _gui_plot = optional_bool("gui_plot", true)?;
+    Ok(PostprocessingSettings {
+        plot: optional_bool("plot", false)?,
+        gnuplot: optional_bool("gnuplot", false)?,
+        save: optional_bool("save", false)?,
+        save_to_csv: optional_bool("save_to_csv", false)?,
+        filename: optional_string(section, "filename")?,
+        return_to_dimension: optional_bool("return_to_dimension", true)?,
+        no_plots_in_terminal: optional_bool("no_plots_in_terminal", false)?,
+    })
+}
+
 /// Apply post-processing options from a parsed document map.
 ///
 /// This keeps the post-processing stage independent from `DocumentParser`
@@ -672,58 +712,27 @@ fn set_postprocessing_from_map(
     task_hashmap: &DocumentMap,
 ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
     reactor.check_balances()?;
-    let solver_settings = required_section(task_hashmap, "postprocessing")?;
+    let settings = parse_postprocessing_settings(task_hashmap)?;
 
-    // Flag to create plot via Rust native crate.
-    let plot_flag = match solver_settings.get("plot") {
-        Some(_) => required_bool(solver_settings, "postprocessing", "plot")?,
-        None => false,
-    };
-    // Flag to create plot via GNU plot library.
-    let gnuplot_flag = match solver_settings.get("gnuplot") {
-        Some(_) => required_bool(solver_settings, "postprocessing", "gnuplot")?,
-        None => false,
-    };
-    // Flag to save solution to txt.
-    let save_flag = match solver_settings.get("save") {
-        Some(_) => required_bool(solver_settings, "postprocessing", "save")?,
-        None => false,
-    };
-    let save_to_csv = match solver_settings.get("save_to_csv") {
-        Some(_) => required_bool(solver_settings, "postprocessing", "save_to_csv")?,
-        None => false,
-    };
-
-    let name = optional_string(solver_settings, "filename")?;
-    // Return from dimensionless to dimensioned unknowns.
-    let return_to_dimension = match solver_settings.get("return_to_dimension") {
-        Some(_) => required_bool(solver_settings, "postprocessing", "return_to_dimension")?,
-        None => true,
-    };
-    let no_plots_in_terminal = match solver_settings.get("no_plots_in_terminal") {
-        Some(_) => required_bool(solver_settings, "postprocessing", "no_plots_in_terminal")?,
-        None => false,
-    };
-
-    if return_to_dimension {
+    if settings.return_to_dimension {
         reactor.postprocessing()?;
     }
-    if plot_flag {
+    if settings.plot {
         reactor.plot()?;
         let _ = show_image("Teta");
     }
-    if gnuplot_flag {
+    if settings.gnuplot {
         reactor.gnuplot()?;
         let _ = show_image("Teta");
     }
-    if !no_plots_in_terminal {
+    if !settings.no_plots_in_terminal {
         reactor.plot_in_terminal()?;
     }
-    if save_flag {
-        reactor.save_to_file(name.clone())?
+    if settings.save {
+        reactor.save_to_file(settings.filename.clone())?
     }
-    if save_to_csv {
-        reactor.save_to_csv(name)?;
+    if settings.save_to_csv {
+        reactor.save_to_csv(settings.filename)?;
     }
     reactor.estimate_values()?;
     Ok(())
@@ -938,16 +947,17 @@ impl SimpleReactorTask {
         let normalized = normalize_reactor_physics_task_map(task_hashmap);
         let spec = task_parser_damped::parse_bvp_damped_solver_settings_from_document(&normalized)
             .map_err(|err| {
-                crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
-                    format!("RustedSciThe rejected solver settings: {err}"),
-                )
+                crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(format!(
+                    "RustedSciThe rejected solver settings: {err}"
+                ))
             })?;
         let tolerance_config = tolerance_config_from_damped_spec(&spec)?;
         let bounds_config = bounds_config_from_damped_spec(&spec)?;
         Ok((tolerance_config, bounds_config))
     }
-
+    #[allow(dead_code)]
     /// Legacy spelling kept for compatibility with older call sites.
+
     fn parse_toleranse_and_bounds(
         &mut self,
         parser: &mut DocumentParser,
@@ -1053,15 +1063,7 @@ impl SimpleReactorTask {
         }
         let initial_guess =
             set_initial_guess_from_map_data(task_map, n_steps, self.solver.unknowns.len())?;
-        solve_and_store_nrbvp(
-            self,
-            task_map,
-            t0,
-            t_end,
-            n_steps,
-            arg,
-            initial_guess,
-        )
+        solve_and_store_nrbvp(self, task_map, t0, t_end, n_steps, arg, initial_guess)
     }
 
     /// One-shot method: reads configuration file, parses it, and solves the BVP problem.
@@ -1159,15 +1161,7 @@ impl SimpleReactorTask {
         }
         let initial_guess =
             set_initial_guess_from_map_data(&task_map, n_steps, self.solver.unknowns.len())?;
-        solve_and_store_nrbvp(
-            self,
-            &task_map,
-            t0,
-            t_end,
-            n_steps,
-            arg,
-            initial_guess,
-        )
+        solve_and_store_nrbvp(self, &task_map, t0, t_end, n_steps, arg, initial_guess)
     }
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1482,6 +1476,7 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use tempfile::tempdir;
+    #[allow(non_upper_case_globals)]
     const task_content: &str = r#"
         initial_guess
         universal:1e-2
@@ -1616,19 +1611,10 @@ mod tests {
         let postprocessing = result
             .get_mut("postprocessing")
             .expect("postprocessing section must exist in the parsed task");
-        postprocessing.insert(
-            "plot".to_string(),
-            Some(vec![Value::Boolean(false)]),
-        );
-        postprocessing.insert(
-            "gnuplot".to_string(),
-            Some(vec![Value::Boolean(false)]),
-        );
+        postprocessing.insert("plot".to_string(), Some(vec![Value::Boolean(false)]));
+        postprocessing.insert("gnuplot".to_string(), Some(vec![Value::Boolean(false)]));
         postprocessing.insert("save".to_string(), Some(vec![Value::Boolean(false)]));
-        postprocessing.insert(
-            "save_to_csv".to_string(),
-            Some(vec![Value::Boolean(false)]),
-        );
+        postprocessing.insert("save_to_csv".to_string(), Some(vec![Value::Boolean(false)]));
         postprocessing.insert(
             "return_to_dimension".to_string(),
             Some(vec![Value::Boolean(false)]),
@@ -1797,8 +1783,9 @@ mod tests {
         document.insert("solver_settings".to_string(), solver_settings);
 
         let normalized = normalize_reactor_physics_task_map(&document);
-        let solver_settings = task_parser_damped::parse_bvp_damped_solver_settings_from_document(&normalized)
-            .expect("BVP damped solver settings should parse through the typed RST API");
+        let solver_settings =
+            task_parser_damped::parse_bvp_damped_solver_settings_from_document(&normalized)
+                .expect("BVP damped solver settings should parse through the typed RST API");
         let options = solver_settings
             .build_solver_options()
             .expect("Typed damped settings should build RustedSciThe options");
@@ -1821,7 +1808,12 @@ mod tests {
                 RustedSciThe::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy::AotOnly
             )
         ));
-        assert!(options.generated_backend_config.matrix_backend_override.is_some());
+        assert!(
+            options
+                .generated_backend_config
+                .matrix_backend_override
+                .is_some()
+        );
     }
 
     #[test]
@@ -1851,10 +1843,7 @@ mod tests {
             "adaptive_strategy".to_string(),
             HashMap::from([
                 ("version".to_string(), Some(vec![Value::Integer(1)])),
-                (
-                    "max_refinements".to_string(),
-                    Some(vec![Value::Float(5.0)]),
-                ),
+                ("max_refinements".to_string(), Some(vec![Value::Float(5.0)])),
             ]),
         );
 
@@ -1917,14 +1906,18 @@ mod tests {
             "solver_settings".to_string(),
             HashMap::from([(
                 "max_iterations".to_string(),
-                Some(vec![Value::Optional(Some(Box::new(Value::String("120".to_string()))))]),
+                Some(vec![Value::Optional(Some(Box::new(Value::String(
+                    "120".to_string(),
+                ))))]),
             )]),
         );
         document.insert(
             "adaptive_strategy".to_string(),
             HashMap::from([(
                 "version".to_string(),
-                Some(vec![Value::Optional(Some(Box::new(Value::String("2".to_string()))))]),
+                Some(vec![Value::Optional(Some(Box::new(Value::String(
+                    "2".to_string(),
+                ))))]),
             )]),
         );
 
@@ -1970,6 +1963,52 @@ mod tests {
             Value::Integer(value) => assert_eq!(*value, 100),
             other => panic!("max_iterations should normalize for the RST parser, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_normalize_reactor_physics_task_map_recovers_backend_policy_only_aot_documents() {
+        let mut document = DocumentMap::new();
+        document.insert(
+            "solver_settings".to_string(),
+            HashMap::from([
+                (
+                    "method".to_string(),
+                    Some(vec![Value::String("Sparse".to_string())]),
+                ),
+                (
+                    "backend_policy".to_string(),
+                    Some(vec![Value::String("aot_only".to_string())]),
+                ),
+                (
+                    "aot_c_compiler".to_string(),
+                    Some(vec![Value::String("gcc".to_string())]),
+                ),
+            ]),
+        );
+
+        let normalized = normalize_reactor_physics_task_map(&document);
+        let solver_settings = normalized
+            .get("solver_settings")
+            .expect("normalized solver_settings should exist");
+
+        assert_eq!(
+            solver_settings
+                .get("generated_backend")
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first())
+                .and_then(Value::as_string)
+                .map(String::as_str),
+            Some("sparse_aot_gcc")
+        );
+        assert_eq!(
+            solver_settings
+                .get("backend_policy")
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first())
+                .and_then(Value::as_string)
+                .map(String::as_str),
+            Some("aot_only")
+        );
     }
 
     #[test]
@@ -2063,19 +2102,13 @@ mod tests {
         let mut document = DocumentMap::new();
         document.insert(
             "strategy_params".to_string(),
-            HashMap::from([(
-                "adaptive".to_string(),
-                Some(vec![Value::Optional(None)]),
-            )]),
+            HashMap::from([("adaptive".to_string(), Some(vec![Value::Optional(None)]))]),
         );
         document.insert(
             "adaptive_strategy".to_string(),
             HashMap::from([
                 ("version".to_string(), Some(vec![Value::Integer(1)])),
-                (
-                    "max_refinements".to_string(),
-                    Some(vec![Value::Integer(3)]),
-                ),
+                ("max_refinements".to_string(), Some(vec![Value::Integer(3)])),
             ]),
         );
         document.insert(
@@ -2116,7 +2149,10 @@ mod tests {
                     "strategy".to_string(),
                     Some(vec![Value::String("Damped".to_string())]),
                 ),
-                ("linear_sys_method".to_string(), Some(vec![Value::Optional(None)])),
+                (
+                    "linear_sys_method".to_string(),
+                    Some(vec![Value::Optional(None)]),
+                ),
                 ("abs_tolerance".to_string(), Some(vec![Value::Float(1e-5)])),
                 ("max_iterations".to_string(), Some(vec![Value::Usize(100)])),
                 (
@@ -2125,7 +2161,10 @@ mod tests {
                         "info".to_string(),
                     ))))]),
                 ),
-                ("dont_save_log".to_string(), Some(vec![Value::Boolean(true)])),
+                (
+                    "dont_save_log".to_string(),
+                    Some(vec![Value::Boolean(true)]),
+                ),
             ]),
         );
         document.insert(
@@ -2276,7 +2315,10 @@ mod tests {
                     Some(vec![Value::String("Banded".to_string())]),
                 ),
                 ("abs_tolerance".to_string(), Some(vec![Value::Float(1e-7)])),
-                ("max_iterations".to_string(), Some(vec![Value::Integer(100)])),
+                (
+                    "max_iterations".to_string(),
+                    Some(vec![Value::Integer(100)]),
+                ),
             ]),
         );
         document.insert(
@@ -2315,7 +2357,10 @@ mod tests {
 
         assert_eq!(spec.abs_tolerance, 1e-7);
         assert_eq!(
-            spec.rel_tolerance.as_ref().and_then(|map| map.get("C")).copied(),
+            spec.rel_tolerance
+                .as_ref()
+                .and_then(|map| map.get("C"))
+                .copied(),
             Some(1e-7)
         );
         assert_eq!(
@@ -2400,6 +2445,125 @@ mod tests {
         let bc = &reactor.solver.BorderConditions;
         info!("bc {:?}", bc);
         info!(" unknowns{:?}", reactor.solver.unknowns);
+    }
+
+    #[test]
+    fn test_physics_parser_rejects_fractional_n_steps_without_truncation() {
+        let mut parser = DocumentParser::new(task_content.to_string());
+        parser.parse_document().expect("task should parse");
+        let mut document = parser
+            .get_result()
+            .cloned()
+            .expect("task parser should return a document");
+        document
+            .get_mut("process_conditions")
+            .expect("process_conditions should exist")
+            .insert("n_steps".to_string(), Some(vec![Value::Float(10.5)]));
+
+        let error = parse_physics_run_settings_from_map(&document)
+            .expect_err("fractional n_steps must not be truncated");
+        assert!(matches!(error, ReactorError::InvalidConfiguration(_)));
+        assert!(error.to_string().contains("process_conditions.n_steps"));
+        assert!(error.to_string().contains("without truncation"));
+    }
+
+    #[test]
+    fn test_solver_counter_normalization_preserves_invalid_fraction() {
+        let mut document = DocumentMap::new();
+        document.insert(
+            "solver_settings".to_string(),
+            HashMap::from([("max_iterations".to_string(), Some(vec![Value::Float(10.5)]))]),
+        );
+
+        let normalized = normalize_reactor_physics_task_map(&document);
+        assert_eq!(
+            normalized
+                .get("solver_settings")
+                .and_then(|section| section.get("max_iterations"))
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first()),
+            Some(&Value::Float(10.5))
+        );
+    }
+
+    #[test]
+    fn test_bvp_preflight_accepts_complete_task_without_solving() {
+        let mut parser = DocumentParser::new(task_content.to_string());
+        parser.parse_document().expect("task should parse");
+        let document = parser
+            .get_result()
+            .expect("task parser should return a document");
+
+        let report = validate_reactor_bvp_task_map(document);
+
+        assert!(report.is_valid(), "unexpected issues: {:?}", report.issues);
+    }
+
+    #[test]
+    fn test_bvp_preflight_collects_independent_physics_and_solver_errors() {
+        let mut parser = DocumentParser::new(task_content.to_string());
+        parser.parse_document().expect("task should parse");
+        let mut document = parser
+            .get_result()
+            .cloned()
+            .expect("task parser should return a document");
+        document.remove("reactions");
+        document
+            .get_mut("solver_settings")
+            .expect("solver_settings should exist")
+            .insert(
+                "generated_backend".to_string(),
+                Some(vec![Value::String("unknown_backend".to_string())]),
+            );
+
+        let report = validate_reactor_bvp_task_map(&document);
+
+        assert!(report.issues.iter().any(|issue| issue.stage == "physics"));
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.stage == "solver settings")
+        );
+    }
+
+    #[test]
+    fn test_bvp_preflight_validates_initial_guess_and_postprocessing() {
+        let mut parser = DocumentParser::new(task_content.to_string());
+        parser.parse_document().expect("task should parse");
+        let mut document = parser
+            .get_result()
+            .cloned()
+            .expect("task parser should return a document");
+        document.insert(
+            "initial_guess".to_string(),
+            HashMap::from([(
+                "universal".to_string(),
+                Some(vec![Value::String("not-a-number".to_string())]),
+            )]),
+        );
+        document
+            .get_mut("postprocessing")
+            .expect("postprocessing should exist")
+            .insert(
+                "gui_plot".to_string(),
+                Some(vec![Value::String("yes".to_string())]),
+            );
+
+        let report = validate_reactor_bvp_task_map(&document);
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.stage == "initial guess")
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.stage == "postprocessing")
+        );
     }
 
     #[test]

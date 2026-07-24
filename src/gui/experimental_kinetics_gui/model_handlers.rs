@@ -655,7 +655,7 @@ impl PlotModel {
         self.series.set_comment(id, comment)?;
         Ok(())
     }
-
+    #[allow(non_snake_case)]
     pub fn set_experiment_temperature(&mut self, id: &str, T: f64) -> Result<(), TGAGUIError> {
         self.series.set_experiment_temperature(id, T)?;
         Ok(())

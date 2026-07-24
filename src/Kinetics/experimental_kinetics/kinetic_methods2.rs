@@ -1,13 +1,12 @@
 use std::collections::HashMap;
-use std::fmt::format;
 
 use super::super::solid_state_kinetics_IVP::{IVPSolution, KineticModelIVP, KineticModelNames};
-use super::kinetic_methods::integral_isoconversion::IntegralIsoconversionalSolver;
+
 use super::kinetic_methods::{ConversionGridBuilder, ExperimentData, KineticDataView};
 use super::one_experiment_dataset::TGADomainError;
 use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
-use RustedSciThe::numerical::ODE_api2::{SolverParam, SolverType, UniversalODESolver};
-use std::time::Instant;
+use RustedSciThe::numerical::ODE_api2::{SolverParam, SolverType};
+
 pub fn solution_to_experiment(sol: IVPSolution, heating_rate: f64, id: &str) -> ExperimentData {
     ExperimentData {
         meta: ExperimentMeta {
@@ -130,6 +129,8 @@ fn test_conversion_grid_build() {
 
 #[test]
 fn test_kas_activation_energy() {
+    use super::kinetic_methods::integral_isoconversion::IntegralIsoconversionalSolver;
+    use std::time::Instant;
     let true_e = 50_000.0;
     let now = Instant::now();
     let data = simulate_tga_dataset(

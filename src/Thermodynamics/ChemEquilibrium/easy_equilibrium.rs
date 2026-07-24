@@ -1,16 +1,107 @@
+//! Simplified equilibrium interface using the law of mass action.
+//!
+//! # Purpose
+//!
+//! This module provides a lightweight, single-reaction equilibrium calculator
+//! that works directly with the **law of mass action** rather than the full
+//! Gibbs free energy minimization used elsewhere in the ChemEquilibrium module.
+//! It is suitable for quick estimates, educational examples, and problems where
+//! a single independent reaction dominates the chemistry.
+//!
+//! # Physical and Mathematical Background
+//!
+//! For a single reaction `Σ ν_i A_i = 0`, the equilibrium constant `K(T)` is
+//! related to the standard Gibbs free energy change:
+//!
+//! ```text
+//! ΔG°(T) = Σ ν_i · ΔG_f°(T, A_i)
+//! K(T) = exp(-ΔG°(T) / (R·T))
+//! ```
+//!
+//! The extent `ξ` satisfies the mass-action equation:
+//!
+//! ```text
+//! K(T) = Π (n_i^0 + ν_i·ξ)^(ν_i) · (P / (P0 · n_total))^(Σ ν_i)
+//! ```
+//!
+//! where `n_i^0` are initial moles, `ν_i` are stoichiometric coefficients,
+//! `P` is pressure, `P0` is reference pressure, and `n_total` is the total
+//! mole number. This module solves for `ξ` using a scalar root finder.
+//!
+//! # Key Structures
+//!
+//! | Structure | Role |
+//! |-----------|------|
+//! | [`EasyEquilibrium`] | Single-reaction equilibrium container |
+//!
+//! # Dataflow
+//!
+//! ```text
+//!   User provides:
+//!     P, subs_data, subs_coeffs (HashMap<species, coeff>), initial_moles
+//!     │
+//!     v
+//!   EasyEquilibrium::new()
+//!     ├── stores P/101325 (dimensionless pressure)
+//!     ├── computes n_total = Σ initial_moles
+//!     └── computes dnu = Σ ν_i
+//!     │
+//!     v
+//!   create_equilibrium_const()
+//!     ├── builds symbolic expression for ΔG°(T) from NASA polynomials
+//!     ├── builds symbolic K(T) = exp(-ΔG°/(R·T))
+//!     └── returns closure: f(ξ) = K - Π (n_i^0 + ν_i·ξ)^(ν_i) · (P/P0)^(dnu) / n_total^(dnu)
+//!     │
+//!     v
+//!   ScalarRootFinder solves f(ξ) = 0 for extent ξ
+//! ```
+//!
+//! # Limitations
+//!
+//! - Only handles **one independent reaction** at a time.
+//! - Uses symbolic expressions via `RustedSciThe` for ΔG°(T) computation.
+//! - Does not support multiphase or activity coefficient models.
+//! - For complex multi-reaction systems, use [`EquilibriumLogMoles`](super::equilibrium_log_moles) instead.
+//!
+//! # Examples
+//!
+//! ```rust, ignore
+//! use KiThe::Thermodynamics::ChemEquilibrium::easy_equilibrium::EasyEquilibrium;
+//!
+//! let eq = EasyEquilibrium::new(
+//!     101325.0,                          // pressure in Pa
+//!     subs_data,                         // substance database
+//!     HashMap::from([("CO2".into(), 1.0), ("CO".into(), -1.0), ("O2".into(), -0.5)]),
+//!     HashMap::from([("CO2".into(), 1.0), ("CO".into(), 0.0), ("O2".into(), 0.0)]),
+//! );
+//! let k_eq = eq.create_equilibrium_const();
+//! let xi = ScalarRootFinder::new(k_eq, 0.0, 1.0).solve();
+//! ```
+//!
 use crate::Thermodynamics::User_substances::{DataType, SubsData};
 use RustedSciThe::numerical::optimization::minimize_scalar::{ClosureFunction, ScalarRootFinder};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 use std::collections::HashMap;
-use std::fmt::Display;
+
+/// Simplified single-reaction equilibrium calculator using the law of mass action.
+///
+/// Fields are public for legacy callers that construct this struct directly.
+/// New code should prefer [`EasyEquilibrium::new()`].
 #[derive(Clone, Debug)]
 pub struct EasyEquilibrium {
+    /// System pressure in Pascals (Pa).
     pub P: f64,
+    /// Substance database with thermochemical data for all species.
     pub subs_data: SubsData,
+    /// Stoichiometric coefficients keyed by substance name.
+    /// Positive for products, negative for reactants.
     pub subs_coeffs: HashMap<String, f64>,
+    /// Initial physical mole numbers keyed by substance name.
     pub initial_moles: HashMap<String, f64>,
+    /// Sum of stoichiometric coefficients `Σ ν_i` (used for mole-fraction corrections).
     dnu: f64,
+    /// Total initial moles `Σ n_i^0` (used for mole-fraction normalization).
     n_total: f64,
 }
 
@@ -70,8 +161,8 @@ impl EasyEquilibrium {
         let mut LHS = Expr::Const(1.0);
         let subs_coeffs = self.subs_coeffs.clone();
         let eta = Expr::Var("eta".to_string());
-        let n_total = Expr::Const(self.n_total.clone());
-        let dnu = Expr::Const(self.dnu.clone());
+        let _n_total = Expr::Const(self.n_total.clone());
+        let _dnu = Expr::Const(self.dnu.clone());
         let P_pow_dnu = Expr::Const(self.P.clone().powf(self.dnu));
         for (subs_i, n0i) in self.initial_moles.clone() {
             let coeff_i = subs_coeffs.get(&subs_i).unwrap();
@@ -124,7 +215,6 @@ impl EasyEquilibrium {
 mod easy_equilibrium_tests {
     use super::*;
     use crate::Thermodynamics::User_substances::{LibraryPriority, Phases};
-    use approx::assert_relative_eq;
 
     #[test]
     fn test_easy_equilibrium_basic() {

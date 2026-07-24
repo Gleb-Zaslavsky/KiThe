@@ -59,7 +59,7 @@
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 use prettytable::{Cell, Row, Table};
-use serde::de::Deserializer;
+use serde::de::{Deserializer, Error as DeError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -116,7 +116,14 @@ impl fmt::Display for NASAError {
     }
 }
 
-impl Error for NASAError {}
+impl Error for NASAError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            NASAError::SerdeError(err) => Some(err),
+            _ => None,
+        }
+    }
+}
 
 impl From<serde_json::Error> for NASAError {
     fn from(err: serde_json::Error) -> Self {
@@ -189,7 +196,7 @@ pub fn ds_sym(a: f64, b: f64, c: f64, d: f64, e: f64, g: f64) -> Expr {
 }
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NASAinput {
-    #[serde(deserialize_with = "deserialize_composition")]
+    #[serde(default, deserialize_with = "deserialize_composition")]
     pub composition: Option<HashMap<String, f64>>,
     pub Cp: Vec<f64>,
 
@@ -208,24 +215,37 @@ where
     }
 
     let s = s.trim_matches(|c| c == '{' || c == '}');
-    let pairs: Result<HashMap<String, f64>, _> = s
-        .split(',')
-        .map(|pair| {
-            let mut parts = pair.trim().split(':');
-            let key = parts
-                .next()
-                .ok_or("Missing key")
-                .unwrap()
-                .trim()
-                .to_string();
-            let value = f64::from_str(parts.next().ok_or("Missing value").unwrap().trim())
-                .map_err(|_| "Invalid float")
-                .unwrap();
-            Ok((key, value))
-        })
-        .collect();
+    let mut composition = HashMap::new();
 
-    pairs.map(Some)
+    for pair in s
+        .split(',')
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+    {
+        let (key, value) = pair.split_once(':').ok_or_else(|| {
+            D::Error::custom(format!("Missing ':' in composition entry '{}'", pair))
+        })?;
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(D::Error::custom(
+                "Missing element name in composition entry",
+            ));
+        }
+        let value = f64::from_str(value.trim()).map_err(|_| {
+            D::Error::custom(format!(
+                "Invalid float value in composition entry '{}'",
+                pair
+            ))
+        })?;
+        if composition.insert(key.to_string(), value).is_some() {
+            return Err(D::Error::custom(format!(
+                "Duplicate element '{}' in composition",
+                key
+            )));
+        }
+    }
+
+    Ok(Some(composition))
 }
 #[derive(Debug, Clone)]
 pub struct Coeffs {
