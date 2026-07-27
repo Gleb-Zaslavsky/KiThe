@@ -34,8 +34,8 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Публичный фасад                           │
-│  phase_equilibrium_workflow.rs, easy_equilibrium.rs          │
-│  gas_solver(), solve_resolved_pt()                           │
+│  phase_equilibrium_workflow.rs                               │
+│  solve_resolved_pt()                                         │
 ├─────────────────────────────────────────────────────────────┤
 │                 Канонический слой                            │
 │  equilibrium_problem.rs → EquilibriumProblem                │
@@ -533,9 +533,9 @@ f_{r+el}(y) = Σ_i a_{i,el} · exp(y_i) - b_el = 0
 
 Выбор между стеками — через `SolverPolicy::RustedSciThe` vs `SolverPolicy::Legacy`.
 
-### 4.3 Масштабирование (Row scaling и Variable scaling)
+### 4.3 Масштабирование строк residual/Jacobian
 
-**Где:** [`equilibrium_problem.rs`](equilibrium_problem.rs) → `ResidualScalingContract`, `VariableScalingContract`
+**Где:** [`equilibrium_problem.rs`](equilibrium_problem.rs) → `ResidualScalingContract`
 
 **Зачем:** Уравнения элементного баланса и реакции имеют разные порядки величин. Без масштабирования численный решатель может «видеть» только элементный баланс и игнорировать сродство реакций.
 
@@ -547,15 +547,10 @@ ResidualScalingContract {
 ```
 Применяется через `scale_residual_rows()` и `scale_jacobian_rows()`.
 
-**Variable scaling** — масштабирование координат итерации:
-```rust
-VariableScalingContract {
-    scale: Vec<f64>,  // положительные множители для каждой переменной
-}
-```
-Применяется через `apply_iterate()` (деление на scale) и `unscale_iterate()` (умножение).
-
-Два типа масштабирования разделены на уровне типов, чтобы их нельзя было перепутать.
+Координаты log-moles сейчас не масштабируются отдельно: такая декларация не
+передавалась ни в один backend и была удалена, чтобы API не обещал неработающий
+механизм. Если variable scaling потребуется в будущем, его нужно вводить вместе
+с явной интеграцией во все backend contracts и отдельными regression-тестами.
 
 ### 4.4 Предотвращение нефизических значений
 
@@ -770,7 +765,7 @@ return PhaseControlDidNotConverge
 |------|------------|---------------|
 | [`equilibrium_ids.rs`](equilibrium_ids.rs) | Типобезопасные идентификаторы | `SpeciesId`, `ElementId`, `PhaseIndex`, `ReactionId` |
 | [`equilibrium_component.rs`](equilibrium_component.rs) | Фазово-квалифицированный компонент | `EquilibriumComponentDescriptor` |
-| [`equilibrium_problem.rs`](equilibrium_problem.rs) | Граница задачи | `EquilibriumProblem`, `PreparedEquilibriumProblem`, `EquilibriumSolution`, `LogMolesInitialGuess`, `ResidualScalingContract`, `VariableScalingContract` |
+| [`equilibrium_problem.rs`](equilibrium_problem.rs) | Граница задачи | `EquilibriumProblem`, `PreparedEquilibriumProblem`, `EquilibriumSolution`, `LogMolesInitialGuess`, `ResidualScalingContract` |
 | [`equilibrium_log_moles.rs`](equilibrium_log_moles.rs) | Основной оркестратор (3881 строка) | `EquilibriumLogMoles`, `EquilibriumSolverSettings`, `Solvers`, `SolverParams`, `EquilibriumSolveCandidate`, `TemperatureWorkerSeed` |
 | [`equilibrium_nonlinear.rs`](equilibrium_nonlinear.rs) | Численные решатели | `LMSolver`, `NRSolver`, `TrustRegionSolver`, `ReactionBasis`, `ReactionExtentError` |
 | [`equilibrium_workflows.rs`](equilibrium_workflows.rs) | Управление фазами, stability, convenience (2043 строки) | `PhaseManager`, `PhaseSet`, `PhaseTransitionPlan`, `PhaseStabilityReport`, `PhaseControlledSolveReport`, `MultiphaseAcceptanceReport`, `gas_solver()` |
@@ -872,3 +867,16 @@ equilibrium_ids.rs
     └── phase_equilibrium_workflow.rs
             │
             └── (solve_resolved_pt — публичный вход)
+## Актуальная production-граница (2026-07-26)
+
+Единственный production-вход для поддерживаемого fixed-`P,T` равновесия —
+типизированный `phase_equilibrium_workflow::solve_resolved_pt` (или
+`PhaseEquilibriumPipelineRequest` из `ChemEquilibrium::prelude`). Он принимает
+разрешённую фазовую систему, typed initial composition, условия и валидируемые
+политики, а возвращает immutable solution и typed reports.
+
+`gas_solver`, `easy_equilibrium` и mutable `EquilibriumLogMoles` workflows —
+только compatibility/characterization surface. Legacy LM/NR/TR внутри
+`equilibrium_legacy_backend` сохраняются как численные fallback-backends, но
+не являются отдельной orchestration-архитектурой и не должны появляться в
+новой пользовательской документации.

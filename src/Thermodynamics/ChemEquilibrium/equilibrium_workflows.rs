@@ -1,16 +1,21 @@
-//! Phase-controlled equilibrium solver, phase management, and convenience workflows.
+#![allow(deprecated)]
+//! Phase-control algorithms, compatibility workflows, and fallback helpers.
 //!
 //! # Purpose
 //!
-//! This module implements the **outer phase-control loop** that manages which
-//! thermodynamic phases are active during a multiphase equilibrium calculation.
-//! While the inner loop (in [`equilibrium_log_moles`](super::equilibrium_log_moles))
-//! solves for chemical equilibrium within a fixed set of active phases, this module
-//! decides when to activate or deactivate phases based on stability criteria,
-//! hysteresis thresholds, and convergence diagnostics.
+//! This module contains the phase-control mechanics and retained mutable
+//! compatibility workflows. The production entry point is
+//! [`phase_equilibrium_workflow`](super::phase_equilibrium_workflow), which
+//! prepares immutable active-set problems and publishes typed results. The
+//! algorithms here are still used by the compatibility layer and by the
+//! explicit fallback implementation, but this module is not the public
+//! orchestration boundary for new code.
 //!
-//! The module also provides convenience functions (`gas_solver`, `gas_solver_from_elements`,
-//! `gas_solver_for_T_range`) that wrap the full workflow for common gas-phase-only problems.
+//! The module also provides convenience functions (`gas_solver`,
+//! `gas_solver_from_elements`, `gas_solver_for_T_range`) for characterization
+//! and migration. They construct the historical mutable
+//! [`EquilibriumLogMoles`] host and should not be used as the production
+//! phase-resolved entry point.
 //!
 //! # Physical and Mathematical Background
 //!
@@ -89,9 +94,9 @@
 //! | [`gas_solver`] | Convenience: one-step gas-phase equilibrium |
 //! | [`gas_solver_for_T_range`] | Convenience: gas-phase equilibrium over T range |
 //!
-//! # Convenience Workflows
+//! # Retained Compatibility Workflows
 //!
-//! The `gas_solver*` family wraps the full pipeline:
+//! The `gas_solver*` family preserves the historical gas-only setup:
 //!
 //! ```text
 //!   SubsData ──> prepare_thermochemistry() ──> collect_gibbs_functions()
@@ -121,12 +126,13 @@
 //! - [`equilibrium_solver_policy`](super::equilibrium_solver_policy) — backend selection
 //! - [`phase_equilibrium_problem`](super::phase_equilibrium_problem) — typed multiphase bridge
 //!
-//! # Examples
+//! # Compatibility Example
 //!
 //! ```rust, ignore
 //! use KiThe::Thermodynamics::ChemEquilibrium::equilibrium_workflows::*;
 //!
-//! // Gas-phase equilibrium at fixed T and P
+//! // Historical gas-only workflow; new code should use
+//! // `ChemEquilibrium::prelude::PhaseEquilibriumPipelineRequest`.
 //! let mut solver = gas_solver(
 //!     vec!["CO2".to_string(), "CO".to_string(), "O2".to_string()],
 //!     1500.0, 101325.0, Solvers::LM, Some("info"), true
@@ -138,6 +144,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_active_set::ActiveSetPro
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::{
     PhaseActivityModel, phase_activity_models,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
@@ -145,10 +152,13 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     compute_element_totals, reaction_phase_stoichiometry, species_to_phase_map,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::PreparedEquilibriumRunner;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
-    EquilibriumConditions, EquilibriumProblem, LogMolesInitialGuess,
+    EquilibriumConditions, EquilibriumProblem, LogMolesInitialGuess, PreparedEquilibriumProblem,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::EquilibriumSolveReport;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
+    EquilibriumSolveReport, SolverPolicy,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
 use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
@@ -336,7 +346,13 @@ pub struct PhaseStabilityReport {
 pub enum InitialPhaseSet {
     /// Derive activity from the caller's initial mole inventory.
     FromInitialMoles,
-    /// Start with every declared phase active.
+    /// Consider every declared phase as a candidate, while initially solving
+    /// only phases with positive physical inventory. Inventory-free phases
+    /// remain eligible for stability-driven activation after the first solve.
+    ///
+    /// The distinction matters for the log-moles formulation: an active phase
+    /// must have a strictly positive phase total, whereas an absent phase is a
+    /// valid boundary state represented by the outer active-set loop.
     AllCandidatePhases,
     /// Start with an explicit active set and permanently omit excluded phases
     /// from stability checks during this solve.
@@ -363,7 +379,7 @@ pub enum PhaseStatus {
 }
 
 impl PhaseStatus {
-    fn is_active(self) -> bool {
+    pub(crate) fn is_active(self) -> bool {
         matches!(self, Self::Active | Self::Appeared)
     }
 
@@ -465,22 +481,60 @@ impl PhaseSet {
             .collect()
     }
 
-    fn is_candidate(&self, phase: usize) -> bool {
+    pub(crate) fn is_candidate(&self, phase: usize) -> bool {
         self.statuses[phase].is_candidate()
     }
 
-    fn settle_transitions(&mut self) {
+    /// Removes inventory-free phases before a positive log-moles solve.
+    ///
+    /// This is a policy normalization, not a thermodynamic decision. The
+    /// removed phases remain candidates and can be activated later when their
+    /// stability driving force crosses the creation threshold. Returning the
+    /// normalized phase indices keeps this boundary auditable for callers and
+    /// tests without pretending that a solver restart already occurred.
+    pub(crate) fn normalize_for_positive_solver(
+        &mut self,
+        physical_activity: &[bool],
+    ) -> Result<Vec<PhaseIndex>, ReactionExtentError> {
+        if physical_activity.len() != self.statuses.len() {
+            return Err(ReactionExtentError::DimensionMismatch(format!(
+                "initial phase normalization has {} activity flags for {} phases",
+                physical_activity.len(),
+                self.statuses.len()
+            )));
+        }
+
+        let phase_count = self.statuses.len();
+        let mut normalized = Vec::new();
+        for (index, status) in self.statuses.iter_mut().enumerate() {
+            if status.is_active() && !physical_activity[index] {
+                *status = PhaseStatus::Inactive;
+                normalized.push(PhaseIndex::new(index, phase_count)?);
+            }
+        }
+        if !self.statuses.iter().any(|status| status.is_active()) {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "initial_phase_set",
+                message:
+                    "positive log-moles solve has no phase with positive physical initial inventory"
+                        .to_string(),
+            });
+        }
+        Ok(normalized)
+    }
+
+    pub(crate) fn settle_transitions(&mut self) {
         for status in &mut self.statuses {
             *status = status.settled();
         }
     }
 
-    fn activate(&mut self, phase: PhaseIndex) {
+    pub(crate) fn activate(&mut self, phase: PhaseIndex) {
         self.settle_transitions();
         self.statuses[phase.index()] = PhaseStatus::Appeared;
     }
 
-    fn deactivate(&mut self, phase: PhaseIndex) {
+    pub(crate) fn deactivate(&mut self, phase: PhaseIndex) {
         self.settle_transitions();
         self.statuses[phase.index()] = PhaseStatus::Disappeared;
     }
@@ -820,6 +874,12 @@ pub enum PhaseTransitionReason {
     },
     VanishingUnstableActivePhase {
         phase_moles: f64,
+        driving_force: f64,
+    },
+    /// The positive interior problem failed at a phase boundary, and a
+    /// validated solve without that phase proved it thermodynamically absent.
+    BoundaryUnstableActivePhase {
+        initial_phase_moles: f64,
         driving_force: f64,
     },
 }
@@ -1171,6 +1231,7 @@ impl Default for PhaseHysteresisPolicy {
 /// The phase manager owns hysteresis thresholds, the destruction epsilon, and
 /// the policy for constructing the initial active set. It is deliberately
 /// separate from the nonlinear solver state.
+#[derive(Debug, Clone)]
 pub struct PhaseManager {
     /// Destruction threshold: phases with total moles below this value are candidates for deactivation.
     pub phase_eps: f64,
@@ -1206,6 +1267,87 @@ impl PhaseManager {
             max_phase_iterations: 16,
             initial_phase_set: InitialPhaseSet::default(),
         }
+    }
+
+    /// Validates policy fields that do not depend on the number of declared
+    /// phases. Phase-index bounds are checked later when the resolved layout
+    /// is available; malformed scalar policy values must fail at the public
+    /// facade boundary instead of inside an outer-loop iteration.
+    pub fn validate(&self) -> Result<(), ReactionExtentError> {
+        if !self.phase_eps.is_finite() || self.phase_eps <= 0.0 {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "phase_eps",
+                message: "phase_eps must be finite and strictly positive".to_string(),
+            });
+        }
+        if self.max_phase_iterations == 0 {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "max_phase_iterations",
+                message: "max_phase_iterations must be greater than zero".to_string(),
+            });
+        }
+        self.thresholds_at(298.15)?;
+
+        if let InitialPhaseSet::Explicit { active, excluded } = &self.initial_phase_set {
+            if active.iter().any(|phase| excluded.contains(phase)) {
+                return Err(ReactionExtentError::InvalidProblem {
+                    field: "initial_phase_set",
+                    message: "a phase cannot be both active and excluded".to_string(),
+                });
+            }
+            for (position, phase) in active.iter().enumerate() {
+                if active.iter().skip(position + 1).any(|other| other == phase) {
+                    return Err(ReactionExtentError::InvalidProblem {
+                        field: "initial_phase_set.active",
+                        message: format!("phase {} is listed more than once", phase.index()),
+                    });
+                }
+            }
+            for (position, phase) in excluded.iter().enumerate() {
+                if excluded
+                    .iter()
+                    .skip(position + 1)
+                    .any(|other| other == phase)
+                {
+                    return Err(ReactionExtentError::InvalidProblem {
+                        field: "initial_phase_set.excluded",
+                        message: format!("phase {} is listed more than once", phase.index()),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates this policy against one resolved phase count.
+    ///
+    /// Scalar policy validation cannot check typed phase indices because the
+    /// resolved layout is not known when `PhaseControlPolicy` is constructed.
+    /// The workflow calls this immediately before active-set construction so
+    /// an out-of-range policy fails at the boundary, never during a later
+    /// transition.
+    pub fn validate_for_phase_count(&self, phase_count: usize) -> Result<(), ReactionExtentError> {
+        self.validate()?;
+        if phase_count == 0 {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "phase_count",
+                message: "at least one declared phase is required".to_string(),
+            });
+        }
+        if let InitialPhaseSet::Explicit { active, excluded } = &self.initial_phase_set {
+            for (field, phases) in [
+                ("initial_phase_set.active", active),
+                ("initial_phase_set.excluded", excluded),
+            ] {
+                if let Some(phase) = phases.iter().find(|phase| phase.index() >= phase_count) {
+                    return Err(ReactionExtentError::DimensionMismatch(format!(
+                        "{field} contains phase {} outside resolved phase count {phase_count}",
+                        phase.index()
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn set_explicit_hysteresis(&mut self, dg_create: f64, dg_keep: f64) {
@@ -1433,17 +1575,22 @@ pub fn compute_phase_totals(
     n_phase
 }
 
-/// Derives the initial active set from the caller's actual seed.
-pub fn initial_phase_activity(
-    log_moles: &[f64],
+/// Derives a phase activity mask from physical component mole numbers.
+///
+/// This is the physical boundary for the first outer-loop iteration. Zero
+/// inventory means that a candidate phase starts absent; it must not become
+/// active merely because the nonlinear solver later represents the same zero
+/// with a positive trace seed.
+pub fn initial_phase_activity_from_moles(
+    moles: &[f64],
     species_phase: &[usize],
     phase_count: usize,
     phase_eps: f64,
 ) -> Result<Vec<bool>, ReactionExtentError> {
-    if log_moles.len() != species_phase.len() {
+    if moles.len() != species_phase.len() {
         return Err(ReactionExtentError::DimensionMismatch(format!(
-            "phase activity has {} log-moles and {} phase labels",
-            log_moles.len(),
+            "phase activity has {} mole values and {} phase labels",
+            moles.len(),
             species_phase.len()
         )));
     }
@@ -1453,23 +1600,49 @@ pub fn initial_phase_activity(
             message: "phase activity threshold must be finite and non-negative".to_string(),
         });
     }
+
     let mut totals = vec![0.0; phase_count];
-    for (species, &phase) in species_phase.iter().enumerate() {
+    for (species, (&moles, &phase)) in moles.iter().zip(species_phase).enumerate() {
+        if !moles.is_finite() || moles < 0.0 {
+            return Err(ReactionExtentError::InvalidCandidate {
+                field: "initial_phase_activity",
+                message: format!("species {species} has invalid physical initial moles {moles:e}"),
+            });
+        }
         let total = totals.get_mut(phase).ok_or_else(|| {
             ReactionExtentError::DimensionMismatch(format!(
                 "species {species} refers to missing phase {phase}"
             ))
         })?;
-        let moles = log_moles[species].exp();
+        *total += moles;
+    }
+    Ok(totals.into_iter().map(|total| total > phase_eps).collect())
+}
+
+/// Derives a phase activity mask from a numerical log-mole seed.
+///
+/// This helper remains useful for explicit numerical warm starts. First-pass
+/// phase-control initialization instead uses
+/// [`initial_phase_activity_from_moles`], preserving the physical distinction
+/// between an absent phase and a trace-coordinate representation of zero.
+pub fn initial_phase_activity(
+    log_moles: &[f64],
+    species_phase: &[usize],
+    phase_count: usize,
+    phase_eps: f64,
+) -> Result<Vec<bool>, ReactionExtentError> {
+    let mut physical_moles = Vec::with_capacity(log_moles.len());
+    for (species, &log_moles) in log_moles.iter().enumerate() {
+        let moles = log_moles.exp();
         if !moles.is_finite() {
             return Err(ReactionExtentError::InvalidCandidate {
                 field: "initial_phase_activity",
                 message: format!("species {species} reconstructs non-finite moles"),
             });
         }
-        *total += moles;
+        physical_moles.push(moles);
     }
-    Ok(totals.into_iter().map(|total| total > phase_eps).collect())
+    initial_phase_activity_from_moles(&physical_moles, species_phase, phase_count, phase_eps)
 }
 
 pub(crate) fn reject_repeated_phase_set(
@@ -1563,10 +1736,6 @@ impl EquilibriumLogMoles {
                 self.n0.len()
             )));
         }
-        if active.iter().all(|&is_active| is_active) {
-            return self.solve_candidate_from_seed(full_seed.to_vec());
-        }
-
         let projection = ActiveSetProjection::build(
             &self.phases,
             &self.species_phase,
@@ -1587,23 +1756,21 @@ impl EquilibriumLogMoles {
         )?;
         let reduced_seed = projection.project_log_moles(full_seed)?;
 
-        let mut local = EquilibriumLogMoles::empty();
-        local.subs_data = self.subs_data.clone();
-        local.subs_data.substances = projection
+        let reduced_components = projection
             .active_species
             .iter()
             .map(|species| self.subs_data.substances[species.index()].clone())
             .collect();
-        local.elem_composition = projection.element_composition.clone();
-        local.reaction_basis = projection.reaction_basis.clone();
-        local.stoich_matrix = projection.reaction_basis.reactions.clone();
-        local.n0 = reduced_seed.iter().map(|value| value.exp()).collect();
-        local.gibbs = projection
+        let reduced_initial_moles = reduced_seed
+            .iter()
+            .map(|value| value.exp())
+            .collect::<Vec<_>>();
+        let reduced_gibbs = projection
             .active_species
             .iter()
             .map(|species| self.gibbs[species.index()].clone())
             .collect();
-        local.gibbs_sym = if self.gibbs_sym.len() == self.n0.len() {
+        let reduced_gibbs_sym = if self.gibbs_sym.len() == self.n0.len() {
             projection
                 .active_species
                 .iter()
@@ -1612,22 +1779,30 @@ impl EquilibriumLogMoles {
         } else {
             Vec::new()
         };
-        local.phases = projection.phases.clone();
-        local.species_phase = projection.species_phase.clone();
-        local.phase_active_mask = vec![true; projection.active_phases.len()];
-        local.elements_vector = full_element_totals;
-        local.P = self.P;
-        local.T = self.T;
-        local.p0 = self.p0;
-        local.solver_settings = self.solver_settings.clone();
+        let conditions = EquilibriumConditions::new(self.T, self.P, self.p0)?;
+        let reduced_problem = EquilibriumProblem::new(
+            reduced_components,
+            reduced_initial_moles,
+            LogMolesInitialGuess::new(reduced_seed)?,
+            projection.element_composition.clone(),
+            reduced_gibbs,
+            projection.phases.clone(),
+            conditions,
+        )?;
+        let reduced_totals = projection.reduced_element_totals(&full_element_totals)?;
+        let prepared = PreparedEquilibriumProblem::new_with_element_totals(
+            reduced_problem,
+            Some(reduced_totals),
+        )?;
+        let mut runner = PreparedEquilibriumRunner::new(prepared, reduced_gibbs_sym)?;
+        runner.configure().clone_from(&self.solver_settings);
         // Independent K_eq validation is applied to canonical fixed-species
         // problems. It must not silently reinterpret an active-set projection.
-        local.solver_settings.keq_validation_mode = EquilibriumConstantValidationMode::Off;
-        local.initial_guess = Some(reduced_seed.clone());
-
-        let reduced = local.solve_candidate_from_seed(reduced_seed)?;
+        runner.configure().keq_validation_mode = EquilibriumConstantValidationMode::Off;
+        let outcome = runner.solve()?;
+        let reduced = outcome.solution;
         let floor_log = PHASE_CONTROL_TRACE_MOLE_FLOOR.ln();
-        let log_moles = projection.scatter_log_moles(&reduced.log_moles, floor_log)?;
+        let log_moles = projection.scatter_log_moles(reduced.log_moles(), floor_log)?;
         let moles = log_moles
             .iter()
             .map(|value| value.exp())
@@ -1645,20 +1820,33 @@ impl EquilibriumLogMoles {
             log_moles,
             moles,
             mole_table,
-            validation_report: reduced.validation_report,
-            solve_report: reduced.solve_report,
+            validation_report: reduced.validation().clone(),
+            solve_report: outcome.solve_report,
             keq_validation_status: None,
         })
     }
 
+    #[deprecated(
+        note = "use phase_equilibrium_workflow::solve_resolved_pt; this mutable method is compatibility-only"
+    )]
     pub fn solve_with_phase_control(&mut self) -> Result<(), ReactionExtentError> {
+        let keq_applicable =
+            self.phases.len() == 1 && matches!(self.phases[0].kind, PhaseActivityModel::IdealGas);
+        if self.solver_settings.keq_validation_mode == EquilibriumConstantValidationMode::Required
+            && !keq_applicable
+        {
+            return Err(ReactionExtentError::ValidationNotApplicable {
+                path: "equilibrium_constant_cross_validation",
+                message: "Required K_eq validation supports only one ideal-gas phase; bounded phase control with condensed phases cannot satisfy this contract".to_string(),
+            });
+        }
         let species_phase = self.species_phase.clone();
         let (mut seed, _) = self.resolved_initial_guess()?;
         let derived_activity = if self.phase_active_mask.len() == self.phases.len() {
             self.phase_active_mask.clone()
         } else {
-            initial_phase_activity(
-                &seed,
+            initial_phase_activity_from_moles(
+                &self.n0,
                 &species_phase,
                 self.phases.len(),
                 self.phase_manager.phase_eps,
@@ -1670,6 +1858,10 @@ impl EquilibriumLogMoles {
         }
         let mut phase_set =
             PhaseSet::from_policy(&self.phase_manager.initial_phase_set, &derived_activity)?;
+        // Normalize the user policy at the physical boundary before entering
+        // the strictly-positive log-moles solver. This is not phase removal:
+        // inventory-free candidates remain eligible for stability activation.
+        phase_set.normalize_for_positive_solver(&derived_activity)?;
         let mut visited = HashSet::new();
         let mut settled_initial = phase_set.clone();
         settled_initial.settle_transitions();
@@ -1682,7 +1874,17 @@ impl EquilibriumLogMoles {
         for iteration in 0..max_phase_iterations {
             phase_set.settle_transitions();
             let phase_active = phase_set.active_mask();
-            let candidate = self.solve_fixed_active_set_candidate(&phase_active, &seed)?;
+            let mut candidate = self.solve_fixed_active_set_candidate(&phase_active, &seed)?;
+            if self.solver_settings.keq_validation_mode
+                == EquilibriumConstantValidationMode::WhenApplicable
+                && !keq_applicable
+            {
+                candidate.keq_validation_status = Some(
+                    EquilibriumConstantCrossValidationStatus::ValidatorNotApplicable {
+                        message: "bounded phase control includes more than one phase or a non-ideal phase; independent K_eq validation is limited to one ideal-gas phase".to_string(),
+                    },
+                );
+            }
             nonlinear_reports.push(candidate.solve_report.clone());
             let phase_manager = &self.phase_manager;
             let mut y = candidate.log_moles.clone();
@@ -1956,6 +2158,9 @@ pub fn multiphase_equilibrium_residual_generator_sym(
 /// * `scaling` - Whether to enable equation scaling
 /// the function don't run calculation by itself only prepare data
 /// for calculation
+#[deprecated(
+    note = "use ChemEquilibrium::prelude::solve_resolved_pt; retained for compatibility characterization"
+)]
 pub fn gas_solver(
     subs: Vec<String>,
     T: f64,
@@ -1985,6 +2190,10 @@ pub fn gas_solver(
     instance.subs_data = user_subs;
     instance.with_loglevel(loglevel);
     instance.solver_settings.solver = solver;
+    // This compatibility helper accepts a legacy `Solvers` selector. Make
+    // that contract explicit instead of letting symbolic context silently
+    // promote the call into the RST production cascade.
+    instance.solver_settings.solver_policy = Some(SolverPolicy::legacy_default(solver));
     instance.solver_settings.scaling_flag = scaling;
     instance.gibbs = g_vec;
 
@@ -1993,6 +2202,9 @@ pub fn gas_solver(
     Ok(instance)
 }
 
+#[deprecated(
+    note = "use ChemEquilibrium::prelude::solve_resolved_pt; retained for compatibility characterization"
+)]
 pub fn gas_solver_from_elements(
     elements: Vec<String>,
     map_of_nonzero_moles: HashMap<String, f64>,
@@ -2020,6 +2232,7 @@ pub fn gas_solver_from_elements(
     let n0 = instance.n0.clone();
 
     instance.solver_settings.solver = solver;
+    instance.solver_settings.solver_policy = Some(SolverPolicy::legacy_default(solver));
     instance.solver_settings.scaling_flag = scaling;
     instance.gibbs = g_vec;
     let species: Vec<usize> = (0..subs.len()).map(|x| x as usize).collect();
@@ -2039,6 +2252,9 @@ pub fn gas_solver_from_elements(
     Ok(instance)
 }
 
+#[deprecated(
+    note = "use the typed temperature-postprocessing workflow after solve_resolved_pt; retained for compatibility"
+)]
 pub fn gas_solver_for_T_range(
     subs: Vec<String>,
     n0: Vec<f64>,
@@ -2093,6 +2309,9 @@ pub fn gas_solver_for_T_range(
     instance.solver_settings.scaling_flag = false;
     instance.with_loglevel(loglevel);
     instance.solver_settings.solver = solver;
+    // Preserve the historical meaning of this compatibility selector: the
+    // requested legacy method runs first, followed only by legacy fallbacks.
+    instance.solver_settings.solver_policy = Some(SolverPolicy::legacy_default(solver));
     if parallel {
         instance.solve_for_T_range_par2(T_start, T_end, T_step)?
     } else {
@@ -2101,6 +2320,9 @@ pub fn gas_solver_for_T_range(
     Ok(instance)
 }
 
+#[deprecated(
+    note = "use the typed temperature-postprocessing workflow after solve_resolved_pt; retained for compatibility"
+)]
 pub fn gas_solver_for_T_range_for_elements(
     elements: Vec<String>,
     map_of_nonzero_moles: HashMap<String, f64>,
@@ -2155,6 +2377,7 @@ pub fn gas_solver_for_T_range_for_elements(
     instance.solver_settings.scaling_flag = false;
     instance.with_loglevel(loglevel);
     instance.solver_settings.solver = solver;
+    instance.solver_settings.solver_policy = Some(SolverPolicy::legacy_default(solver));
     instance.solve_for_T_range(T_start, T_end, T_step)?;
     Ok(instance)
 }

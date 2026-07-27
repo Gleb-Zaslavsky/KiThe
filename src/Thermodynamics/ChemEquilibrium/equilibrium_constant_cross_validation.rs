@@ -31,7 +31,11 @@ impl Default for EquilibriumConstantCrossValidationTolerances {
         Self {
             max_abs_species_mole_delta: 1e-5,
             max_abs_species_fraction_delta: 1e-5,
-            max_abs_total_gibbs_delta: 1e-6,
+            // Independent summation orders can differ by a few microjoules
+            // when total Gibbs energies are of order megajoules. This remains
+            // far stricter than the composition gates while avoiding a false
+            // rejection caused solely by floating-point accumulation.
+            max_abs_total_gibbs_delta: 1e-5,
         }
     }
 }

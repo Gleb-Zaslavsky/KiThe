@@ -78,12 +78,19 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumCond
 use std::fmt;
 
 /// Controls whether an independent K_eq validation is requested.
+///
+/// This validator is deliberately a secondary diagnostic. It is currently
+/// applicable only to a single ideal-gas phase at fixed `P,T`; it is not a
+/// general multiphase equilibrium algorithm and is never enabled implicitly by
+/// the production facade. `Off` is therefore the safe default, while the other
+/// modes are explicit requests made by tests, diagnostics, or callers that
+/// knowingly operate inside the supported validation domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EquilibriumConstantValidationMode {
     /// Do not construct or run the independent validator.
     #[default]
     Off,
-    /// Validate supported small systems and report unsupported systems normally.
+    /// Validate supported systems and report unsupported systems normally.
     WhenApplicable,
     /// Treat a non-applicable validator as a validation failure.
     Required,

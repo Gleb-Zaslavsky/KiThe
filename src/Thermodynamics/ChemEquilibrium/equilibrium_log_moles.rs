@@ -1,13 +1,20 @@
 #![allow(dead_code)]
+#![allow(deprecated)]
 //! Canonical chemical equilibrium solver using log-mole formulation and reaction extent approach.
 //!
 //! # Purpose
 //!
-//! This module is the **central orchestrator** of the chemical equilibrium calculation
-//! pipeline. It owns all equilibrium data (elemental composition, stoichiometry, Gibbs
-//! functions, solver settings), manages the solve lifecycle, and publishes results.
-//! The module solves chemical equilibrium problems by **minimizing Gibbs free energy**
-//! using reaction extents in log-mole space.
+//! This module contains the historical mutable log-mole solver host. It remains
+//! useful for backend characterization, temperature-sweep compatibility, and
+//! explicit legacy fallback coverage, but it is **not** the production
+//! orchestration boundary. New fixed-`P,T` equilibrium code must enter through
+//! [`phase_equilibrium_workflow`](super::phase_equilibrium_workflow) and its
+//! typed `solve_resolved_pt` facade, which prepares immutable problems and
+//! publishes immutable results.
+//!
+//! The formulation itself is still canonical: it minimizes Gibbs free energy
+//! using reaction extents in log-mole space. The mutable host is retained only
+//! as a migration shell around that formulation.
 //!
 //! # Physical and Mathematical Background
 //!
@@ -107,7 +114,7 @@
 //!
 //! | Structure | Role |
 //! |-----------|------|
-//! | [`EquilibriumLogMoles`] | Central orchestrator — owns all data and methods |
+//! | [`EquilibriumLogMoles`] | Deprecated mutable compatibility host |
 //! | [`SolverParams`] | Numerical solver tuning parameters (λ, tol, max_iter, etc.) |
 //! | [`EquilibriumSolverSettings`] | High-level settings (backend policy, scaling, K_eq validation) |
 //! | [`EquilibriumSolveContract`] | Bundles residual, Jacobian, and feasibility closures |
@@ -134,12 +141,13 @@
 //! | [`validate_logmole_system_dimensions`] | Validates all matrix/vector dimensions |
 //! | [`validate_residual_conditions`] | Validates T, P, p0 for residual evaluation |
 //!
-//! # Examples
+//! # Compatibility Example
 //!
 //! ```rust, ignore
 //! use KiThe::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::*;
 //!
-//! // Create equilibrium solver for gas-phase system
+//! // Historical mutable workflow; new code should use the typed
+//! // `ChemEquilibrium::prelude::solve_resolved_pt` facade.
 //! let mut solver = gas_solver(
 //!     vec!["CO".to_string(), "CO2".to_string(), "O2".to_string()],
 //!     1000.0, 101325.0, Solvers::LM, Some("info"), true
@@ -220,11 +228,11 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::{
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     PhaseControlledSolveReport, PhaseManager, multiphase_equilibrium_residual_generator_sym,
 };
-use crate::Thermodynamics::User_substances::SubsData;
+use crate::Thermodynamics::User_substances::{SubsData, WhatIsFound};
 use crate::Thermodynamics::User_substances_error::SubsDataError;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use RustedSciThe::symbolic::symbolic_functions::Jacobian;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use nalgebra::{DMatrix, DVector};
 use prettytable::{Cell, Row, Table};
 use std::collections::{HashMap, HashSet};
@@ -233,7 +241,24 @@ use std::f64;
 use std::rc::Rc;
 use std::time::Instant;
 /// Universal gas constant in J/(mol·K)
-pub const R: f64 = 8.314;
+/// CODATA 2018 molar gas constant in J/(mol K).
+///
+/// The equilibrium residual contains `Delta G / (R T)`, so a rounded
+/// engineering approximation creates a systematic bias across a temperature
+/// sweep. Keep the full SI value at this numerical boundary.
+pub const R: f64 = 8.314_462_618_153_24;
+
+/// Numerical slack used only by legacy feasibility callbacks.
+///
+/// Log-mole reconstruction itself guarantees strictly positive moles. This
+/// tolerance remains for adapters whose candidate representation can briefly
+/// contain round-off-level negative values before publication.
+pub(crate) const LEGACY_MOLE_FEASIBILITY_TOLERANCE: f64 = 1e-12;
+
+/// The element-balance gate is intentionally looser than the nonlinear solve
+/// tolerance because it validates a reconstructed physical-mole candidate.
+const ELEMENT_BALANCE_ACCEPTANCE_TOLERANCE_MULTIPLIER: f64 = 10.0;
+const MIN_ELEMENT_BALANCE_ACCEPTANCE_TOLERANCE: f64 = 1e-8;
 
 /// Configuration parameters for numerical solvers.
 ///
@@ -265,14 +290,16 @@ pub struct SolverParams {
 
 /// Backend-specific solver controls separated from the physical equilibrium data.
 ///
-/// The `EquilibriumLogMoles` facade still carries domain data, sweep state, and
-/// published results. This structure groups the numerical policy knobs that are
-/// specific to backend selection and continuation behavior.
+/// The deprecated `EquilibriumLogMoles` compatibility host still carries domain
+/// data, sweep state, and published results. This structure groups the numerical
+/// policy knobs that are specific to backend selection and continuation behavior.
 #[derive(Clone)]
 pub struct EquilibriumSolverSettings {
     /// Numerical solver parameters (max iterations, tolerances, damping, trust-region radii).
     pub solver_params: SolverParams,
-    /// Preferred legacy solver backend (LM, NR, or TR) used when `solver_policy` is `None`.
+    /// Preferred legacy solver backend (LM, NR, or TR). When symbolic context
+    /// exists and `solver_policy` is `None`, it becomes the first legacy
+    /// fallback after the RST cascade.
     pub solver: Solvers,
     /// Whether to enable row scaling of the residual and Jacobian.
     /// When `true`, each residual/Jacobian row is divided by its scale factor.
@@ -756,7 +783,10 @@ pub struct TemperatureSolveSnapshot {
 /// Extracts the ordered backend cascade trace from `AllBackendsFailed` errors,
 /// or creates a simple diagnostic message for non-cascade failures (e.g., invalid
 /// temperature range, dimension mismatch).
-pub(crate) fn temperature_failure(temperature: f64, error: &ReactionExtentError) -> TemperatureSolveFailure {
+pub(crate) fn temperature_failure(
+    temperature: f64,
+    error: &ReactionExtentError,
+) -> TemperatureSolveFailure {
     let attempts = match error {
         ReactionExtentError::AllBackendsFailed { attempts }
         | ReactionExtentError::CascadeAborted { attempts, .. } => attempts.clone(),
@@ -795,15 +825,27 @@ impl EquilibriumLogMoles {
     ///
     /// The RST backend requires `gibbs_sym` (symbolic `Expr` closures) in addition to
     /// the numeric `GibbsFn` closures. This method returns `true` only when the symbolic
-    /// vector is non-empty and its length matches the substance database. Falling back to
-    /// the legacy backend when this returns `false` prevents a cryptic RST initialization
-    /// failure.
+    /// vector is non-empty and its length matches the substance database. A
+    /// fully resolved thermochemistry record for every requested species is
+    /// also sufficient: the RST adapter can then build its own symbolic
+    /// standard-Gibbs snapshot through `SubsData`.
+    ///
+    /// Partial search/property caches are deliberately not evidence here.
+    /// They may be stale or incomplete, while RST needs a complete symbolic
+    /// standard-Gibbs vector in exact solver order.
     pub(crate) fn has_rst_symbolic_context(&self) -> bool {
-        (self.gibbs_sym.len() == self.subs_data.substances.len() && !self.gibbs_sym.is_empty())
-            || !self.subs_data.search_results.is_empty()
-            || !self.subs_data.search_states.is_empty()
-            || !self.subs_data.therm_map_of_sym.is_empty()
-            || !self.subs_data.therm_map_of_fun.is_empty()
+        let exact_symbolic_snapshot =
+            self.gibbs_sym.len() == self.subs_data.substances.len() && !self.gibbs_sym.is_empty();
+        let complete_thermo_lookup = !self.subs_data.substances.is_empty()
+            && self.subs_data.substances.iter().all(|substance| {
+                self.subs_data
+                    .search_results
+                    .get(substance)
+                    .and_then(|results| results.get(&WhatIsFound::Thermo))
+                    .and_then(|result| result.as_ref())
+                    .is_some()
+            });
+        exact_symbolic_snapshot || complete_thermo_lookup
     }
 
     /// Validates a temperature-grid request before it can enter a mutable
@@ -967,6 +1009,52 @@ impl EquilibriumLogMoles {
         Ok(solver)
     }
 
+    /// Builds the temporary mutable host for bounded phase control.
+    ///
+    /// Unlike [`Self::from_problem`], this path deliberately does not require
+    /// the *full* declared phase layout to be square. Candidate phases with
+    /// zero physical inventory may be absent from the first active set, and
+    /// only that reduced layout is handed to a nonlinear backend. Structural
+    /// chemistry validation still happens before any mutable solver state is
+    /// created; the active-set projection owns the later square-system and
+    /// elemental-feasibility gates.
+    pub(crate) fn from_problem_for_phase_control(
+        problem: EquilibriumProblem,
+    ) -> Result<Self, ReactionExtentError> {
+        problem.validate()?;
+        let (
+            species,
+            initial_moles,
+            initial_log_moles,
+            element_composition,
+            gibbs,
+            phases,
+            conditions,
+        ) = problem.into_parts();
+        let reaction_basis = compute_reaction_basis(&element_composition, 1e-6)?;
+        let element_totals = compute_element_totals(&element_composition, &initial_moles)?
+            .iter()
+            .copied()
+            .collect();
+        let species_phase = species_to_phase_map(&phases, species.len())?;
+
+        let mut solver = Self::empty();
+        solver.subs_data.substances = species;
+        solver.n0 = initial_moles;
+        solver.initial_guess = Some(initial_log_moles);
+        solver.elem_composition = element_composition;
+        solver.gibbs = gibbs;
+        solver.phases = phases;
+        solver.T = conditions.temperature();
+        solver.P = conditions.pressure();
+        solver.p0 = conditions.reference_pressure();
+        solver.stoich_matrix = reaction_basis.reactions.clone();
+        solver.reaction_basis = reaction_basis;
+        solver.elements_vector = element_totals;
+        solver.species_phase = species_phase;
+        Ok(solver)
+    }
+
     /// Solves one canonical equilibrium problem with the default solver
     /// configuration.
     ///
@@ -1093,11 +1181,15 @@ impl EquilibriumLogMoles {
             validation_tolerances: EquilibriumConstantValidationTolerances::default(),
             ..Default::default()
         };
-        let validator = solver.solve_if_applicable(&keq_problem)?;
+        // `WhenApplicable` is diagnostic: a numerical failure in the
+        // independent validator must be retained as `ValidatorFailed`, not
+        // retroactively invalidate a candidate already accepted by the
+        // canonical solver. `Required` is enforced below after classification.
+        let validator = solver.solve_if_applicable(&keq_problem);
         let status = classify_equilibrium_constant_cross_validation(
             &keq_problem,
             Ok(candidate.clone()),
-            Ok(validator),
+            validator,
             self.solver_settings.keq_validation_tolerances,
         )?;
 
@@ -1334,7 +1426,10 @@ impl EquilibriumLogMoles {
     }
 
     /// Validates the legacy mutable problem shape before the state is staged.
-    pub(crate) fn validate_mutable_problem_shape(&self, n0: &[f64]) -> Result<(), ReactionExtentError> {
+    pub(crate) fn validate_mutable_problem_shape(
+        &self,
+        n0: &[f64],
+    ) -> Result<(), ReactionExtentError> {
         if n0.iter().any(|moles| !moles.is_finite() || *moles < 0.0) {
             return Err(ReactionExtentError::InvalidProblem {
                 field: "initial_moles",
@@ -1456,7 +1551,9 @@ impl EquilibriumLogMoles {
     /// Keeping this in one place ensures the scalar solve and all sweep
     /// variants evaluate the same equations in the same order.
     #[allow(dead_code)]
-    pub(crate) fn build_solve_contract(&mut self) -> Result<EquilibriumSolveContract, ReactionExtentError> {
+    pub(crate) fn build_solve_contract(
+        &mut self,
+    ) -> Result<EquilibriumSolveContract, ReactionExtentError> {
         let subs_eps = self.substate_eps;
         let phase_eps = self.species_eps;
         let stoich = Rc::new(self.stoich_matrix.clone());
@@ -1506,7 +1603,7 @@ impl EquilibriumLogMoles {
             .clone()
             .unwrap_or_else(|| {
                 if self.has_rst_symbolic_context() {
-                    SolverPolicy::rusted_scithe_default()
+                    SolverPolicy::production_default(self.solver_settings.solver)
                 } else {
                     SolverPolicy::legacy_default(self.solver_settings.solver)
                 }
@@ -1863,6 +1960,51 @@ impl EquilibriumLogMoles {
 
         Ok(())
     }
+
+    /// Refreshes temperature-dependent thermochemistry for one serial sweep point.
+    ///
+    /// This is shared by ordinary and phase-controlled sweeps so both paths
+    /// rebuild Gibbs closures under the same `SubsData` validity contract.
+    fn refresh_temperature_gibbs(&mut self, temperature: f64) -> Result<(), ReactionExtentError> {
+        let refreshed_coefficients = self
+            .subs_data
+            .extract_coeffs_if_current_coeffs_not_valid_for_all_subs(temperature)
+            .map_err(|_| {
+                ReactionExtentError::SubsDataError(SubsDataError::CoefficientExtractionFailed {
+                    substance: "all_subs".to_string(),
+                    temperature: Some(temperature),
+                })
+            })?;
+        if !refreshed_coefficients.is_empty() || self.gibbs.is_empty() {
+            debug!("thermochemistry coefficients changed at T={temperature}");
+            self.gibbs = self.build_gibbs_functions()?;
+        }
+        self.T = temperature;
+        Ok(())
+    }
+
+    /// Publishes the complete outcome of one serial temperature sweep.
+    ///
+    /// Building the table happens before any field is updated, preserving the
+    /// previous published sweep if a malformed row is detected at the end.
+    fn publish_temperature_sweep(
+        &mut self,
+        rows: Vec<(f64, Vec<f64>)>,
+        failures: Vec<TemperatureSolveFailure>,
+        snapshots: Vec<TemperatureSolveSnapshot>,
+    ) -> Result<Vec<(f64, Vec<f64>)>, ReactionExtentError> {
+        let mole_table = build_mole_series_table(&self.subs_data.substances, &rows)?;
+        self.moles_for_T_range = rows.clone();
+        self.list_of_failed_T = failures.iter().map(|failure| failure.temperature).collect();
+        self.temperature_failures = failures;
+        self.temperature_solutions = snapshots;
+        self.map_of_moles_for_each_substance = mole_table;
+        Ok(rows)
+    }
+
+    #[deprecated(
+        note = "use solve_resolved_pt for fixed-P,T points and typed postprocessing for ranges"
+    )]
     pub fn solve_for_T_range(
         &mut self,
         T_start: f64,
@@ -1884,21 +2026,7 @@ impl EquilibriumLogMoles {
                 &configured_seed,
                 &self.initial_guess,
             );
-            // Build Gibbs functions while holding a short-lived mutable borrow to subs_data
-            let user_subs = &mut self.subs_data;
-            let vec_of_coeffs = user_subs
-                .extract_coeffs_if_current_coeffs_not_valid_for_all_subs(T)
-                .map_err(|_| {
-                    ReactionExtentError::SubsDataError(SubsDataError::CoefficientExtractionFailed {
-                        substance: "all_subs".to_string(),
-                        temperature: Some(T),
-                    })
-                })?;
-            if vec_of_coeffs.len() != 0 || self.gibbs.len() == 0 {
-                info!("\n coefficients outdated ... \n renewing pipeline ...");
-                self.gibbs = self.build_gibbs_functions()?;
-            }
-            self.T = T; // Temperature in K
+            self.refresh_temperature_gibbs(T)?;
             match self.solve() {
                 Ok(()) => {}
                 Err(e) => {
@@ -1919,20 +2047,75 @@ impl EquilibriumLogMoles {
             snapshots.push(snapshot);
             T += T_step;
         }
-        let mole_table = build_mole_series_table(&self.subs_data.substances, &moles_for_T_range)?;
-        self.moles_for_T_range = moles_for_T_range.clone();
-        self.list_of_failed_T = failures.iter().map(|failure| failure.temperature).collect();
-        self.temperature_failures = failures;
-        self.temperature_solutions = snapshots;
-        self.map_of_moles_for_each_substance = mole_table;
         info!(
             "total elapsed time non-parallel solver{} ms",
             now.elapsed().as_millis()
         );
-        Ok(Vec::new())
+        self.publish_temperature_sweep(moles_for_T_range, failures, snapshots)
+    }
+
+    /// Solves a serial temperature sweep with the bounded phase-control outer loop.
+    ///
+    /// The accepted log-mole state and phase mask at one point seed the next
+    /// point when continuation is enabled. This API is deliberately serial:
+    /// phase appearance/disappearance is stateful, so a parallel sweep would
+    /// need a different, explicitly independent semantics.
+    #[deprecated(
+        note = "use repeated typed solve_resolved_pt requests; mutable phase-control ranges are compatibility-only"
+    )]
+    pub fn solve_for_T_range_with_phase_control(
+        &mut self,
+        T_start: f64,
+        T_end: f64,
+        T_step: f64,
+    ) -> Result<Vec<(f64, Vec<f64>)>, ReactionExtentError> {
+        Self::validate_temperature_range(T_start, T_end, T_step)?;
+        let now = Instant::now();
+        let mut temperature = T_start;
+        let mut rows = Vec::new();
+        let mut failures = Vec::new();
+        let mut snapshots = Vec::new();
+        let configured_seed = self.initial_guess.clone();
+
+        while temperature < T_end {
+            self.initial_guess = continuation_seed_for_point(
+                self.solver_settings.continuation_seed_policy,
+                &configured_seed,
+                &self.initial_guess,
+            );
+            self.refresh_temperature_gibbs(temperature)?;
+
+            if let Err(error) = self.solve_with_phase_control() {
+                error!(
+                    "phase-controlled equilibrium calculation failed at T = {temperature} K: {error}"
+                );
+                failures.push(temperature_failure(temperature, &error));
+                temperature += T_step;
+                continue;
+            }
+
+            let snapshot = self.snapshot_published_solution(temperature)?;
+            if self.solver_settings.continuation_seed_policy
+                == ContinuationSeedPolicy::PreviousAccepted
+            {
+                self.initial_guess = Some(snapshot.log_moles.clone());
+            }
+            rows.push((temperature, snapshot.moles.clone()));
+            snapshots.push(snapshot);
+            temperature += T_step;
+        }
+
+        info!(
+            "total elapsed time phase-controlled serial solver {} ms",
+            now.elapsed().as_millis()
+        );
+        self.publish_temperature_sweep(rows, failures, snapshots)
     }
 
     /// parallel solver
+    #[deprecated(
+        note = "use the typed resolved-phase workflow; this mutable temperature sweep is compatibility-only"
+    )]
     pub fn solve_for_T_range_par(
         &mut self,
         T_start: f64,
@@ -2075,6 +2258,9 @@ impl EquilibriumLogMoles {
     ///
     /// This mode deliberately does not apply [`ContinuationSeedPolicy`]: a
     /// previous accepted point is unavailable while tasks run concurrently.
+    #[deprecated(
+        note = "use typed resolved-phase requests and explicit postprocessing; this mutable parallel sweep is compatibility-only"
+    )]
     pub fn solve_for_T_range_par2(
         &mut self,
         T_start: f64,
@@ -2220,6 +2406,9 @@ impl EquilibriumLogMoles {
     }
 
     /// Solve the equilibrium and return an error enum on failure
+    #[deprecated(
+        note = "use phase_equilibrium_workflow::solve_resolved_pt; retained as a mutable compatibility workflow"
+    )]
     pub fn solve(&mut self) -> Result<(), ReactionExtentError> {
         self.check_task()?;
 
@@ -2261,7 +2450,7 @@ impl EquilibriumLogMoles {
             .clone()
             .unwrap_or_else(|| {
                 if self.has_rst_symbolic_context() {
-                    SolverPolicy::rusted_scithe_default()
+                    SolverPolicy::production_default(self.solver_settings.solver)
                 } else {
                     SolverPolicy::legacy_default(self.solver_settings.solver)
                 }
@@ -2274,9 +2463,9 @@ impl EquilibriumLogMoles {
         }
 
         let contract = self.build_solve_contract()?;
-        info!("Initial guess: {:?}", &initial_guess);
-        info!("n0 (species initial moles): {:?}", &self.n0);
-        info!("Stoichiometric matrix:\n{}", &self.stoich_matrix);
+        debug!("Initial guess: {:?}", &initial_guess);
+        debug!("n0 (species initial moles): {:?}", &self.n0);
+        debug!("Stoichiometric matrix:\n{}", &self.stoich_matrix);
 
         let try_step = contract.raw_residual(&initial_guess)?;
         if try_step.iter().any(|v| v.is_nan() || v.is_infinite()) {
@@ -2287,7 +2476,11 @@ impl EquilibriumLogMoles {
         let feasible = {
             move |xi: &[f64]| {
                 compute_species_moles(xi)
-                    .map(|moles| moles.iter().all(|&moles_i| moles_i >= -1e-12))
+                    .map(|moles| {
+                        moles
+                            .iter()
+                            .all(|&moles_i| moles_i >= -LEGACY_MOLE_FEASIBILITY_TOLERANCE)
+                    })
                     .unwrap_or(false)
             }
         };
@@ -2303,8 +2496,21 @@ impl EquilibriumLogMoles {
                 },
                 EquilibriumAcceptanceCriteria::new(
                     self.solver_settings.solver_params.tol,
-                    10.0 * self.solver_settings.solver_params.tol.max(1e-8),
+                    ELEMENT_BALANCE_ACCEPTANCE_TOLERANCE_MULTIPLIER
+                        * self
+                            .solver_settings
+                            .solver_params
+                            .tol
+                            .max(MIN_ELEMENT_BALANCE_ACCEPTANCE_TOLERANCE),
                     self.solver_settings.solver_params.tol,
+                )?
+                .with_element_balance_relative_tolerance(
+                    ELEMENT_BALANCE_ACCEPTANCE_TOLERANCE_MULTIPLIER
+                        * self
+                            .solver_settings
+                            .solver_params
+                            .tol
+                            .max(MIN_ELEMENT_BALANCE_ACCEPTANCE_TOLERANCE),
                 )?,
                 &self.elem_composition,
                 &self.elements_vector,
@@ -2536,11 +2742,15 @@ impl EquilibriumLogMoles {
         Err(ReactionExtentError::AllBackendsFailed { attempts })
     }
 
-    /// Converts log-mole solution to actual mole numbers
+    /// Validates and publishes a reconstructed physical-mole state.
     ///
-    /// Transforms the solver output (ln(n_i)) back to mole numbers (n_i = exp(ln(n_i))).
-    pub fn compute_species_moles(&mut self, sol: Vec<f64>) -> Result<(), ReactionExtentError> {
-        let (moles, map_of_moles_for_each_substance) = self.reconstructed_mole_state(&sol)?;
+    /// This is intentionally a mutation boundary, not a calculator. Pure
+    /// conversion belongs to the free [`compute_species_moles`] function.
+    pub(crate) fn publish_reconstructed_moles(
+        &mut self,
+        log_moles: &[f64],
+    ) -> Result<(), ReactionExtentError> {
+        let (moles, map_of_moles_for_each_substance) = self.reconstructed_mole_state(log_moles)?;
         self.moles = moles;
         self.map_of_moles_for_each_substance = map_of_moles_for_each_substance;
         Ok(())

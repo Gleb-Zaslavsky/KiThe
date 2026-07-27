@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Offline long-term regression matrix for canonical equilibrium cases.
 //!
 //! The goal is not to preserve one historical iterate per solver backend.

@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Golden regression fixtures for the canonical equilibrium formulation.
 //!
 //! These tests freeze a couple of representative, currently solvable systems

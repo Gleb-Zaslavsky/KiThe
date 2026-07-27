@@ -12,8 +12,7 @@
 //! - [`PreparedEquilibriumProblem`] — a ready-to-solve problem with precomputed
 //!   reaction basis, scaling, and residual/Jacobian closures.
 //! - [`EquilibriumSolution`] — the immutable result of a successful solve.
-//! - [`ResidualScalingContract`] and [`VariableScalingContract`] — row and variable
-//!   scaling for numerical conditioning.
+//! - [`ResidualScalingContract`] — row scaling for numerical conditioning.
 //! - [`LogMolesInitialGuess`] — typed initial guess with trace-species seeding policies.
 //! - Diagnostic structures: [`FormulationDiagnostics`], [`SpeciesCapacityReport`],
 //!   [`EquilibriumProblemPreview`].
@@ -44,11 +43,6 @@
 //!
 //! This prevents species with large mole numbers from dominating the residual norm.
 //!
-//! ### Variable Scaling (VariableScalingContract) — UNUSED
-//!
-//! Declared but not currently used in the solve pipeline. Would scale the
-//! log-mole variables to improve conditioning of the normal equations.
-//!
 //! ## Solution
 //!
 //! [`EquilibriumSolution`] bundles the solved log-moles, physical moles,
@@ -65,7 +59,6 @@
 //! | [`EquilibriumConditions`] | Thermodynamic conditions (T, P, P0) |
 //! | [`LogMolesInitialGuess`] | Typed initial guess with trace seeding |
 //! | [`ResidualScalingContract`] | Row scaling for residual/Jacobian |
-//! | [`VariableScalingContract`] | Variable scaling (currently unused) |
 //! | [`FormulationDiagnostics`] | Condition number and capacity analysis |
 //! | [`SpeciesCapacityReport`] | Per-species limiting factor analysis |
 //! | [`EquilibriumProblemPreview`] | Human-readable problem summary |
@@ -128,8 +121,6 @@
 //!   assignments, and element composition consistency.
 //! - `PreparedEquilibriumProblem` precomputes the SVD reaction basis and scaling
 //!   factors, making it efficient to evaluate residuals at multiple points.
-//! - `VariableScalingContract` is **declared but unused** in the current pipeline
-//!   (see SourceCraft Diagnostics item B.2 in TODO_ANALYSIS.md).
 //! - `DEFAULT_TRACE_MOLE_FLOOR = 1e-30` is the default seed for species with
 //!   zero initial moles. This is a numerical floor, not a physical cutoff.
 //!
@@ -141,7 +132,9 @@
 //! - [`equilibrium_validation`](super::equilibrium_validation) — acceptance gate for solutions
 //!
 
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_component::EquilibriumComponentDescriptor;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_component::{
+    EquilibriumComponentDescriptor, EquilibriumPhaseDescriptor,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::{
     ElementId, PhaseIndex, ReactionId, SpeciesId,
 };
@@ -157,6 +150,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumC
 use nalgebra::{DMatrix, linalg::SVD};
 use std::collections::HashSet;
 use std::fmt;
+use std::ops::Range;
 
 /// Default positive seed for a species absent from the physical initial state.
 ///
@@ -362,6 +356,11 @@ impl LogMolesInitialGuess {
 }
 
 /// Fully validated input for one canonical equilibrium solve.
+///
+/// Cloning is intentionally cheap at the formulation level: Gibbs closures
+/// are reference-counted and the matrices are cloned only when a temperature
+/// sweep retargets the immutable problem to a new set of conditions.
+#[derive(Clone)]
 pub struct EquilibriumProblem {
     /// Canonical phase-qualified identity in exact solver order.
     components: Vec<EquilibriumComponentDescriptor>,
@@ -377,6 +376,9 @@ pub struct EquilibriumProblem {
     /// Standard Gibbs free energy functions `g_i(T)` for each species, in J/mol.
     gibbs: Vec<GibbsFn>,
     /// Phase descriptors: activity model and species indices for each phase.
+    /// Canonical semantic phase descriptors in deterministic phase order.
+    phase_descriptors: Vec<EquilibriumPhaseDescriptor>,
+    /// Derived legacy numerical projection used by residual/Jacobian backends.
     phases: Vec<Phase>,
     /// Thermodynamic conditions (T, P, P0) for this problem.
     conditions: EquilibriumConditions,
@@ -436,6 +438,11 @@ impl ResidualScalingContract {
         &self.scale
     }
 
+    /// Borrows the validated scale factors for internal immutable runners.
+    pub(crate) fn scale(&self) -> &[f64] {
+        &self.scale
+    }
+
     /// Applies the scale to one residual vector.
     pub fn apply_residual(&self, residual: Vec<f64>) -> Result<Vec<f64>, ReactionExtentError> {
         scale_residual_rows(residual, &self.scale)
@@ -447,95 +454,6 @@ impl ResidualScalingContract {
         jacobian: DMatrix<f64>,
     ) -> Result<DMatrix<f64>, ReactionExtentError> {
         scale_jacobian_rows(jacobian, &self.scale)
-    }
-}
-
-/// Validated coordinate scaling for the nonlinear iterate itself.
-///
-/// This is intentionally separate from [`ResidualScalingContract`]. Row
-/// scaling changes the residual/Jacobian rows that a backend sees, while
-/// variable scaling changes the coordinate system in which the solver walks.
-/// Keeping these two concepts in different types prevents one from being
-/// mistaken for the other.
-#[derive(Debug, Clone, PartialEq)]
-pub struct VariableScalingContract {
-    /// Variable-scale factors: `scale[i]` scales coordinate `i` in the solver iterate.
-    /// Each factor must be finite and strictly positive.
-    scale: Vec<f64>,
-}
-
-impl VariableScalingContract {
-    /// Builds a validated coordinate-scale contract.
-    pub fn new(scale: Vec<f64>) -> Result<Self, ReactionExtentError> {
-        if scale.is_empty() {
-            return Err(ReactionExtentError::InvalidProblem {
-                field: "variable_scale",
-                message: "variable scale must contain at least one entry".to_string(),
-            });
-        }
-        for (index, value) in scale.iter().enumerate() {
-            if !value.is_finite() || *value <= 0.0 {
-                return Err(ReactionExtentError::InvalidProblem {
-                    field: "variable_scale",
-                    message: format!("scale[{index}] must be finite and positive"),
-                });
-            }
-        }
-        Ok(Self { scale })
-    }
-
-    /// Borrow the validated coordinate scale.
-    pub fn as_slice(&self) -> &[f64] {
-        &self.scale
-    }
-
-    /// Applies the coordinate scale to one solver iterate.
-    ///
-    /// This is a standalone transform: it does not alter residual rows or
-    /// Jacobian rows.
-    pub fn apply_iterate(&self, iterate: &[f64]) -> Result<Vec<f64>, ReactionExtentError> {
-        if iterate.len() != self.scale.len() {
-            return Err(ReactionExtentError::DimensionMismatch(format!(
-                "iterate has {} entries but variable scale has {} entries",
-                iterate.len(),
-                self.scale.len(),
-            )));
-        }
-
-        let mut scaled = Vec::with_capacity(iterate.len());
-        for (index, (value, factor)) in iterate.iter().zip(self.scale.iter()).enumerate() {
-            if !value.is_finite() {
-                return Err(ReactionExtentError::InvalidProblem {
-                    field: "variable_iterate",
-                    message: format!("iterate[{index}] must be finite"),
-                });
-            }
-            scaled.push(value / factor);
-        }
-        Ok(scaled)
-    }
-
-    /// Restores a scaled iterate back to physical coordinates.
-    pub fn unscale_iterate(&self, scaled_iterate: &[f64]) -> Result<Vec<f64>, ReactionExtentError> {
-        if scaled_iterate.len() != self.scale.len() {
-            return Err(ReactionExtentError::DimensionMismatch(format!(
-                "scaled iterate has {} entries but variable scale has {} entries",
-                scaled_iterate.len(),
-                self.scale.len(),
-            )));
-        }
-
-        let mut iterate = Vec::with_capacity(scaled_iterate.len());
-        for (index, (value, factor)) in scaled_iterate.iter().zip(self.scale.iter()).enumerate() {
-            if !value.is_finite() {
-                return Err(ReactionExtentError::InvalidProblem {
-                    field: "variable_iterate",
-                    message: format!("scaled iterate[{index}] must be finite"),
-                });
-            }
-            iterate.push(value * factor);
-        }
-        Ok(iterate)
     }
 }
 
@@ -832,6 +750,18 @@ impl fmt::Display for EquilibriumProblemPreview {
 impl PreparedEquilibriumProblem {
     /// Validates and derives the deterministic matrices used by the log-moles formulation.
     pub fn new(problem: EquilibriumProblem) -> Result<Self, ReactionExtentError> {
+        Self::new_with_element_totals(problem, None)
+    }
+
+    /// Prepares a problem while retaining an explicitly supplied conserved
+    /// inventory. This is used by active-set reductions: the reduced matrix
+    /// contains only an independent elemental basis, but its totals still
+    /// describe the original closed system rather than a trace-seeded local
+    /// problem.
+    pub(crate) fn new_with_element_totals(
+        problem: EquilibriumProblem,
+        explicit_element_totals: Option<Vec<f64>>,
+    ) -> Result<Self, ReactionExtentError> {
         problem.validate()?;
 
         let reaction_basis = compute_reaction_basis(problem.element_composition(), 1e-6)?;
@@ -847,18 +777,40 @@ impl PreparedEquilibriumProblem {
         let species_phase = species_to_phase_map(problem.phases(), species_count)?;
         let phase_stoichiometry =
             reaction_phase_stoichiometry(&reaction_basis.reactions, problem.phases());
-        let element_totals = (0..problem.element_composition().ncols())
-            .map(|element| {
-                problem
-                    .initial_moles()
+        let element_totals = match explicit_element_totals {
+            Some(totals) => {
+                if totals.len() != problem.element_composition().ncols() {
+                    return Err(ReactionExtentError::DimensionMismatch(format!(
+                        "explicit element totals have {} entries for {} prepared element columns",
+                        totals.len(),
+                        problem.element_composition().ncols()
+                    )));
+                }
+                if totals
                     .iter()
-                    .enumerate()
-                    .map(|(species, moles)| {
-                        problem.element_composition()[(species, element)] * moles
-                    })
-                    .sum()
-            })
-            .collect();
+                    .any(|value| !value.is_finite() || *value < 0.0)
+                {
+                    return Err(ReactionExtentError::InvalidProblem {
+                        field: "element_totals",
+                        message: "explicit element totals must be finite and non-negative"
+                            .to_string(),
+                    });
+                }
+                totals
+            }
+            None => (0..problem.element_composition().ncols())
+                .map(|element| {
+                    problem
+                        .initial_moles()
+                        .iter()
+                        .enumerate()
+                        .map(|(species, moles)| {
+                            problem.element_composition()[(species, element)] * moles
+                        })
+                        .sum()
+                })
+                .collect(),
+        };
 
         Ok(Self {
             problem,
@@ -866,6 +818,44 @@ impl PreparedEquilibriumProblem {
             element_totals,
             species_phase,
             phase_stoichiometry,
+        })
+    }
+
+    /// Retargets conditions, continuation seed, and temperature-selected Gibbs
+    /// closures while preserving all structural preparation products.
+    pub(crate) fn retarget_with_gibbs(
+        &self,
+        conditions: EquilibriumConditions,
+        initial_log_moles: LogMolesInitialGuess,
+        gibbs: Vec<GibbsFn>,
+    ) -> Result<Self, ReactionExtentError> {
+        if initial_log_moles.as_slice().len() != self.problem.species().len() {
+            return Err(ReactionExtentError::DimensionMismatch(format!(
+                "continuation seed has {} entries for {} prepared species",
+                initial_log_moles.as_slice().len(),
+                self.problem.species().len()
+            )));
+        }
+        if gibbs.len() != self.problem.species().len() {
+            return Err(ReactionExtentError::DimensionMismatch(format!(
+                "temperature Gibbs snapshot has {} entries for {} prepared species",
+                gibbs.len(),
+                self.problem.species().len()
+            )));
+        }
+
+        let mut problem = self.problem.clone();
+        problem.conditions = conditions;
+        problem.initial_log_moles = initial_log_moles;
+        problem.gibbs = gibbs;
+        problem.validate()?;
+
+        Ok(Self {
+            problem,
+            reaction_basis: self.reaction_basis.clone(),
+            element_totals: self.element_totals.clone(),
+            species_phase: self.species_phase.clone(),
+            phase_stoichiometry: self.phase_stoichiometry.clone(),
         })
     }
 
@@ -1241,10 +1231,63 @@ impl EquilibriumProblem {
             .into_iter()
             .map(Into::into)
             .collect::<Vec<EquilibriumComponentDescriptor>>();
+        let phase_descriptors = legacy_phase_descriptors(&phases, components.len())?;
+        Self::from_canonical_parts(
+            components,
+            initial_moles,
+            initial_log_moles,
+            element_composition,
+            gibbs,
+            phase_descriptors,
+            conditions,
+        )
+    }
+
+    /// Builds a problem from phase-qualified descriptors and derives the
+    /// legacy numerical projection exactly once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_phase_descriptors<C>(
+        components: Vec<C>,
+        initial_moles: Vec<f64>,
+        initial_log_moles: LogMolesInitialGuess,
+        element_composition: DMatrix<f64>,
+        gibbs: Vec<GibbsFn>,
+        phase_descriptors: Vec<EquilibriumPhaseDescriptor>,
+        conditions: EquilibriumConditions,
+    ) -> Result<Self, ReactionExtentError>
+    where
+        C: Into<EquilibriumComponentDescriptor>,
+    {
+        let components = components
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<EquilibriumComponentDescriptor>>();
+        Self::from_canonical_parts(
+            components,
+            initial_moles,
+            initial_log_moles,
+            element_composition,
+            gibbs,
+            phase_descriptors,
+            conditions,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_canonical_parts(
+        components: Vec<EquilibriumComponentDescriptor>,
+        initial_moles: Vec<f64>,
+        initial_log_moles: LogMolesInitialGuess,
+        element_composition: DMatrix<f64>,
+        gibbs: Vec<GibbsFn>,
+        phase_descriptors: Vec<EquilibriumPhaseDescriptor>,
+        conditions: EquilibriumConditions,
+    ) -> Result<Self, ReactionExtentError> {
         let labels = components
             .iter()
             .map(EquilibriumComponentDescriptor::label)
             .collect();
+        let phases = numeric_phase_projection(&phase_descriptors);
         let problem = Self {
             components,
             labels,
@@ -1252,6 +1295,7 @@ impl EquilibriumProblem {
             initial_log_moles,
             element_composition,
             gibbs,
+            phase_descriptors,
             phases,
             conditions,
         };
@@ -1342,21 +1386,65 @@ impl EquilibriumProblem {
                 });
             }
         }
-        if self.phases.is_empty() {
+        if self.phase_descriptors.is_empty() {
             return Err(ReactionExtentError::InvalidProblem {
-                field: "phases",
+                field: "phase_descriptors",
                 message: "at least one phase is required".to_string(),
             });
         }
-        if self
-            .phases
-            .iter()
-            .flat_map(|phase| phase.species.iter())
-            .any(|&index| index >= species_count)
-        {
+        let mut phase_ids = HashSet::with_capacity(self.phase_descriptors.len());
+        let mut expected_range_start = 0usize;
+        for (position, descriptor) in self.phase_descriptors.iter().enumerate() {
+            if descriptor.index().index() != position {
+                return Err(ReactionExtentError::InvalidProblem {
+                    field: "phase_descriptors",
+                    message: format!(
+                        "descriptor {position} stores phase index {}",
+                        descriptor.index().index()
+                    ),
+                });
+            }
+            if !phase_ids.insert(descriptor.id().clone()) {
+                return Err(ReactionExtentError::InvalidProblem {
+                    field: "phase_descriptors",
+                    message: format!("duplicate phase identity {:?}", descriptor.id().as_option()),
+                });
+            }
+            let range = descriptor.component_range();
+            if range.start != expected_range_start
+                || range.start >= range.end
+                || range.end > species_count
+            {
+                return Err(ReactionExtentError::InvalidProblem {
+                    field: "phase_descriptors",
+                    message: format!(
+                        "descriptor {position} has invalid component range {range:?} for {species_count} components"
+                    ),
+                });
+            }
+            expected_range_start = range.end;
+        }
+        if expected_range_start != species_count {
             return Err(ReactionExtentError::InvalidProblem {
-                field: "phases",
-                message: "a phase references a missing species index".to_string(),
+                field: "phase_descriptors",
+                message: "phase descriptor ranges must cover every component exactly once"
+                    .to_string(),
+            });
+        }
+        let derived_phases = numeric_phase_projection(&self.phase_descriptors);
+        let projection_matches = self.phases.len() == derived_phases.len()
+            && self
+                .phases
+                .iter()
+                .zip(derived_phases.iter())
+                .all(|(stored, derived)| {
+                    stored.kind == derived.kind && stored.species == derived.species
+                });
+        if !projection_matches {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "numeric_phase_projection",
+                message: "numeric phase projection differs from canonical phase descriptors"
+                    .to_string(),
             });
         }
         species_to_phase_map(&self.phases, species_count)?;
@@ -1390,7 +1478,7 @@ impl EquilibriumProblem {
 
     /// Returns a typed phase id in the validated problem ordering.
     pub fn phase_index(&self, index: usize) -> Result<PhaseIndex, ReactionExtentError> {
-        PhaseIndex::new(index, self.phases.len())
+        PhaseIndex::new(index, self.phase_descriptors.len())
     }
 
     /// Species-by-element composition matrix.
@@ -1406,6 +1494,11 @@ impl EquilibriumProblem {
     /// Phase layout in species-index order.
     pub fn phases(&self) -> &[Phase] {
         &self.phases
+    }
+
+    /// Canonical semantic phase descriptors in deterministic phase order.
+    pub fn phase_descriptors(&self) -> &[EquilibriumPhaseDescriptor] {
+        &self.phase_descriptors
     }
 
     /// Thermodynamic conditions for this solve.
@@ -1434,4 +1527,80 @@ impl EquilibriumProblem {
             self.conditions,
         )
     }
+}
+
+fn numeric_phase_projection(descriptors: &[EquilibriumPhaseDescriptor]) -> Vec<Phase> {
+    descriptors
+        .iter()
+        .map(|descriptor| Phase {
+            kind: descriptor.activity_model(),
+            species: descriptor.component_range().collect(),
+        })
+        .collect()
+}
+
+/// Lifts the historical indexed `Phase` API into synthetic descriptors.
+///
+/// This compatibility path has no physical-state provenance; bridge callers
+/// must use `new_with_phase_descriptors` so their semantic phase ids survive.
+fn legacy_phase_descriptors(
+    phases: &[Phase],
+    component_count: usize,
+) -> Result<Vec<EquilibriumPhaseDescriptor>, ReactionExtentError> {
+    let phase_count = phases.len();
+    let mut descriptors = Vec::with_capacity(phase_count);
+    for (index, phase) in phases.iter().enumerate() {
+        let phase_index = PhaseIndex::new(index, phase_count)?;
+        let component_range = contiguous_legacy_range(&phase.species, component_count)?;
+        let (physical_state, phase_model) = match phase.kind {
+            crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel::IdealGas => (
+                crate::Thermodynamics::physical_state::PhysicalState::Gas,
+                crate::Thermodynamics::User_PhaseOrSolution::PhaseModel::IdealGas,
+            ),
+            crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel::IdealSolution => (
+                crate::Thermodynamics::physical_state::PhysicalState::Condensed,
+                crate::Thermodynamics::User_PhaseOrSolution::PhaseModel::PureCondensed,
+            ),
+        };
+        let id = if phase_count == 1 {
+            crate::Thermodynamics::phase_layout::PhaseId::new(None)
+        } else {
+            crate::Thermodynamics::phase_layout::PhaseId::new(Some(format!("legacy-phase-{index}")))
+        };
+        descriptors.push(EquilibriumPhaseDescriptor::new(
+            id,
+            phase_index,
+            physical_state,
+            phase_model,
+            phase.kind,
+            component_range,
+        ));
+    }
+    Ok(descriptors)
+}
+
+fn contiguous_legacy_range(
+    species: &[usize],
+    component_count: usize,
+) -> Result<Range<usize>, ReactionExtentError> {
+    let Some(&start) = species.first() else {
+        return Err(ReactionExtentError::InvalidProblem {
+            field: "phases",
+            message: "a phase must contain at least one species".to_string(),
+        });
+    };
+    let end =
+        start
+            .checked_add(species.len())
+            .ok_or_else(|| ReactionExtentError::InvalidProblem {
+                field: "phases",
+                message: "phase range overflows usize".to_string(),
+            })?;
+    if end > component_count || species.iter().copied().ne(start..end) {
+        return Err(ReactionExtentError::InvalidProblem {
+            field: "phases",
+            message: "legacy phase species must be contiguous and ordered".to_string(),
+        });
+    }
+    Ok(start..end)
 }

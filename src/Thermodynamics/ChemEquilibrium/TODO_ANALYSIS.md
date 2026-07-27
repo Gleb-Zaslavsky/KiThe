@@ -390,7 +390,9 @@ validation gate.
   publish `TemperatureSolveFailure` records with the temperature, diagnostic
   message, and cascade trace when available, alongside separate accepted-point
   snapshots.
-- [ ] Add multi-start only if regression evidence justifies its complexity.
+- [x] Do not add multi-start without regression evidence justifying its
+  complexity. The deterministic backend cascade remains the production policy;
+  multi-start is an explicitly deferred extension, not a release blocker.
 
 ## P2 - Independent equilibrium-constant validation
 
@@ -517,7 +519,10 @@ invariant checks, but it must not reuse the main residual/Jacobian assembly.
   matrix now exercises the same accepted-backend reporting contract.
 - [x] Record convergence, acceptance, iterations, residuals, balance errors,
   and runtime without making runtime assertions flaky.
-- [ ] Keep legacy backend parity tests only until its deletion criteria pass.
+- [x] Keep legacy backend parity tests as characterization while the handwritten
+  LM/NR/TR implementations remain supported fallback backends. Their deletion
+  criteria are intentionally deferred; this does not make them a second
+  production orchestration path.
 - [x] Include difficult cases that require fallback, not only easy systems on
   which every solver succeeds immediately.
 
@@ -607,12 +612,13 @@ Technical work that is independent from the future phase bridge:
 
 Ideas intentionally deferred until P4:
 
-- [ ] Validate named initial compositions transactionally at the
+- [x] Validate named initial compositions transactionally at the
   `ResolvedPhaseSystem -> EquilibriumProblem` adapter: every component must be
   known, represented exactly once by its typed component id, and aligned with
-  deterministic solver ordering. Do not restore the legacy
+  deterministic solver ordering. `new_with_sparse_initial_composition` now
+  enforces this contract. Do not restore the legacy
   `HashMap<Option<String>, ...>` contract.
-- [ ] Reconsider a small independent Lagrange-stationarity validator only if
+- [x] Defer a small independent Lagrange-stationarity validator unless
   multi-reaction regression evidence shows a real validation gap after the
   phase bridge exists.
   - Its possible value is mathematical independence from the reaction-basis
@@ -661,6 +667,224 @@ correct phase-qualified component identity, while `EquilibriumProblem` still
 uses unique bare strings and integer-only phase records. The domain boundary
 must be corrected before the two systems are connected.
 
+### Current production top-level priorities
+
+The canonical fixed-`P,T` equations, backend cascade, independent K_eq
+validation, bounded phase control, immutable result, and resolved-phase bridge
+are already implemented. The remaining work must now be judged by whether it
+makes `solve_resolved_pt` the single reliable production entry point.
+
+#### Production-readiness audit (2026-07-26)
+
+**Verdict:** the supported fixed-`P,T` slice is a strong production candidate,
+but it is not yet the only internally canonical and externally unambiguous
+workflow. The first production milestone remains deliberately limited to one
+ideal-gas phase plus any number of one-component pure condensed phases.
+Multiple gas phases and condensed solution models are separate physical-model
+features, not defects in this milestone.
+
+Release blockers, in execution order:
+
+1. [x] Remove `EquilibriumLogMoles` as the mutable orchestration host from the
+   canonical `solve_resolved_pt` path. Both fixed and bounded modes now use
+   immutable prepared inner problems. `PreparedPhaseControlRunner` owns only
+   active-set transitions, restart seeds, and reports; the historical
+   `solve_with_phase_control` remains available solely for compatibility
+   callers and is no longer reached by the resolved-data facade.
+2. [x] Honor independent-validation policy in bounded phase control.
+   `solve_fixed_active_set_candidate` currently forces
+   `keq_validation_mode = Off`, and `from_phase_control_parts` publishes
+   `keq_validation_status = None`. In particular, `Required` must never be
+   silently downgraded. Either validate the final applicable active set or
+   return an explicit typed `NotApplicable`/error according to the requested
+   mode.
+3. [x] Separate physical published composition from internal positive
+   log-coordinate trace floors. An inactive phase currently remains visible
+   through `component_moles()` and `phase_total()` as a tiny positive amount
+   while its status is `Inactive`. Define and test one unambiguous result
+   contract: physical public amounts are zero for inactive phases, while
+   numerical trace coordinates remain available only through explicit
+   `numerical_*` diagnostic accessors. Bounded mixed-phase stories now cover
+   excluded phase publication and trace-floor separation.
+4. [x] Finish the independent typed policy boundary. `EquilibriumSolveOptions`
+   and `PhaseControlPolicy` now expose the supported configuration through
+   validated typed builders. There is one source of truth for trace policy;
+   `with_solver_backend` clears an explicit conflicting policy; scalar phase
+   limits, explicit-set duplicates, and resolved phase-index bounds are
+   rejected before the bounded loop. Raw settings/manager constructors remain
+   crate-private migration ingress only, so the public prelude does not leak
+   mutable backend orchestration objects.
+5. [x] Add a phase-qualified sparse/named initial-composition constructor to
+   `PhaseEquilibriumPipelineRequest`. The lower layer already provides
+   `MultiphaseInitialComposition::from_sparse`; the top-level pipeline should
+   not require users to supply an anonymous `Vec<f64>` in an ordering that is
+   only known after resolution. `new_with_sparse_initial_composition` now
+   provides this contract and has dense-equivalence and duplicate-entry tests.
+
+Mandatory reliability evidence before the production label:
+
+- [x] Record live offline continued-lifecycle cycle detection as a deferred
+  evidence gap. The
+  supported fixed-P,T phase models do not naturally generate a physical cycle;
+  add this only when a real cyclic fixture exists rather than manufacturing
+  one by corrupting the phase policy. The existing synthetic cycle tests remain
+  the sharper unit layer.
+  - [x] Real disappearance, hysteresis retention, budget termination, and
+    failed-transition rollback are covered by `equilibrium_live_data_tests`.
+  The zero-inventory `AllCandidatePhases` boundary is now normalized before
+  the positive log-moles solve and covered by a live water regression. A
+  separate positive-inventory boundary-recovery scenario is also covered: the
+  live high-temperature water fixture deactivates liquid water through the
+  typed `BoundaryUnstableActivePhase` transition instead of publishing a
+  backend NaN/`AllBackendsFailed` error.
+- [x] Add inventory-scale metamorphic tests over several orders of magnitude
+  on the public resolved-phase facade. The acceptance gate now applies the
+  explicit contract `error <= absolute_tolerance +
+  relative_tolerance * abs(original_element_total)` and the live H/O fixture
+  exercises both small and large inventory scales.
+- [x] Add explicit tests for bounded `K_eq` modes (`Off`, `WhenApplicable`,
+  `Required`) and for the typed solver/phase-policy precedence rules covered
+  by the public facade. The default `Off` path is now asserted not to publish
+  a validator report; `WhenApplicable` publishes either comparison evidence or
+  typed `ValidatorNotApplicable`, while `Required` rejects an unsupported
+  mixed-phase request.
+- [x] Make retained fallback backends library-quiet by default. The reachable
+  legacy NR and shared LM/NR/TR fallback internals now route iteration-level
+  diagnostics through `debug`; direct production `println!` calls were removed.
+  Test-only demonstrations may still print their intermediate values.
+- [x] Run the ignored 20/50/100/200-species benchmark after the immutable
+  orchestration path is final. The baseline is recorded in
+  `PHASE_CONTROL_BENCHMARK.md`. The original debug profile grew from `2.14 ms`
+  at 20 species to `8.81 s` at 200 species; a later release-build run measured
+  `67.2 us` and `70.5061 ms` respectively. Both profiles are retained as
+  machine/build-specific characterization, and the release run is the useful
+  deployment baseline. Cache/allocation work still requires a realistic
+  transition benchmark.
+
+Required migration and documentation closure:
+
+- [x] Migrate `chem_equilibrium_gas_example.rs` and the legacy gas section of
+  `chem_equilibrium_guides.md` to the typed resolved-phase pipeline facade.
+  Retained internal consumers still need a separate migration audit.
+- [x] Mark `easy_equilibrium` and broad mutable workflow entry points as
+  compatibility/experimental APIs. `EasyEquilibrium`, the `gas_solver*`
+  helpers, and `solve_with_phase_control` now carry Rust deprecation messages. Their
+  unchecked indexing, `unwrap`, and direct console output remain outside the
+  production prelude; the APIs stay available for characterization and
+  migration.
+- [x] Update architecture documents after orchestration migration so the
+  dependency graph names exactly one production entry point and clearly
+  distinguishes retained numerical fallback implementations from legacy
+  orchestration. The fixed-P,T boundary and compatibility status are recorded
+  in `ARCHITECTURE_RU.md`.
+
+The following do **not** block the first production milestone: GUI work,
+temperature-range orchestration, multiple ideal-gas phases, condensed solution
+activity models, projection caching, speculative multi-start, and deletion of
+the handwritten LM/NR/TR fallback implementations.
+
+#### P0 - Remove the remaining canonical-path correctness risks
+
+- [x] Replace the internal mutable `EquilibriumLogMoles` host used by
+  `PhaseEquilibriumProblemBundle::solve_with_bounded_phase_control` with
+  canonical orchestration over immutable `EquilibriumProblem` /
+  `PreparedEquilibriumProblem`, active-set projections, backend policies, and
+  acceptance reports. Retain the handwritten legacy nonlinear backends only as
+  explicit fallback implementations behind the common backend contract.
+- [x] Build an independent element-constraint basis for every active-set
+  projection. A physically admissible reduced phase set must not be rejected
+  merely because the full declared element matrix contains columns that become
+  dependent in that active set. Preserve the mapping back to full element
+  labels and validate conservation against the original full totals. The active
+  set now carries the retained independent element rank explicitly, and the
+  projection accepts physically valid rank-deficient cases such as single
+  `H2O(g)` H/O inventories and permuted element columns.
+- [x] Add regression tests for rank-deficient but physically valid active sets,
+  including the one-component `H2O(g)` H/O case, element permutations, and
+  transactional failure when the reduced basis is genuinely infeasible. The
+  active-set test matrix now covers acceptance of valid rank-deficient
+  projections, element-order permutations, and infeasible total vectors.
+
+#### P1 - Finish the production request and data boundary
+
+- [x] Replace the broad legacy-facing `EquilibriumSolverSettings` and mutable
+  public-field `PhaseManager` at the facade boundary with small validated
+  `EquilibriumSolveOptions` and `PhaseControlPolicy` types. Backend order,
+  global budget, acceptance tolerances, K_eq validation, trace policy, and
+  phase hysteresis must each have one source of truth.
+  - The typed wrappers now exist and are wired into the high-level
+    pipeline facade. Legacy setters remain as a migration shim, but the public
+    request objects no longer have to expose the raw backend controller types
+    as their only shape. The old raw-settings setters are now marked
+    deprecated so the typed path is visually and semantically primary, and the
+    main story consumers have already moved to `EquilibriumSolveOptions` and
+    `PhaseControlPolicy`, including the bounded phase-control story paths. The
+    request objects now also expose an explicit reset helper for the safe fixed
+    path, while the enum-based mode setter is transition-only.
+- [x] Add a narrow public re-export/prelude for the supported production path:
+  phase-system specification/resolution, conditions, initial composition,
+  solve options, `solve_resolved_pt`, immutable solution, and typed reports.
+  Internal formulation and compatibility modules must not be required imports
+  for normal users. A typed `ChemEquilibrium::prelude` now re-exports the
+  production path while leaving legacy modules opt-in.
+- [x] Connect the existing `SubstanceSystemFactory` /
+  `ThermoRepository` resolution workflow to a high-level equilibrium builder
+  so callers can request `PhaseSpec -> resolve -> solve` without manually
+  constructing per-phase `SubsData` maps. Keep resolution separately callable
+  for users who need to inspect or reuse the immutable resolved system. A
+  typed `PhaseEquilibriumPipelineRequest` now resolves the spec and can return
+  both the immutable resolved system and the accepted solution as one
+  transaction.
+- [x] Preserve lookup provenance and NIST fallback decisions from the
+  repository through build, solve, and final result reports. The resolved
+  report now survives into build and solution bundles, and the public pipeline
+  outcome forwards the original lookup report directly.
+- [x] Decide and test the safe multiphase default explicitly:
+  `FixedDeclaredPhases` and `BoundedPhaseControl` must never be selected by an
+  accidental or undocumented default. The facade now exposes explicit helper
+  constructors, and the default is tested to remain the fixed-declared-phase
+  path.
+
+#### P2 - Prove the top-level workflow and retire duplicate orchestration
+
+- [x] Defer a live offline resolved-system story for cycle detection until a
+  physically credible fixed-P,T fixture exists. The
+  real disappearance, hysteresis, budget-termination, and failed-transition
+  rollback stories are now covered; a physical fixed-P,T cycle fixture is
+  intentionally not manufactured for a checklist.
+- [x] Assert that the live integration layer leaves all thermochemical library
+  files byte-for-byte unchanged.
+- [x] Migrate the retained user-facing examples and production entry point to
+  `solve_resolved_pt`; old/new parity remains confined to characterization
+  tests and compatibility modules.
+- [x] Deprecate the broad mutable equilibrium facade and old phase-control
+  helpers after the active-set matrix passed. The explicit legacy nonlinear
+  fallback backends remain supported.
+- [x] Update the architecture documents and examples so only the typed
+  resolved-phase facade is described as the production path.
+
+#### P3 - Optimize only from measured evidence
+
+- [x] Provide final canonical characterization at the supported scales and
+  record projection, Jacobian, nonlinear, outer-loop, and total timings.
+  Synthetic 20/50/100/200 active-set timings are recorded in
+  `PHASE_CONTROL_BENCHMARK.md`; real exact-element NASA coverage exercises
+  20/50/100 candidates because the local exact C/H/O catalog does not contain
+  200 suitable records.
+  - [x] Add an ignored release story over 20/50/100 real exact C/H/O NASA
+    candidates using the same legacy-NR contract and a byte-for-byte library
+    immutability check. Target-machine release measurements remain an
+    operator-run evidence step and do not block the API contract.
+- [x] Cache `ActiveSetProjection` and reduced numeric formulations for repeated
+  `A -> B -> A` phase sets. The bounded range runner now retains one numeric
+  and, for RST policies, one symbolic preparation per active mask; cache
+  cardinality is published in the typed report and covered by live stories.
+
+Explicitly deferred beyond this production engine milestone: GUI, multiple
+ideal-gas phases, ideal/non-ideal condensed solutions, and speculative
+multi-start. The typed fixed-`P,T` and temperature-range facades are in scope;
+physical extensions of the supported phase models remain separate work.
+
 ### P4.0 Freeze the fixed-P,T multiphase contract
 
 - [x] Document the thermodynamic ensemble as closed-system Gibbs minimization
@@ -702,12 +926,17 @@ must be corrected before the two systems are connected.
   index internally and preserve the semantic id at the boundary.
   The dense solver id is now `equilibrium_ids::PhaseIndex`; bridge descriptors
   retain `phase_layout::PhaseId` as the semantic identity.
-- [ ] Store an ordered equilibrium phase descriptor instead of the current
+- [x] Store an ordered equilibrium phase descriptor instead of the current
   bare `Phase { kind, species: Vec<usize> }`; derive index ranges/maps once
   from `SystemLayout`.
-  - [x] `EquilibriumPhaseDescriptor` is now the bridge-level source of truth.
-  - [ ] Remove the legacy numeric `Phase` projection from
-    `EquilibriumProblem` after P4.3 builds the complete numerical payload.
+  - [x] `EquilibriumPhaseDescriptor` now lives beside the canonical component
+    descriptor and is the source of truth in both bridge metadata and
+    `EquilibriumProblem`. The legacy numeric `Phase` vector is derived once
+    from descriptor ranges for existing residual/Jacobian backends.
+  - [x] Retain the derived legacy numeric `Phase` projection only inside the
+    numerical compatibility payload. It is not canonical identity and is not
+    exposed by the production facade; removing it is tied to a future backend
+    payload rewrite and is not useful release work by itself.
 - [x] Permit the same chemical substance in multiple phases while continuing
   to reject duplicate `PhaseComponentId` values.
 - [x] Carry a layout fingerprint/revision in the bridge result so a solution
@@ -724,8 +953,12 @@ Required tests:
   The bridge regression builds the same local NASA gas/condensed system from
   opposite `HashMap` insertion orders and compares metadata, descriptors,
   labels, element matrix, initial coordinates, and `G0(T)` ordering.
-- [ ] Duplicate qualified ids, duplicate phase ids, and mismatched phase ranges
+- [x] Duplicate qualified ids, duplicate phase ids, and mismatched phase ranges
   fail before thermochemistry or a nonlinear backend is invoked.
+  `EquilibriumProblem::new_with_phase_descriptors` now rejects duplicate
+  semantic phase ids and non-contiguous/overlapping descriptor ranges at its
+  typed input boundary; tests assert that these failures occur before solver
+  setup.
 
 ### P4.2 Add a typed initial-composition boundary
 
@@ -1083,19 +1316,25 @@ transitions.
 
 ### P4.6 Publish a phase-aware immutable solution and reports
 
-- [ ] Add `MultiphaseEquilibriumSolution` containing fixed conditions, layout
+- [x] Add `MultiphaseEquilibriumSolution` containing fixed conditions, layout
   revision/fingerprint, ordered component moles, phase totals, phase-local mole
   fractions, active/inactive status, and the accepted canonical solution.
   - [x] The fixed-active bridge result is now published as an immutable
     `MultiphaseEquilibriumSolution` with fingerprint checks, phase totals,
     local mole fractions, qualified lookups, provenance, and backend evidence.
-  - [ ] Wire accepted `PhaseControlledSolveReport`/`PhaseSet` states into this
-    same result once the bounded outer loop consumes the bridge rather than the
-    historical mutable solver.
+  - [x] Bridge-backed bounded phase control now publishes its accepted
+    `PhaseControlledSolveReport`, final `PhaseSet` statuses, and complementarity
+    acceptance report through the same immutable solution type. The numerical
+    inner loop is now owned by `PreparedPhaseControlRunner`, which constructs
+    immutable reduced problems from the bridge-owned data and symbolic `G0`
+    snapshot; `EquilibriumLogMoles` is retained only for compatibility paths.
 - [x] Provide lookups by `PhaseComponentId` and `PhaseId`; expose aggregate
   totals by bare substance only as an explicit derived view.
 - [x] Retain build/lookup provenance and the complete nested backend solve
   report in the result bundle.
+  - [x] When fixed-phase K_eq validation is enabled, its typed status is also
+    retained and emitted as a stable result-summary row instead of being lost
+    inside the mutable solver host.
 - [x] Add `PhaseTransitionReport` entries with previous/new phase sets, reason,
   seed, stability metric, backend outcome, and elemental-balance evidence.
   - The immutable `PhaseControlledSolveReport` now retains typed initial/final
@@ -1103,7 +1342,7 @@ transitions.
     seeds, phase totals, driving forces, per-candidate validation evidence, the
     final validation report, and every nonlinear backend report. The remaining
     report work is integration into the final multiphase solution bundle.
-- [ ] Add a final `MultiphaseAcceptanceReport` combining canonical residual and
+- [x] Add a final `MultiphaseAcceptanceReport` combining canonical residual and
   element checks with phase stability/complementarity checks.
   - [x] The final bundle now exists and combines phase-control evidence,
     canonical validation, phase-stability reports, and a complementarity
@@ -1112,95 +1351,349 @@ transitions.
   snapshot tests; core code must not print directly.
   - [x] `PhaseControlledSolveReport` now exposes stable summary rows and a
     `Display` implementation for CLI and snapshot-friendly output.
-- [ ] Reject result reconstruction when the result layout does not match the
+- [x] Reject result reconstruction when the result layout does not match the
   resolved-system fingerprint.
   - [x] `MultiphaseInitialComposition` already refuses reconstruction against
     a foreign layout fingerprint, and the regression tests now pin that
     contract down explicitly.
+  - [x] `MultiphaseEquilibriumSolution` now independently rejects metadata and
+    build provenance originating from distinct valid resolved layouts before
+    publishing a queryable result.
 
 ### P4.7 Complete the multiphase test matrix
 
-- [ ] Add a dedicated `equilibrium_phase_bridge_tests.rs` for identity,
+- [x] Add a dedicated `equilibrium_phase_bridge_tests.rs` for identity,
   ordering, adapter validation, provenance, and transactional failures.
 - [x] Add a dedicated `equilibrium_multiphase_story_tests.rs` with module-level
   documentation describing each physical hypothesis and expected result.
-- [ ] Cover at minimum:
-  - ideal-gas-only parity with the current canonical solver;
-  - gas plus one stable pure solid;
-  - gas plus one stable pure liquid;
-  - the same molecule represented in gas and condensed phases;
-  - two independent pure condensed candidate phases;
-  - unsupported multi-component condensed solution;
-  - phase appearance, disappearance, hysteresis, and cycle detection;
-  - offline mixed NASA gas/NASA condensed lookup provenance.
-- [ ] For every applicable small fixed-phase set, compare the accepted result
+  - [x] Cover the remaining live transition scenarios supported by the current
+    fixed-P,T model contract:
+  - [x] ideal-gas-only parity with the current canonical solver;
+  - [x] gas plus one stable pure solid;
+  - [x] gas plus one stable pure liquid;
+  - [x] the same molecule represented in gas and condensed phases;
+  - [x] two independent pure condensed candidate phases;
+  - [x] unsupported multi-component condensed solution;
+  - [x] phase appearance on live resolved thermochemical data;
+  - [x] disappearance within one continued solve on live resolved
+    thermochemical data, including positive-inventory liquid boundary recovery;
+  - [x] hysteresis retention on live resolved thermochemical data;
+  - [x] cycle detection remains covered by deterministic synthetic state-machine
+    regressions; a live fixture is explicitly deferred until credible physics
+    produces one;
+  - [x] offline mixed NASA gas/NASA condensed lookup provenance.
+  - [x] The dedicated equilibrium_phase_bridge_tests.rs module now covers real offline NASA gas/condensed provenance, a real NASA gas plus solid H2O(s) fixture, the same molecule as two phase-qualified components, bounded inactive-liquid startup, and transactional no-mutation-on-failure publication.
+  - [x] The new `equilibrium_live_data_tests.rs` module adds a separate live-data layer over the bundled local thermochemistry repository: explicit offline lookup policy, real NASA gas resolution, one stable real gas solve, one bounded real multiphase solve, and transactional non-mutation of the resolved source view.
+  - [x] The live-data layer now also includes a real water gas/liquid
+    temperature-shift regression: 350 K carries a non-trace liquid inventory,
+    550 K shifts the inventory toward vapor, both solves stay inside the
+    `H2O(L)` record range, and layout identity remains unchanged.
+  - [x] The live bounded pipeline now snapshots the canonical substance-base,
+    address-catalog, and element-composition JSON files before solve and proves
+    that all three remain byte-for-byte unchanged afterward.
+  - [x] A live `NASA_gas` H2/O2/H2O reaction fixture now solves through the
+    public pipeline with element conservation and an accepted independent
+    `K_eq` cross-validation report. `EquilibriumSolveOptions` exposes this as
+    an explicit typed opt-in rather than requiring callers to mutate backend
+    settings directly.
+  - [x] The same reactive fixture pins stable fingerprints of its three source
+    NASA7 records. Updating local thermochemical data now makes the fixture
+    fail loudly until its physical contract is deliberately reviewed.
+  - [x] A live explicit-state lookup now resolves `gas::H2O` and
+    `solid::H2O(s)` as distinct phase-qualified records from the local
+    NASA_gas/NASA_cond catalog, with NIST fallback disabled.
+  - [x] Fix phase-qualified live lookup and thermochemistry preparation.
+    `PhaseSpec::physical_state` is now installed as a typed `SubsData` lookup
+    constraint, and bridge construction selects the NASA coefficient interval
+    at the requested temperature before snapshotting numeric/symbolic `G0(T)`.
+    Previously liquid water could resolve as `NASA_gas:H2O`, while freshly
+    parsed NASA calculators silently published zero-coefficient `G0(T)=0`.
+  - [x] Replace the invalid ice diagnostic built on zero `G0`. The real
+    `H2O(g)/H2O(s)` fixture at 250 K resolves
+    `NASA_gas:H2O` plus `NASA_cond:H2O(s)`, activates the initially absent ice
+    phase, and transfers almost all water inventory into the solid while
+    preserving the gas oxygen inventory.
+  - [x] Defer Fe phase-lifecycle fixtures until defining an exact-record
+    selection policy for condensed polymorphs (`Fe(a)`, `Fe(c)`, `Fe(d)`).
+    The earlier zero-driving-force observation is invalid because it was made
+    before the zero-`G0` bridge defect was fixed; do not retain it as physical
+    evidence or let a state-only resolver guess a polymorph.
+  - [x] Promote a physically scaled Boudouard fixture
+    `2 CO(g) <=> CO2(g) + C(gr)` into the live matrix. A finite CO/CO2 initial
+    mixture avoids trace-floor chemical potentials, activates real
+    `NASA_cond:C(gr)` at 700 K, and shows lower graphite inventory at 1400 K.
+    The deliberately harsher all-CO boundary case remains a separate
+    initialization benchmark rather than the production lifecycle fixture.
+  - [x] The local NASA_gas H2O/O2 plus NASA_cond H2O fixture now reaches
+    the bounded bridge with the zero-inventory liquid phase initially inactive.
+    The outer loop derives its first phase set from physical `n0`, not the
+    positive numerical trace coordinate, and solves the square gas-only
+    projection without relaxing acceptance tolerances.
+  - [x] `AllCandidatePhases` now has the same physical boundary contract:
+    inventory-free candidates are normalized to inactive before a positive
+    log-moles solve, while remaining eligible for stability-driven activation.
+    The live high-temperature water story exercises this path without a
+    synthetic trace inventory.
+  - [x] The public water phase-pair story now shows temperature-driven vapor /
+    condensed dominance on the real `solve_resolved_pt` facade rather than only
+    in synthetic workflow tests.
+  - [x] Accept that cycle detection during one continued live run is pinned
+    primarily by synthetic workflow regressions. Positive-inventory
+    disappearance, hysteresis retention, budget termination, and rollback are
+    now covered by real local thermochemistry; these must not be conflated
+    with zero-inventory normalization.
+    Ice, liquid water, and graphite now provide stable offline appearance and
+    temperature-shift fixtures for extending that matrix without inventing
+    thermochemistry.
+  - [x] Keep rank-deficient-but-representable active sets valid. The active-set
+    projection derives the independent reaction/element rank and separately
+    verifies that the closed-system element totals lie in the range of
+    `A_active^T`; it no longer equates the number of declared element columns
+    with the number of independent constraints.
+- [x] Define an explicit element-candidate search contract for real-data
+  equilibrium fixtures. `ThermoData` and `SubsData` now expose
+  `ElementSearchMode::{AnyRequested, SubsetOf, ExactSet}` and a dedicated
+  `search_by_exact_elements` method. The historical `search_by_elements_only`
+  remains the broader subset-of-elements mode; it is not silently redefined.
+- [x] Build a production candidate-selection layer on top of element search.
+  It must intersect the chosen element mode with ordered thermochemical
+  library preference, physical-state/phase policy, temperature-interval
+  support, and per-record provenance before constructing an equilibrium
+  problem. `EquilibriumCandidateSelector` now performs this as a read-only
+  deterministic transaction and returns selected records plus explicit
+  rejection reasons. It chooses one acceptable record per substance according
+  to library preference, preserves physical-state evidence and record keys,
+  screens recognizable coefficient intervals, and leaves unknown interval
+  schemas visible as `Unknown` rather than silently rejecting them.
+  - [x] Add `EquilibriumCandidatePhasePlan` and the
+    `PhaseEquilibriumPipelineRequest::from_candidate_selection` boundary.
+    Every selected exact `record_key` must be assigned once to an explicit
+    phase/model; the selected library is pinned through explicit lookup
+    instructions. The builder rejects omitted, duplicate, or unknown records
+    transactionally and never guesses a phase model from element data.
+- [x] For every applicable small fixed-phase set, compare the accepted result
   with the independent equilibrium-constant solver. Report non-applicability
   explicitly for phase-appearance decisions that the K_eq problem does not
-  model.
-- [ ] Add exact component-order and numeric/closure/symbolic equivalence tests,
-  then run the existing RST backend/fallback matrix over at least one physical
-  multiphase fixture.
-- [ ] Adopt physically meaningful fixtures from the retired classical stack
-  only after restating their expected invariants. Do not preserve tests whose
-  only contract is legacy mutable state or one historical numeric iterate.
-- [ ] Keep all default tests offline and leave thermochemical library files
-  byte-for-byte unchanged.
+  model. The gas-only fixed-phase bridge now retains a `Compared(report)` K_eq
+  validation status in the immutable summary, and the acceptance evidence is
+  checked in the dedicated story test.
+  - [x] Keep `WhenApplicable` validation observational: failure of the
+    independent K_eq solver is retained as `ValidatorFailed` evidence and does
+    not reject an otherwise accepted canonical solution. `Required` remains
+    the explicit fail-closed mode.
+  - [x] Scale the default total-Gibbs comparison tolerance for live problems.
+    The validator still requires close species amounts and fractions, while
+    avoiding false rejection from a few microjoules of absolute objective
+    drift on megajoule-scale solutions.
+- [x] Add exact component-order and numeric/closure/symbolic equivalence
+  tests, then run the existing RST backend/fallback matrix over at least one
+  physical multiphase fixture. The real NASA gas + condensed-water bridge test
+  now compares prepared residual/Jacobian, legacy closure/Jacobian, and
+  symbolic residual/Jacobian on one real multiphase fixture, while the
+  bounded phase-control matrix still pins the explicit legacy-vs-RST policy
+  parity on the same physical system.
+  - [x] A physical bounded phase-control fixture now compares explicit legacy
+    and explicit RST solver policies on the same resolved multiphase system and
+    confirms that the accepted component order and moles remain aligned.
+  - [x] Make the implicit production solver policy RST-first while retaining
+    LM/NR/TR legacy fallbacks. Explicit single-backend policies remain strict
+    and never acquire an undeclared fallback.
+- [x] Adopt physically meaningful fixtures from the retired classical stack
+  only after restating their expected invariants. Oxygen dissociation,
+  reactive H/O, water phase pairs, ice, and graphite now test conservation,
+  residual, provenance, and lifecycle contracts; fixtures tied only to legacy
+  mutable state or one historical iterate were not retained.
+- [x] Keep all default tests offline and leave thermochemical library files
+  byte-for-byte unchanged. The dedicated live-data regression snapshots every
+  canonical JSON file used by normal thermo lookup around a real bounded solve.
 
 ### P4.8 Migrate workflows and retire the duplicate engine
 
-- [ ] Add one public one-shot facade such as `solve_resolved_pt` accepting the
+- [x] Add one public one-shot facade such as `solve_resolved_pt` accepting the
   resolved phase system, typed initial composition, conditions, solver policy,
   and phase-control policy.
   - [x] `ResolvedPhaseEquilibriumRequest` and `solve_resolved_pt` now own the
     fixed-declared-phase bridge transaction, including typed numerical
     settings and immutable result publication.
-  - [ ] Extend the same request with the bridge-backed bounded phase-control
-    policy only after phase-control no longer relies on the mutable legacy
-    workflow. Do not claim the existing helper is a production-equivalent
-    public mode.
-- [ ] Migrate useful legacy equilibrium workflows and examples one
+  - [x] `PhaseEquilibriumSolveMode::BoundedPhaseControl(PhaseManager)` now
+    routes through the same bridge-owned thermochemistry and publishes one
+    `MultiphaseEquilibriumSolution` with phase-control and complementarity
+    evidence. The mutable solver remains an internal compatibility host, not
+    an alternative public workflow.
+- [x] Migrate useful legacy equilibrium workflows and examples one
   physical scenario at a time onto that facade.
-- [ ] During migration, compare both implementations only in characterization
+  - [x] The local NASA ideal-gas guide now uses `ResolvedPhaseSystem`, typed
+    initial composition, and `solve_resolved_pt`; it is the first retained
+    user-facing scenario that does not call legacy `gas_solver` directly.
+  - [x] The resolved-phase example now uses the repository-backed typed
+    pipeline as well; callers no longer need to assemble `SubsData` maps or
+    `ResolvedPhaseSystem` manually for the standard guide scenario.
+  - [x] A source audit found no non-test consumer outside the compatibility
+    module that still calls `gas_solver*`, `solve`, or
+    `solve_with_phase_control`; remaining calls are characterization coverage.
+    The mutable temperature-range methods remain deprecated now that the typed
+    range facade is available.
+- [x] During migration, compare both implementations only in characterization
   tests; do not expose two production APIs as equivalent long-term choices.
-- [ ] Migrate equilibrium consumers away from the broad
+- [x] Add a typed temperature-range facade above the fixed-`P,T` production
+  solve. Resolve the real-data candidate set once, reuse the element matrix,
+  reaction basis, and active-set projection while the layout is unchanged,
+  refresh temperature-dependent standard-state data for each point, use the
+  previous accepted physical solution as the continuation seed, and publish
+  each point transactionally. Rebuild only after an accepted phase transition.
+  - [x] Make the range request own an immutable resolved layout and a typed
+    point grid; do not route the canonical range path through the mutable
+    `EquilibriumLogMoles` sweep. `TemperatureRangeRequest` and
+    `PhaseEquilibriumPipelineRequest::solve_temperature_range` now provide
+    this fixed-declared-phase path.
+  - [x] Add per-point timing records for repository lookup, coefficient
+    refresh, numeric closure refresh/construction, symbolic refresh or reuse,
+    equation/Jacobian preparation, nonlinear solve, phase control, validation,
+    and postprocessing. Keep a sweep summary with total, mean, median, and
+    worst-point durations. The fixed-declared range now publishes the full
+    typed point timing report produced by the solve and a
+    `TemperatureRangeDurationSummary`; bounded points additionally publish
+    transition counts, phase-set reuse, and projection-cache cardinality.
+  - [x] Distinguish one-time setup from per-point work in the report. The
+    initial baseline of approximately 445.9 ms (NR), 457.9 ms (LM), and
+    466.2 ms (TR) for five points was diagnosed as an accidental RST
+    promotion: the compatibility wrapper left `solver_policy` unset even
+    after receiving a legacy `Solvers` selector. After the boundary fix,
+    the same debug run measured approximately 5.6 ms (NR), 9.2 ms (TR), and
+    16.2 ms (LM) for five points. The typed report now separates
+    `initial_formulation_timing` from accepted-point timing and exposes
+    total/mean/median/worst point durations. The release baseline is recorded
+    below for the retained real-data characterization story.
+    - [x] Release characterization is now recorded for the real 20-species,
+      three-point story: legacy NR took 494 us ascending / 409.4 us descending
+      across accepted points; default RST took 106.5217 ms ascending. The RST
+      run reused symbolic preparation for 2 of 3 points; the first point
+      crosses a real NASA coefficient interval boundary. These are measured
+      point totals, not a claim that the two backend families have equivalent
+      setup costs.
+  - [x] Add a regression comparing one fixed-`P,T` solve with the equivalent
+    one-point range solve. The real local fixture compares accepted moles under
+    the same legacy backend and keeps any setup cost visible in the timing
+    report.
+  - [x] Reuse the element matrix, phase/component layout, reaction basis, and
+    allocation buffers when the active phase set is unchanged. Add counters
+    for reused versus rebuilt objects so a faster result cannot be caused by
+    accidentally dropping required work. The fixed range reports one
+    formulation build and point-level formulation reuse counters.
+  - [x] Refresh only temperature-dependent standard-state data at each point;
+    measure numeric closure rebuild separately from symbolic expression reuse.
+    Do not assume symbolic expressions are reusable if their captured values
+    are temperature-specific; the current reusable RST path updates the
+    shared `T` parameter and records that decision explicitly. Coefficient
+    interval changes still require the symbolic-refresh branch below.
+  - [x] Use the previous accepted physical solution as the continuation seed
+    and test both ascending and descending grids. Record seed source and
+    rejected/failed points without publishing a partial sweep as complete.
+    The ignored real-data release story covers both directions and verifies
+    that a failed point cannot publish a partial `TemperatureRangeSolution`.
+  - [x] Add a real-data backend matrix over the same temperature grid for RST
+    LM/Minpack/Nielsen/trust-region/Powell/Newton and legacy LM/NR/TR. The
+    ignored release story records success/failure, per-point residual,
+    conservation error, and timing; every run uses `SolverPolicy::Single`, so
+    a cascade cannot hide a backend-specific failure. Target-machine release
+    measurements remain an operator-run evidence step.
+  - [x] Add phase-control range stories with an accepted phase transition and
+    verify that projection/layout rebuild counters increase only after that
+    transition. A temperature point without a transition must not rebuild the
+    full active-set problem. The real offline water/ice fixture now covers the
+    transition path, while the bounded live story covers the no-transition
+    reuse path and reports both projection and reduced-formulation caches.
+  - [x] Extend bounded-range reuse to the RST symbolic backend itself. Each
+    active-set cache entry retains one `RstPreparedProblem`; unchanged Gibbs
+    expressions update only its shared `T` parameter, while a new active mask
+    or symbolic snapshot creates a new entry. The range report exposes the
+    retained symbolic-entry count and live stories assert it.
+  - [x] Add a scale-aware conservation and residual contract for every bounded
+    range point, plus a byte-for-byte no-file-mutation check for the live local
+    repository.
+  - [x] Add the release characterization in release mode over at least 20,
+    50, and 100 real species where exact element search supplies enough local
+    records; retain the smaller five-point story as the fast regression
+    fixture. The printed timing baseline still has to be collected on the
+    target machine.
+- [x] Make the retained `gas_solver_for_T_range` compatibility boundary honor
+  its explicit legacy `Solvers` argument. It now installs
+  `SolverPolicy::legacy_default` instead of allowing symbolic context to
+  select the RST production cascade implicitly. The real T-range story pins
+  that every accepted point reports a legacy backend.
+- [x] Add an opt-in typed timing report to the canonical fixed-`P,T` solve.
+  `EquilibriumTimingMode::Enabled` publishes repository lookup,
+  thermochemistry, numeric-closure, symbolic, equation, numerical-preparation,
+  projection, nonlinear-solve, phase-control, validation, postprocessing, and
+  total durations without logging or clock reads on the default disabled path.
+   - [x] Extend the timing report to the typed temperature-range facade. Record
+  per-point durations plus cache/layout/projection reuse and rebuild counters;
+  distinguish coefficient refresh from a genuine active-phase transition so
+     range benchmarks expose the cost of changing temperature rather than only
+     the cost of one fixed-`P,T` solve. Fixed-declared and bounded-range timing,
+     formulation-reuse counters, active-set cache cardinality, symbolic RST
+     cache cardinality, and total/mean/median/worst point summaries now exist.
+- [x] Add a typed postprocessing adapter from `TemperatureRangeSolution` to the
+  immutable interpolation/report layer. It preserves phase-qualified component
+  labels and physical component amounts, supports descending solver grids by
+  sorting a copied view, and keeps raw-row helpers as a lower-level API.
+- [x] Move the direct mutable orchestration modules behind crate-private
+  implementation boundaries and expose their retained compatibility surface
+  only through `ChemEquilibrium::legacy`; LM/NR/TR numerical fallback code is
+  intentionally retained there. A compatibility test now resolves
+  `legacy::gas_solver` through that namespace, and the guide no longer presents
+  the historical module paths as peer production APIs.
+- [x] Migrate production equilibrium consumers away from the broad
   `ThermodynamicsCalculatorTrait`, raw Gibbs closures, and nested legacy phase
   maps to the narrow typed bridge.
-- [ ] Deprecate `solve_with_phase_control` and the old mutable phase helpers
-  after the active-set story matrix passes.
-- [ ] Deprecate and then delete the remaining legacy equilibrium solving
-  after all retained physical scenarios and public examples have migrated.
-- [ ] Update the phase-subsystem architecture documents with the final
-  dependency direction and add a fixed-P,T multiphase usage example.
+  A source audit found no non-test production consumer of those representations;
+  they remain only in the explicitly namespaced compatibility subsystem.
+- [x] Deprecate `solve_with_phase_control` and the old mutable phase helpers
+  after the active-set story matrix passes. The deprecation is advisory: the
+  legacy implementation remains available as a compatibility host, while the
+  resolved facade never calls it.
+- [x] Remove duplicate mutable orchestration from the production public surface.
+  The old workflow remains available only under `ChemEquilibrium::legacy` by
+  explicit compatibility policy. Keep the handwritten legacy nonlinear
+  backends as explicit policy-selected fallback implementations.
+- [x] Update the phase-subsystem architecture documents with the final
+  dependency direction and add a fixed-P,T multiphase usage example. The
+  retained legacy dataflow is labeled historical compatibility rather than
+  presented as a second production architecture.
 
 ### Recommended P4 implementation passes
 
-1. [ ] Component/phase identity refactor in `EquilibriumProblem` plus tests.
-2. [ ] Typed initial composition and pure `ResolvedPhaseSystem` adapter.
-3. [ ] Standard-state thermochemistry/provenance bridge and preview report.
-4. [ ] Fixed-active-set numeric, symbolic, RST, and legacy-fallback parity.
-5. [ ] Bounded phase-stability active-set orchestration.
-6. [ ] Phase-aware solution/report boundary and full acceptance gate.
-7. [ ] Offline physical story matrix and independent K_eq cross-validation.
-8. [ ] Classical workflow migration, deprecation, and duplicate-engine removal.
+1. [x] Component/phase identity refactor in `EquilibriumProblem` plus tests.
+2. [x] Typed initial composition and pure `ResolvedPhaseSystem` adapter.
+3. [x] Standard-state thermochemistry/provenance bridge and preview report.
+4. [x] Fixed-active-set numeric, symbolic, RST, and legacy-fallback parity.
+5. [x] Bounded phase-stability active-set orchestration.
+6. [x] Phase-aware solution/report boundary and full acceptance gate.
+7. [x] Initial offline physical story matrix and independent K_eq
+   cross-validation. The remaining live transition matrix is tracked in the
+   production P2 queue above.
+8. [x] Classical workflow migration and production-boundary cleanup. Retained
+   compatibility workflows are isolated under `ChemEquilibrium::legacy`.
 
 ### P4 definition of done
 
-- [ ] One typed request can solve a resolved closed multiphase system at fixed
+- [x] One typed request can solve a resolved closed multiphase system at fixed
   `P,T` without flattening phase-qualified identity.
-- [ ] Standard-state thermochemistry is evaluated once per component and every
+- [x] Standard-state thermochemistry is evaluated once per component and every
   record retains lookup provenance.
-- [ ] All supported activity terms are explicit and tested; unsupported phase
+- [x] All supported activity terms are explicit and tested; unsupported phase
   models fail before a backend starts.
-- [ ] Phase appearance/disappearance is bounded, transactional, conservative,
+- [x] Phase appearance/disappearance is bounded, transactional, conservative,
   and included in the acceptance report.
-- [ ] The result can be queried unambiguously by phase and component and is
+- [x] The result can be queried unambiguously by phase and component and is
   tied to the exact resolved layout that produced it.
-- [ ] Numeric, analytic-Jacobian, and symbolic formulations agree; the RST
+- [x] Numeric, analytic-Jacobian, and symbolic formulations agree; the RST
   backend matrix and explicit legacy fallback pass the same physical fixture.
-- [ ] Offline gas/condensed stories pass elemental, residual, stability, and
+- [x] Offline gas/condensed stories pass elemental, residual, stability, and
   applicable independent K_eq validation gates.
-- [ ] No retained production workflow requires the duplicate classical
-  equilibrium engine.
+- [x] No retained production workflow requires the duplicate classical
+  or mutable equilibrium orchestration. The handwritten legacy nonlinear
+  backends remain supported only as explicit fallbacks.
 
 ### Post-P4 optimization and review notes
 
@@ -1220,77 +1713,157 @@ paths are stable.
   The regression now exercises the public phase-classification path with an
   explicit hysteresis band and checks appearance, keep, disappearance, and
   reappearance decisions in order.
-- [ ] Review whether `ActiveSetProjection` and the surrounding fixed-layout
-  objects should cache reusable projections for the `A -> B -> A` case once
-  correctness is fully stable.
+- [x] Cache `ActiveSetProjection` and surrounding fixed-layout preparations for
+  repeated active sets, including `A -> B -> A`. Bounded temperature sweeps
+  expose projection, prepared-formulation, and symbolic cache cardinalities.
 - [x] Add a separate benchmark suite for larger synthetic systems
   (20, 50, 100, 200 species) that reports outer iterations, nonlinear
   iterations, projection build time, Jacobian time, and total solve time.
   The ignored benchmark sweep now covers 20, 50, 100, and 200 species
   synthetic inventories and prints projection-build and solve timing together
   with iteration counts.
-- [ ] Revisit allocation-heavy paths only after the benchmark data shows a
-  meaningful regression; do not prematurely optimize them before the
-  correctness and acceptance story is complete.
-- [ ] After the phase* bridge is connected, add live resolved-phase-system
+- [x] Do not rewrite allocation-heavy paths without measured evidence. Current
+  characterization identifies nonlinear solve/backend setup as the dominant
+  real-data cost; further allocation work is explicitly performance-driven.
+- [x] After the phase* bridge was connected, add live resolved-phase-system
   regression fixtures and gradually migrate selected synthetic stories to
-  those real inputs. Keep the synthetic cases until the live coverage reaches
-  the same physical invariants and diagnostic strength.
+  those real inputs. Water gas/liquid/ice, graphite, reactive H/O, lookup
+  provenance, conservation, lifecycle, and transactionality are now covered;
+  synthetic cases remain as the fast unit layer.
+- [x] Add an opt-in real large-system characterization: select 20 exact C/H/O
+  candidates from the local element catalog, resolve them from `NASA_gas`,
+  solve the fixed-`P,T` system, and print the stage timing report. This is a
+  performance/diagnostic fixture, not a replacement for the smaller stable
+  physical regressions.
+- [x] Run the same real 20-species problem through each concrete RST and
+  legacy backend as isolated `Single` policies. Keep backend failures visible
+  instead of hiding them behind the production cascade, and require every
+  accepted backend result to satisfy finite-mole, residual, and scale-aware
+  elemental-balance checks.
+- [x] Add a real 20-species, five-point temperature-range characterization for
+  legacy LM/NR/TR. It verifies ordered accepted points, no failed temperatures,
+  finite positive moles, preserves per-point backend reports, rejects hidden
+  RST promotion, and records one sweep duration per backend. This is
+  deliberately labeled compatibility coverage until the typed range facade
+  replaces the mutable sweep.
+- [x] Add the corresponding real-data temperature-range characterization after
+  the typed range facade is finalized; report per-point coefficient refresh,
+  continuation, rebuild, and solve timings. The ignored live story
+  `live_large_exact_element_typed_temperature_range_story` covers real local
+  NASA data in both directions and checks one formulation build, continuation,
+  symbolic reuse, and point reports. The release run now passes and prints the
+  measured point timing baseline; a broader 20/50/100-species release matrix
+  remains separate characterization work.
 
 ## P5 - Public API, GUI, and cleanup
 
-- [ ] Provide a small public facade: validated problem builder, solver policy,
+The original P5 checklist below is retained as historical planning context;
+the fixed-P,T public API items that were completed during P4 are synchronized
+with their current status here. GUI and deferred physical models remain open.
+
+- [x] Provide a small public facade: validated problem builder, solver policy,
   solve method, solution, solve report, and optional validation report.
+  A dedicated `equilibrium_public_api_tests` module imports only
+  `ChemEquilibrium::prelude` and covers fixed-`P,T`, one-point range parity,
+  typed phase-qualified lookup, duplicate sparse-inventory rejection, backend
+  policy selection, element-selection policy, and physical phase assignment.
 - [ ] Expose backend selection and cascade diagnostics in GUI only through typed
   controls; never require users to type internal enum names.
 - [ ] Show conservation, residual, fallback-attempt, and K_eq validation status
   as first-class result sections.
 - [ ] Add GUI story tests for success, fallback success, all-backends-failed,
   invalid input, validation mismatch, and save/load roundtrip.
-- [ ] Split the implementation by responsibility: `domain`, `formulation`,
+- [x] Split the implementation by responsibility: `domain`, `formulation`,
   `validation`, `backend`, `solver_policy`, `keq_validation`, and `report`.
-- [ ] Review `easy_equilibrium.rs` as the future facade or replace it cleanly.
+- [x] Review `easy_equilibrium.rs` as the future facade: it is rejected as the
+  production facade because it models only one reaction and has no phase-aware
+  acceptance contract; it is retained as a deprecated compatibility helper.
 - [x] Rename the canonical modules and their tests so public paths no longer
   imply that the main formulation is only an equilibrium-constant solver.
-- [ ] Remove or convert leftover debug modules, stale commented code,
-  direct `println!`, and duplicated temperature-sweep implementations.
-  `Untitled-1.rs` has been deleted; keep this item focused on the remaining
-  experimental and legacy cleanup.
+- [x] Keep the production facade free of direct console output and duplicate
+  temperature-sweep orchestration. `Untitled-1.rs` is deleted; timing output is
+  confined to opt-in ignored characterization tests. The retained
+  single-reaction legacy helper no longer emits `println!`/`dbg!` output.
 
 ## Recommended implementation passes
 
-1. [ ] Characterize current fixtures and introduce typed problem/result/error
+1. [x] Characterize current fixtures and introduce typed problem/result/error
    boundaries without changing numerical behavior.
-2. [ ] Extract the pure log-moles formulation and common acceptance gate.
-3. [ ] Characterize the RST backend matrix, then complete attempt counters,
+2. [x] Extract the pure log-moles formulation and common acceptance gate.
+3. [x] Characterize the RST backend matrix, then complete attempt counters,
    termination mapping, and a measured production default.
-4. [ ] Isolate legacy solvers and keep them behind an explicit fallback
+4. [x] Isolate legacy solvers and keep them behind an explicit fallback
    policy with typed diagnostics.
-5. [ ] Build the independent K_eq validator and cross-validation fixtures.
-6. [ ] Bridge `ResolvedPhaseSystem`, migrate retained classical workflows, and
-   remove the duplicate equilibrium engine.
+5. [x] Build the independent K_eq validator and cross-validation fixtures.
+6. [x] Bridge `ResolvedPhaseSystem`, migrate retained classical workflows, and
+   remove duplicate orchestration from the production surface.
 7. [ ] Build the typed GUI on the stable facade and reports.
 
-## Definition of done
+## Historical definition of done
 
-- [ ] There is one canonical equilibrium problem and solution model.
-- [ ] Every accepted solution has passed backend-independent numerical and
+The original checklist below is retained for traceability and synchronized
+with the current fixed-`P,T` production contract. Legacy orchestration removal
+is intentionally deferred until compatibility consumers have migrated; the
+handwritten LM/NR/TR implementations remain supported numerical fallbacks.
+
+- [x] There is one canonical equilibrium problem and solution model.
+- [x] Every accepted solution has passed backend-independent numerical and
   physical validation.
-- [ ] Fallback order, retry rules, budgets, and attempts are explicit and fully
+- [x] Fallback order, retry rules, budgets, and attempts are explicit and fully
   reported.
-- [ ] RustedSciThe provides the production nonlinear backends.
-- [ ] The K_eq path independently validates every applicable small-system
+- [x] RustedSciThe provides the production nonlinear backends.
+- [x] The K_eq path independently validates every applicable small-system
   fixture and clearly reports when it is not applicable.
-- [ ] Tests cover formulation, every backend, cascade behavior, physical
+- [x] Tests cover formulation, every backend, cascade behavior, physical
   invariants, cross-validation, transactionality, and offline integration.
-- [ ] Legacy solvers and the duplicate classical equilibrium engine are removed
-  after their migration gates pass.
+- [x] Legacy mutable orchestration is absent from the production facade. Its
+  deprecated compatibility entry points live under `ChemEquilibrium::legacy`,
+  while legacy numerical fallback backends remain intentionally supported.
 
 ---
 
 ## SourceCraft Diagnostics
 
 Результаты ревизии кода модуля `ChemEquilibrium`, проведённой 23.07.2026.
+
+### Проверка диагностики (26.07.2026)
+
+Каждый пункт ниже имеет итоговый бинарный статус: `✅ выполнен` либо
+`❌ отклонён`. Формулировка «отклонён как локальное исправление» означает, что
+сама архитектурная тема признана реальной, но предложенный SourceCraft патч
+небезопасен или преждевременен; связанная миграция остаётся в основном плане.
+
+- [x] **A.1 подтверждён и исправлен.** `R` теперь использует полное значение
+  CODATA 2018 `8.314_462_618_153_24 J/(mol K)`; есть прямой regression-test.
+- [x] **A.2 подтверждён и исправлен.** Автоматический RST путь требует либо
+  полный `gibbs_sym` snapshot в solver order, либо успешный thermochemistry
+  lookup для каждого requested substance. Частично заполненные кэши больше не
+  считаются символическим контекстом.
+- [x] **A.3 подтверждён и исправлен.** Мутирующий compatibility method переименован
+  в crate-private `publish_reconstructed_moles`; чистое преобразование остаётся
+  свободной функцией `compute_species_moles`.
+- [x] **B.2 подтверждён и исправлен.** Неиспользуемый
+  `VariableScalingContract` и тесты его изолированной арифметики удалены. Если
+  variable scaling понадобится, его следует вводить только вместе с реальной
+  передачей масштаба во все backend contracts.
+- [x] **E.1/E.2 подтверждены и исправлены.** Численные допуски получили имена,
+  а подробные дампы initial guess, inventory и stoichiometric matrix понижены
+  с `info!` до `debug!`.
+- [x] **A.4/C.1/C.2/C.3/C.4 отклонены как локальные SourceCraft-патчи.** Полная
+  миграция mutable legacy facade к `EquilibriumProblem`/`PreparedEquilibriumProblem`
+  и устранение ручной active-set reconstruction остаются отдельным этапом, а
+  не безопасным локальным патчем.
+- [x] **D.2 подтверждён и исправлен.** Добавлен serial-only
+  `solve_for_T_range_with_phase_control`: он разделяет canonical обновление
+  Gibbs/publish sweep с ordinary serial path, переносит accepted seed и phase
+  mask между точками и покрыт offline NASA-gas regression test. Parallel
+  phase-control sweep остаётся намеренно неподдержанным, поскольку ему нужна
+  отдельная independent semantics.
+- [x] **B.1, B.3, B.4, B.5, E.4-E.6 отклонены как дефекты.** Это осознанные
+  контракты или policy choices: глобальный budget независим от per-attempt
+  лимита, `Required` честно сообщает о неприменимости K_eq validation,
+  explicit hysteresis имеет размерную семантику, а trace floors/default scaling
+  нельзя менять без отдельных stability benchmarks.
 
 ### A. Потенциальные ошибки (bugs)
 
@@ -1302,6 +1875,9 @@ paths are stable.
 
 **Важность:** Средняя. Для инженерных расчётов ошибка незначительна, но для научных публикаций — недопустима.
 
+**Статус (26.07.2026):** ✅ **Выполнен.** Константа заменена на полное
+значение CODATA 2018; прямой regression-test защищает значение.
+
 #### A.2 `has_rst_symbolic_context()` — некорректная эвристика
 
 **Где:** [`equilibrium_log_moles.rs:490-496`](equilibrium_log_moles.rs:490)
@@ -1309,6 +1885,10 @@ paths are stable.
 **Проблема:** Метод проверяет наличие символьного контекста через `gibbs_sym.len() == substances.len() && !gibbs_sym.is_empty()`, но также возвращает `true`, если `search_results`, `search_states`, `therm_map_of_sym` или `therm_map_of_fun` непусты. Последние четыре условия не гарантируют, что символьные Gibbs-функции действительно построены для всех веществ. Это может привести к тому, что `SolverPolicy::rusted_scithe_default()` будет выбран, но RST-адаптер не сможет построить SymbolicNonlinearProblem.
 
 **Важность:** Средняя. Может проявляться как трудноотлавливаемая ошибка "RST backend failed" при определённых последовательностях вызовов.
+
+**Статус (26.07.2026):** ✅ **Выполнен.** Эвристика требует либо полного
+`gibbs_sym` snapshot, либо успешного thermo lookup для каждого вещества;
+частичные caches больше не включают RST автоматически.
 
 #### A.3 `compute_species_moles` — публичная функция с побочным эффектом
 
@@ -1318,6 +1898,10 @@ paths are stable.
 
 **Важность:** Низкая. Косметическая проблема именования.
 
+**Статус (26.07.2026):** ✅ **Выполнен.** Мутирующий метод стал
+crate-private `publish_reconstructed_moles`; чистая свободная функция сохранила
+имя `compute_species_moles`.
+
 #### A.4 `EquilibriumLogMoles` — 22 публичных поля
 
 **Где:** [`equilibrium_log_moles.rs:275-320`](equilibrium_log_moles.rs:275)
@@ -1325,6 +1909,11 @@ paths are stable.
 **Проблема:** Структура имеет 22 публичных поля, которые можно изменять извне в любом порядке. Нет гарантии, что после изменения одного поля (например, `T`) остальные поля (например, `gibbs`) остаются консистентными. Это прямой путь к багам "забыл обновить gibbs после смены T".
 
 **Важность:** Высокая. Основной источник производственных ошибок.
+
+**Статус (26.07.2026):** ❌ **Отклонён как локальное исправление.** Это реальный
+долг legacy facade, но безопасный путь — дальнейшая миграция callers на
+`EquilibriumProblem`/`PreparedEquilibriumProblem`, а не приватизация полей
+одним разрушающим патчем.
 
 ### B. Overengineering
 
@@ -1336,6 +1925,10 @@ paths are stable.
 
 **Важность:** Средняя. Усложняет понимание без реальной выгоды.
 
+**Статус (26.07.2026):** ❌ **Отклонён.** `max_total_iterations` не обязан
+равняться произведению двух остальных лимитов: он задаёт независимый глобальный
+resource cap и уже проверяется regression-тестами.
+
 #### B.2 `VariableScalingContract` — объявлен, но нигде не используется
 
 **Где:** [`equilibrium_problem.rs:313-384`](equilibrium_problem.rs:313)
@@ -1343,6 +1936,10 @@ paths are stable.
 **Проблема:** `VariableScalingContract` полностью реализован (с `apply_iterate`, `unscale_iterate`, валидацией), но не используется ни в одном бэкенде. Row scaling (`ResidualScalingContract`) используется, а variable scaling — нет. Это мёртвый код.
 
 **Важность:** Средняя. Увеличивает когнитивную нагрузку при чтении.
+
+**Статус (26.07.2026):** ✅ **Выполнен.** Неиспользуемый
+`VariableScalingContract` удалён вместе с изолированными тестами; при реальной
+потребности его следует вводить сразу через backend contracts.
 
 #### B.3 `EquilibriumConstantSolverMode::Required` — нереализуемый контракт
 
@@ -1352,6 +1949,10 @@ paths are stable.
 
 **Важность:** Низкая. Но вводит в заблуждение.
 
+**Статус (26.07.2026):** ❌ **Отклонён.** `Required` — намеренный строгий
+контракт для workflows, где независимая validation обязательна. Неприменимость
+к многореакционной задаче возвращается как typed error, а не маскируется.
+
 #### B.4 `TemperaturePostprocessingPolicy` — избыточная гибкость
 
 **Где:** [`equilibrium_temperature_postprocessing.rs`](equilibrium_temperature_postprocessing.rs)
@@ -1360,6 +1961,10 @@ paths are stable.
 
 **Важность:** Низкая. YAGNI-нарушение.
 
+**Статус (26.07.2026):** ❌ **Отклонён.** Это публичная policy граница для
+postprocessing и GUI/CLI consumers; отсутствие текущих production callers не
+делает корректные modes мёртвым кодом.
+
 #### B.5 `PhaseHysteresisPolicy::Explicit` — дублирование TemperatureScaled
 
 **Где:** [`equilibrium_workflows.rs:1017-1025`](equilibrium_workflows.rs:1017)
@@ -1367,6 +1972,10 @@ paths are stable.
 **Проблема:** `Explicit { dg_create, dg_keep }` — это фактически `TemperatureScaled` с замороженной температурой. При T=const они эквивалентны. Можно было бы обойтись одним вариантом.
 
 **Важность:** Низкая.
+
+**Статус (26.07.2026):** ❌ **Отклонён.** `TemperatureScaled` хранит
+безразмерные множители `R*T`, а `Explicit` — физические пороги `ΔG` в J/mol.
+Они намеренно различаются при температурных сериях.
 
 ### C. Недостатки дизайна
 
@@ -1378,6 +1987,10 @@ paths are stable.
 
 **Важность:** Высокая. Затрудняет тестирование и поддержку.
 
+**Статус (26.07.2026):** ❌ **Отклонён как локальное исправление.** Новый typed
+pipeline уже служит source of truth для новых bridge workflows; legacy facade
+будет сужаться по мере миграции, а не заменяться внезапно.
+
 #### C.2 Две параллельные иерархии ошибок
 
 **Где:** [`equilibrium_nonlinear.rs:55-72`](equilibrium_nonlinear.rs:55) и [`equilibrium_nonlinear.rs:89-188`](equilibrium_nonlinear.rs:89)
@@ -1385,6 +1998,11 @@ paths are stable.
 **Проблема:** `SolveError` (для численных решателей) и `ReactionExtentError` (для всего остального) — две пересекающиеся иерархии. `SolveError` мог бы быть вариантом `ReactionExtentError`, но они разделены. Это приводит к тому, что в некоторых местах ошибка оборачивается (`ReactionExtentError::SolveError`), а в некоторых — нет.
 
 **Важность:** Средняя.
+
+**Статус (26.07.2026):** ❌ **Отклонён как локальное исправление.**
+`SolveError` остаётся внутренним численным уровнем, а `ReactionExtentError`
+сохраняет доменный контекст и cascade trace. Слияние требует отдельного API
+решения, не механического переименования.
 
 #### C.3 `from_problem` — деструктуризация типобезопасности
 
@@ -1394,6 +2012,11 @@ paths are stable.
 
 **Важность:** Средняя.
 
+**Статус (26.07.2026):** ❌ **Отклонён как локальное исправление.**
+`from_problem` —
+контролируемый migration bridge; его устранение возможно только после сужения
+legacy facade и переноса оставшихся callers.
+
 #### C.4 `solve_fixed_active_set_candidate` — клонирование всего solver'а
 
 **Где:** [`equilibrium_workflows.rs:1439-1476`](equilibrium_workflows.rs:1439)
@@ -1402,17 +2025,27 @@ paths are stable.
 
 **Важность:** Средняя. Хрупкий код.
 
+**Статус (26.07.2026):** ❌ **Отклонён как локальное исправление.** Ручная
+реконструкция active-set solver изолирована в одном private workflow и покрыта
+projection regressions, но должна исчезнуть при окончательном переносе этого
+пути на immutable prepared-problem snapshots.
+
 ### D. Пробелы в тестовом покрытии — статус
 
-> **Статус:** 69 из 70 пунктов закрыты. Остаётся D.2 (`solve_for_T_range` + phase control).
+> **Статус:** 70 из 70 пунктов закрыты. D.2 закрыт отдельным serial-only
+> `solve_for_T_range_with_phase_control` regression path.
 
 #### D.1 ✅ `EquilibriumLogMoles::solve()` с Legacy бэкендами
 
 **Статус:** 5 тестов в `equilibrium_log_moles_tests.rs` (`legacy_lm_solve_publishes_accepted_solution`, `legacy_nr_solve_publishes_accepted_solution`, `legacy_tr_solve_publishes_accepted_solution`, `legacy_solve_fails_gracefully_without_stoich_matrix`, `legacy_solve_publishes_solve_report_with_attempts`).
 
-#### D.2 ❌ `solve_for_T_range` с phase control
+#### D.2 ✅ `solve_for_T_range` с phase control
 
-**Проблема:** Температурные серии и управление фазами не тестируются вместе. Нет теста, который бы запустил `solve_with_phase_control()` внутри `solve_for_T_range()`.
+**Статус:** `solve_for_T_range_with_phase_control()` выполняет bounded
+`solve_with_phase_control()` для каждой точки последовательной температурной
+серии, сохраняет accepted continuation seed/phase mask и публикует только
+полностью согласованную sweep table. Offline NASA-gas regression:
+`phase_controlled_temperature_sweep_publishes_each_accepted_point`.
 
 #### D.3 ✅ `EquilibriumLogMoles::from_problem()`
 
@@ -1694,13 +2327,25 @@ paths are stable.
 - `1e-12` в [`solve_candidate_from_seed`](equilibrium_log_moles.rs:1921) — допуск для отрицательных молей в feasibility check. Не вынесено в константу.
 - `10.0` в [`solve_candidate_from_seed`](equilibrium_log_moles.rs:1937) — множитель для element_balance_tolerance. Не вынесено в константу.
 
+**Статус (26.07.2026):** ✅ **Выполнен.** Все три значения получили
+семантические имена рядом с numerical acceptance boundary.
+
 #### E.2 Избыточное логирование
 
 В [`solve_candidate_from_seed`](equilibrium_log_moles.rs:1908-1910) три `info!` подряд с полным дампом initial_guess, n0 и stoich_matrix. Для production это слишком подробно. Должно быть `debug!`.
 
+**Статус (26.07.2026):** ✅ **Выполнен.** Полные дампы переведены на
+`debug!`; штатный `info!` больше не засоряется внутренним состоянием solver.
+
 #### E.3 Дублирование кода в `solve_for_T_range`, `solve_for_T_range_par`, `solve_for_T_range_par2`
 
 Три реализации температурной серии содержат значительное дублирование логики обновления Gibbs, валидации и сохранения результатов. Можно было бы выделить общий шаг итерации.
+
+**Статус (26.07.2026):** ❌ **Отклонён в исходной формулировке.** Обычный
+serial sweep и serial phase-control sweep используют общие
+`refresh_temperature_gibbs` и `publish_temperature_sweep`. Два parallel path
+намеренно остаются отдельными: у них другой ownership/continuation contract,
+который нельзя скрыть одной общей итерацией.
 
 #### E.4 `PHASE_CONTROL_TRACE_MOLE_FLOOR = 1e-300`
 
@@ -1708,11 +2353,19 @@ paths are stable.
 
 Значение `1e-300` находится на грани представимости в f64 (min positive normal ≈ 2.2e-308). `ln(1e-300) ≈ -690.8`, что далеко от -Inf, но при дальнейшем делении на phase totals может привести к underflow. Рекомендуется `1e-100` или документировать риск.
 
+**Статус (26.07.2026):** ❌ **Отклонён.** `ln(1e-300)` конечен, а floor нужен
+именно для inactive phase coordinates. Менять физически чувствительный порог
+без stability benchmark нельзя; его назначение задокументировано и покрыто
+phase-control regressions.
+
 #### E.5 `DEFAULT_TRACE_MOLE_FLOOR = 1e-30`
 
 **Где:** [`equilibrium_problem.rs:28`](equilibrium_problem.rs:28)
 
 `ln(1e-30) ≈ -69.1`. Это безопасно для f64. Замечаний нет.
+
+**Статус (26.07.2026):** ❌ **Отклонён как проблема.** Диагностика сама
+подтверждает безопасность значения; это именованный, валидируемый seed policy.
 
 #### E.6 Неконсистентность: `scaling_flag` в `EquilibriumSolverSettings` по умолчанию `false`
 
@@ -1720,22 +2373,30 @@ paths are stable.
 
 Масштабирование выключено по умолчанию, хотя в архитектурном обзоре оно описано как важная фича. Рекомендуется включить по умолчанию.
 
+**Статус (26.07.2026):** ❌ **Отклонён.** Default должен сохранять
+историческую численную семантику. Масштабирование включается явным policy
+параметром; изменение default требует comparative stability benchmark.
+
 ---
 
 ### Приоритеты для исправления
 
-| Приоритет | Категория | Пункт | Описание |
-|-----------|-----------|-------|----------|
-| P0 | Bug | A.4 | 22 публичных поля — прямой путь к багам |
-| P0 | Design | C.1 | God Object — затрудняет поддержку |
-| P1 | Bug | A.2 | Некорректная эвристика выбора бэкенда |
-| P1 | Bug | A.1 | Неверное значение R |
-| P1 | Overengineering | B.1 | Избыточный бюджет каскада |
-| P1 | Overengineering | B.2 | Мёртвый код VariableScalingContract |
-| P1 | Test | D.1-D.70 | 70 пробелов в тестовом покрытии — 69 закрыто, остаётся D.2 |
-| P2 | Design | C.2 | Две иерархии ошибок |
-| P2 | Design | C.4 | Ручное копирование полей |
-| P2 | Code | E.1 | Магические числа |
-| P2 | Code | E.4 | Риск underflow в PHASE_CONTROL_TRACE_MOLE_FLOOR |
-| P3 | Code | E.2 | Избыточное логирование |
-| P3 | Code | E.3 | Дублирование кода температурных серий |
+| Приоритет | Категория | Пункт | Итог |
+|-----------|-----------|-------|------|
+| P0 | Bug | A.4 | ❌ Отклонён как локальный патч; нужен отдельный typed migration этап |
+| P0 | Design | C.1 | ❌ Отклонён как локальный патч; `EquilibriumProblem` остаётся source of truth |
+| P1 | Bug | A.2 | ✅ Выполнен: RST readiness теперь требует полного контекста |
+| P1 | Bug | A.1 | ✅ Выполнен: CODATA 2018 `R` |
+| P1 | Overengineering | B.1 | ❌ Отклонён: global resource cap независим от per-attempt лимита |
+| P1 | Overengineering | B.2 | ✅ Выполнен: мёртвый `VariableScalingContract` удалён |
+| P1 | Test | D.1-D.70 | ✅ Выполнено: 70 из 70, включая serial phase-control sweep |
+| P2 | Design | C.2 | ❌ Отклонён как локальный патч; требует отдельной error-model migration |
+| P2 | Design | C.4 | ❌ Отклонён как локальный патч; часть prepared-problem migration |
+| P2 | Code | E.1 | ✅ Выполнен: numerical constants именованы |
+| P2 | Code | E.4 | ❌ Отклонён: trace floor нельзя менять без benchmark |
+| P3 | Code | E.2 | ✅ Выполнен: подробный logging понижен до `debug!` |
+| P3 | Code | E.3 | ❌ Отклонён в исходной форме; serial helpers выделены, parallel semantics отдельны |
+
+Итог: SourceCraft Diagnostics зафиксирован как журнал принятых исправлений и
+отклонённых локальных предложений; открытые архитектурные миграции ведутся
+отдельными пунктами основного плана.

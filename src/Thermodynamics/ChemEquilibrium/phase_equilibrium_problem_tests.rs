@@ -8,17 +8,21 @@
 use std::collections::HashMap;
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
+    equilibrium_logmole_jacobian, equilibrium_logmole_residual,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
-    EquilibriumConditions, TraceSpeciesSeedPolicy,
+    EquilibriumConditions, PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RustedSciTheSolver;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     SolverBackend, SolverPolicy,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::multiphase_equilibrium_residual_generator_sym;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
     PhaseEquilibriumBuildRequest, PhaseEquilibriumMetadata, PhaseEquilibriumProblemBundle,
     SupportedPhaseModelPolicy, build_phase_equilibrium_problem,
@@ -27,6 +31,7 @@ use crate::Thermodynamics::User_PhaseOrSolution::{PhaseModel, PhaseSpec, Resolve
 use crate::Thermodynamics::User_substances::{LibraryPriority, SubsData};
 use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 use crate::Thermodynamics::physical_state::PhysicalState;
+use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 fn gas_spec() -> PhaseSpec {
     PhaseSpec::ideal_gas(
@@ -72,7 +77,7 @@ fn prepared_local_nasa_gas() -> PhaseEquilibriumProblemBundle {
     let resolved = resolved_local_nasa_gas();
     let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
     let composition =
-        MultiphaseInitialComposition::from_dense(&layout, vec![2.0, 1.0, 0.0]).unwrap();
+        MultiphaseInitialComposition::from_dense(&layout, vec![0.1, 0.05, 1.9]).unwrap();
     build_phase_equilibrium_problem(
         PhaseEquilibriumBuildRequest::new(
             &resolved,
@@ -88,6 +93,46 @@ fn prepared_local_nasa_gas() -> PhaseEquilibriumProblemBundle {
 
 fn resolved_local_gas_and_condensed_water() -> ResolvedPhaseSystem {
     resolved_local_gas_and_condensed_water_with_map_order(false)
+}
+
+/// Local fixture whose gas phase spans both H and O conservation directions.
+/// This makes it suitable for a bounded active-set solve while still retaining
+/// H2O as a zero-inventory pure-liquid candidate.
+fn resolved_local_gas_oxygen_and_condensed_water() -> ResolvedPhaseSystem {
+    let gas = PhaseSpec::ideal_gas(
+        PhaseId::new(Some("gas".to_string())),
+        vec!["H2O".to_string(), "O2".to_string()],
+    )
+    .unwrap();
+    let liquid = PhaseSpec::pure_condensed(
+        PhaseId::new(Some("liquid".to_string())),
+        vec!["H2O".to_string()],
+        PhysicalState::Liquid,
+    )
+    .unwrap();
+
+    let mut gas_data = phase_data(&["H2O", "O2"]);
+    gas_data
+        .set_multiple_library_priorities(vec!["NASA_gas".to_string()], LibraryPriority::Priority);
+    gas_data.set_substance_physical_state("H2O".to_string(), PhysicalState::Gas);
+    gas_data.search_substances().unwrap();
+    gas_data.parse_all_thermal_coeffs().unwrap();
+
+    let mut condensed_data = phase_data(&["H2O"]);
+    condensed_data
+        .set_multiple_library_priorities(vec!["NASA_cond".to_string()], LibraryPriority::Priority);
+    condensed_data.set_substance_physical_state("H2O".to_string(), PhysicalState::Liquid);
+    condensed_data.search_substances().unwrap();
+    condensed_data.parse_all_thermal_coeffs().unwrap();
+
+    ResolvedPhaseSystem::new(
+        vec![gas, liquid],
+        HashMap::from([
+            (Some("gas".to_string()), gas_data),
+            (Some("liquid".to_string()), condensed_data),
+        ]),
+    )
+    .unwrap()
 }
 
 fn resolved_local_gas_and_condensed_water_with_map_order(
@@ -516,6 +561,9 @@ fn every_rst_backend_receives_the_same_phase_bridge_problem() {
 fn rst_fallback_reuses_one_prepared_phase_bridge_problem() {
     let accepted = prepared_local_nasa_gas()
         .solve_with(|settings| {
+            // This test isolates deterministic backend fallback rather than
+            // the stricter production acceptance preset.
+            settings.solver_params.tol = 1e-5;
             settings.solver_policy = Some(SolverPolicy::Cascade(vec![
                 SolverBackend::RustedSciThe(RustedSciTheSolver::NielsenLevenbergMarquardt),
                 SolverBackend::RustedSciThe(RustedSciTheSolver::LevenbergMarquardt),
@@ -617,6 +665,9 @@ fn bridge_standard_gibbs_matches_direct_subsdata_and_is_pressure_independent() {
         .get(&Some("gas".to_string()))
         .expect("gas payload must exist")
         .clone();
+    direct_payload
+        .extract_all_thermal_coeffs(temperature)
+        .unwrap();
     let direct_gibbs = direct_payload.calculate_dG0_fun_one_phase().unwrap();
     let (_, direct_compositions, _) =
         SubsData::calculate_elem_composition_and_molar_mass_local(&mut direct_payload, None)
@@ -682,6 +733,39 @@ fn same_molecule_in_gas_and_condensed_records_keeps_one_formula_and_two_componen
 }
 
 #[test]
+fn bridge_phase_control_starts_a_zero_condensed_candidate_as_inactive() {
+    let resolved = resolved_local_gas_oxygen_and_condensed_water();
+    let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
+    let composition =
+        MultiphaseInitialComposition::from_dense(&layout, vec![0.5, 0.25, 0.0]).unwrap();
+    let result = build_phase_equilibrium_problem(
+        PhaseEquilibriumBuildRequest::new(
+            &resolved,
+            EquilibriumConditions::new(500.0, 101_325.0, 101_325.0).unwrap(),
+            composition,
+            TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 },
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .solve_with_bounded_phase_control(|_| {}, |_| {})
+    .unwrap();
+
+    let phase_control = result
+        .phase_control_report()
+        .expect("bounded bridge solve must publish phase-control evidence");
+    assert_eq!(
+        phase_control.initial_phase_set.active_mask(),
+        vec![true, false]
+    );
+    assert_eq!(
+        result.phase_status(&PhaseId::new(Some("liquid".to_string()))),
+        Some(crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseStatus::Inactive)
+    );
+}
+
+#[test]
 fn bridge_problem_order_is_invariant_to_phase_map_insertion_order() {
     let first = resolved_local_gas_and_condensed_water_with_map_order(false);
     let second = resolved_local_gas_and_condensed_water_with_map_order(true);
@@ -739,6 +823,110 @@ fn bridge_problem_order_is_invariant_to_phase_map_insertion_order() {
             left(conditions.temperature()),
             right(conditions.temperature())
         );
+    }
+}
+
+#[test]
+fn physical_bridge_numeric_closure_and_symbolic_contracts_agree() {
+    // This fixture uses real NASA gas and condensed records so the comparison
+    // is not just a synthetic algebra study. It locks the bridge, closure, and
+    // symbolic residual/Jacobian paths to the same physical formulation.
+    let resolved = resolved_local_gas_oxygen_and_condensed_water();
+    let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
+    let composition =
+        MultiphaseInitialComposition::from_dense(&layout, vec![0.5, 0.25, 0.0]).unwrap();
+    let conditions = EquilibriumConditions::new(500.0, 101_325.0, 101_325.0).unwrap();
+    let bundle = build_phase_equilibrium_problem(
+        PhaseEquilibriumBuildRequest::new(
+            &resolved,
+            conditions,
+            composition,
+            TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 },
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let symbolic_standard_gibbs = bundle.symbolic_standard_gibbs().to_vec();
+    let prepared = PreparedEquilibriumProblem::new(bundle.into_problem()).unwrap();
+    let log_moles = prepared.problem().initial_log_moles().as_slice().to_vec();
+    let numeric_residual = prepared.residual(&log_moles).unwrap();
+    let numeric_jacobian = prepared.jacobian(&log_moles).unwrap();
+
+    let closure = equilibrium_logmole_residual(
+        prepared.reaction_basis().reactions.clone(),
+        prepared.problem().element_composition().clone(),
+        prepared.element_totals().to_vec(),
+        prepared.problem().gibbs().to_vec(),
+        prepared.problem().phases().to_vec(),
+        conditions.temperature(),
+        conditions.pressure(),
+        conditions.reference_pressure(),
+        prepared.species_phase().to_vec(),
+        1e-30,
+        1e-30,
+    )
+    .unwrap();
+    let closure_residual = closure(&log_moles).unwrap();
+    assert_eq!(closure_residual, numeric_residual);
+
+    let closure_jacobian = equilibrium_logmole_jacobian(
+        &log_moles,
+        &prepared.reaction_basis().reactions,
+        prepared.problem().element_composition(),
+        prepared.species_phase(),
+        prepared.phase_stoichiometry(),
+        prepared.problem().phases().len(),
+        1e-30,
+        1e-30,
+    )
+    .unwrap();
+    assert_eq!(closure_jacobian, numeric_jacobian);
+
+    let symbolic = multiphase_equilibrium_residual_generator_sym(
+        prepared.reaction_basis().reactions.clone(),
+        prepared.problem().element_composition().clone(),
+        prepared.element_totals().to_vec(),
+        symbolic_standard_gibbs,
+        prepared.problem().phases().to_vec(),
+        conditions.pressure(),
+        conditions.reference_pressure(),
+    )
+    .unwrap();
+    let variables = Expr::IndexedVars(prepared.problem().species().len(), "y").0;
+    let names = variables
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+
+    assert_eq!(symbolic.len(), numeric_residual.len());
+    for (row, residual) in symbolic.iter().enumerate() {
+        let evaluated = residual
+            .clone()
+            .set_variable("T", conditions.temperature())
+            .simplify();
+        let evaluate = evaluated.lambdify_borrowed_thread_safe(&refs);
+        let symbolic_residual = evaluate(&log_moles);
+        assert!(
+            (symbolic_residual - numeric_residual[row]).abs() <= 1e-10,
+            "physical residual {row} diverged: symbolic={symbolic_residual}, numeric={}",
+            numeric_residual[row]
+        );
+
+        for (column, variable) in refs.iter().enumerate() {
+            let derivative = evaluated
+                .diff(variable)
+                .set_variable("T", conditions.temperature());
+            let evaluate = derivative.lambdify_borrowed_thread_safe(&refs);
+            let symbolic_jacobian = evaluate(&log_moles);
+            assert!(
+                (symbolic_jacobian - numeric_jacobian[(row, column)]).abs() <= 1e-10,
+                "physical Jacobian entry ({row}, {column}) diverged: symbolic={symbolic_jacobian}, numeric={}",
+                numeric_jacobian[(row, column)]
+            );
+        }
     }
 }
 

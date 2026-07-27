@@ -583,7 +583,8 @@ mod tests {
         assert!(result.is_ok());
         let found_substances = result.unwrap();
         let _ = user_subs.calculate_therm_map_of_properties(400.0);
-        // Should find substances like H2O, H2O2 but not CH4, CO2, etc.
+        // SubsetOf semantics should find H2O/H2O2 and may also find H2 or O2;
+        // it must exclude compounds containing an element outside H/O.
         if !found_substances.is_empty() {
             // Check that search results were populated
             for substance in &found_substances {

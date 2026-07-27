@@ -6,9 +6,11 @@
 //! nonlinear solvers so both layers share one identity contract.
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
 use crate::Thermodynamics::User_PhaseOrSolution::PhaseModel;
 use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 use crate::Thermodynamics::physical_state::PhysicalState;
+use std::ops::Range;
 
 /// Solver-facing identity and thermodynamic interpretation of one component.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,5 +82,71 @@ impl From<String> for EquilibriumComponentDescriptor {
             PhaseModel::IdealGas,
             PhaseActivityModel::IdealGas,
         )
+    }
+}
+
+/// Ordered semantic description of one equilibrium phase.
+///
+/// Its component range is the canonical phase-to-component mapping. Numeric
+/// `Phase { kind, species }` values exist only as a derived projection for
+/// residual and Jacobian implementations that have not yet migrated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EquilibriumPhaseDescriptor {
+    id: PhaseId,
+    index: PhaseIndex,
+    physical_state: PhysicalState,
+    phase_model: PhaseModel,
+    activity_model: PhaseActivityModel,
+    component_range: Range<usize>,
+}
+
+impl EquilibriumPhaseDescriptor {
+    /// Creates a fully qualified phase descriptor in canonical phase order.
+    pub fn new(
+        id: PhaseId,
+        index: PhaseIndex,
+        physical_state: PhysicalState,
+        phase_model: PhaseModel,
+        activity_model: PhaseActivityModel,
+        component_range: Range<usize>,
+    ) -> Self {
+        Self {
+            id,
+            index,
+            physical_state,
+            phase_model,
+            activity_model,
+            component_range,
+        }
+    }
+
+    /// Semantic phase identity retained through lookup, solve, and reporting.
+    pub fn id(&self) -> &PhaseId {
+        &self.id
+    }
+
+    /// Dense numeric phase coordinate derived from canonical order.
+    pub fn index(&self) -> PhaseIndex {
+        self.index
+    }
+
+    /// Physical state selected for thermochemical record lookup.
+    pub fn physical_state(&self) -> PhysicalState {
+        self.physical_state
+    }
+
+    /// Domain-level phase model.
+    pub fn phase_model(&self) -> PhaseModel {
+        self.phase_model
+    }
+
+    /// Canonical activity law used by the numerical formulation.
+    pub fn activity_model(&self) -> PhaseActivityModel {
+        self.activity_model
+    }
+
+    /// Contiguous component range in canonical component order.
+    pub fn component_range(&self) -> Range<usize> {
+        self.component_range.clone()
     }
 }

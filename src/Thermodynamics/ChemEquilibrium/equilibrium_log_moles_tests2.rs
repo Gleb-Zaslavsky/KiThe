@@ -1,31 +1,33 @@
 #![allow(deprecated)]
 #[cfg(test)]
 mod tests {
-    use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-        continuation_seed_for_point, equilibrium_logmole_jacobian2, equilibrium_logmole_residual2,
-        evaluate_equilibrium_logmole_jacobian, evaluate_equilibrium_logmole_residual,
-        recoverable_backend_failure_kind, scale_jacobian_rows, scale_residual_rows, scaled_jacobian,
-        scaled_residual, temperature_failure, validate_logmole_system_dimensions,
-        validate_residual_conditions, ContinuationSeedPolicy, EquilibriumLogMoles,
-        EquilibriumSolveCandidate, GibbsFn, Phase, PhaseKind, Solvers,
-        TemperatureSolveFailure, TemperatureSolveSnapshot,
-    };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
-    use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{ReactionExtentError, SolveError};
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::SolverParams;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
+        ContinuationSeedPolicy, EquilibriumLogMoles, EquilibriumSolveCandidate, GibbsFn, Phase,
+        PhaseKind, R, Solvers, TemperatureSolveFailure, TemperatureSolveSnapshot,
+        continuation_seed_for_point, equilibrium_logmole_jacobian2, equilibrium_logmole_residual2,
+        evaluate_equilibrium_logmole_jacobian, evaluate_equilibrium_logmole_residual,
+        recoverable_backend_failure_kind, scale_jacobian_rows, scale_residual_rows,
+        scaled_jacobian, scaled_residual, temperature_failure, validate_logmole_system_dimensions,
+        validate_residual_conditions,
+    };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
+        ReactionExtentError, SolveError,
+    };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
         EquilibriumSolveReport, SolverAttemptFailureKind, SolverAttemptOutcome,
         SolverAttemptReport, SolverBackend, SolverCascadeBudget, SolverPolicy,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
-    use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
-        build_multiphase_acceptance_report, deactivate_phases_seed_only, seed_activated_phase,
-        InitialPhaseSet, PhaseManager, PhaseSeedPolicy, PhaseSet, PhaseStabilityReport,
-        PhaseTransitionPlan, PHASE_CONTROL_TRACE_MOLE_FLOOR,
-    };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseControlledSolveReport;
-    use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
+        InitialPhaseSet, PHASE_CONTROL_TRACE_MOLE_FLOOR, PhaseManager, PhaseSeedPolicy, PhaseSet,
+        PhaseStabilityReport, PhaseTransitionPlan, build_multiphase_acceptance_report,
+        deactivate_phases_seed_only, gas_solver, seed_activated_phase,
+    };
     use nalgebra::DMatrix;
     use std::collections::HashMap;
     use std::rc::Rc;
@@ -43,11 +45,11 @@ mod tests {
         solver.P = 101_325.0;
         solver.p0 = 101_325.0;
         solver.elem_composition = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
-        solver.gibbs = vec![
-            Rc::new(|_| 0.0) as GibbsFn,
-            Rc::new(|_| 0.0) as GibbsFn,
-        ];
-        solver.phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        solver.gibbs = vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn];
+        solver.phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
         solver.species_phase = vec![0, 0];
         solver.solver_settings.solver = Solvers::LM;
         solver.create_stoich_matrix().unwrap();
@@ -68,11 +70,11 @@ mod tests {
         solver.P = 101_325.0;
         solver.p0 = 101_325.0;
         solver.elem_composition = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
-        solver.gibbs = vec![
-            Rc::new(|_| 0.0) as GibbsFn,
-            Rc::new(|_| 0.0) as GibbsFn,
-        ];
-        solver.phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        solver.gibbs = vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn];
+        solver.phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
         solver.species_phase = vec![0, 0];
         solver.solver_settings.solver = Solvers::LM;
         solver.create_stoich_matrix().unwrap();
@@ -104,11 +106,11 @@ mod tests {
         solver.P = 101_325.0;
         solver.p0 = 101_325.0;
         solver.elem_composition = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
-        solver.gibbs = vec![
-            Rc::new(|_| 0.0) as GibbsFn,
-            Rc::new(|_| 0.0) as GibbsFn,
-        ];
-        solver.phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        solver.gibbs = vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn];
+        solver.phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
         solver.species_phase = vec![0, 0];
         solver.solver_settings.solver = Solvers::LM;
         solver.create_stoich_matrix().unwrap();
@@ -130,14 +132,15 @@ mod tests {
         solver.P = 101_325.0;
         solver.p0 = 101_325.0;
         solver.elem_composition = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
-        solver.gibbs = vec![
-            Rc::new(|_| 0.0) as GibbsFn,
-            Rc::new(|_| 0.0) as GibbsFn,
-        ];
-        solver.phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        solver.gibbs = vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn];
+        solver.phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
         solver.species_phase = vec![0, 0];
         solver.solver_settings.solver = Solvers::LM;
-        solver.solver_settings.keq_validation_mode = EquilibriumConstantValidationMode::WhenApplicable;
+        solver.solver_settings.keq_validation_mode =
+            EquilibriumConstantValidationMode::WhenApplicable;
         solver.create_stoich_matrix().unwrap();
         solver.solve().unwrap();
         let solution = solver.accepted_solution().unwrap();
@@ -149,11 +152,8 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn build_multiphase_acceptance_report_rejects_dimension_mismatch() {
-        let phase_set = PhaseSet::from_policy(
-            &InitialPhaseSet::AllCandidatePhases,
-            &[true],
-        )
-        .unwrap();
+        let phase_set =
+            PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &[true]).unwrap();
         let report = PhaseControlledSolveReport {
             iterations: 1,
             initial_active_phases: vec![PhaseIndex::new(0, 1).unwrap()],
@@ -198,11 +198,8 @@ mod tests {
 
     #[test]
     fn build_multiphase_acceptance_report_accepts_matching_dimensions() {
-        let phase_set = PhaseSet::from_policy(
-            &InitialPhaseSet::AllCandidatePhases,
-            &[true],
-        )
-        .unwrap();
+        let phase_set =
+            PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &[true]).unwrap();
         let stability = vec![
             PhaseStabilityReport {
                 phase: PhaseIndex::new(0, 1).unwrap(),
@@ -283,11 +280,8 @@ mod tests {
     #[test]
     fn classify_phases_returns_no_transition_when_all_phases_stable() {
         let manager = PhaseManager::new(1e-30, 0.0, 0.0);
-        let phase_set = PhaseSet::from_policy(
-            &InitialPhaseSet::AllCandidatePhases,
-            &[true],
-        )
-        .unwrap();
+        let phase_set =
+            PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &[true]).unwrap();
         let phase_totals = vec![1.0];
         let stability = vec![PhaseStabilityReport {
             phase: PhaseIndex::new(0, 1).unwrap(),
@@ -296,7 +290,9 @@ mod tests {
             driving_force: None,
             element_potentials: None,
         }];
-        let plan = manager.classify_phases(&phase_totals, &stability, &phase_set).unwrap();
+        let plan = manager
+            .classify_phases(&phase_totals, &stability, &phase_set)
+            .unwrap();
         assert!(matches!(plan, PhaseTransitionPlan::NoTransition { .. }));
     }
 
@@ -311,11 +307,8 @@ mod tests {
             max_phase_iterations: 16,
             initial_phase_set: InitialPhaseSet::default(),
         };
-        let phase_set = PhaseSet::from_policy(
-            &InitialPhaseSet::AllCandidatePhases,
-            &[true],
-        )
-        .unwrap();
+        let phase_set =
+            PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &[true]).unwrap();
         let phase_totals = vec![1.0];
         let stability = vec![PhaseStabilityReport {
             phase: PhaseIndex::new(0, 1).unwrap(),
@@ -331,11 +324,8 @@ mod tests {
     #[test]
     fn classify_phases_rejects_dimension_mismatch() {
         let manager = PhaseManager::new(1e-30, 0.0, 0.0);
-        let phase_set = PhaseSet::from_policy(
-            &InitialPhaseSet::AllCandidatePhases,
-            &[true, false],
-        )
-        .unwrap();
+        let phase_set =
+            PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &[true, false]).unwrap();
         // 2 phases in set, but only 1 total and 1 stability report
         let phase_totals = vec![1.0];
         let stability = vec![PhaseStabilityReport {
@@ -364,7 +354,9 @@ mod tests {
         )
         .unwrap();
         // species 2 (phase 1) should be set to trace floor
-        let expected_ln = PHASE_CONTROL_TRACE_MOLE_FLOOR.max(PHASE_CONTROL_TRACE_MOLE_FLOOR).ln();
+        let expected_ln = PHASE_CONTROL_TRACE_MOLE_FLOOR
+            .max(PHASE_CONTROL_TRACE_MOLE_FLOOR)
+            .ln();
         assert!((log_moles[2] - expected_ln).abs() < 1e-10);
         // species 0,1 (phase 0) should be unchanged
         assert!((log_moles[0] - 1.0_f64.ln()).abs() < 1e-10);
@@ -638,21 +630,18 @@ mod tests {
         source.P = 101_325.0;
         source.p0 = 101_325.0;
         source.elem_composition = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
-        source.gibbs = vec![
-            Rc::new(|_| 0.0) as GibbsFn,
-            Rc::new(|_| 0.0) as GibbsFn,
-        ];
-        source.phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        source.gibbs = vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn];
+        source.phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
         source.species_phase = vec![0, 0];
         source.solver_settings.solver = Solvers::LM;
         source.create_stoich_matrix().unwrap();
 
         let seed = source.temperature_worker_seed();
         let mut local = EquilibriumLogMoles::empty();
-        let new_gibbs = vec![
-            Rc::new(|_| 100.0) as GibbsFn,
-            Rc::new(|_| 200.0) as GibbsFn,
-        ];
+        let new_gibbs = vec![Rc::new(|_| 100.0) as GibbsFn, Rc::new(|_| 200.0) as GibbsFn];
         seed.apply(&mut local, 3500.0, new_gibbs, None);
 
         assert!((local.T - 3500.0).abs() < 1e-12);
@@ -672,11 +661,11 @@ mod tests {
         source.P = 101_325.0;
         source.p0 = 101_325.0;
         source.elem_composition = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
-        source.gibbs = vec![
-            Rc::new(|_| 0.0) as GibbsFn,
-            Rc::new(|_| 0.0) as GibbsFn,
-        ];
-        source.phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        source.gibbs = vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn];
+        source.phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
         source.species_phase = vec![0, 0];
         source.solver_settings.solver = Solvers::LM;
         source.create_stoich_matrix().unwrap();
@@ -699,10 +688,7 @@ mod tests {
             min_moles: 1.0,
         });
 
-        let new_gibbs = vec![
-            Rc::new(|_| 0.0) as GibbsFn,
-            Rc::new(|_| 0.0) as GibbsFn,
-        ];
+        let new_gibbs = vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn];
         seed.apply(&mut local, 3000.0, new_gibbs, None);
 
         // Stale data must be cleared
@@ -765,21 +751,18 @@ mod tests {
         source.P = 101_325.0;
         source.p0 = 101_325.0;
         source.elem_composition = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
-        source.gibbs = vec![
-            Rc::new(|_| 0.0) as GibbsFn,
-            Rc::new(|_| 0.0) as GibbsFn,
-        ];
-        source.phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        source.gibbs = vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn];
+        source.phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
         source.species_phase = vec![0, 0];
         source.solver_settings.solver = Solvers::LM;
         source.create_stoich_matrix().unwrap();
 
         let seed = source.temperature_worker_seed();
         let mut local = EquilibriumLogMoles::empty();
-        let new_gibbs = vec![
-            Rc::new(|_| 0.0) as GibbsFn,
-            Rc::new(|_| 0.0) as GibbsFn,
-        ];
+        let new_gibbs = vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn];
         seed.apply(&mut local, 3000.0, new_gibbs, None);
 
         // After apply, local should have the captured state
@@ -892,9 +875,9 @@ mod tests {
         let scale = vec![2.0, 5.0, 10.0];
         let scaled = scaled_residual(f, scale);
         let result = scaled(&[1.0, 2.0, 3.0]).unwrap();
-        assert!((result[0] - 5.0).abs() < 1e-12);  // 10/2
-        assert!((result[1] - 4.0).abs() < 1e-12);  // 20/5
-        assert!((result[2] - 3.0).abs() < 1e-12);  // 30/10
+        assert!((result[0] - 5.0).abs() < 1e-12); // 10/2
+        assert!((result[1] - 4.0).abs() < 1e-12); // 20/5
+        assert!((result[2] - 3.0).abs() < 1e-12); // 30/10
     }
 
     #[test]
@@ -978,7 +961,10 @@ mod tests {
         let elements = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
         let element_totals = vec![2.0];
         let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0)];
-        let phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        let phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
         let species_phase = vec![0, 0];
         let phase_stoich = vec![vec![-1.0]]; // 1 reaction, 1 phase
 
@@ -1005,7 +991,10 @@ mod tests {
         let elements = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
         let element_totals = vec![2.0];
         let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0)];
-        let phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        let phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
         let species_phase = vec![0, 0];
         let phase_stoich = vec![vec![-1.0]];
 
@@ -1031,7 +1020,10 @@ mod tests {
         let elements = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
         let element_totals = vec![2.0];
         let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0)];
-        let phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        let phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
         let species_phase = vec![0, 0];
         let phase_stoich = vec![vec![-1.0]];
 
@@ -1058,7 +1050,10 @@ mod tests {
         let elements = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
         let element_totals = vec![2.0];
         let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0)];
-        let phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        let phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
         let species_phase = vec![0, 0];
         let phase_stoich = vec![vec![-1.0]];
 
@@ -1151,7 +1146,10 @@ mod tests {
         let elements = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
         let element_totals = vec![2.0];
         let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0)];
-        let phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        let phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
 
         let result = equilibrium_logmole_residual2(
             reactions,
@@ -1177,7 +1175,10 @@ mod tests {
         let elements = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
         let element_totals = vec![2.0];
         let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0)];
-        let phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        let phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
 
         let closure = equilibrium_logmole_residual2(
             reactions,
@@ -1312,11 +1313,8 @@ mod tests {
 
     #[test]
     fn continuation_seed_for_point_returns_none_when_no_seed_available() {
-        let seed = continuation_seed_for_point(
-            ContinuationSeedPolicy::PreviousAccepted,
-            &None,
-            &None,
-        );
+        let seed =
+            continuation_seed_for_point(ContinuationSeedPolicy::PreviousAccepted, &None, &None);
         assert!(seed.is_none());
     }
 
@@ -1368,13 +1366,8 @@ mod tests {
     fn solve_temperature_point_from_seed_fails_on_empty_seed() {
         let solver = EquilibriumLogMoles::empty();
         let seed = solver.temperature_worker_seed();
-        let result = EquilibriumLogMoles::solve_temperature_point_from_seed(
-            &seed,
-            300.0,
-            vec![],
-            None,
-            0.0,
-        );
+        let result =
+            EquilibriumLogMoles::solve_temperature_point_from_seed(&seed, 300.0, vec![], None, 0.0);
         assert!(result.is_err());
     }
 
@@ -1394,8 +1387,7 @@ mod tests {
     #[test]
     fn ordered_gibbs_functions_returns_error_for_missing_substance() {
         let substances = vec!["O2".to_string(), "O".to_string()];
-        let mut functions: HashMap<String, Box<dyn Fn(f64) -> f64 + Send + Sync>> =
-            HashMap::new();
+        let mut functions: HashMap<String, Box<dyn Fn(f64) -> f64 + Send + Sync>> = HashMap::new();
         functions.insert("O2".to_string(), Box::new(|_| 0.0));
         // "O" is missing
         let result = EquilibriumLogMoles::ordered_gibbs_functions(&substances, functions);
@@ -1584,15 +1576,7 @@ mod tests {
         };
         // Empty policy with no backends
         let policy = SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM));
-        let result = solver.solver_impl(
-            vec![0.0],
-            &f,
-            None,
-            &feasible,
-            &validate,
-            policy,
-            None,
-        );
+        let result = solver.solver_impl(vec![0.0], &f, None, &feasible, &validate, policy, None);
         // Should fail because solver has no stoich matrix etc.
         assert!(result.is_err());
     }
@@ -1706,9 +1690,8 @@ mod tests {
         let elements = DMatrix::from_row_slice(1, 1, &[1.0]);
         let species_phase = vec![0, 0];
         let delta_n = vec![vec![1.0]];
-        let result = validate_logmole_system_dimensions(
-            &reactions, &elements, &species_phase, 1, &delta_n,
-        );
+        let result =
+            validate_logmole_system_dimensions(&reactions, &elements, &species_phase, 1, &delta_n);
         assert!(result.is_err());
     }
 
@@ -1719,9 +1702,8 @@ mod tests {
         // Only 1 entry for 2 species
         let species_phase = vec![0];
         let delta_n = vec![vec![1.0]];
-        let result = validate_logmole_system_dimensions(
-            &reactions, &elements, &species_phase, 1, &delta_n,
-        );
+        let result =
+            validate_logmole_system_dimensions(&reactions, &elements, &species_phase, 1, &delta_n);
         assert!(result.is_err());
     }
 
@@ -1731,9 +1713,8 @@ mod tests {
         let elements = DMatrix::from_row_slice(2, 1, &[1.0, 1.0]);
         let species_phase = vec![0, 5]; // phase 5 > phase_count 1
         let delta_n = vec![vec![1.0]];
-        let result = validate_logmole_system_dimensions(
-            &reactions, &elements, &species_phase, 1, &delta_n,
-        );
+        let result =
+            validate_logmole_system_dimensions(&reactions, &elements, &species_phase, 1, &delta_n);
         assert!(result.is_err());
     }
 
@@ -1744,9 +1725,8 @@ mod tests {
         let species_phase = vec![0, 0];
         // delta_n has 2 reaction rows but only 1 reaction
         let delta_n = vec![vec![1.0], vec![0.0]];
-        let result = validate_logmole_system_dimensions(
-            &reactions, &elements, &species_phase, 1, &delta_n,
-        );
+        let result =
+            validate_logmole_system_dimensions(&reactions, &elements, &species_phase, 1, &delta_n);
         assert!(result.is_err());
     }
 
@@ -1756,9 +1736,8 @@ mod tests {
         let elements = DMatrix::from_row_slice(2, 1, &[1.0, 1.0]);
         let species_phase = vec![0, 0];
         let delta_n = vec![vec![1.0]];
-        let result = validate_logmole_system_dimensions(
-            &reactions, &elements, &species_phase, 1, &delta_n,
-        );
+        let result =
+            validate_logmole_system_dimensions(&reactions, &elements, &species_phase, 1, &delta_n);
         assert!(result.is_ok());
     }
 
@@ -1796,6 +1775,65 @@ mod tests {
     fn has_rst_symbolic_context_returns_false_for_empty_solver() {
         let solver = EquilibriumLogMoles::empty();
         assert!(!solver.has_rst_symbolic_context());
+    }
+
+    #[test]
+    fn equilibrium_uses_the_codata_2018_molar_gas_constant() {
+        assert_eq!(R, 8.314_462_618_153_24);
+    }
+
+    #[test]
+    fn has_rst_symbolic_context_rejects_partial_cached_thermochemistry() {
+        let mut solver = EquilibriumLogMoles::empty();
+        solver.subs_data.substances = vec!["H2O".to_string()];
+        // A non-empty cache says only that some lookup work happened. It does
+        // not prove that the exact symbolic G0(T) vector exists in solver order.
+        solver
+            .subs_data
+            .therm_map_of_sym
+            .insert("H2O".to_string(), HashMap::new());
+
+        assert!(!solver.has_rst_symbolic_context());
+
+        solver.gibbs_sym = vec![RustedSciThe::symbolic::symbolic_engine::Expr::Const(0.0)];
+        assert!(solver.has_rst_symbolic_context());
+    }
+
+    // -----------------------------------------------------------------------
+    // SourceCraft Diagnostics: D.2 - serial temperature sweep + phase control
+    // -----------------------------------------------------------------------
+    #[test]
+    fn phase_controlled_temperature_sweep_publishes_each_accepted_point() {
+        let mut solver = gas_solver(
+            vec!["O2".to_string(), "O".to_string()],
+            500.0,
+            101_325.0,
+            Solvers::LM,
+            None,
+            false,
+        )
+        .expect("local NASA gas fixture must resolve offline");
+        solver.n0 = vec![1.0, 1e-5];
+        solver.initial_guess = Some(vec![0.0, (1e-5_f64).ln()]);
+        solver.phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
+        solver.create_stoich_matrix().unwrap();
+        solver.solver_settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
+
+        let rows = solver
+            .solve_for_T_range_with_phase_control(500.0, 600.0, 50.0)
+            .expect("single-phase control must solve every requested point");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows, solver.moles_for_T_range);
+        assert_eq!(solver.temperature_solutions.len(), 2);
+        assert!(solver.temperature_failures.is_empty());
+        assert!(solver.last_phase_control_report.is_some());
+        assert!(rows.iter().all(|(_, moles)| {
+            moles.len() == 2 && moles.iter().all(|moles| moles.is_finite() && *moles > 0.0)
+        }));
     }
 
     // -----------------------------------------------------------------------

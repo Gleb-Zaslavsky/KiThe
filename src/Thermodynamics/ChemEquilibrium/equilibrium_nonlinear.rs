@@ -159,7 +159,9 @@
 //!
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptReport;
 use crate::Thermodynamics::User_substances_error::SubsDataError;
-use log::{error, info};
+// These are fallback nonlinear implementations. Keep detailed iteration
+// diagnostics available at debug level without making normal solves noisy.
+use log::{debug as info, error};
 use nalgebra::{DMatrix, DVector};
 use std::error::Error;
 use std::fmt;

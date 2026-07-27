@@ -2,10 +2,10 @@
 //!
 //! # Purpose
 //!
-//! This module provides **postprocessing** for temperature-range equilibrium
-//! calculations. After [`EquilibriumLogMoles::solve_for_T_range`](super::equilibrium_log_moles::EquilibriumLogMoles::solve_for_T_range)
-//! produces a series of solutions at discrete temperature points, this module
-//! can:
+//! This module provides **postprocessing** for typed temperature-range
+//! equilibrium calculations. After
+//! [`TemperatureRangeSolution`](super::equilibrium_temperature_range::TemperatureRangeSolution)
+//! produces immutable accepted points, this module can:
 //!
 //! - Preserve the raw solved points as-is.
 //! - Build a **smoother render/export grid** via interpolation (PCHIP).
@@ -35,7 +35,7 @@
 //! # Dataflow
 //!
 //! ```text
-//!   EquilibriumLogMoles::solve_for_T_range() produces:
+//!   TemperatureRangeRequest::solve() produces:
 //!     temperatures: Vec<f64>
 //!     solution_values: Vec<Vec<f64>>  (one per species)
 //!     │
@@ -99,6 +99,7 @@
 //!
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_range::TemperatureRangeSolution;
 use RustedSciThe::numerical::optimization::inter_n_extrapolate::{
     InterpolationSpace as PchipSpace, Pchip,
 };
@@ -488,6 +489,52 @@ pub fn postprocess_temperature_series(
     let raw = TemperatureSweepSeries::from_rows(labels, rows)?;
     let resampled = raw.resample(policy)?;
     Ok(TemperaturePostprocessingResult { raw, resampled })
+}
+
+/// Postprocesses an accepted typed temperature-range solution.
+///
+/// Labels and values come directly from the immutable phase-aware result. The
+/// points are sorted by temperature because PCHIP requires an increasing
+/// interpolation coordinate, so descending solver grids are supported without
+/// exposing solver-order assumptions to the interpolation layer. Physical
+/// component amounts are used rather than numerical trace coordinates; a log
+/// policy therefore rejects an exact zero at a phase transition instead of
+/// silently treating a numerical floor as physical material.
+pub fn postprocess_temperature_range_solution(
+    solution: &TemperatureRangeSolution,
+    policy: &TemperaturePostprocessingPolicy,
+) -> Result<TemperaturePostprocessingResult, ReactionExtentError> {
+    if solution.points().is_empty() {
+        return Err(invalid_series(
+            "typed temperature range must contain at least one accepted point",
+        ));
+    }
+
+    let labels = solution.points()[0]
+        .solution()
+        .metadata()
+        .components()
+        .iter()
+        .map(|component| component.label())
+        .collect::<Vec<_>>();
+    let mut points = solution.points().iter().collect::<Vec<_>>();
+    points.sort_by(|left, right| {
+        left.solution()
+            .conditions()
+            .temperature()
+            .total_cmp(&right.solution().conditions().temperature())
+    });
+    let rows = points
+        .into_iter()
+        .map(|point| {
+            (
+                point.solution().conditions().temperature(),
+                point.solution().component_moles().to_vec(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    postprocess_temperature_series(labels, &rows, policy)
 }
 
 fn validate_and_build_pchip(

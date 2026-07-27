@@ -11,6 +11,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{EquilibriumL
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
     BackendFailureKind, ReactionExtentError,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::PreparedEquilibriumProblem;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     SolverAttemptMetrics, SolverTermination,
 };
@@ -142,6 +143,21 @@ pub(crate) struct RstPreparedProblem(SymbolicNonlinearProblem);
 impl RstPreparedProblem {
     pub(crate) fn new(problem: SymbolicNonlinearProblem) -> Self {
         Self(problem)
+    }
+
+    /// Updates the shared equation parameter used by the temperature sweep.
+    ///
+    /// RST keeps residual and Jacobian closures connected to the same
+    /// parameter storage, so changing `T` here avoids rebuilding symbolic
+    /// expressions and lambdified callbacks for every range point.
+    pub(crate) fn set_temperature(&mut self, temperature: f64) -> Result<(), ReactionExtentError> {
+        self.0
+            .set_parameter_values(DVector::from_vec(vec![temperature]))
+            .map_err(|error| {
+                ReactionExtentError::ResidualEvaluation(format!(
+                    "failed to update RST temperature parameter: {error}"
+                ))
+            })
     }
 
     fn as_problem(&self) -> &SymbolicNonlinearProblem {
@@ -423,6 +439,52 @@ pub(crate) fn prepare_rst_symbolic_problem(
         .with_equation_parameter_values(DVector::from_vec(vec![solver.T]))
         .with_lambdify_backend();
 
+    SymbolicNonlinearProblem::from_expressions_with_options(equations, options)
+        .map(RstPreparedProblem::new)
+        .map_err(|error| {
+            ReactionExtentError::ResidualEvaluation(format!(
+                "failed to prepare RustedSciThe symbolic equilibrium problem: {error}"
+            ))
+        })
+}
+
+/// Builds the same symbolic RST problem from immutable prepared data.
+///
+/// The old helper remains for the compatibility solver, but the canonical
+/// fixed-`P,T` facade uses this function so symbolic preparation cannot reopen
+/// or mutate `SubsData` through `EquilibriumLogMoles`.
+pub(crate) fn prepare_rst_symbolic_problem_from_prepared(
+    prepared: &PreparedEquilibriumProblem,
+    standard_gibbs: &[Expr],
+) -> Result<RstPreparedProblem, ReactionExtentError> {
+    if standard_gibbs.len() != prepared.problem().species().len() {
+        return Err(ReactionExtentError::DimensionMismatch(format!(
+            "symbolic Gibbs snapshot has {} entries for {} species",
+            standard_gibbs.len(),
+            prepared.problem().species().len()
+        )));
+    }
+    let equations = multiphase_equilibrium_residual_generator_sym(
+        prepared.reaction_basis().reactions.clone(),
+        prepared.problem().element_composition().clone(),
+        prepared.element_totals().to_vec(),
+        standard_gibbs.to_vec(),
+        prepared.problem().phases().to_vec(),
+        prepared.problem().conditions().pressure(),
+        prepared.problem().conditions().reference_pressure(),
+    )?;
+    let variables = Expr::IndexedVars(prepared.problem().species().len(), "y")
+        .0
+        .into_iter()
+        .map(|expression| expression.to_string())
+        .collect();
+    let options = SymbolicProblemOptions::new()
+        .with_variables(variables)
+        .with_equation_parameters(vec!["T".to_string()])
+        .with_equation_parameter_values(DVector::from_vec(vec![
+            prepared.problem().conditions().temperature(),
+        ]))
+        .with_lambdify_backend();
     SymbolicNonlinearProblem::from_expressions_with_options(equations, options)
         .map(RstPreparedProblem::new)
         .map_err(|error| {

@@ -1,5 +1,8 @@
 #[cfg(test)]
 mod tests {
+    // These tests intentionally characterize the deprecated mutable compatibility
+    // surface; production callers must use the typed resolved-phase facade.
+    #![allow(deprecated)]
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
         ContinuationSeedPolicy, EquilibriumLogMoles, EquilibriumSolverSettings, GibbsFn, Phase,
         PhaseKind, Solvers, compute_element_totals, compute_species_moles,
@@ -15,9 +18,9 @@ mod tests {
         SolverBackend, SolverCascadeBudget, SolverPolicy,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
-        compute_phase_totals, finite_difference_jacobian, gas_solver, gas_solver_for_T_range,
-        gas_solver_for_T_range_for_elements, gas_solver_from_elements, initial_phase_activity,
-        reject_repeated_phase_set, validate_phase_set_candidate, InitialPhaseSet, PhaseSet,
+        InitialPhaseSet, PhaseSet, compute_phase_totals, finite_difference_jacobian, gas_solver,
+        gas_solver_for_T_range, gas_solver_for_T_range_for_elements, gas_solver_from_elements,
+        initial_phase_activity, reject_repeated_phase_set, validate_phase_set_candidate,
     };
     use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData};
     use RustedSciThe::symbolic::symbolic_engine::Expr;
@@ -278,7 +281,7 @@ mod tests {
             .insert("sentinel".to_string(), vec![24.0]);
 
         assert!(matches!(
-            solver.compute_species_moles(vec![0.0, 0.0]),
+            solver.publish_reconstructed_moles(&[0.0, 0.0]),
             Err(ReactionExtentError::InvalidProblem {
                 field: "species",
                 ..
@@ -327,7 +330,7 @@ mod tests {
 
         solver.moles = vec![0.5];
         assert!(matches!(
-            solver.compute_species_moles(vec![0.0]),
+            solver.publish_reconstructed_moles(&[0.0]),
             Err(ReactionExtentError::DimensionMismatch(_))
         ));
         assert_eq!(solver.moles, vec![0.5]);
@@ -998,13 +1001,18 @@ mod tests {
             species: vec![0, 1],
         }];
         instance.create_stoich_matrix().unwrap();
+        // `gas_solver` is a compatibility constructor and now pins an
+        // explicit legacy policy. Clear that compatibility choice here so
+        // this test exercises the EquilibriumLogMoles default: symbolic
+        // context selects the RST production policy when no policy is set.
+        instance.clear_solver_policy();
         instance.solve().unwrap();
 
         let report = instance.last_solve_report.as_ref().unwrap();
         assert_eq!(
             report.policy,
-            SolverPolicy::rusted_scithe_default(),
-            "default policy should prefer the RST symbolic cascade"
+            SolverPolicy::production_default(Solvers::LM),
+            "default policy should prefer RST while retaining legacy fallbacks"
         );
         assert!(
             report
@@ -2103,7 +2111,10 @@ mod tests {
         let a = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
         let n0 = vec![0.5]; // 1 entry, but matrix has 2 rows
         let result = compute_element_totals(&a, &n0);
-        assert!(matches!(result, Err(ReactionExtentError::DimensionMismatch(_))));
+        assert!(matches!(
+            result,
+            Err(ReactionExtentError::DimensionMismatch(_))
+        ));
     }
 
     #[test]
@@ -2127,10 +2138,7 @@ mod tests {
     fn reaction_standard_gibbs_computes_weighted_sum() {
         // 2 species, 1 reaction: ν = [-1, 2]
         let stoich = DMatrix::from_row_slice(2, 1, &[-1.0, 2.0]);
-        let gibbs: Vec<GibbsFn> = vec![
-            Rc::new(|_| 100.0),
-            Rc::new(|_| 200.0),
-        ];
+        let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 100.0), Rc::new(|_| 200.0)];
         let dg0 = reaction_standard_gibbs(&stoich, &gibbs, 1000.0);
         assert!((dg0[0] - (-1.0 * 100.0 + 2.0 * 200.0)).abs() < 1e-12);
     }
@@ -2138,16 +2146,8 @@ mod tests {
     #[test]
     fn reaction_standard_gibbs_handles_multiple_reactions() {
         // 3 species, 2 reactions
-        let stoich = DMatrix::from_row_slice(3, 2, &[
-            -1.0, 0.0,
-            1.0, -1.0,
-            0.0, 1.0,
-        ]);
-        let gibbs: Vec<GibbsFn> = vec![
-            Rc::new(|_| 50.0),
-            Rc::new(|_| 100.0),
-            Rc::new(|_| 200.0),
-        ];
+        let stoich = DMatrix::from_row_slice(3, 2, &[-1.0, 0.0, 1.0, -1.0, 0.0, 1.0]);
+        let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 50.0), Rc::new(|_| 100.0), Rc::new(|_| 200.0)];
         let dg0 = reaction_standard_gibbs(&stoich, &gibbs, 500.0);
         assert!((dg0[0] - (-1.0 * 50.0 + 1.0 * 100.0 + 0.0 * 200.0)).abs() < 1e-12);
         assert!((dg0[1] - (0.0 * 50.0 + -1.0 * 100.0 + 1.0 * 200.0)).abs() < 1e-12);
@@ -2189,8 +2189,14 @@ mod tests {
     #[test]
     fn species_to_phase_map_assigns_each_species_to_its_phase() {
         let phases = vec![
-            Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] },
-            Phase { kind: PhaseKind::IdealSolution, species: vec![2] },
+            Phase {
+                kind: PhaseKind::IdealGas,
+                species: vec![0, 1],
+            },
+            Phase {
+                kind: PhaseKind::IdealSolution,
+                species: vec![2],
+            },
         ];
         let map = species_to_phase_map(&phases, 3).unwrap();
         assert_eq!(map, vec![0, 0, 1]);
@@ -2198,18 +2204,20 @@ mod tests {
 
     #[test]
     fn species_to_phase_map_rejects_out_of_range_species_index() {
-        let phases = vec![
-            Phase { kind: PhaseKind::IdealGas, species: vec![0, 5] },
-        ];
+        let phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 5],
+        }];
         let result = species_to_phase_map(&phases, 3);
         assert!(result.is_err());
     }
 
     #[test]
     fn species_to_phase_map_rejects_unassigned_species() {
-        let phases = vec![
-            Phase { kind: PhaseKind::IdealGas, species: vec![0] },
-        ];
+        let phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0],
+        }];
         let result = species_to_phase_map(&phases, 2);
         assert!(result.is_err());
     }
@@ -2223,8 +2231,14 @@ mod tests {
         // species 0,1 in phase 0; species 2 in phase 1
         let reactions = DMatrix::from_row_slice(3, 1, &[-1.0, 1.0, 2.0]);
         let phases = vec![
-            Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] },
-            Phase { kind: PhaseKind::IdealSolution, species: vec![2] },
+            Phase {
+                kind: PhaseKind::IdealGas,
+                species: vec![0, 1],
+            },
+            Phase {
+                kind: PhaseKind::IdealSolution,
+                species: vec![2],
+            },
         ];
         let delta_n = reaction_phase_stoichiometry(&reactions, &phases);
         assert_eq!(delta_n.len(), 1); // 1 reaction
@@ -2401,7 +2415,13 @@ mod tests {
         let mut settings = EquilibriumSolverSettings::default();
         settings.solver_params.max_iter = 0;
         let err = settings.validate().unwrap_err();
-        assert!(matches!(err, ReactionExtentError::InvalidProblem { field: "solver_params.max_iter", .. }));
+        assert!(matches!(
+            err,
+            ReactionExtentError::InvalidProblem {
+                field: "solver_params.max_iter",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2409,7 +2429,13 @@ mod tests {
         let mut settings = EquilibriumSolverSettings::default();
         settings.solver_params.tol = f64::NAN;
         let err = settings.validate().unwrap_err();
-        assert!(matches!(err, ReactionExtentError::InvalidProblem { field: "solver_params.tol", .. }));
+        assert!(matches!(
+            err,
+            ReactionExtentError::InvalidProblem {
+                field: "solver_params.tol",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2439,7 +2465,13 @@ mod tests {
         settings.solver_params.delta_init = 100.0;
         settings.solver_params.delta_max = 50.0;
         let err = settings.validate().unwrap_err();
-        assert!(matches!(err, ReactionExtentError::InvalidProblem { field: "solver_params.delta_max", .. }));
+        assert!(matches!(
+            err,
+            ReactionExtentError::InvalidProblem {
+                field: "solver_params.delta_max",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2482,7 +2514,9 @@ mod tests {
     #[test]
     fn solver_settings_validate_rejects_non_finite_keq_tolerances() {
         let mut settings = EquilibriumSolverSettings::default();
-        settings.keq_validation_tolerances.max_abs_species_mole_delta = f64::NAN;
+        settings
+            .keq_validation_tolerances
+            .max_abs_species_mole_delta = f64::NAN;
         assert!(settings.validate().is_err());
     }
 
@@ -2562,22 +2596,16 @@ mod tests {
     #[test]
     fn reject_repeated_phase_set_accepts_first_occurrence() {
         let mut visited = HashSet::new();
-        let phase_set = PhaseSet::from_policy(
-            &InitialPhaseSet::AllCandidatePhases,
-            &[true, false],
-        )
-        .unwrap();
+        let phase_set =
+            PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &[true, false]).unwrap();
         assert!(reject_repeated_phase_set(&mut visited, &phase_set, 0).is_ok());
     }
 
     #[test]
     fn reject_repeated_phase_set_rejects_duplicate() {
         let mut visited = HashSet::new();
-        let phase_set = PhaseSet::from_policy(
-            &InitialPhaseSet::AllCandidatePhases,
-            &[true, false],
-        )
-        .unwrap();
+        let phase_set =
+            PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &[true, false]).unwrap();
         reject_repeated_phase_set(&mut visited, &phase_set, 0).unwrap();
         let result = reject_repeated_phase_set(&mut visited, &phase_set, 1);
         assert!(result.is_err());
@@ -2623,11 +2651,11 @@ mod tests {
         solver.P = 101_325.0;
         solver.p0 = 101_325.0;
         solver.elem_composition = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
-        solver.gibbs = vec![
-            Rc::new(|_| 0.0) as GibbsFn,
-            Rc::new(|_| 0.0) as GibbsFn,
-        ];
-        solver.phases = vec![Phase { kind: PhaseKind::IdealGas, species: vec![0, 1] }];
+        solver.gibbs = vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn];
+        solver.phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
         solver.species_phase = vec![0, 0];
         solver
     }
@@ -2645,7 +2673,11 @@ mod tests {
         let moles: Vec<f64> = solver.solution.iter().map(|&y| y.exp()).collect();
         // elem_composition is (species × elements): column 0 = O coefficients [2.0, 1.0]
         let elem_col: Vec<f64> = solver.elem_composition.column(0).iter().copied().collect();
-        let total_o: f64 = moles.iter().zip(elem_col.iter()).map(|(&n, &a)| n * a).sum();
+        let total_o: f64 = moles
+            .iter()
+            .zip(elem_col.iter())
+            .map(|(&n, &a)| n * a)
+            .sum();
         assert!((total_o - 2.0).abs() < 1e-6);
     }
 

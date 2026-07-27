@@ -148,7 +148,10 @@ use RustedSciThe::symbolic::symbolic_functions::Jacobian;
 use RustedSciThe::numerical::Nonlinear_systems::LM_utils::{
     ConvergenceCriteria, ReductionRatio, ScalingMethod,
 };
-use log::{error, info, warn};
+// The handwritten solver is a retained fallback. Its iteration-level
+// diagnostics are useful when explicitly debugging that fallback, but must
+// not pollute the normal production log stream.
+use log::{debug as info, error, warn};
 use nalgebra::{DMatrix, DVector, Matrix};
 use simplelog::LevelFilter;
 use simplelog::*;
@@ -582,7 +585,6 @@ impl NR {
         let weights_abs = weights.map(|x| 1.0 / x.abs());
         let weights_abs_vec: Vec<f64> = weights_abs.data.into();
         info!("\n weights_abs_vec: {:#?}", weights_abs_vec);
-        println!("\n weights_abs_vec: {:#?}", weights_abs_vec); // .iter().max_by(|a, b| a.partial_cmp(b).unwrap()) 
         let weighted_resuduals: Vec<Expr> = eq_system
             .clone()
             .iter()
@@ -590,7 +592,6 @@ impl NR {
             .map(|(eq, weight)| eq.clone() * Expr::Const(weight))
             .collect();
         info!("\n weighted_resuduals: {:?}", weighted_resuduals);
-        println!("\n weighted_resuduals: {:?}", weighted_resuduals);
         //self.eq_system = weighted_resuduals;
     }
     ///Set system of equations with vector of symbolic expressions
@@ -858,7 +859,7 @@ impl NR {
             } else {
                 LevelFilter::Info
             };
-            println!(" \n \n Program started with loglevel: {}", log_option);
+            info!(" \n \n Program started with loglevel: {}", log_option);
             //  let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
             //  let name = format!("log_{}.txt", date_and_time);
             let logger_instance = CombinedLogger::init(vec![TermLogger::new(

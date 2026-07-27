@@ -23,8 +23,8 @@ pub use crate::Thermodynamics::physical_state::{
     PhysicalState, PhysicalStateEvidence, ThermoRecordQuery,
 };
 pub use crate::Thermodynamics::thermo_lib_api::{
-    LibraryCapability, LibraryId, ResolvedThermoRecord, ThermoData, ThermoLibraryError,
-    ThermoRepository,
+    ElementSearchMode, LibraryCapability, LibraryId, ResolvedThermoRecord, ThermoData,
+    ThermoLibraryError, ThermoRepository,
 };
 
 #[cfg(test)]
@@ -34,6 +34,7 @@ mod tests {
         let _ = std::any::type_name::<crate::Thermodynamics::prelude::SubsData>();
         let _ = std::any::type_name::<crate::Thermodynamics::prelude::ThermoData>();
         let _ = std::any::type_name::<crate::Thermodynamics::prelude::LibraryId>();
+        let _ = std::any::type_name::<crate::Thermodynamics::prelude::ElementSearchMode>();
         let _ = std::any::type_name::<crate::Thermodynamics::prelude::ThermoLookupPolicy>();
         let _ = std::any::type_name::<crate::Thermodynamics::prelude::ThermoOutputPolicy>();
         let _ = std::any::type_name::<crate::Thermodynamics::prelude::ThermoPresetPreviewReport>();

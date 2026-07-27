@@ -150,6 +150,44 @@ fn acceptance_criteria_rejects_invalid_tolerances_before_validation() {
 }
 
 #[test]
+fn acceptance_criteria_supports_an_absolute_plus_relative_balance_contract() {
+    let criteria = EquilibriumAcceptanceCriteria::new(1e-6, 1e-8, 1e-6)
+        .unwrap()
+        .with_element_balance_relative_tolerance(1e-6)
+        .unwrap();
+
+    let report = validate_equilibrium_candidate(
+        EquilibriumCandidateResiduals {
+            log_moles: &[0.0, 0.0],
+            raw_residual: &[0.0, 0.0],
+            acceptance_residual: &[0.0, 0.0],
+        },
+        criteria,
+        &DMatrix::from_row_slice(2, 1, &[1.0, 1.0]),
+        &[2.0 + 5e-7],
+    )
+    .unwrap();
+
+    assert!((report.max_abs_element_balance_error - 5e-7).abs() < 1e-12);
+}
+
+#[test]
+fn acceptance_criteria_rejects_invalid_relative_balance_tolerance() {
+    let error = EquilibriumAcceptanceCriteria::new(1e-6, 1e-8, 1e-6)
+        .unwrap()
+        .with_element_balance_relative_tolerance(-1e-12)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ReactionExtentError::InvalidProblem {
+            field: "candidate_tolerances",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn candidate_selection_prefers_the_more_accurate_report_and_uses_ties_deterministically() {
     let stronger = validate_equilibrium_candidate(
         EquilibriumCandidateResiduals {

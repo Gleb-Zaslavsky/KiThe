@@ -130,6 +130,42 @@ impl SubstanceSystemSpec {
         &self.phases
     }
 
+    /// Applies one immutable lookup policy to every phase query.
+    ///
+    /// Candidate-driven workflows use the explicit map to pin each exact
+    /// record to the library selected by the repository report.  Keeping the
+    /// policy on the spec means resolution can be repeated against the same
+    /// repository without reconstructing hidden mutable `SubsData` state.
+    pub fn with_lookup_policy(
+        mut self,
+        library_priorities: Vec<String>,
+        permitted_libraries: Vec<String>,
+        explicit_search_instructions: Option<HashMap<String, String>>,
+        search_in_nist: bool,
+    ) -> Self {
+        self.library_priorities = library_priorities;
+        self.permitted_libraries = permitted_libraries;
+        self.explicit_search_instructions = explicit_search_instructions;
+        self.search_in_nist = search_in_nist;
+        self
+    }
+
+    pub fn library_priorities(&self) -> &[String] {
+        &self.library_priorities
+    }
+
+    pub fn permitted_libraries(&self) -> &[String] {
+        &self.permitted_libraries
+    }
+
+    pub fn explicit_search_instructions(&self) -> Option<&HashMap<String, String>> {
+        self.explicit_search_instructions.as_ref()
+    }
+
+    pub fn search_in_nist(&self) -> bool {
+        self.search_in_nist
+    }
+
     pub fn builder(container: SubstancesContainer) -> SubstanceSystemSpecBuilder {
         SubstanceSystemSpecBuilder::new(container)
     }
@@ -407,15 +443,19 @@ impl SubstanceSystemFactory {
             }
             let mut phase_data = SubsData::from_thermo_repository(Arc::clone(&repository));
             phase_data.substances = phase.components().to_vec();
+            for component in phase.components() {
+                phase_data
+                    .set_substance_physical_state(component.clone(), phase.physical_state().into());
+            }
             Self::apply_lookup_policy(
                 &mut phase_data,
                 &library_priorities,
                 &permitted_libraries,
                 explicit_search_instructions.as_ref(),
             );
-            // A phase model carries physical context, but state-specific
-            // library lookup remains opt-in. The compatibility projection is
-            // retained for NIST fallback without restricting local records.
+            // Keep the compatibility map aligned with the canonical typed
+            // lookup constraint. Downstream property code still reads this
+            // view when applying phase-specific activity corrections.
             phase_data.map_of_phases = phase.legacy_component_phase_map();
             Self::resolve_subs_data(&mut phase_data, search_in_nist)?;
             resolved_data.insert(phase_key, phase_data);

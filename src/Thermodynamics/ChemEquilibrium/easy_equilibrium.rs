@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Simplified equilibrium interface using the law of mass action.
 //!
 //! # Purpose
@@ -61,12 +62,13 @@
 //! - Only handles **one independent reaction** at a time.
 //! - Uses symbolic expressions via `RustedSciThe` for ΔG°(T) computation.
 //! - Does not support multiphase or activity coefficient models.
-//! - For complex multi-reaction systems, use [`EquilibriumLogMoles`](super::equilibrium_log_moles) instead.
+//! - For production multi-reaction systems, use the typed
+//!   [`ChemEquilibrium::prelude`](super::prelude) facade instead.
 //!
 //! # Examples
 //!
 //! ```rust, ignore
-//! use KiThe::Thermodynamics::ChemEquilibrium::easy_equilibrium::EasyEquilibrium;
+//! use KiThe::Thermodynamics::ChemEquilibrium::legacy::single_reaction::EasyEquilibrium;
 //!
 //! let eq = EasyEquilibrium::new(
 //!     101325.0,                          // pressure in Pa
@@ -88,6 +90,9 @@ use std::collections::HashMap;
 ///
 /// Fields are public for legacy callers that construct this struct directly.
 /// New code should prefer [`EasyEquilibrium::new()`].
+#[deprecated(
+    note = "use ChemEquilibrium::prelude and solve_resolved_pt for the supported fixed-P,T workflow"
+)]
 #[derive(Clone, Debug)]
 pub struct EasyEquilibrium {
     /// System pressure in Pascals (Pa).
@@ -151,7 +156,6 @@ impl EasyEquilibrium {
             G_react += dG_i * Expr::Const(coeff_i);
         }
         let G_react_simplified = G_react.simplify();
-        println!("G_react_simplified: {}", G_react_simplified.pretty_print());
         let dG_fun = G_react_simplified.lambdify1D();
         let K = Box::new(move |T| f64::exp(-dG_fun(T) / (8.31446261815324 * T)));
         K
@@ -168,7 +172,6 @@ impl EasyEquilibrium {
             let coeff_i = subs_coeffs.get(&subs_i).unwrap();
             LHS *= (Expr::Const(n0i) + Expr::Const(coeff_i.clone()) * eta.clone())
                 .pow(Expr::Const(*coeff_i));
-            //println!("LHS: {}", LHS.pretty_print());
         }
         let LHS = P_pow_dnu * LHS.simplify(); // / (n_total + dnu.clone() * eta).pow(dnu);
         LHS
@@ -195,7 +198,6 @@ impl EasyEquilibrium {
 
             let eta = solver.secant(&func, 0.2, 0.7).unwrap();
             let eta = eta.root;
-            dbg!(eta);
             for subs_i in self.initial_moles.keys() {
                 let n0i = self.initial_moles.get(subs_i).unwrap();
                 let coeff_i = self.subs_coeffs.get(subs_i).unwrap();
@@ -213,6 +215,9 @@ impl EasyEquilibrium {
 
 #[cfg(test)]
 mod easy_equilibrium_tests {
+    // These tests intentionally characterize the deprecated single-reaction
+    // compatibility module rather than the production phase-equilibrium API.
+    #![allow(deprecated)]
     use super::*;
     use crate::Thermodynamics::User_substances::{LibraryPriority, Phases};
 

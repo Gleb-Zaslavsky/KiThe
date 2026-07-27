@@ -46,7 +46,8 @@ use crate::Thermodynamics::User_substances_error::SimpleExceptionLogger;
 use crate::Thermodynamics::User_substances_error::{SubsDataError, SubsDataResult};
 pub use crate::Thermodynamics::physical_state::PhysicalState as Phases;
 use crate::Thermodynamics::thermo_lib_api::{
-    LibraryCapability, LibraryId, ResolvedThermoRecord, ThermoData, ThermoRepository,
+    ElementSearchMode, LibraryCapability, LibraryId, ResolvedThermoRecord, ThermoData,
+    ThermoRepository,
 };
 use std::fmt;
 
@@ -1812,6 +1813,34 @@ impl SubsData {
         let found_substances = self.thermo_data.search_by_elements_only(elements);
         self.substances = found_substances.clone();
         self.populate_element_search_results(found_substances)
+    }
+
+    /// Search substances whose element set is exactly the requested set.
+    ///
+    /// Unlike `search_by_elements_only`, this excludes both proper subsets and
+    /// compounds containing an additional element. The result is still a
+    /// candidate list: callers must apply their library, phase, and
+    /// temperature-interval policy before building an equilibrium system.
+    pub fn search_by_exact_elements(
+        &mut self,
+        elements: Vec<String>,
+    ) -> SubsDataResult<Vec<String>> {
+        let found_substances = self.thermo_data.search_by_exact_elements(elements);
+        self.substances = found_substances.clone();
+        self.populate_element_search_results(found_substances)
+    }
+
+    /// Select the element matching contract explicitly.
+    pub fn search_by_elements_with_mode(
+        &mut self,
+        elements: Vec<String>,
+        mode: ElementSearchMode,
+    ) -> SubsDataResult<Vec<String>> {
+        match mode {
+            ElementSearchMode::AnyRequested => self.search_by_elements(elements),
+            ElementSearchMode::SubsetOf => self.search_by_elements_only(elements),
+            ElementSearchMode::ExactSet => self.search_by_exact_elements(elements),
+        }
     }
 
     /// Common function to populate search results from element-based searches

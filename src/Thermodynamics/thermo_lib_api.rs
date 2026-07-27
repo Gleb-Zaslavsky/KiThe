@@ -104,6 +104,24 @@ pub enum LibraryCapability {
     Transport,
 }
 
+/// Defines how an element-based substance search matches the requested set.
+///
+/// The distinction is important for equilibrium candidate generation:
+/// `SubsetOf` limits the chemical universe to the requested elements, while
+/// `ExactSet` excludes substances that contain only a subset or any additional
+/// element. The historical `search_by_elements` and
+/// `search_by_elements_only` methods remain available and map to
+/// `AnyRequested` and `SubsetOf`, respectively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ElementSearchMode {
+    /// Match a substance if it contains at least one requested element.
+    AnyRequested,
+    /// Match only substances whose element set is a subset of the request.
+    SubsetOf,
+    /// Match only substances whose element set equals the request exactly.
+    ExactSet,
+}
+
 /// Canonical identifiers for the library records we know how to classify.
 ///
 /// The enum deliberately covers the repository keys and their accepted aliases
@@ -282,6 +300,22 @@ fn resolve_thermo_record_from_catalog(
     }
     let requested_state = query.physical_state().or(encoded_state);
 
+    // A suffix-qualified query such as `Fe(c)` is already an exact record
+    // request. Do not widen it back to the base name and accidentally report
+    // an ambiguity with Fe(a)/Fe(d). The explicit state constraint above has
+    // already checked that the suffix is compatible with the requested state.
+    if encoded_state.is_some() {
+        if let Some(data) = records.get(query.substance()) {
+            let (state, evidence) = record_state(library_id, query.substance());
+            return Ok(Some(ResolvedThermoRecord {
+                record_key: query.substance().to_string(),
+                data: data.clone(),
+                physical_state: state,
+                state_evidence: evidence,
+            }));
+        }
+    }
+
     if requested_state.is_none() {
         if let Some(data) = records.get(query.substance()) {
             let (state, evidence) = record_state(library_id, query.substance());
@@ -381,12 +415,13 @@ fn state_suffix(library: Option<LibraryId>, key: &str) -> Option<(&str, Physical
     let tag = &key[open + 1..key.len() - 1];
     let state = match tag {
         "g" | "G" => PhysicalState::Gas,
-        "l" | "L" => PhysicalState::Liquid,
+        "l" | "L" | "liq" | "LIQ" => PhysicalState::Liquid,
         "s" | "S" => PhysicalState::Solid,
         // NASA-condensed uses alphabetical allotrope labels for records such
-        // as Fe(a), Fe(c), and Fe(d). They are all solids but the exact
-        // allotrope must remain explicit when more than one exists.
-        "a" | "b" | "c" | "d" => PhysicalState::Solid,
+        // as Fe(a), Fe(c), and Fe(d), as well as labels such as C(gr) and
+        // C(cr). They are all solids but the exact allotrope must remain
+        // explicit when more than one exists.
+        "a" | "b" | "c" | "d" | "cr" | "gr" => PhysicalState::Solid,
         _ => return None,
     };
     Some((base, state))
@@ -638,8 +673,15 @@ impl ThermoData {
         }
 
         let repository = Arc::new(Self::try_load_repository_from_default_paths()?);
+        // Another thread may publish the catalog between the initial `get`
+        // and this load. Always return the handle stored in `OnceLock` after
+        // publication; otherwise concurrent callers could observe distinct
+        // repository Arcs despite the shared-lifecycle contract.
         let _ = DEFAULT_THERMO_REPOSITORY.set(Arc::clone(&repository));
-        Ok(repository)
+        Ok(DEFAULT_THERMO_REPOSITORY
+            .get()
+            .map(Arc::clone)
+            .unwrap_or(repository))
     }
 
     /// Returns the process-wide immutable catalog used by default lookups.
@@ -834,6 +876,22 @@ impl ThermoData {
 
     /// Search substances containing only the specified elements or subsets
     pub fn search_by_elements_only(&mut self, elements: Vec<String>) -> Vec<String> {
+        self.search_by_element_set(elements, false)
+    }
+
+    /// Search substances whose element set is exactly the requested set.
+    ///
+    /// This is deliberately separate from `search_by_elements_only`: the
+    /// latter accepts subsets such as `H2` when searching `[H, O]`, whereas
+    /// this method accepts only compounds containing both H and O and no
+    /// additional element.
+    pub fn search_by_exact_elements(&mut self, elements: Vec<String>) -> Vec<String> {
+        self.search_by_element_set(elements, true)
+    }
+
+    /// Apply the shared subset/exact-set matching and deterministic library
+    /// selection used by element-constrained searches.
+    fn search_by_element_set(&mut self, elements: Vec<String>, exact: bool) -> Vec<String> {
         let mut found_substances = Vec::new();
         let mut seen_substances = HashSet::new();
         let mut hashmap_of_thermo_data: HashMap<String, HashMap<String, Value>> = HashMap::new();
@@ -879,7 +937,12 @@ impl ThermoData {
             else {
                 continue;
             };
-            if substance_element_set.is_subset(&allowed_elements) {
+            let matches = if exact {
+                substance_element_set == allowed_elements
+            } else {
+                substance_element_set.is_subset(&allowed_elements)
+            };
+            if matches {
                 let mut libraries: Vec<String> = database_names.into_iter().collect();
                 libraries.sort();
                 if let Some(database_name) = libraries.first() {
@@ -1509,9 +1572,58 @@ mod tests {
         let elements = vec!["H".to_string(), "O".to_string()];
         let found_substances = thermo_data.search_by_elements_only(elements);
 
-        // Should find H2O but not CH4 (contains C) or H2/O2 (missing elements)
+        // SubsetOf semantics include H2O and the H2/O2 proper subsets, but not
+        // CH4 because carbon is outside the requested H/O universe.
         println!("Mock test - Found substances: {:?}", found_substances);
         assert!(found_substances.contains(&"H2O".to_string()) || found_substances.is_empty());
+    }
+
+    #[test]
+    fn test_search_by_exact_elements_excludes_subsets_and_supersets() {
+        let mut thermo_data = ThermoData::new();
+        Arc::make_mut(&mut thermo_data.LibThermoData).insert(
+            "test_lib".to_string(),
+            HashMap::from([
+                ("H2O".to_string(), Value::Null),
+                ("H2".to_string(), Value::Null),
+                ("O2".to_string(), Value::Null),
+                ("CH4".to_string(), Value::Null),
+            ]),
+        );
+
+        let mut mock_elements = HashMap::new();
+        mock_elements.insert(
+            "H".to_string(),
+            vec![
+                vec!["H2O".to_string(), "test_lib".to_string()],
+                vec!["H2".to_string(), "test_lib".to_string()],
+                vec!["CH4".to_string(), "test_lib".to_string()],
+            ],
+        );
+        mock_elements.insert(
+            "O".to_string(),
+            vec![
+                vec!["H2O".to_string(), "test_lib".to_string()],
+                vec!["O2".to_string(), "test_lib".to_string()],
+            ],
+        );
+        mock_elements.insert(
+            "C".to_string(),
+            vec![vec!["CH4".to_string(), "test_lib".to_string()]],
+        );
+        thermo_data.set_elements_data(mock_elements);
+
+        let found = thermo_data.search_by_exact_elements(vec!["O".into(), "H".into(), "H".into()]);
+
+        assert_eq!(found, vec!["H2O".to_string()]);
+        assert_eq!(
+            thermo_data
+                .hashmap_of_thermo_data
+                .get("H2O")
+                .and_then(|libraries| libraries.keys().next())
+                .map(String::as_str),
+            Some("test_lib")
+        );
     }
 
     #[test]
@@ -1743,6 +1855,10 @@ mod tests {
                     ),
                     ("Fe(a)".to_string(), serde_json::json!({"record": "alpha"})),
                     ("Fe(c)".to_string(), serde_json::json!({"record": "gamma"})),
+                    (
+                        "C(gr)".to_string(),
+                        serde_json::json!({"record": "graphite"}),
+                    ),
                 ]),
             ),
             (
@@ -1843,5 +1959,20 @@ mod tests {
 
         assert_eq!(record.record_key, "H2O");
         assert_eq!(record.physical_state, Some(PhysicalState::Condensed));
+    }
+
+    #[test]
+    fn physical_state_lookup_classifies_graphite_and_crystalline_suffixes_as_solid() {
+        let repository = physical_state_fixture_repository();
+        for name in ["C(gr)", "Fe(c)"] {
+            let record = repository
+                .resolve_thermo_record(
+                    "NASA_cond",
+                    &ThermoRecordQuery::new(name).with_physical_state(PhysicalState::Solid),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(record.physical_state, Some(PhysicalState::Solid));
+        }
     }
 }

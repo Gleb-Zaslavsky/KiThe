@@ -1,5 +1,8 @@
 #[cfg(test)]
 mod tests {
+    // This module is the explicit characterization layer for the deprecated
+    // mutable workflows retained as numerical fallback coverage.
+    #![allow(deprecated)]
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_active_set::ActiveSetProjection;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::*;
@@ -9,6 +12,7 @@ mod tests {
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PHASE_CONTROL_TRACE_MOLE_FLOOR;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseSeedPolicy;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::*;
+    use crate::Thermodynamics::ChemEquilibrium::legacy::gas_solver as legacy_gas_solver;
     use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData, WhatIsFound};
     use crate::Thermodynamics::thermo_lib_api::LibraryId;
     use nalgebra::DMatrix;
@@ -32,6 +36,27 @@ mod tests {
 
     fn phase_set(active: &[bool]) -> PhaseSet {
         PhaseSet::from_policy(&InitialPhaseSet::FromInitialMoles, active).unwrap()
+    }
+
+    #[test]
+    fn compatibility_gas_solver_pins_the_requested_legacy_backend_family() {
+        // The historical constructor accepts `Solvers` rather than a typed
+        // policy. It must translate that selector immediately; otherwise a
+        // later symbolic-context check can silently promote the solve to RST.
+        let solver = legacy_gas_solver(
+            vec!["O2".to_string(), "O".to_string()],
+            500.0,
+            101_325.0,
+            Solvers::LM,
+            None,
+            false,
+        )
+        .expect("compatibility gas solver should resolve its local data");
+
+        assert_eq!(
+            solver.solver_settings.solver_policy,
+            Some(SolverPolicy::legacy_default(Solvers::LM))
+        );
     }
 
     fn synthetic_gas_with_pure_condensed(candidate_gibbs: f64) -> EquilibriumLogMoles {
@@ -244,6 +269,66 @@ mod tests {
         .unwrap();
 
         assert_eq!(activity, vec![true, false]);
+    }
+
+    #[test]
+    fn physical_initial_inventory_keeps_a_zero_phase_inactive_despite_trace_seed() {
+        let physical_activity =
+            initial_phase_activity_from_moles(&[1.0, 0.0], &[0, 1], 2, 1e-20).unwrap();
+        let numerical_seed_activity = initial_phase_activity(
+            &[1.0_f64.ln(), PHASE_CONTROL_TRACE_MOLE_FLOOR.ln()],
+            &[0, 1],
+            2,
+            0.0,
+        )
+        .unwrap();
+
+        assert_eq!(physical_activity, vec![true, false]);
+        assert_eq!(numerical_seed_activity, vec![true, true]);
+    }
+
+    #[test]
+    fn all_candidate_policy_normalizes_inventory_free_phases_before_log_solve() {
+        let activity = vec![true, false];
+        let mut phase_set =
+            PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &activity).unwrap();
+
+        let normalized = phase_set.normalize_for_positive_solver(&activity).unwrap();
+
+        assert_eq!(normalized, vec![PhaseIndex::new(1, 2).unwrap()]);
+        assert_eq!(phase_set.active_mask(), vec![true, false]);
+        assert!(phase_set.is_candidate(1));
+    }
+
+    #[test]
+    fn positive_log_solve_rejects_a_policy_with_no_physical_inventory() {
+        let mut phase_set =
+            PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &[false, false]).unwrap();
+
+        let error = phase_set
+            .normalize_for_positive_solver(&[false, false])
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ReactionExtentError::InvalidProblem {
+                field: "initial_phase_set",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn phase_control_initial_set_uses_physical_inventory_not_trace_coordinates() {
+        let mut solver = synthetic_gas_with_pure_condensed(1_000.0);
+        solver.solve_with_phase_control().unwrap();
+        let report = solver
+            .last_phase_control_report
+            .as_ref()
+            .expect("accepted phase-control solve must retain its report");
+
+        assert_eq!(report.initial_phase_set.active_mask(), vec![true, false]);
+        assert_eq!(report.final_phase_set.active_mask(), vec![true, false]);
     }
 
     #[test]

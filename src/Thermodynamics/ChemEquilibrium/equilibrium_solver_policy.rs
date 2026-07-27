@@ -189,6 +189,26 @@ impl SolverPolicy {
         )
     }
 
+    /// Builds the production cascade: RST symbolic methods first, followed by
+    /// the independent hand-written implementations as numerical fallbacks.
+    ///
+    /// The fallback family is reached only for retryable backend failures.
+    /// Invalid thermochemistry, dimensions, or solver configuration still
+    /// abort the cascade immediately at the common validation boundary.
+    pub fn production_default(preferred_legacy: Solvers) -> Self {
+        let mut backends = RustedSciTheSolver::recommended_cascade()
+            .into_iter()
+            .map(SolverBackend::RustedSciThe)
+            .collect::<Vec<_>>();
+        backends.extend([
+            SolverBackend::Legacy(preferred_legacy),
+            SolverBackend::Legacy(Solvers::LM),
+            SolverBackend::Legacy(Solvers::NR),
+            SolverBackend::Legacy(Solvers::TR),
+        ]);
+        Self::Cascade(backends)
+    }
+
     /// Returns the deterministic, duplicate-free backend order.
     pub fn ordered_backends(&self) -> Vec<SolverBackend> {
         let requested = match self {
@@ -487,6 +507,27 @@ mod tests {
                 SolverBackend::Legacy(Solvers::NR),
                 SolverBackend::Legacy(Solvers::LM),
                 SolverBackend::Legacy(Solvers::TR),
+            ]
+        );
+    }
+
+    #[test]
+    fn production_policy_runs_rst_first_and_keeps_legacy_fallbacks() {
+        let ordered = SolverPolicy::production_default(Solvers::TR).ordered_backends();
+        let rst_count = RustedSciTheSolver::recommended_cascade().len();
+
+        assert_eq!(ordered.len(), rst_count + 3);
+        assert!(
+            ordered[..rst_count]
+                .iter()
+                .all(|backend| matches!(backend, SolverBackend::RustedSciThe(_)))
+        );
+        assert_eq!(
+            ordered[rst_count..],
+            [
+                SolverBackend::Legacy(Solvers::TR),
+                SolverBackend::Legacy(Solvers::LM),
+                SolverBackend::Legacy(Solvers::NR),
             ]
         );
     }

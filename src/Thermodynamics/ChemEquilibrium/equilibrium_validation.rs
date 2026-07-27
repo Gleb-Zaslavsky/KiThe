@@ -135,6 +135,11 @@ pub struct EquilibriumAcceptanceCriteria {
     pub residual_tolerance: f64,
     /// Tolerance for the independently recomputed element balance.
     pub element_balance_tolerance: f64,
+    /// Relative tolerance for the independently recomputed element balance.
+    ///
+    /// The effective limit is the absolute tolerance plus this value times
+    /// the magnitude of the corresponding original element total.
+    pub element_balance_relative_tolerance: f64,
     /// Tolerance for the reaction-affinity block.
     pub reaction_affinity_tolerance: f64,
 }
@@ -161,8 +166,25 @@ impl EquilibriumAcceptanceCriteria {
         Ok(Self {
             residual_tolerance,
             element_balance_tolerance,
+            element_balance_relative_tolerance: 0.0,
             reaction_affinity_tolerance,
         })
+    }
+
+    /// Adds the scale-aware part of the conservation contract.
+    pub fn with_element_balance_relative_tolerance(
+        mut self,
+        tolerance: f64,
+    ) -> Result<Self, ReactionExtentError> {
+        if !tolerance.is_finite() || tolerance < 0.0 {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "candidate_tolerances",
+                message: "relative element-balance tolerance must be finite and non-negative"
+                    .to_string(),
+            });
+        }
+        self.element_balance_relative_tolerance = tolerance;
+        Ok(self)
     }
 }
 
@@ -379,12 +401,15 @@ pub fn validate_equilibrium_candidate(
             .map(|species| element_composition[(species, element)] * moles[species])
             .sum::<f64>();
         let error = (reconstructed_total - element_totals[element]).abs();
-        if !error.is_finite() || error > criteria.element_balance_tolerance {
+        let relative_scale = element_totals[element].abs();
+        let allowed_element_error = criteria.element_balance_tolerance
+            + criteria.element_balance_relative_tolerance * relative_scale;
+        if !error.is_finite() || error > allowed_element_error {
             return Err(ReactionExtentError::InvalidCandidate {
                 field: "candidate_element_balance",
                 message: format!(
-                    "element {element} balance error {error:e} exceeds tolerance {:e}",
-                    criteria.element_balance_tolerance
+                    "element {element} balance error {error:e} exceeds absolute-plus-relative tolerance {allowed_element_error:e} (absolute {:e}, relative {:e}, scale {relative_scale:e})",
+                    criteria.element_balance_tolerance, criteria.element_balance_relative_tolerance,
                 ),
             });
         }

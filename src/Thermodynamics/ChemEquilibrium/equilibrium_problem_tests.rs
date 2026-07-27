@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Tests for the typed equilibrium-problem boundary.
 //!
 //! The tests protect the distinction between physical mole numbers and the
@@ -5,9 +6,12 @@
 //! residual/Jacobian construction can panic.
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_component::EquilibriumComponentDescriptor;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_component::{
+    EquilibriumComponentDescriptor, EquilibriumPhaseDescriptor,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     ContinuationSeedPolicy, EquilibriumLogMoles, GibbsFn, Phase, PhaseKind, Solvers,
     compute_species_moles, equilibrium_logmole_jacobian, equilibrium_logmole_residual,
@@ -15,7 +19,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, EquilibriumProblem, LogMolesInitialGuess, PreparedEquilibriumProblem,
-    ResidualScalingContract, TraceSpeciesSeedPolicy, VariableScalingContract,
+    ResidualScalingContract, TraceSpeciesSeedPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     SolverBackend, SolverCascadeBudget, SolverPolicy,
@@ -212,60 +216,6 @@ fn log_mole_reconstruction_rejects_overflow_and_underflow() {
     assert!(matches!(
         compute_species_moles(&[-1000.0]),
         Err(ReactionExtentError::InvalidCandidate { .. })
-    ));
-}
-
-#[test]
-fn variable_scaling_contract_applies_to_coordinates_without_touching_residual_rows() {
-    let variable_scale = VariableScalingContract::new(vec![2.0, 4.0]).unwrap();
-    let residual_scale = ResidualScalingContract::new(vec![3.0, 5.0]).unwrap();
-    let iterate = vec![10.0, 20.0];
-    let residual = vec![30.0, 50.0];
-
-    assert_eq!(
-        variable_scale.apply_iterate(&iterate).unwrap(),
-        vec![5.0, 5.0]
-    );
-    assert_eq!(
-        variable_scale.unscale_iterate(&[5.0, 5.0]).unwrap(),
-        iterate
-    );
-    assert_eq!(
-        residual_scale.apply_residual(residual.clone()).unwrap(),
-        vec![10.0, 10.0]
-    );
-    assert_eq!(residual, vec![30.0, 50.0]);
-    assert_eq!(variable_scale.as_slice(), &[2.0, 4.0]);
-}
-
-#[test]
-fn variable_scaling_contract_rejects_shape_and_value_errors() {
-    let err = VariableScalingContract::new(vec![]).unwrap_err();
-    assert!(matches!(
-        err,
-        ReactionExtentError::InvalidProblem {
-            field: "variable_scale",
-            ..
-        }
-    ));
-
-    let err = VariableScalingContract::new(vec![1.0, 0.0]).unwrap_err();
-    assert!(matches!(
-        err,
-        ReactionExtentError::InvalidProblem {
-            field: "variable_scale",
-            ..
-        }
-    ));
-
-    let contract = VariableScalingContract::new(vec![1.0, 2.0]).unwrap();
-    assert!(matches!(
-        contract.apply_iterate(&[1.0]),
-        Err(ReactionExtentError::DimensionMismatch(_))
-    ));
-    assert!(matches!(
-        contract.unscale_iterate(&[1.0]),
-        Err(ReactionExtentError::DimensionMismatch(_))
     ));
 }
 
@@ -977,45 +927,154 @@ fn phase_qualified_components_allow_same_substance_in_distinct_phases() {
         PhaseActivityModel::IdealSolution,
     );
 
-    let problem = EquilibriumProblem::new(
+    let gas_phase = PhaseId::new(Some("gas".to_string()));
+    let liquid_phase = PhaseId::new(Some("liquid".to_string()));
+    let phase_descriptors = vec![
+        EquilibriumPhaseDescriptor::new(
+            gas_phase.clone(),
+            PhaseIndex::new(0, 2).unwrap(),
+            PhysicalState::Gas,
+            PhaseModel::IdealGas,
+            PhaseActivityModel::IdealGas,
+            0..1,
+        ),
+        EquilibriumPhaseDescriptor::new(
+            liquid_phase.clone(),
+            PhaseIndex::new(1, 2).unwrap(),
+            PhysicalState::Liquid,
+            PhaseModel::PureCondensed,
+            PhaseActivityModel::IdealSolution,
+            1..2,
+        ),
+    ];
+
+    let problem = EquilibriumProblem::new_with_phase_descriptors(
         vec![gas_water.clone(), liquid_water],
         vec![1.0, 0.0],
         LogMolesInitialGuess::new(vec![0.0, -20.0]).unwrap(),
         DMatrix::from_row_slice(2, 2, &[2.0, 1.0, 2.0, 1.0]),
         vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn],
-        vec![
-            Phase {
-                kind: PhaseKind::IdealGas,
-                species: vec![0],
-            },
-            Phase {
-                kind: PhaseKind::IdealSolution,
-                species: vec![1],
-            },
-        ],
+        phase_descriptors.clone(),
         EquilibriumConditions::new(1000.0, 101325.0, 101325.0).unwrap(),
     )
     .unwrap();
 
     assert_eq!(problem.species(), ["gas::H2O", "liquid::H2O"]);
     assert_eq!(problem.components()[0], gas_water);
+    assert_eq!(problem.phase_descriptors(), phase_descriptors);
 
-    let duplicate = EquilibriumProblem::new(
+    let duplicate = EquilibriumProblem::new_with_phase_descriptors(
         vec![gas_water.clone(), gas_water],
         vec![1.0, 0.0],
         LogMolesInitialGuess::new(vec![0.0, -20.0]).unwrap(),
         DMatrix::from_row_slice(2, 2, &[2.0, 1.0, 2.0, 1.0]),
         vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn],
-        vec![Phase {
-            kind: PhaseKind::IdealGas,
-            species: vec![0, 1],
-        }],
+        vec![EquilibriumPhaseDescriptor::new(
+            gas_phase,
+            PhaseIndex::new(0, 1).unwrap(),
+            PhysicalState::Gas,
+            PhaseModel::IdealGas,
+            PhaseActivityModel::IdealGas,
+            0..2,
+        )],
         EquilibriumConditions::new(1000.0, 101325.0, 101325.0).unwrap(),
     );
     assert!(matches!(
         duplicate,
         Err(ReactionExtentError::InvalidProblem {
             field: "components",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn canonical_phase_descriptors_reject_duplicate_ids_and_invalid_ranges_before_solver_setup() {
+    let components = vec![
+        EquilibriumComponentDescriptor::new(
+            PhaseComponentId::new(PhaseId::new(Some("gas".to_string())), "A"),
+            PhysicalState::Gas,
+            PhaseModel::IdealGas,
+            PhaseActivityModel::IdealGas,
+        ),
+        EquilibriumComponentDescriptor::new(
+            PhaseComponentId::new(PhaseId::new(Some("liquid".to_string())), "A"),
+            PhysicalState::Liquid,
+            PhaseModel::PureCondensed,
+            PhaseActivityModel::IdealSolution,
+        ),
+    ];
+    let initial_moles = vec![1.0, 0.0];
+    let initial_log_moles = LogMolesInitialGuess::from_moles(&initial_moles, 1e-20).unwrap();
+    let matrix = DMatrix::from_row_slice(2, 1, &[1.0, 1.0]);
+    let gibbs = vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn];
+    let conditions = EquilibriumConditions::new(1000.0, 101_325.0, 101_325.0).unwrap();
+    let gas = PhaseId::new(Some("gas".to_string()));
+
+    let duplicate = EquilibriumProblem::new_with_phase_descriptors(
+        components.clone(),
+        initial_moles.clone(),
+        initial_log_moles.clone(),
+        matrix.clone(),
+        gibbs.clone(),
+        vec![
+            EquilibriumPhaseDescriptor::new(
+                gas.clone(),
+                PhaseIndex::new(0, 2).unwrap(),
+                PhysicalState::Gas,
+                PhaseModel::IdealGas,
+                PhaseActivityModel::IdealGas,
+                0..1,
+            ),
+            EquilibriumPhaseDescriptor::new(
+                gas,
+                PhaseIndex::new(1, 2).unwrap(),
+                PhysicalState::Gas,
+                PhaseModel::IdealGas,
+                PhaseActivityModel::IdealGas,
+                1..2,
+            ),
+        ],
+        conditions,
+    );
+    assert!(matches!(
+        duplicate,
+        Err(ReactionExtentError::InvalidProblem {
+            field: "phase_descriptors",
+            ..
+        })
+    ));
+
+    let invalid_range = EquilibriumProblem::new_with_phase_descriptors(
+        components,
+        initial_moles,
+        initial_log_moles,
+        matrix,
+        gibbs,
+        vec![
+            EquilibriumPhaseDescriptor::new(
+                PhaseId::new(Some("gas".to_string())),
+                PhaseIndex::new(0, 2).unwrap(),
+                PhysicalState::Gas,
+                PhaseModel::IdealGas,
+                PhaseActivityModel::IdealGas,
+                0..1,
+            ),
+            EquilibriumPhaseDescriptor::new(
+                PhaseId::new(Some("liquid".to_string())),
+                PhaseIndex::new(1, 2).unwrap(),
+                PhysicalState::Liquid,
+                PhaseModel::PureCondensed,
+                PhaseActivityModel::IdealSolution,
+                0..2,
+            ),
+        ],
+        conditions,
+    );
+    assert!(matches!(
+        invalid_range,
+        Err(ReactionExtentError::InvalidProblem {
+            field: "phase_descriptors",
             ..
         })
     ));

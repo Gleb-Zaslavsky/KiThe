@@ -5,9 +5,11 @@
 //! used to project seeds and scatter accepted solutions.
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::{PhaseIndex, SpeciesId};
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{Phase, species_to_phase_map};
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Phase;
+#[cfg(test)]
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionBasis;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
-    ReactionBasis, ReactionExtentError, compute_reaction_basis,
+    ReactionExtentError, compute_reaction_basis,
 };
 use nalgebra::{DMatrix, DVector, linalg::SVD};
 
@@ -20,17 +22,29 @@ use nalgebra::{DMatrix, DVector, linalg::SVD};
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveSetProjection {
     /// Active phases in the global phase ordering.
+    #[cfg(test)]
     pub active_phases: Vec<PhaseIndex>,
     /// Active species in the global species ordering.
     pub active_species: Vec<SpeciesId>,
     /// Phase descriptors for the active phases only, with local species indices.
     pub phases: Vec<Phase>,
     /// Maps each active species to its active phase index (local coordinates).
-    pub species_phase: Vec<usize>,
     /// Element composition matrix restricted to active species only.
-    /// Shape: `(active_species × elements)`.
+    /// Shape: `(active_species × independent elements)`.
     pub element_composition: DMatrix<f64>,
+    /// Original element-column positions retained by the deterministic basis.
+    /// The full matrix may contain dependent columns when only a subset of
+    /// phases is active; the nonlinear problem must carry only independent
+    /// constraints so its equation count remains square.
+    pub independent_element_columns: Vec<usize>,
+    /// Full active-species composition, retained for feasibility checks against
+    /// the original element inventory. This is intentionally separate from
+    /// `element_composition`, which is the reduced solver matrix.
+    full_element_composition: DMatrix<f64>,
+    /// Independent element-constraint rank retained by this projection.
+    pub element_rank: usize,
     /// SVD-derived reaction basis for the reduced active-species system.
+    #[cfg(test)]
     pub reaction_basis: ReactionBasis,
     /// Total number of species in the full (unprojected) system.
     full_species_count: usize,
@@ -109,30 +123,40 @@ impl ActiveSetProjection {
             });
         }
 
-        let local_elements = DMatrix::from_fn(
+        let full_local_elements = DMatrix::from_fn(
             active_species.len(),
             element_composition.ncols(),
             |row, col| element_composition[(active_species[row].index(), col)],
         );
-        let reaction_basis = compute_reaction_basis(&local_elements, rank_tolerance)?;
-        if reaction_basis.num_reactions + local_elements.ncols() != active_species.len() {
+        let reaction_basis = compute_reaction_basis(&full_local_elements, rank_tolerance)?;
+        let element_rank = reaction_basis.rank;
+        if reaction_basis.num_reactions + element_rank != active_species.len() {
             return Err(ReactionExtentError::InvalidProblem {
                 field: "phase_active_set",
                 message: format!(
                     "active species span rank {} for {} conserved element columns; this phase set cannot represent the full closed-system inventory in the square log-moles formulation",
-                    reaction_basis.rank,
-                    local_elements.ncols()
+                    element_rank,
+                    full_local_elements.ncols()
                 ),
             });
         }
-        let local_species_phase = species_to_phase_map(&local_phases, active_species.len())?;
-
+        let independent_element_columns =
+            independent_column_basis(&full_local_elements, element_rank, rank_tolerance)?;
+        let local_elements = DMatrix::from_fn(
+            active_species.len(),
+            independent_element_columns.len(),
+            |row, col| full_local_elements[(row, independent_element_columns[col])],
+        );
         Ok(Self {
+            #[cfg(test)]
             active_phases,
             active_species,
             phases: local_phases,
-            species_phase: local_species_phase,
             element_composition: local_elements,
+            independent_element_columns,
+            full_element_composition: full_local_elements,
+            element_rank,
+            #[cfg(test)]
             reaction_basis,
             full_species_count: species_count,
         })
@@ -165,11 +189,14 @@ impl ActiveSetProjection {
         totals: &[f64],
         tolerance: f64,
     ) -> Result<(), ReactionExtentError> {
-        if totals.len() != self.element_composition.ncols() {
+        if self
+            .independent_element_columns
+            .iter()
+            .any(|&column| column >= totals.len())
+        {
             return Err(ReactionExtentError::DimensionMismatch(format!(
-                "active-set feasibility has {} element totals for {} element columns",
-                totals.len(),
-                self.element_composition.ncols()
+                "active-set feasibility has {} element totals but a retained element column is out of bounds",
+                totals.len()
             )));
         }
         if !tolerance.is_finite() || tolerance <= 0.0 {
@@ -185,8 +212,8 @@ impl ActiveSetProjection {
             });
         }
 
-        let active_element_map = self.element_composition.transpose();
-        let target = DVector::from_column_slice(totals);
+        let active_element_map = self.full_element_composition.transpose();
+        let target = DVector::from_iterator(totals.len(), totals.iter().copied());
         let svd = SVD::new(active_element_map.clone(), true, true);
         let coefficients = svd.solve(&target, tolerance).map_err(|message| {
             ReactionExtentError::InvalidProblem {
@@ -206,6 +233,32 @@ impl ActiveSetProjection {
             });
         }
         Ok(())
+    }
+
+    /// Independent element-constraint rank retained after projection.
+    #[cfg(test)]
+    pub fn element_rank(&self) -> usize {
+        self.element_rank
+    }
+
+    /// Projects a full element-total vector into the independent constraint
+    /// basis used by this active set.
+    pub fn reduced_element_totals(&self, totals: &[f64]) -> Result<Vec<f64>, ReactionExtentError> {
+        debug_assert_eq!(self.element_composition.ncols(), self.element_rank);
+        if self
+            .independent_element_columns
+            .iter()
+            .any(|&column| column >= totals.len())
+        {
+            return Err(ReactionExtentError::DimensionMismatch(
+                "full element totals do not cover the active-set basis".to_string(),
+            ));
+        }
+        Ok(self
+            .independent_element_columns
+            .iter()
+            .map(|&column| totals[column])
+            .collect())
     }
 
     pub fn scatter_log_moles(
@@ -232,6 +285,49 @@ impl ActiveSetProjection {
         }
         Ok(full)
     }
+}
+
+/// Selects a deterministic independent basis of the element columns.
+///
+/// Column order is part of the numerical contract: the first columns that
+/// increase the SVD rank are retained. This makes reduced active problems
+/// reproducible while preserving every elemental constraint represented by
+/// the active species.
+fn independent_column_basis(
+    matrix: &DMatrix<f64>,
+    expected_rank: usize,
+    tolerance: f64,
+) -> Result<Vec<usize>, ReactionExtentError> {
+    let mut selected = Vec::with_capacity(expected_rank);
+    let mut current_rank = 0;
+    for column in 0..matrix.ncols() {
+        let mut candidate = selected.clone();
+        candidate.push(column);
+        let candidate_matrix = DMatrix::from_fn(matrix.nrows(), candidate.len(), |row, col| {
+            matrix[(row, candidate[col])]
+        });
+        let rank = SVD::new(candidate_matrix, false, false)
+            .singular_values
+            .iter()
+            .filter(|&&value| value > tolerance)
+            .count();
+        if rank > current_rank {
+            selected.push(column);
+            current_rank = rank;
+        }
+        if current_rank == expected_rank {
+            break;
+        }
+    }
+    if current_rank != expected_rank {
+        return Err(ReactionExtentError::InvalidProblem {
+            field: "phase_active_set.element_basis",
+            message: format!(
+                "could not select {expected_rank} independent element columns; found {current_rank}"
+            ),
+        });
+    }
+    Ok(selected)
 }
 
 #[cfg(test)]
@@ -295,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_rejects_an_active_set_missing_a_conserved_element() {
+    fn projection_accepts_an_active_set_missing_a_conserved_element() {
         let phases = vec![
             Phase {
                 kind: PhaseKind::IdealGas,
@@ -308,15 +404,13 @@ mod tests {
         ];
         // Species zero contains only H; species one contains only C.
         let elements = DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1.0]);
-        let error = ActiveSetProjection::build(&phases, &[0, 1], &elements, &[true, false], 1e-10)
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            ReactionExtentError::InvalidProblem {
-                field: "phase_active_set",
-                ..
-            }
-        ));
+        let projection =
+            ActiveSetProjection::build(&phases, &[0, 1], &elements, &[true, false], 1e-10).unwrap();
+
+        assert_eq!(projection.element_rank(), 1);
+        projection
+            .validate_element_totals_representable(&[1.0, 0.0], 1e-10)
+            .unwrap();
     }
 
     #[test]
@@ -377,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_rejects_dependent_element_columns_in_the_active_set() {
+    fn projection_accepts_dependent_element_columns_in_the_active_set() {
         let phases = vec![
             Phase {
                 kind: PhaseKind::IdealGas,
@@ -388,18 +482,17 @@ mod tests {
                 species: vec![1],
             },
         ];
-        // Two identical element columns make the reduced basis rank-deficient.
-        let elements = DMatrix::from_row_slice(2, 2, &[1.0, 1.0, 0.0, 0.0]);
-        let error = ActiveSetProjection::build(&phases, &[0, 1], &elements, &[true, true], 1e-10)
-            .unwrap_err();
+        // Two proportional element rows keep the reduced basis rank-deficient
+        // while still describing a physically admissible active set.
+        let elements = DMatrix::from_row_slice(2, 2, &[2.0, 1.0, 4.0, 2.0]);
+        let projection =
+            ActiveSetProjection::build(&phases, &[0, 1], &elements, &[true, true], 1e-10).unwrap();
 
-        assert!(matches!(
-            error,
-            ReactionExtentError::InvalidProblem {
-                field: "phase_active_set",
-                ..
-            }
-        ));
+        assert_eq!(projection.element_rank(), 1);
+        assert_eq!(projection.reaction_basis.num_reactions, 1);
+        projection
+            .validate_element_totals_representable(&[6.0, 3.0], 1e-10)
+            .unwrap();
     }
 
     #[test]
@@ -573,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_rejects_an_impossible_sparse_active_set_before_backend_use() {
+    fn projection_accepts_an_impossible_sparse_active_set_before_backend_use() {
         let phases = vec![
             Phase {
                 kind: PhaseKind::IdealGas,
@@ -598,14 +691,69 @@ mod tests {
                 1.0, 0.0,
             ],
         );
-        let error = ActiveSetProjection::build(
+        let projection = ActiveSetProjection::build(
             &phases,
             &[0, 1, 2, 0],
             &elements,
             &[true, false, false],
             1e-10,
         )
-        .unwrap_err();
+        .unwrap();
+
+        assert_eq!(projection.element_rank(), 1);
+        projection
+            .validate_element_totals_representable(&[2.0, 0.0], 1e-10)
+            .unwrap();
+    }
+
+    #[test]
+    fn projection_accepts_one_component_h2o_with_independent_element_rank() {
+        let phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0],
+        }];
+        let elements = DMatrix::from_row_slice(1, 2, &[2.0, 1.0]);
+
+        let projection =
+            ActiveSetProjection::build(&phases, &[0], &elements, &[true], 1e-10).unwrap();
+
+        assert_eq!(projection.element_rank(), 1);
+        assert_eq!(projection.reaction_basis.num_reactions, 0);
+        projection
+            .validate_element_totals_representable(&[2.0, 1.0], 1e-10)
+            .unwrap();
+    }
+
+    #[test]
+    fn projection_accepts_permuted_element_columns_for_the_same_physical_species() {
+        let phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0],
+        }];
+        let elements = DMatrix::from_row_slice(1, 2, &[1.0, 2.0]);
+
+        let projection =
+            ActiveSetProjection::build(&phases, &[0], &elements, &[true], 1e-10).unwrap();
+
+        assert_eq!(projection.element_rank(), 1);
+        projection
+            .validate_element_totals_representable(&[1.0, 2.0], 1e-10)
+            .unwrap();
+    }
+
+    #[test]
+    fn projection_rejects_infeasible_totals_even_when_the_active_set_is_formed() {
+        let phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0],
+        }];
+        let elements = DMatrix::from_row_slice(1, 2, &[2.0, 1.0]);
+
+        let projection =
+            ActiveSetProjection::build(&phases, &[0], &elements, &[true], 1e-10).unwrap();
+        let error = projection
+            .validate_element_totals_representable(&[1.0, 1.0], 1e-10)
+            .unwrap_err();
 
         assert!(matches!(
             error,

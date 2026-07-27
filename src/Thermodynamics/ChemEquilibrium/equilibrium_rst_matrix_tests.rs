@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! First physical backend matrix for the canonical equilibrium solver.
 //!
 //! Every selected RST strategy solves the same small dissociation system from
