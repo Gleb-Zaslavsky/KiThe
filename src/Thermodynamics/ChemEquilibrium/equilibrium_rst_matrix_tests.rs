@@ -210,7 +210,6 @@ fn rusted_scithe_default_policy_has_a_stable_documented_backend_order() {
             SolverBackend::RustedSciThe(RustedSciTheSolver::MinpackLevenbergMarquardt),
             SolverBackend::RustedSciThe(RustedSciTheSolver::NielsenLevenbergMarquardt),
             SolverBackend::RustedSciThe(RustedSciTheSolver::TrustRegionLevenbergMarquardt),
-            SolverBackend::RustedSciThe(RustedSciTheSolver::PowellDogleg),
             SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton),
         ]
     );

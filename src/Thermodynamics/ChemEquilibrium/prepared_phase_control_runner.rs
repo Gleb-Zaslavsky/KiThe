@@ -15,7 +15,9 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_active_set::ActiveSetPro
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::EquilibriumSolverSettings;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
+    EquilibriumSolverSettings, GibbsFn,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::PreparedEquilibriumRunner;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
@@ -48,19 +50,33 @@ pub(crate) struct PreparedPhaseControlOutcome {
     pub(crate) acceptance_report: MultiphaseAcceptanceReport,
     pub(crate) phase_statuses: Vec<PhaseStatus>,
     pub(crate) projection_build: Duration,
+    /// Time spent constructing missing reduced formulations or rebuilding
+    /// their symbolic backend for the current active-set snapshot.
+    pub(crate) formulation_build: Duration,
     pub(crate) validation_duration: Duration,
     pub(crate) rst_symbolic_reused: bool,
 }
 
-#[derive(Debug)]
-struct PreparedActiveSetCandidate {
-    log_moles: Vec<f64>,
-    validation_report: EquilibriumCandidateReport,
-    solve_report: EquilibriumSolveReport,
-    keq_validation_status: Option<EquilibriumConstantCrossValidationStatus>,
-    projection_build: Duration,
-    validation_duration: Duration,
-    rst_symbolic_reused: bool,
+pub(crate) struct PreparedActiveSetCandidate {
+    pub(crate) log_moles: Vec<f64>,
+    /// Active mask actually used by the fixed-set formulation. Normally it
+    /// equals the lifecycle mask; a monolithic P,H probe may solve a wider
+    /// trace-seeded mask to discover a phase whose enthalpy branch is needed.
+    pub(crate) solved_active_mask: Vec<bool>,
+    pub(crate) validation_report: EquilibriumCandidateReport,
+    pub(crate) solve_report: EquilibriumSolveReport,
+    pub(crate) keq_validation_status: Option<EquilibriumConstantCrossValidationStatus>,
+    /// Full-layout Gibbs capabilities and conditions at this accepted
+    /// candidate. Phase stability must use these values rather than the
+    /// runner's construction temperature; P,H candidates solve temperature
+    /// and composition together.
+    pub(crate) stability_gibbs: Vec<GibbsFn>,
+    pub(crate) conditions:
+        crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumConditions,
+    pub(crate) projection_build: Duration,
+    pub(crate) formulation_build: Duration,
+    pub(crate) validation_duration: Duration,
+    pub(crate) rst_symbolic_reused: bool,
 }
 
 struct PreparedBoundaryRecovery {
@@ -73,14 +89,16 @@ struct PreparedBoundaryRecovery {
 
 /// Numeric and symbolic preparation retained for one active phase mask.
 ///
-/// The symbolic snapshot is compared before reuse. This matters because a
-/// temperature interval may cross a thermochemical coefficient boundary: the
-/// active mask can remain unchanged while the symbolic equation itself must
-/// still be rebuilt.
+/// Canonical fixed-P,T RST graphs receive standard Gibbs values as equation
+/// parameters. A coefficient-interval transition therefore reuses this entry;
+/// only a changed active mask needs another graph.
 struct PreparedActiveSetCacheEntry {
     prepared: PreparedEquilibriumProblem,
     symbolic_standard_gibbs: Vec<Expr>,
     rst_problem: Option<RstPreparedProblem>,
+    /// Cumulative time spent building this active-set entry, including later
+    /// symbolic rebuilds when a native coefficient interval changes.
+    formulation_build: Duration,
 }
 
 /// Runs phase transitions around immutable prepared fixed-set solves.
@@ -129,32 +147,21 @@ impl PreparedPhaseControlRunner {
         })
     }
 
-    /// Retargets the immutable prepared formulation for the next temperature.
+    /// Retargets numeric conditions and thermochemistry while retaining the
+    /// symbolic capability snapshot captured during initial phase resolution.
     ///
-    /// The elemental inventory and reaction basis are intentionally retained.
-    /// Only temperature-dependent conditions, Gibbs closures, and the seed are
-    /// replaced. A changed active mask will populate one additional projection
-    /// cache entry when it is first solved.
-    pub(crate) fn retarget(
+    /// This is the temperature-range path: fixed-P,T RST graphs parameterize
+    /// `G0_i`, so recalculating symbolic polynomials at every point is both
+    /// redundant and a source of avoidable rebuilds.
+    pub(crate) fn retarget_numeric(
         &mut self,
         conditions: crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumConditions,
         seed: LogMolesInitialGuess,
         gibbs: Vec<crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::GibbsFn>,
-        symbolic_standard_gibbs: Vec<Expr>,
     ) -> Result<(), ReactionExtentError> {
         self.prepared = self
             .prepared
             .retarget_with_gibbs(conditions, seed.clone(), gibbs)?;
-        if !symbolic_standard_gibbs.is_empty()
-            && symbolic_standard_gibbs.len() != self.prepared.problem().species().len()
-        {
-            return Err(ReactionExtentError::DimensionMismatch(format!(
-                "symbolic Gibbs snapshot has {} entries for {} species",
-                symbolic_standard_gibbs.len(),
-                self.prepared.problem().species().len()
-            )));
-        }
-        self.symbolic_standard_gibbs = symbolic_standard_gibbs;
         self.continuation_seed = Some(seed.as_slice().to_vec());
         Ok(())
     }
@@ -195,6 +202,29 @@ impl PreparedPhaseControlRunner {
             .count()
     }
 
+    /// Returns deterministic per-entry build timing for release reports.
+    ///
+    /// `HashMap` iteration order is deliberately hidden behind active-mask
+    /// sorting so repeated runs produce comparable evidence. The mask uses
+    /// the canonical phase order retained by the prepared problem.
+    pub(crate) fn prepared_active_set_cache_timings(&self) -> Vec<(Vec<bool>, Duration)> {
+        let mut entries = self
+            .prepared_active_set_cache
+            .iter()
+            .map(|(active_mask, entry)| (active_mask.clone(), entry.formulation_build))
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        entries
+    }
+
+    /// Checks whether the configured solver policy selects a RustedSciThe
+    /// backend for the supplied symbolic expression vector.
+    ///
+    /// Returns `true` when at least one backend in the resolved policy is
+    /// a RustedSciThe variant and the symbolic expressions are non-empty.
+    /// This guards the RST problem preparation path: when no symbolic backend
+    /// is present, the runner skips the expensive symbolic construction and
+    /// uses only the analytical formulation.
     fn uses_rst_backend(&self, symbols: &[Expr]) -> bool {
         self.solver_settings
             .solver_policy
@@ -218,9 +248,47 @@ impl PreparedPhaseControlRunner {
         &mut self.phase_manager
     }
 
+    /// Borrows the immutable full-layout problem used as the active-set
+    /// projection source. The P,H adapter uses only its topology and conserved
+    /// inventory; its nonlinear equations are built separately.
+    pub(crate) fn prepared_problem(&self) -> &PreparedEquilibriumProblem {
+        &self.prepared
+    }
+
+    /// Clones the validated backend settings for a fixed-set adapter.
+    pub(crate) fn solver_settings(&self) -> EquilibriumSolverSettings {
+        self.solver_settings.clone()
+    }
+
     /// Executes the bounded outer loop and publishes only the final accepted
     /// immutable solution plus complete transition evidence.
     pub(crate) fn solve(&mut self) -> Result<PreparedPhaseControlOutcome, ReactionExtentError> {
+        self.solve_with_fixed_active_solver(|runner, active, seed, species_phase, totals| {
+            runner.solve_active_set(active, seed, species_phase, totals)
+        })
+    }
+
+    /// Executes the common active-set lifecycle with an injected fixed-set
+    /// candidate solver.
+    ///
+    /// The callback owns only one immutable fixed active set. This runner
+    /// remains the sole owner of hysteresis, boundary recovery, cycle checks,
+    /// transition accounting, and final transactional publication. P,T uses
+    /// [`Self::solve_active_set`]; coupled P,H will use the same lifecycle
+    /// after providing a monolithic candidate adapter.
+    pub(crate) fn solve_with_fixed_active_solver<F>(
+        &mut self,
+        mut solve_active_set: F,
+    ) -> Result<PreparedPhaseControlOutcome, ReactionExtentError>
+    where
+        F: FnMut(
+            &mut Self,
+            &[bool],
+            &[f64],
+            &[usize],
+            &[f64],
+        ) -> Result<PreparedActiveSetCandidate, ReactionExtentError>,
+    {
         self.solver_settings.validate()?;
         self.phase_manager
             .validate_for_phase_count(self.prepared.problem().phases().len())?;
@@ -274,14 +342,17 @@ impl PreparedPhaseControlRunner {
         let mut transitions = Vec::new();
         let mut nonlinear_reports = Vec::new();
         let mut projection_build = Duration::ZERO;
+        let mut formulation_build = Duration::ZERO;
         let mut validation_duration = Duration::ZERO;
         let mut rst_symbolic_reused = false;
         let full_element_totals = self.prepared.element_totals().to_vec();
 
         for iteration in 0..max_phase_iterations {
+            let transition_started = Instant::now();
             phase_set.settle_transitions();
             let phase_active = phase_set.active_mask();
-            let mut candidate = match self.solve_active_set(
+            let mut candidate = match solve_active_set(
+                self,
                 &phase_active,
                 &seed,
                 &species_phase,
@@ -289,6 +360,7 @@ impl PreparedPhaseControlRunner {
             ) {
                 Ok(candidate) => {
                     projection_build += candidate.projection_build;
+                    formulation_build += candidate.formulation_build;
                     validation_duration += candidate.validation_duration;
                     rst_symbolic_reused |= candidate.rst_symbolic_reused;
                     candidate
@@ -299,6 +371,7 @@ impl PreparedPhaseControlRunner {
                         &seed,
                         &species_phase,
                         &full_element_totals,
+                        &mut solve_active_set,
                     )?
                     else {
                         return Err(primary_error);
@@ -311,6 +384,7 @@ impl PreparedPhaseControlRunner {
                         stability,
                     } = recovery;
                     projection_build += candidate.projection_build;
+                    formulation_build += candidate.formulation_build;
                     validation_duration += candidate.validation_duration;
                     rst_symbolic_reused |= candidate.rst_symbolic_reused;
                     if self.solver_settings.keq_validation_mode
@@ -352,6 +426,7 @@ impl PreparedPhaseControlRunner {
                     phase_set = recovered_phase_set;
                     transitions.push(PhaseTransitionRecord {
                         iteration,
+                        transition_duration: transition_started.elapsed(),
                         activated: Vec::new(),
                         deactivated: vec![phase],
                         phase_totals,
@@ -384,19 +459,91 @@ impl PreparedPhaseControlRunner {
             nonlinear_reports.push(candidate.solve_report.clone());
             let mut y = candidate.log_moles.clone();
             let phase_totals = compute_phase_totals(&y, &species_phase);
-            let stability = compute_phase_stability_reports(
+            let mut phase_active = phase_set.active_mask();
+            let probe_stability = compute_phase_stability_reports(
                 &y,
-                self.prepared.problem().gibbs(),
+                &candidate.stability_gibbs,
                 self.prepared.problem().phases(),
                 &species_phase,
                 self.prepared.problem().element_composition(),
-                self.prepared.problem().conditions().temperature(),
-                self.prepared.problem().conditions().pressure(),
-                self.prepared.problem().conditions().reference_pressure(),
+                candidate.conditions.temperature(),
+                candidate.conditions.pressure(),
+                candidate.conditions.reference_pressure(),
                 &phase_set,
             )?;
+            if candidate.solved_active_mask.len() != phase_active.len() {
+                return Err(ReactionExtentError::DimensionMismatch(format!(
+                    "candidate solved-active mask has {} phases but lifecycle has {}",
+                    candidate.solved_active_mask.len(),
+                    phase_active.len()
+                )));
+            }
+            if phase_active
+                .iter()
+                .zip(&candidate.solved_active_mask)
+                .any(|(&lifecycle_active, &solved_active)| lifecycle_active && !solved_active)
+            {
+                return Err(ReactionExtentError::InvalidCandidate {
+                    field: "phase_active_set",
+                    message: "a fixed-set candidate cannot silently remove a lifecycle-active phase"
+                        .to_string(),
+                });
+            }
+            let mut probe_expanded = false;
+            for phase_index in 0..phase_active.len() {
+                if phase_active[phase_index] || !candidate.solved_active_mask[phase_index] {
+                    continue;
+                }
+                let phase = PhaseIndex::new(phase_index, phase_active.len())?;
+                let driving_force = probe_stability[phase_index]
+                    .driving_force
+                    .ok_or_else(|| ReactionExtentError::InvalidCandidate {
+                        field: "phase_stability",
+                        message: format!(
+                            "monolithic active-set probe expanded phase {} without a driving force",
+                            phase.index()
+                        ),
+                    })?;
+                let previous_phase_set = phase_set.clone();
+                phase_set.activate(phase);
+                phase_active = phase_set.active_mask();
+                probe_expanded = true;
+                transitions.push(PhaseTransitionRecord {
+                    iteration,
+                    transition_duration: transition_started.elapsed(),
+                    activated: vec![phase],
+                    deactivated: Vec::new(),
+                    phase_totals: phase_totals.clone(),
+                    driving_forces: probe_stability
+                        .iter()
+                        .map(|report| report.driving_force)
+                        .collect(),
+                    reason: PhaseTransitionReason::UnstableInactivePhase { driving_force },
+                    previous_phase_set,
+                    new_phase_set: phase_set.clone(),
+                    restart_seed: y.clone(),
+                    nonlinear_report: candidate.solve_report.clone(),
+                    candidate_validation: candidate.validation_report.clone(),
+                });
+                reject_repeated_phase_set(&mut visited, &phase_set, iteration + 1)?;
+            }
+            let stability = if probe_expanded {
+                compute_phase_stability_reports(
+                    &y,
+                    &candidate.stability_gibbs,
+                    self.prepared.problem().phases(),
+                    &species_phase,
+                    self.prepared.problem().element_composition(),
+                    candidate.conditions.temperature(),
+                    candidate.conditions.pressure(),
+                    candidate.conditions.reference_pressure(),
+                    &phase_set,
+                )?
+            } else {
+                probe_stability
+            };
             let transition_plan = self.phase_manager.classify_phases_at_temperature(
-                self.prepared.problem().conditions().temperature(),
+                candidate.conditions.temperature(),
                 &phase_totals,
                 &stability,
                 &phase_set,
@@ -429,6 +576,7 @@ impl PreparedPhaseControlRunner {
                     let new_phase_set = phase_set.clone();
                     transitions.push(PhaseTransitionRecord {
                         iteration,
+                        transition_duration: transition_started.elapsed(),
                         activated: Vec::new(),
                         deactivated: vec![phase],
                         phase_totals,
@@ -471,6 +619,7 @@ impl PreparedPhaseControlRunner {
                     let new_phase_set = phase_set.clone();
                     transitions.push(PhaseTransitionRecord {
                         iteration,
+                        transition_duration: transition_started.elapsed(),
                         activated: vec![phase],
                         deactivated: Vec::new(),
                         phase_totals,
@@ -501,6 +650,7 @@ impl PreparedPhaseControlRunner {
                         iteration + 1,
                         stability,
                         projection_build,
+                        formulation_build,
                         validation_duration,
                         rst_symbolic_reused,
                     );
@@ -521,6 +671,7 @@ impl PreparedPhaseControlRunner {
                         iteration + 1,
                         stability,
                         projection_build,
+                        formulation_build,
                         validation_duration,
                         rst_symbolic_reused,
                     );
@@ -542,21 +693,33 @@ impl PreparedPhaseControlRunner {
     /// report places the removed phase above the keep threshold. This narrow
     /// contract prevents the recovery path from hiding unrelated numerical or
     /// data errors behind a convenient phase deletion.
-    fn recover_active_boundary(
+    ///
+    /// Iterates over active phases that had positive input inventory, removes
+    /// each one in turn, and re-solves the reduced active set. Recovery is
+    /// accepted only when the reduced solve succeeds and the removed phase's
+    /// stability driving force exceeds the keep threshold. Returns `None` when
+    /// no phase satisfies all recovery preconditions.
+    fn recover_active_boundary<F>(
         &mut self,
         phase_set: &PhaseSet,
         seed: &[f64],
         species_phase: &[usize],
         full_element_totals: &[f64],
-    ) -> Result<Option<PreparedBoundaryRecovery>, ReactionExtentError> {
+        solve_active_set: &mut F,
+    ) -> Result<Option<PreparedBoundaryRecovery>, ReactionExtentError>
+    where
+        F: FnMut(
+            &mut Self,
+            &[bool],
+            &[f64],
+            &[usize],
+            &[f64],
+        ) -> Result<PreparedActiveSetCandidate, ReactionExtentError>,
+    {
         let active = phase_set.active_mask();
         if active.iter().filter(|&&is_active| is_active).count() <= 1 {
             return Ok(None);
         }
-        let (_, dg_keep) = self
-            .phase_manager
-            .thresholds_at(self.prepared.problem().conditions().temperature())?;
-
         for phase_index in 0..active.len() {
             if !active[phase_index] {
                 continue;
@@ -579,20 +742,25 @@ impl PreparedPhaseControlRunner {
             reduced_phase_set.deactivate(phase);
             reduced_phase_set.settle_transitions();
             let reduced_active = reduced_phase_set.active_mask();
-            let Ok(candidate) =
-                self.solve_active_set(&reduced_active, seed, species_phase, full_element_totals)
+            let Ok(candidate) = solve_active_set(
+                self,
+                &reduced_active,
+                seed,
+                species_phase,
+                full_element_totals,
+            )
             else {
                 continue;
             };
             let Ok(stability) = compute_phase_stability_reports(
                 &candidate.log_moles,
-                self.prepared.problem().gibbs(),
+                &candidate.stability_gibbs,
                 self.prepared.problem().phases(),
                 species_phase,
                 self.prepared.problem().element_composition(),
-                self.prepared.problem().conditions().temperature(),
-                self.prepared.problem().conditions().pressure(),
-                self.prepared.problem().conditions().reference_pressure(),
+                candidate.conditions.temperature(),
+                candidate.conditions.pressure(),
+                candidate.conditions.reference_pressure(),
                 &reduced_phase_set,
             ) else {
                 continue;
@@ -602,6 +770,9 @@ impl PreparedPhaseControlRunner {
             let Some(driving_force) = stability[phase_index].driving_force else {
                 continue;
             };
+            let (_, dg_keep) = self
+                .phase_manager
+                .thresholds_at(candidate.conditions.temperature())?;
             if phase_total < self.phase_manager.phase_eps && driving_force > dg_keep {
                 return Ok(Some(PreparedBoundaryRecovery {
                     phase,
@@ -614,6 +785,15 @@ impl PreparedPhaseControlRunner {
         Ok(None)
     }
 
+    /// Solves one fixed active set and returns a validated candidate.
+    ///
+    /// Builds or retrieves the cached active-set projection, prepares the
+    /// reduced numerical problem (and optionally the RST symbolic problem),
+    /// then dispatches through the solver cascade. The result includes the
+    /// solved log-moles, validation report, backend cascade evidence, and
+    /// timing for the projection and formulation builds. The active mask is
+    /// retained so the outer phase-control loop can associate each candidate
+    /// with its phase set.
     fn solve_active_set(
         &mut self,
         active: &[bool],
@@ -669,12 +849,13 @@ impl PreparedPhaseControlRunner {
         let reduced_totals = projection.reduced_element_totals(full_element_totals)?;
         let reduced_seed = LogMolesInitialGuess::new(reduced_seed.clone())?;
         let current_conditions = self.prepared.problem().conditions();
-        let current_temperature = current_conditions.temperature();
         let solver_settings = self.solver_settings.clone();
         let use_rst = self.uses_rst_backend(&reduced_symbols);
         let mut rst_symbolic_reused = false;
+        let mut formulation_build = Duration::ZERO;
 
         if !self.prepared_active_set_cache.contains_key(&cache_key) {
+            let formulation_started = self.timing_enabled.then(Instant::now);
             let reduced_problem = EquilibriumProblem::new(
                 reduced_components,
                 reduced_initial_moles,
@@ -688,19 +869,24 @@ impl PreparedPhaseControlRunner {
                 reduced_problem,
                 Some(reduced_totals),
             )?;
+            let entry_build = formulation_started
+                .map(|started| started.elapsed())
+                .unwrap_or(Duration::ZERO);
             self.prepared_active_set_cache.insert(
                 cache_key.clone(),
                 PreparedActiveSetCacheEntry {
                     prepared,
                     symbolic_standard_gibbs: Vec::new(),
                     rst_problem: None,
+                    formulation_build: entry_build,
                 },
             );
+            formulation_build += entry_build;
         }
 
         // The cache entry owns both equation preparations. Retargeting makes
         // a cheap immutable numeric copy for this point, while the RST object
-        // itself remains borrowed for the solve and receives only a new `T`.
+        // itself remains borrowed and receives the new `T` plus `G0_i` values.
         let outcome = {
             let entry = self
                 .prepared_active_set_cache
@@ -712,22 +898,26 @@ impl PreparedPhaseControlRunner {
                 reduced_gibbs,
             )?;
             if use_rst {
-                let symbolic_changed =
-                    entry.rst_problem.is_none() || entry.symbolic_standard_gibbs != reduced_symbols;
-                rst_symbolic_reused = !symbolic_changed;
-                if symbolic_changed {
+                if entry.rst_problem.is_none() {
+                    let formulation_started = self.timing_enabled.then(Instant::now);
                     entry.rst_problem = Some(prepare_rst_symbolic_problem_from_prepared(
                         &prepared,
                         &reduced_symbols,
                     )?);
                     entry.symbolic_standard_gibbs = reduced_symbols.clone();
+                    let symbolic_build = formulation_started
+                        .map(|started| started.elapsed())
+                        .unwrap_or(Duration::ZERO);
+                    entry.formulation_build += symbolic_build;
+                    formulation_build += symbolic_build;
                 } else {
-                    entry
-                        .rst_problem
-                        .as_mut()
-                        .expect("cached RST problem exists when symbolic snapshot is unchanged")
-                        .set_temperature(current_temperature)?;
+                    rst_symbolic_reused = true;
                 }
+                entry
+                    .rst_problem
+                    .as_mut()
+                    .expect("RST problem was created or retained above")
+                    .set_fixed_pt_thermochemistry_from_prepared(&prepared)?;
             } else {
                 // An explicitly legacy-only policy must not retain an unused
                 // symbolic backend object or report it as reusable.
@@ -755,15 +945,27 @@ impl PreparedPhaseControlRunner {
         )?;
         Ok(PreparedActiveSetCandidate {
             log_moles,
+            solved_active_mask: active.to_vec(),
             validation_report: outcome.solution.validation().clone(),
             solve_report: outcome.solve_report,
             keq_validation_status: outcome.keq_validation_status,
+            stability_gibbs: self.prepared.problem().gibbs().to_vec(),
+            conditions: self.prepared.problem().conditions(),
             projection_build,
+            formulation_build,
             validation_duration: outcome.validation_duration,
             rst_symbolic_reused,
         })
     }
 
+    /// Assembles the final [`PreparedPhaseControlOutcome`] from the accepted
+    /// active-set candidate and the outer-loop transition history.
+    ///
+    /// Computes phase stability reports for the accepted phase set, builds the
+    /// multiphase acceptance report, and packages everything into a single
+    /// immutable outcome value. The initial and final phase sets are retained
+    /// so the caller can inspect the complete transition sequence without
+    /// re-running the outer loop.
     fn finish(
         &self,
         candidate: PreparedActiveSetCandidate,
@@ -777,6 +979,7 @@ impl PreparedPhaseControlRunner {
             crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseStabilityReport,
         >,
         projection_build: Duration,
+        formulation_build: Duration,
         validation_duration: Duration,
         rst_symbolic_reused: bool,
     ) -> Result<PreparedPhaseControlOutcome, ReactionExtentError> {
@@ -792,7 +995,7 @@ impl PreparedPhaseControlRunner {
         };
         let (dg_create, dg_keep) = self
             .phase_manager
-            .thresholds_at(self.prepared.problem().conditions().temperature())?;
+            .thresholds_at(candidate.conditions.temperature())?;
         let acceptance_report = build_multiphase_acceptance_report(
             phase_control_report.clone(),
             phase_stability,
@@ -813,7 +1016,7 @@ impl PreparedPhaseControlRunner {
             crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumSolution::new(
                 log_moles,
                 moles,
-                self.prepared.problem().conditions(),
+                candidate.conditions,
                 candidate.validation_report,
             )?;
         Ok(PreparedPhaseControlOutcome {
@@ -824,6 +1027,7 @@ impl PreparedPhaseControlRunner {
             acceptance_report,
             phase_statuses,
             projection_build,
+            formulation_build,
             validation_duration,
             rst_symbolic_reused,
         })

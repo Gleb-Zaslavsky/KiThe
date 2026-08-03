@@ -194,6 +194,10 @@ pub trait ThermoCalculator {
     fn create_closures_Cp_dH_dS_with_T_range(&mut self, T: f64) -> Result<(), ThermoError>;
     fn create_sym_Cp_dH_dS_with_T_range(&mut self, T: f64) -> Result<(), ThermoError>;
     fn is_coeffs_valid_for_T(&self, T: f64) -> Result<bool, ThermoError>;
+    /// Returns the inclusive temperature domain represented by the parsed
+    /// source record.  This is metadata about the record, not a user-selected
+    /// fitting interval.
+    fn valid_temperature_interval(&self) -> Result<(f64, f64), ThermoError>;
 }
 #[derive(Clone, Debug)]
 #[enum_dispatch(ThermoCalculator)]

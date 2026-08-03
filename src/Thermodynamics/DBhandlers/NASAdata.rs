@@ -1030,4 +1030,22 @@ impl ThermoCalculator for NASAdata {
         let flag = self.is_this_T_from_current_T_range(T);
         Ok(flag)
     }
+
+    fn valid_temperature_interval(&self) -> Result<(f64, f64), ThermoError> {
+        let bounds = self
+            .coeffs_map
+            .values()
+            .map(|coeffs| coeffs.T)
+            .fold(None, |acc: Option<(f64, f64)>, interval| {
+                Some(match acc {
+                    Some((lower, upper)) => (lower.min(interval.0), upper.max(interval.1)),
+                    None => interval,
+                })
+            })
+            .ok_or(ThermoError::InvalidTemperatureRange)?;
+        if !bounds.0.is_finite() || !bounds.1.is_finite() || bounds.0 > bounds.1 {
+            return Err(ThermoError::InvalidTemperatureRange);
+        }
+        Ok(bounds)
+    }
 }

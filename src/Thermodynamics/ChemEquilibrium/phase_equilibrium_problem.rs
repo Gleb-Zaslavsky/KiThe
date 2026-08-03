@@ -41,12 +41,13 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExten
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::PreparedEquilibriumRunner;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, EquilibriumProblem, EquilibriumSolution, LogMolesInitialGuess,
-    TraceSpeciesSeedPolicy,
+    PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
     RstPreparedProblem, prepare_rst_symbolic_problem_from_prepared,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::EquilibriumSolveReport;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::MultiStartSolveReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
     EquilibriumTimingCollector, EquilibriumTimingMode, EquilibriumTimingReport,
     EquilibriumTimingStage,
@@ -64,7 +65,7 @@ use crate::Thermodynamics::phase_layout::{
 };
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::DMatrix;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Explicit version of the phase-model contract accepted by the bridge.
 ///
@@ -528,6 +529,48 @@ impl PhaseEquilibriumProblemBundle {
             build_report: self.report,
             solution: outcome.solution,
             solve_report: outcome.solve_report,
+            multi_start_report: outcome.multi_start_report,
+            keq_validation_status: outcome.keq_validation_status,
+            timing: timing.finish(),
+        })
+    }
+
+    /// Solves one fixed formulation from explicit ordered log-mole seeds.
+    ///
+    /// The chemistry, layout, and conserved totals are prepared once. Each
+    /// seed is only a numerical starting point; the common acceptance gate
+    /// selects the best accepted candidate. The ordinary solve remains the
+    /// default; the typed public request opts into this method explicitly.
+    /// It is not available on the bounded phase-control path.
+    pub fn solve_with_initial_guesses<F>(
+        self,
+        initial_guesses: Vec<LogMolesInitialGuess>,
+        configure: F,
+    ) -> Result<PhaseEquilibriumSolutionBundle, ReactionExtentError>
+    where
+        F: FnOnce(&mut EquilibriumSolverSettings),
+    {
+        let mut timing = EquilibriumTimingCollector::from_report(self.timing);
+        let prepared = timing
+            .measure(EquilibriumTimingStage::NumericalProblemPreparation, || {
+                PreparedEquilibriumProblem::new(self.problem)
+            })?;
+        let mut runner = PreparedEquilibriumRunner::new(prepared, self.symbolic_standard_gibbs)?;
+        configure(runner.configure());
+        let outcome = timing.measure(EquilibriumTimingStage::NonlinearSolve, || {
+            runner.solve_from_initial_guesses(initial_guesses)
+        })?;
+        timing.record(
+            EquilibriumTimingStage::Validation,
+            outcome.validation_duration,
+        );
+
+        Ok(PhaseEquilibriumSolutionBundle {
+            metadata: self.metadata,
+            build_report: self.report,
+            solution: outcome.solution,
+            solve_report: outcome.solve_report,
+            multi_start_report: outcome.multi_start_report,
             keq_validation_status: outcome.keq_validation_status,
             timing: timing.finish(),
         })
@@ -540,17 +583,28 @@ impl PhaseEquilibriumProblemBundle {
     pub(crate) fn into_temperature_template(
         self,
         prepare_rst: bool,
+        timing_mode: EquilibriumTimingMode,
     ) -> Result<PreparedPhaseEquilibriumTemplate, ReactionExtentError> {
-        let prepared = crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::
-            PreparedEquilibriumProblem::new(self.problem)?;
+        let prior_timing = self.timing;
+        let started = Instant::now();
+        let mut timing = EquilibriumTimingCollector::from_report(prior_timing);
+        let prepared = timing.measure(EquilibriumTimingStage::NumericalProblemPreparation, || {
+            crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::
+                PreparedEquilibriumProblem::new(self.problem)
+        })?;
         let rst_problem = if prepare_rst {
-            Some(prepare_rst_symbolic_problem_from_prepared(
-                &prepared,
-                &self.symbolic_standard_gibbs,
-            )?)
+            Some(timing.measure(EquilibriumTimingStage::SymbolicConstruction, || {
+                prepare_rst_symbolic_problem_from_prepared(
+                    &prepared,
+                    &self.symbolic_standard_gibbs,
+                )
+            })?)
         } else {
             None
         };
+        if matches!(timing_mode, EquilibriumTimingMode::Enabled) {
+            timing.set_total(prior_timing.total() + started.elapsed());
+        }
 
         Ok(PreparedPhaseEquilibriumTemplate {
             prepared,
@@ -559,10 +613,26 @@ impl PhaseEquilibriumProblemBundle {
             symbolic_standard_gibbs: self.symbolic_standard_gibbs,
             thermo_payloads: self.thermo_payloads,
             rst_problem,
-            timing: self.timing,
-            // The first point has not been solved yet.  This flag is updated
-            // after the first symbolic comparison in `solve_at`.
+            timing: timing.finish(),
+            // The first point has not yet published its parameter update.
+            fixed_pt_parameters_initialized: false,
             last_symbolic_parameter_reused: false,
+            last_formulation_build: Duration::ZERO,
+        })
+    }
+
+    /// Consumes a fixed-active bridge bundle for a formulation that owns a
+    /// solved temperature itself, such as monolithic P,H. No symbolic P,T
+    /// payload is carried across this boundary because it is not valid after
+    /// temperature becomes a nonlinear unknown.
+    pub(crate) fn into_prepared_fixed_active_problem(
+        self,
+    ) -> Result<PreparedFixedActiveProblem, ReactionExtentError> {
+        Ok(PreparedFixedActiveProblem {
+            prepared: PreparedEquilibriumProblem::new(self.problem)?,
+            metadata: self.metadata,
+            report: self.report,
+            timing: self.timing,
         })
     }
 
@@ -593,6 +663,7 @@ impl PhaseEquilibriumProblemBundle {
             thermo_payloads: self.thermo_payloads,
             timing: self.timing,
             last_rst_symbolic_reused: false,
+            last_formulation_build: Duration::ZERO,
         })
     }
 
@@ -651,6 +722,18 @@ impl PhaseEquilibriumProblemBundle {
     }
 }
 
+/// Fixed phase metadata paired with the prepared numerical P,T structure.
+///
+/// This is deliberately narrower than a temperature-range template: it does
+/// not retain mutable closures or an RST payload, because monolithic P,H
+/// evaluates thermochemistry from its own capability bundle at every iterate.
+pub(crate) struct PreparedFixedActiveProblem {
+    pub(crate) prepared: PreparedEquilibriumProblem,
+    pub(crate) metadata: PhaseEquilibriumMetadata,
+    pub(crate) report: PhaseEquilibriumBuildReport,
+    pub(crate) timing: EquilibriumTimingReport,
+}
+
 /// Reusable fixed-layout formulation for typed temperature continuation.
 ///
 /// This is deliberately crate-private: callers receive the smaller range
@@ -665,7 +748,11 @@ pub(crate) struct PreparedPhaseEquilibriumTemplate {
     thermo_payloads: Vec<SubsData>,
     rst_problem: Option<RstPreparedProblem>,
     timing: EquilibriumTimingReport,
+    /// The first point initializes the reusable parameterized RST graph.
+    /// Later points only replace `T` and the numeric `G0` parameter vector.
+    fixed_pt_parameters_initialized: bool,
     last_symbolic_parameter_reused: bool,
+    last_formulation_build: Duration,
 }
 
 /// Reusable bounded phase-control formulation for a typed temperature range.
@@ -680,6 +767,7 @@ pub(crate) struct PreparedPhaseControlTemplate {
     thermo_payloads: Vec<SubsData>,
     timing: EquilibriumTimingReport,
     last_rst_symbolic_reused: bool,
+    last_formulation_build: Duration,
 }
 
 impl PreparedPhaseControlTemplate {
@@ -702,10 +790,22 @@ impl PreparedPhaseControlTemplate {
         self.runner.rst_prepared_cache_size()
     }
 
+    /// Per-active-set formulation timing retained for range diagnostics.
+    pub(crate) fn formulation_cache_timings(&self) -> Vec<(Vec<bool>, Duration)> {
+        self.runner.prepared_active_set_cache_timings()
+    }
+
     /// Whether the most recent bounded point reused an unchanged RST symbolic
     /// formulation for at least one active-set solve.
     pub(crate) fn last_rst_symbolic_reused(&self) -> bool {
         self.last_rst_symbolic_reused
+    }
+
+    /// Duration spent constructing reduced formulations during the most recent
+    /// accepted range point. A zero value means the timing mode was disabled
+    /// or every required active-set formulation was already cached.
+    pub(crate) fn last_formulation_build(&self) -> Duration {
+        self.last_formulation_build
     }
 
     /// Solves one point and returns the accepted bounded result. The caller
@@ -723,9 +823,10 @@ impl PreparedPhaseControlTemplate {
         let started = Instant::now();
         let mut timing = EquilibriumTimingCollector::new(timing_mode);
         let gibbs = self.refresh_gibbs(conditions.temperature(), &mut timing)?;
-        let symbolic = self.refresh_symbolic()?;
-        self.runner
-            .retarget(conditions, seed, gibbs.clone(), symbolic.clone())?;
+        // The phase-control runner retains the initial symbolic capability
+        // snapshot. Canonical RST fixed-P,T problems parameterize `G0_i`, so
+        // a range point needs only refreshed numeric thermochemistry.
+        self.runner.retarget_numeric(conditions, seed, gibbs.clone())?;
         if let Some(phase_set) = continuation_phase_set {
             self.runner.set_continuation_phase_set(phase_set)?;
         }
@@ -733,6 +834,7 @@ impl PreparedPhaseControlTemplate {
         let outcome =
             timing.measure(EquilibriumTimingStage::PhaseControl, || self.runner.solve())?;
         self.last_rst_symbolic_reused = outcome.rst_symbolic_reused;
+        self.last_formulation_build = outcome.formulation_build;
         timing.record(
             EquilibriumTimingStage::ProjectionBuild,
             outcome.projection_build,
@@ -745,6 +847,63 @@ impl PreparedPhaseControlTemplate {
         let report = self.report.at_conditions(conditions, &gibbs)?;
         MultiphaseEquilibriumSolution::from_phase_control_parts(
             self.metadata.clone(),
+            report,
+            outcome.solution,
+            outcome.solve_report,
+            outcome.keq_validation_status,
+            outcome.phase_control_report,
+            outcome.acceptance_report,
+            outcome.phase_statuses,
+            timing.finish(),
+        )
+    }
+
+    /// Consumes this phase-control template through a caller-supplied
+    /// fixed-active candidate solver. The lifecycle remains identical to the
+    /// ordinary bounded P,T path; the adapter may instead solve a coupled P,H
+    /// formulation whose candidate owns its temperature.
+    pub(crate) fn solve_with_fixed_active_solver<F>(
+        mut self,
+        settings: EquilibriumSolverSettings,
+        mut solve_active_set: F,
+    ) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError>
+    where
+        F: FnMut(
+            &mut PreparedPhaseControlRunner,
+            &[bool],
+            &[f64],
+            &[usize],
+            &[f64],
+        ) -> Result<
+            crate::Thermodynamics::ChemEquilibrium::prepared_phase_control_runner::
+                PreparedActiveSetCandidate,
+            ReactionExtentError,
+        >,
+    {
+        let started = Instant::now();
+        *self.runner.configure_solver() = settings;
+        let outcome = self
+            .runner
+            .solve_with_fixed_active_solver(|runner, active, seed, species_phase, totals| {
+                solve_active_set(runner, active, seed, species_phase, totals)
+            })?;
+        self.last_rst_symbolic_reused = outcome.rst_symbolic_reused;
+        let mut timing = EquilibriumTimingCollector::from_report(self.timing);
+        timing.record(
+            EquilibriumTimingStage::ProjectionBuild,
+            outcome.projection_build,
+        );
+        timing.record(
+            EquilibriumTimingStage::Validation,
+            outcome.validation_duration,
+        );
+        timing.set_total(started.elapsed());
+        let gibbs = self.refresh_gibbs(outcome.solution.conditions().temperature(), &mut timing)?;
+        let report = self
+            .report
+            .at_conditions(outcome.solution.conditions(), &gibbs)?;
+        MultiphaseEquilibriumSolution::from_phase_control_parts(
+            self.metadata,
             report,
             outcome.solution,
             outcome.solve_report,
@@ -809,38 +968,6 @@ impl PreparedPhaseControlTemplate {
             .collect()
     }
 
-    fn refresh_symbolic(&mut self) -> Result<Vec<Expr>, ReactionExtentError> {
-        let phase_expressions = self
-            .thermo_payloads
-            .iter_mut()
-            .map(SubsData::calculate_dG0_sym_one_phase)
-            .collect::<Result<Vec<_>, _>>()?;
-        self.metadata
-            .components()
-            .iter()
-            .map(|component| {
-                let phase_index = self
-                    .metadata
-                    .phase_index(&component.id().phase)
-                    .ok_or_else(|| ReactionExtentError::InvalidProblem {
-                        field: "temperature_range_phase",
-                        message: format!("missing phase for component '{}'", component.label()),
-                    })?
-                    .index();
-                phase_expressions
-                    .get(phase_index)
-                    .and_then(|expressions| expressions.get(component.substance()))
-                    .cloned()
-                    .ok_or_else(|| ReactionExtentError::InvalidProblem {
-                        field: "temperature_range_symbolic_gibbs",
-                        message: format!(
-                            "missing symbolic Gibbs expression for '{}'",
-                            component.label()
-                        ),
-                    })
-            })
-            .collect()
-    }
 }
 
 impl PreparedPhaseEquilibriumTemplate {
@@ -859,6 +986,14 @@ impl PreparedPhaseEquilibriumTemplate {
         self.last_symbolic_parameter_reused
     }
 
+    /// Duration spent rebuilding the symbolic formulation during the most
+    /// recent accepted range point. Initial construction is reported by
+    /// [`Self::build_timing`]; this value covers later interval/formulation
+    /// rebuilds only.
+    pub(crate) fn last_formulation_build(&self) -> Duration {
+        self.last_formulation_build
+    }
+
     /// Solves one point from a typed continuation seed.
     pub(crate) fn solve_at(
         &mut self,
@@ -867,33 +1002,60 @@ impl PreparedPhaseEquilibriumTemplate {
         settings: EquilibriumSolverSettings,
         timing_mode: EquilibriumTimingMode,
     ) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
+        self.solve_at_with_seeds(conditions, vec![seed], settings, timing_mode)
+    }
+
+    /// Solves one retargeted point from deterministic candidates while
+    /// reusing the phase layout and, when applicable, the prepared RST
+    /// symbolic problem.
+    ///
+    /// This is intentionally crate-private: temperature-continuation and
+    /// fixed-`P,H` workflows need the same multi-start recovery contract, but
+    /// callers must not observe or mutate the reusable formulation itself.
+    pub(crate) fn solve_at_with_initial_guesses(
+        &mut self,
+        conditions: EquilibriumConditions,
+        seeds: Vec<LogMolesInitialGuess>,
+        settings: EquilibriumSolverSettings,
+        timing_mode: EquilibriumTimingMode,
+    ) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
+        self.solve_at_with_seeds(conditions, seeds, settings, timing_mode)
+    }
+
+    fn solve_at_with_seeds(
+        &mut self,
+        conditions: EquilibriumConditions,
+        seeds: Vec<LogMolesInitialGuess>,
+        settings: EquilibriumSolverSettings,
+        timing_mode: EquilibriumTimingMode,
+    ) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
+        if seeds.is_empty() {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "temperature_template_seeds",
+                message: "at least one fixed-formulation seed is required".to_string(),
+            });
+        }
+        // Retargeting needs one initial vector to instantiate the local
+        // prepared problem. Candidate selection still receives every seed
+        // below, preserving deterministic multi-start recovery.
+        let retarget_seed = seeds[0].clone();
         let started = Instant::now();
         let mut timing = EquilibriumTimingCollector::new(timing_mode);
-        if let Some(rst_problem) = self.rst_problem.as_mut() {
-            rst_problem.set_temperature(conditions.temperature())?;
-        }
-
         let gibbs = self.refresh_gibbs(conditions.temperature(), &mut timing)?;
         let prepared = self
             .prepared
-            .retarget_with_gibbs(conditions, seed.clone(), gibbs)?;
-        if self.rst_problem.is_some() {
-            let symbolic = timing.measure(EquilibriumTimingStage::SymbolicConstruction, || {
-                self.refresh_symbolic()
-            })?;
-            if symbolic != self.symbolic_standard_gibbs {
-                self.symbolic_standard_gibbs = symbolic;
-                self.rst_problem = Some(prepare_rst_symbolic_problem_from_prepared(
-                    &prepared,
-                    &self.symbolic_standard_gibbs,
-                )?);
-                self.last_symbolic_parameter_reused = false;
-            } else {
-                self.last_symbolic_parameter_reused = true;
-            }
+            .retarget_with_gibbs(conditions, retarget_seed, gibbs)?;
+        if let Some(rst_problem) = self.rst_problem.as_mut() {
+            // The canonical fixed-P,T RST formulation owns `G0_i` as equation
+            // parameters. Coefficient-interval changes therefore update only
+            // numeric values, never its symbolic graph or Jacobian.
+            rst_problem.set_fixed_pt_thermochemistry_from_prepared(&prepared)?;
+            self.last_symbolic_parameter_reused = self.fixed_pt_parameters_initialized;
+            self.fixed_pt_parameters_initialized = true;
         } else {
             self.last_symbolic_parameter_reused = false;
         }
+        self.last_formulation_build = Duration::ZERO;
         let report = self
             .report
             .at_conditions(conditions, prepared.problem().gibbs())?;
@@ -901,9 +1063,24 @@ impl PreparedPhaseEquilibriumTemplate {
             PreparedEquilibriumRunner::new(prepared, self.symbolic_standard_gibbs.clone())?;
         *runner.configure() = settings.clone();
         let outcome = timing.measure(EquilibriumTimingStage::NonlinearSolve, || {
-            match self.rst_problem.as_ref() {
-                Some(rst_problem) => runner.solve_from_seed_with_rst(seed, rst_problem),
-                None => runner.solve_from_seed(seed),
+            if seeds.len() == 1 {
+                let seed = seeds.into_iter().next().ok_or_else(|| {
+                    ReactionExtentError::InvalidProblem {
+                        field: "temperature_template_seeds",
+                        message: "fixed-formulation seed disappeared before solving".to_string(),
+                    }
+                })?;
+                match self.rst_problem.as_ref() {
+                    Some(rst_problem) => runner.solve_from_seed_with_rst(seed, rst_problem),
+                    None => runner.solve_from_seed(seed),
+                }
+            } else {
+                match self.rst_problem.as_ref() {
+                    Some(rst_problem) => {
+                        runner.solve_from_initial_guesses_with_rst(seeds, rst_problem)
+                    }
+                    None => runner.solve_from_initial_guesses(seeds),
+                }
             }
         })?;
         timing.record(
@@ -917,6 +1094,7 @@ impl PreparedPhaseEquilibriumTemplate {
             build_report: report,
             solution: outcome.solution,
             solve_report: outcome.solve_report,
+            multi_start_report: outcome.multi_start_report,
             keq_validation_status: outcome.keq_validation_status,
             timing: timing.finish(),
         };
@@ -977,38 +1155,6 @@ impl PreparedPhaseEquilibriumTemplate {
         Ok(gibbs)
     }
 
-    /// Rebuilds symbolic standard-state expressions only when coefficient
-    /// interval selection changes their captured constants.
-    fn refresh_symbolic(&mut self) -> Result<Vec<Expr>, ReactionExtentError> {
-        let mut phase_expressions = Vec::with_capacity(self.thermo_payloads.len());
-        for payload in &mut self.thermo_payloads {
-            phase_expressions.push(payload.calculate_dG0_sym_one_phase()?);
-        }
-
-        let mut symbolic = Vec::with_capacity(self.metadata.components().len());
-        for component in self.metadata.components() {
-            let phase_index = self
-                .metadata
-                .phase_index(&component.id().phase)
-                .ok_or_else(|| ReactionExtentError::InvalidProblem {
-                    field: "temperature_range_phase",
-                    message: format!("missing phase for component '{}'", component.label()),
-                })?
-                .index();
-            let expression = phase_expressions
-                .get(phase_index)
-                .and_then(|expressions| expressions.get(component.substance()))
-                .ok_or_else(|| ReactionExtentError::InvalidProblem {
-                    field: "temperature_range_symbolic_gibbs",
-                    message: format!(
-                        "missing symbolic Gibbs expression for '{}'",
-                        component.label()
-                    ),
-                })?;
-            symbolic.push(expression.clone());
-        }
-        Ok(symbolic)
-    }
 }
 
 /// Immutable accepted result of a phase-system equilibrium solve.
@@ -1027,6 +1173,8 @@ pub struct PhaseEquilibriumSolutionBundle {
     solution: EquilibriumSolution,
     /// Ordered backend cascade evidence for the accepted result.
     solve_report: EquilibriumSolveReport,
+    /// Optional explicit multi-start seed comparison evidence.
+    multi_start_report: Option<MultiStartSolveReport>,
     /// Optional independent equilibrium-constant validation evidence.
     keq_validation_status: Option<EquilibriumConstantCrossValidationStatus>,
     /// Optional stage timing accumulated during the complete solve.
@@ -1057,6 +1205,11 @@ impl PhaseEquilibriumSolutionBundle {
     /// Ordered backend cascade evidence for the accepted result.
     pub fn solve_report(&self) -> &EquilibriumSolveReport {
         &self.solve_report
+    }
+
+    /// Explicit multi-start evidence, when the caller requested it.
+    pub fn multi_start_report(&self) -> Option<&MultiStartSolveReport> {
+        self.multi_start_report.as_ref()
     }
 
     /// Optional independent equilibrium-constant validation evidence.
@@ -1103,6 +1256,7 @@ pub(crate) fn build_phase_equilibrium_problem_with_timing(
     request: PhaseEquilibriumBuildRequest<'_>,
     timing_mode: EquilibriumTimingMode,
 ) -> Result<PhaseEquilibriumProblemBundle, ReactionExtentError> {
+    let started = Instant::now();
     let mut timing = EquilibriumTimingCollector::new(timing_mode);
     let metadata = request.metadata.clone();
     let conditions = request.conditions;
@@ -1262,6 +1416,7 @@ pub(crate) fn build_phase_equilibrium_problem_with_timing(
         components: component_reports,
     };
 
+    timing.set_total(started.elapsed());
     Ok(PhaseEquilibriumProblemBundle {
         problem,
         metadata,

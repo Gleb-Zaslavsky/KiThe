@@ -25,7 +25,7 @@
 //! # Dataflow
 //!
 //! ```text
-//!   EquilibriumLogMoles::solve_backend_cascade()
+//!   solve_backend_cascade_with_control()
 //!     │
 //!     ├── Builds BackendSolveRequest from solver state
 //!     │     ├── initial_guess: Vec<f64>
@@ -70,31 +70,78 @@
 //!
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_legacy_backend::solve_legacy_backend;
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::SolverParams;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
+    EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
+};
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
+    recoverable_backend_failure_kind, SolverParams,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
     RstPreparedProblem, RustedSciTheSolveContract,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
-    SolverAttemptMetrics, SolverBackend,
+    EquilibriumSolveReport, SolverAttemptMetrics, SolverAttemptOutcome, SolverAttemptReport,
+    SolverBackend, SolverCascadeBudget, SolverPolicy,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
+use log::info;
 use nalgebra::DMatrix;
 
 type ResidualFn<'a> = dyn Fn(&[f64]) -> Result<Vec<f64>, ReactionExtentError> + 'a;
 type JacobianFn<'a> = dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError> + 'a;
 type FeasibilityFn<'a> = dyn Fn(&[f64]) -> bool + 'a;
 
+/// Domain-independent prepared nonlinear-system capabilities.
+///
+/// The coordinate meaning is intentionally absent. A fixed-P,T problem may
+/// use log-moles only; a future P,H problem may append a temperature
+/// coordinate. The adapter only needs the dimension and callable residual,
+/// Jacobian, and feasibility contracts. The optional RST payload is an
+/// implementation detail of the symbolic backend, not a thermodynamic model.
+pub(crate) struct PreparedNonlinearSystem<'a> {
+    /// Number of unknowns expected by the prepared capabilities.
+    pub dimension: usize,
+    /// Residual capability for the prepared coordinate vector.
+    pub residual: &'a ResidualFn<'a>,
+    /// Optional analytic Jacobian capability.
+    pub jacobian: Option<&'a JacobianFn<'a>>,
+    /// Domain-side feasibility predicate.
+    pub feasible: &'a FeasibilityFn<'a>,
+    /// Optional symbolic payload consumed only by an RST backend.
+    pub rst_problem: Option<&'a RstPreparedProblem>,
+}
+
+impl<'a> PreparedNonlinearSystem<'a> {
+    pub(crate) fn new(
+        dimension: usize,
+        residual: &'a ResidualFn<'a>,
+        jacobian: Option<&'a JacobianFn<'a>>,
+        feasible: &'a FeasibilityFn<'a>,
+        rst_problem: Option<&'a RstPreparedProblem>,
+    ) -> Result<Self, ReactionExtentError> {
+        if dimension == 0 {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "nonlinear_system.dimension",
+                message: "prepared nonlinear system must contain at least one unknown".to_string(),
+            });
+        }
+        Ok(Self {
+            dimension,
+            residual,
+            jacobian,
+            feasible,
+            rst_problem,
+        })
+    }
+}
+
 /// Mechanical request passed to one backend attempt.
 pub(crate) struct BackendSolveRequest<'a> {
     pub initial_guess: Vec<f64>,
-    pub residual: &'a ResidualFn<'a>,
-    pub jacobian: Option<&'a JacobianFn<'a>>,
-    pub feasible: &'a FeasibilityFn<'a>,
+    pub system: PreparedNonlinearSystem<'a>,
     pub params: &'a SolverParams,
-    pub initial_moles: &'a [f64],
-    pub reactions: &'a DMatrix<f64>,
     pub max_iterations: usize,
-    pub rst_problem: Option<&'a RstPreparedProblem>,
 }
 
 /// Uniform output of one backend attempt.
@@ -123,28 +170,36 @@ impl EquilibriumNonlinearBackend for SolverBackend {
         &self,
         request: BackendSolveRequest<'_>,
     ) -> Result<BackendSolveResult, ReactionExtentError> {
+        if request.initial_guess.len() != request.system.dimension {
+            return Err(ReactionExtentError::DimensionMismatch(format!(
+                "nonlinear initial guess has {} entries, prepared system requires {}",
+                request.initial_guess.len(),
+                request.system.dimension
+            )));
+        }
         match *self {
             SolverBackend::Legacy(legacy_backend) => solve_legacy_backend(
                 legacy_backend,
                 request.initial_guess,
-                request.residual,
-                request.jacobian,
-                request.feasible,
+                request.system.residual,
+                request.system.jacobian,
+                request.system.feasible,
                 request.params,
-                request.initial_moles,
-                request.reactions,
                 request.max_iterations,
             )
             .map(|solution| BackendSolveResult {
                 solution,
                 metrics: None,
             }),
-            SolverBackend::RustedSciThe(rst_solver) => match request.rst_problem {
+            SolverBackend::RustedSciThe(rst_solver) => match request.system.rst_problem {
                 Some(problem) => rst_solver
                     .solve(
                         problem,
                         &request.initial_guess,
-                        RustedSciTheSolveContract::new(request.params.tol, request.max_iterations)?,
+                        &RustedSciTheSolveContract::new(
+                            request.params.tol,
+                            request.max_iterations,
+                        )?,
                     )
                     .map(|outcome| BackendSolveResult {
                         solution: outcome.solution,
@@ -157,6 +212,163 @@ impl EquilibriumNonlinearBackend for SolverBackend {
             },
         }
     }
+}
+
+pub(crate) fn solve_backend_cascade_with_control(
+    backends: &[&dyn EquilibriumNonlinearBackend],
+    initial_guess: Vec<f64>,
+    f: &dyn Fn(&[f64]) -> Result<Vec<f64>, ReactionExtentError>,
+    j: Option<&dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError>>,
+    feasible: &dyn Fn(&[f64]) -> bool,
+    validate_candidate: &dyn Fn(
+        &[f64],
+    )
+        -> Result<EquilibriumCandidateReport, ReactionExtentError>,
+    policy: SolverPolicy,
+    budget: SolverCascadeBudget,
+    solver_params: &SolverParams,
+    rst_problem: Option<&RstPreparedProblem>,
+    execution_control: Option<&EquilibriumExecutionControl>,
+) -> Result<(Vec<f64>, EquilibriumCandidateReport, EquilibriumSolveReport), ReactionExtentError>
+{
+    if backends.is_empty() {
+        return Err(ReactionExtentError::InvalidProblem {
+            field: "solver_policy",
+            message: "a solver policy must contain at least one backend".to_string(),
+        });
+    }
+
+    if budget.max_attempts == 0
+        || budget.max_iterations_per_attempt == 0
+        || budget.max_total_iterations == 0
+    {
+        return Err(ReactionExtentError::InvalidProblem {
+            field: "solver_budget",
+            message: "attempt, per-attempt, and total iteration limits must be positive"
+                .to_string(),
+        });
+    }
+
+    let system = PreparedNonlinearSystem::new(
+        initial_guess.len(),
+        f,
+        j,
+        feasible,
+        rst_problem,
+    )?;
+
+    let mut attempts = Vec::with_capacity(backends.len());
+    let mut started_attempts = 0usize;
+    let mut remaining_iterations = budget.max_total_iterations;
+    for &backend in backends {
+        let backend_id = backend.backend();
+        if started_attempts >= budget.max_attempts || remaining_iterations == 0 {
+            let reason = if started_attempts >= budget.max_attempts {
+                format!(
+                    "cascade attempt budget exhausted after {} started backend(s)",
+                    budget.max_attempts
+                )
+            } else {
+                "cascade total iteration budget exhausted".to_string()
+            };
+            attempts.push(SolverAttemptReport {
+                backend: backend_id,
+                outcome: SolverAttemptOutcome::Skipped { reason },
+                metrics: None,
+            });
+            continue;
+        }
+        let max_iterations = budget.max_iterations_per_attempt.min(remaining_iterations);
+        started_attempts += 1;
+        remaining_iterations -= max_iterations;
+
+        // Every backend receives this same validated seed. A previous
+        // rejected candidate is evidence for diagnostics, never an
+        // implicit warm start.
+        if let Some(control) = execution_control {
+            control.report(EquilibriumProgressEvent::new(
+                EquilibriumProgressStage::InnerBackendAttemptStarted,
+                None,
+                None,
+                None,
+            ));
+            control.check_cancelled()?;
+        }
+        let result = backend.solve(BackendSolveRequest {
+            initial_guess: initial_guess.clone(),
+            system: PreparedNonlinearSystem {
+                dimension: system.dimension,
+                residual: system.residual,
+                jacobian: system.jacobian,
+                feasible: system.feasible,
+                rst_problem: system.rst_problem,
+            },
+            params: solver_params,
+            max_iterations,
+        });
+        if let Some(control) = execution_control {
+            control.report(EquilibriumProgressEvent::new(
+                EquilibriumProgressStage::InnerBackendAttemptFinished,
+                None,
+                None,
+                None,
+            ));
+            control.check_cancelled()?;
+        }
+
+        match result {
+            Ok(candidate) => match validate_candidate(&candidate.solution) {
+                Ok(validation) => {
+                    attempts.push(SolverAttemptReport {
+                        backend: backend_id,
+                        outcome: SolverAttemptOutcome::Accepted,
+                        metrics: candidate.metrics,
+                    });
+                    let report = EquilibriumSolveReport {
+                        policy,
+                        attempts,
+                        accepted_backend: backend_id,
+                    };
+                    if report.accepted_after_fallback() {
+                        info!("Solver accepted after fallback: {}", report);
+                    }
+                    return Ok((candidate.solution, validation, report));
+                }
+                Err(error) => attempts.push(SolverAttemptReport {
+                    backend: backend_id,
+                    outcome: SolverAttemptOutcome::RejectedCandidate {
+                        reason: error.to_string(),
+                    },
+                    metrics: candidate.metrics,
+                }),
+            },
+            Err(e) => {
+                let Some(kind) = recoverable_backend_failure_kind(&e) else {
+                    return if attempts.is_empty() {
+                        Err(e)
+                    } else {
+                        Err(ReactionExtentError::CascadeAborted {
+                            attempts,
+                            cause: Box::new(e),
+                        })
+                    };
+                };
+                attempts.push(SolverAttemptReport {
+                    backend: backend_id,
+                    outcome: SolverAttemptOutcome::Failed {
+                        kind,
+                        // Attempt reports are part of the public solve
+                        // contract, so keep their wording independent of
+                        // a private Debug implementation.
+                        reason: e.to_string(),
+                    },
+                    metrics: None,
+                });
+            }
+        }
+    }
+
+    Err(ReactionExtentError::AllBackendsFailed { attempts })
 }
 
 #[cfg(test)]
@@ -197,6 +409,7 @@ mod tests {
                         jacobian_evaluations: 1,
                         linear_solves: 1,
                         elapsed_millis: 0,
+                        evaluation_timing: None,
                     }),
                 }),
                 FakeBackendBehavior::Fail => Err(ReactionExtentError::BackendFailure {
@@ -214,14 +427,9 @@ mod tests {
         let feasible = |_values: &[f64]| true;
         let request = BackendSolveRequest {
             initial_guess: vec![1.0],
-            residual: &residual,
-            jacobian: None,
-            feasible: &feasible,
+            system: PreparedNonlinearSystem::new(1, &residual, None, &feasible, None).unwrap(),
             params: &SolverParams::default(),
-            initial_moles: &[1.0],
-            reactions: &DMatrix::zeros(1, 1),
             max_iterations: 1,
-            rst_problem: None,
         };
 
         let backend = FakeBackend {
@@ -239,14 +447,9 @@ mod tests {
         let feasible = |_values: &[f64]| true;
         let request = BackendSolveRequest {
             initial_guess: vec![1.0],
-            residual: &residual,
-            jacobian: None,
-            feasible: &feasible,
+            system: PreparedNonlinearSystem::new(1, &residual, None, &feasible, None).unwrap(),
             params: &SolverParams::default(),
-            initial_moles: &[1.0],
-            reactions: &DMatrix::zeros(1, 1),
             max_iterations: 1,
-            rst_problem: None,
         };
 
         let backend = FakeBackend {
@@ -256,6 +459,39 @@ mod tests {
         assert!(matches!(
             backend.solve(request),
             Err(ReactionExtentError::BackendFailure { .. })
+        ));
+    }
+
+    #[test]
+    fn prepared_nonlinear_system_rejects_an_empty_coordinate_contract() {
+        let residual = |_values: &[f64]| Ok(Vec::new());
+        let feasible = |_values: &[f64]| true;
+
+        assert!(matches!(
+            PreparedNonlinearSystem::new(0, &residual, None, &feasible, None),
+            Err(ReactionExtentError::InvalidProblem {
+                field: "nonlinear_system.dimension",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn backend_rejects_a_seed_with_the_wrong_prepared_dimension() {
+        let residual = |values: &[f64]| Ok(values.to_vec());
+        let feasible = |_values: &[f64]| true;
+        let request = BackendSolveRequest {
+            initial_guess: vec![1.0],
+            system: PreparedNonlinearSystem::new(2, &residual, None, &feasible, None).unwrap(),
+            params: &SolverParams::default(),
+            max_iterations: 1,
+        };
+        let backend = SolverBackend::Legacy(Solvers::LM);
+
+        assert!(matches!(
+            backend.solve(request),
+            Err(ReactionExtentError::DimensionMismatch(message))
+                if message.contains("prepared system requires 2")
         ));
     }
 }

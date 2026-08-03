@@ -20,11 +20,11 @@ pub use crate::Thermodynamics::User_substances_presets::{
     ThermoScenarioKind, ThermoScenarioPreset,
 };
 pub use crate::Thermodynamics::physical_state::{
-    PhysicalState, PhysicalStateEvidence, ThermoRecordQuery,
+    NistFallbackPolicy, PhysicalState, PhysicalStateEvidence, ThermoRecordQuery,
 };
 pub use crate::Thermodynamics::thermo_lib_api::{
     ElementSearchMode, LibraryCapability, LibraryId, ResolvedThermoRecord, ThermoData,
-    ThermoLibraryError, ThermoRepository,
+    ThermoCatalogConsistencyReport, ThermoLibraryError, ThermoRepository,
 };
 
 #[cfg(test)]
@@ -39,5 +39,8 @@ mod tests {
         let _ = std::any::type_name::<crate::Thermodynamics::prelude::ThermoOutputPolicy>();
         let _ = std::any::type_name::<crate::Thermodynamics::prelude::ThermoPresetPreviewReport>();
         let _ = std::any::type_name::<crate::Thermodynamics::prelude::ThermoRequestedData>();
+        let _ = std::any::type_name::<
+            crate::Thermodynamics::prelude::ThermoCatalogConsistencyReport,
+        >();
     }
 }

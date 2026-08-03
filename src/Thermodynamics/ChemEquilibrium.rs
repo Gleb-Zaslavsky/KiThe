@@ -32,6 +32,10 @@ mod equilibrium_constant_solver_tests;
 mod equilibrium_constant_tests;
 /// Policies and reports for equilibrium-constant validation.
 pub mod equilibrium_constant_validation;
+/// Typed PT/PH constraints and pure enthalpy-domain helpers.
+pub mod equilibrium_constraints;
+/// Cooperative cancellation and progress events for typed workflows.
+pub mod equilibrium_execution;
 #[cfg(test)]
 mod equilibrium_golden_fixtures_tests;
 /// Typed, validated input data for the canonical equilibrium formulation.
@@ -60,6 +64,22 @@ mod equilibrium_multiphase_story_tests;
 pub mod equilibrium_nonlinear;
 #[cfg(test)]
 mod equilibrium_offline_regression_matrix_tests;
+/// Structural contracts for the monolithic fixed-P,H formulation.
+pub(crate) mod equilibrium_ph_formulation;
+/// Shared and route-specific typed controls for fixed-P,H solving.
+pub mod equilibrium_ph_options;
+/// Typed thermochemistry capabilities shared by P,H formulations and runners.
+pub(crate) mod equilibrium_ph_thermochemistry;
+/// Transactional fixed-pressure target-enthalpy continuation.
+pub mod equilibrium_ph_range;
+/// Nested scalar P,H reports and the stateless bracket engine. The stable
+/// workflow facade re-exports the report types; callers normally do not need
+/// to address this module directly.
+pub mod equilibrium_ph_nested;
+/// Fixed-active-set numerical runner for the monolithic P,H formulation.
+pub(crate) mod equilibrium_ph_monolithic;
+/// Outer fixed-pressure, fixed-total-enthalpy workflow over the canonical PT solver.
+pub mod equilibrium_ph_workflow;
 #[cfg(test)]
 mod equilibrium_phase_bridge_tests;
 /// Immutable numerical runner for one prepared fixed-`P,T` problem.
@@ -136,19 +156,46 @@ pub mod prelude {
         EquilibriumCandidatePolicy, EquilibriumCandidateSelectionReport,
         EquilibriumCandidateSelector,
     };
+    pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
+    pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
+        EnthalpyScale, EquilibriumConstraint, TemperatureBounds, TotalEnthalpyJoules,
+        additive_total_enthalpy,
+    };
+    pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
+        EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
+    };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
         MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
         ReactionExtentError, ReactionExtentErrorKind,
     };
+    pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::{
+        EnthalpyEvaluation, EnthalpyModel, FixedPressureEnthalpySolution, MolarEnthalpyFunction,
+        MolarThermoFunction, PhFallbackReason, PhMonotonicityPolicy, PhSolveMode, PhSolvePath,
+        PhMonolithicEvidence, PhTemperatureSolveOptions,
+        PhTemperatureSolveReport, PhTemperatureStepKind, PhTemperatureTimingReport,
+        PhTemperatureTrial, PhTrialInnerEvidence, PhTrialPhaseState, PhTrialPreparation,
+        PhTrialTimingReport,
+        ResolvedPhaseEnthalpyRequest,
+        ResolvedThermochemistry, ThermochemistryProvenance, solve_resolved_ph,
+    };
+    pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_options::{
+        PhAcceptanceOptions, PhMonolithicOptions, PhNestedOptions,
+    };
+    pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_range::{
+        PhEnthalpyGrid, PhRangeDirection, PhRangeDurationSummary, PhRangeError,
+        PhRangePoint, PhRangePointError, PhRangePointPreparation, PhRangePointReport,
+        PhRangeRequest, PhRangeSolution, PhRangeSolveReport,
+    };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
-        EquilibriumConditions, TraceSpeciesSeedPolicy,
+        EquilibriumConditions, LogMolesInitialGuess, TraceSpeciesSeedPolicy,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RustedSciTheSolver;
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
-        EquilibriumSolveReport, SolverAttemptMetrics, SolverAttemptOutcome, SolverAttemptReport,
-        SolverBackend, SolverCascadeBudget, SolverPolicy,
+        EquilibriumSolveReport, MultiStartAttemptReport, MultiStartSolveReport,
+        SolverAttemptMetrics, SolverAttemptOutcome, SolverAttemptReport, SolverBackend,
+        SolverCascadeBudget, SolverPolicy,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_postprocessing::{
         TemperatureInterpolationPolicy, TemperatureInterpolationSpace,
@@ -186,5 +233,7 @@ pub mod prelude {
     };
     pub use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
     pub use crate::Thermodynamics::physical_state::PhysicalState;
-    pub use crate::Thermodynamics::thermo_lib_api::{ElementSearchMode, ThermoRepository};
+    pub use crate::Thermodynamics::thermo_lib_api::{
+        ElementSearchMode, ThermoCatalogConsistencyReport, ThermoRepository,
+    };
 }

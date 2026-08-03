@@ -445,6 +445,37 @@ Required tests:
 - [x] Ordinary CI does not require network access.
 - [x] Optional live tests are explicitly ignored.
 
+## P1.6 Make NIST fallback phase-safe
+
+- [x] Keep local thermochemical records authoritative; live NIST lookup is an
+  explicit opt-in fallback and never a hidden second local catalog.
+- [x] Introduce a typed `NistFallbackPolicy` with `Disabled`,
+  `ExactRequestedState`, and a deprecated `LegacyGasDefault` compatibility
+  value. The canonical phase factory now uses the exact-state policy when the
+  old boolean opt-in is enabled.
+- [x] For an explicit gas/liquid/solid request, query NIST only for that same
+  state. A missing requested state is reported as missing data; it must not be
+  replaced by another physical state. Network, HTTP, and parser failures stay
+  typed failures rather than being converted to absence.
+- [x] Refuse to guess a state in the canonical exact-state path when the
+  component has no physical-state requirement. The historical gas default is
+  isolated behind a deprecated compatibility method.
+- [x] Expose one explicit `SubsData::search_substances_with_nist_fallback`
+  workflow. An explicit `NIST` library instruction may use the online parser
+  after its local payload is missing; an explicit non-NIST instruction remains
+  a hard source pin and is never silently replaced by NIST.
+- [x] Add one explicitly ignored online NIST state-matrix diagnostic for a
+  substance with gas, liquid, and solid records where available. It is release
+  evidence for the parser boundary only; it must not mutate local JSON or be a
+  default CI/release gate.
+  - [x] The H2O diagnostic passes for gas/liquid and records solid as an
+    incomplete WebBook payload (navigation exists, but no Cp interval table).
+    This is intentionally reported as unavailable solid thermochemistry, not
+    accepted as a gas/liquid substitution.
+- [x] Add an ignored phase-resolution story proving that an explicit `NIST`
+  source instruction plus `ExactRequestedState` resolves a local-miss liquid
+  component online and preserves the policy/provenance in the resolved report.
+
 # P2: Performance, API, and Maintainability
 
 ## P2.1 Remove repeated large clones and redundant scans
@@ -907,9 +938,15 @@ Required tests:
 These items depend on changing equilibrium consumers, not on further changes
 to the phase-data engine. Keep them out of independent phase-system passes.
 
-- [ ] Migrate equilibrium consumers from `ThermodynamicsCalculatorTrait` to
+- [x] Migrate equilibrium consumers from `ThermodynamicsCalculatorTrait` to
   `PhaseLayoutAccess`, `PhasePropertyEvaluator`,
   `PhaseSymbolicPropertyBuilder`, and `PhaseEquilibriumAssembly`.
+  - [x] No canonical `ChemEquilibrium` production path or live-data story
+    imports the broad trait or `CustomSubstance`; the remaining references are
+    isolated to the phase compatibility facade and its dedicated tests.
+  - [x] Live equilibrium stories now resolve directly to
+    `ResolvedPhaseSystem`; they no longer unwrap `CustomSubstance` merely to
+    reach the canonical solver boundary.
 - [ ] Replace equilibrium closure input `Option<Vec<f64>>` with a borrowed
   typed composition view aligned to `SystemLayout`.
 - [ ] Migrate legacy raw Gibbs/entropy `Fn(...) -> f64` closures together with
@@ -919,8 +956,22 @@ to the phase-data engine. Keep them out of independent phase-system passes.
   - Return to this item only after the equilibrium facade accepts the narrow
     typed composition API and can propagate `SubsDataResult` at callback
     invocation time.
-- [ ] Remove `CustomSubstance`/`enum_dispatch` once no equilibrium-facing
-  consumer requires its broad legacy surface.
+- [ ] Remove `CustomSubstance`/`enum_dispatch` from the remaining phase
+  compatibility surface after its dedicated legacy consumers are migrated.
+  - [x] `CustomSubstance`, `ThermodynamicsCalculatorTrait`, the legacy
+    factory adapters, and `LegacyGibbsFunction` are now marked deprecated with
+    migration notes. They remain callable, but new downstream code receives a
+    compiler warning instead of silently extending the old API.
+  - [x] The canonical `SubstanceSystemSpec::resolve*` and
+    `SubstanceSystemFactory::resolve_spec*` methods now return
+    `ResolvedPhaseSystem`. The enum facade is available only through
+    explicitly named `*_legacy` methods while the independent phase facade
+    tests and older applications are migrated.
+  - [x] No equilibrium-facing consumer remains on the enum; the remaining
+    work is limited to the separate phase-facade compatibility contract.
+  - [x] Removed the primitive six-argument `create_system` factory. Legacy
+    callers must now construct an explicit `SubstanceSystemSpec`; only the
+    intentionally named `resolve_legacy*` adapter remains for old facades.
 - [ ] Add equilibrium integration story-tests for `PhaseEvaluationRequest`,
   cache revision invalidation, and the same substance represented in two
   phases.
@@ -1026,8 +1077,9 @@ to the phase-data engine. Keep them out of independent phase-system passes.
   the same engine.
   - [x] `CustomSubstance` now implements the narrow preparation, symbolic, and
     equilibrium roles by delegation. New consumers no longer need the broad
-    enum-dispatch trait; removing the enum itself remains deferred until the
-    equilibrium migration.
+    enum-dispatch trait; the enum and trait are deprecated and their final
+    removal remains deferred until dedicated phase compatibility consumers
+    migrate.
 - [ ] Split the oversized `ThermodynamicsCalculatorTrait` into narrow roles:
   resolved data access, phase-property evaluation, layout/composition access,
   and equilibrium equation assembly.
@@ -1038,7 +1090,8 @@ to the phase-data engine. Keep them out of independent phase-system passes.
   - [x] Introduce `PhaseDataPreparation`, `PhaseSymbolicPropertyBuilder`, and
     `PhaseEquilibriumAssembly` for both facades. New solver-facing code can
     depend on one capability at a time; `ThermodynamicsCalculatorTrait` stays
-    intact only as a compatibility adapter until its legacy consumers migrate.
+    intact only as a deprecated compatibility adapter until its legacy
+    consumers migrate.
     Its preparation, symbolic, and Lagrange methods now delegate through those
     narrow roles instead of maintaining a second direct `PhaseSystem` route.
 - [ ] Move equilibrium-only Lagrange equation builders out of the data

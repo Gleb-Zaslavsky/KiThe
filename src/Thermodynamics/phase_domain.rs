@@ -19,6 +19,7 @@ use crate::Thermodynamics::User_substances::{Phases, SubsData};
 use crate::Thermodynamics::User_substances2::SearchSummaryReport;
 use crate::Thermodynamics::phase_layout::{PhaseId, SystemLayout};
 use crate::Thermodynamics::physical_state::PhysicalState;
+use crate::Thermodynamics::physical_state::NistFallbackPolicy;
 
 use super::SubstanceSystemFactoryError;
 
@@ -186,14 +187,19 @@ impl PhaseResolutionSummary {
 /// Immutable lookup provenance paired with a resolved phase-system payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedPhaseSystemReport {
-    nist_fallback_enabled: bool,
+    nist_fallback_policy: NistFallbackPolicy,
     phases: Vec<PhaseResolutionSummary>,
 }
 
 impl ResolvedPhaseSystemReport {
     /// Whether unresolved local records were allowed to query NIST.
     pub fn nist_fallback_enabled(&self) -> bool {
-        self.nist_fallback_enabled
+        self.nist_fallback_policy.enabled()
+    }
+
+    /// Exact policy used when local phase records were missing.
+    pub fn nist_fallback_policy(&self) -> NistFallbackPolicy {
+        self.nist_fallback_policy
     }
 
     /// Per-phase lookup summaries in canonical solver phase order.
@@ -220,7 +226,11 @@ impl ResolvedPhaseSystem {
         phase_specs: Vec<PhaseSpec>,
         phase_data: HashMap<Option<String>, SubsData>,
     ) -> Result<Self, SubstanceSystemFactoryError> {
-        Self::new_with_nist_fallback_policy(phase_specs, phase_data, false)
+        Self::new_with_nist_fallback_policy(
+            phase_specs,
+            phase_data,
+            NistFallbackPolicy::Disabled,
+        )
     }
 
     /// Creates a resolved system while retaining the lookup policy that
@@ -228,7 +238,7 @@ impl ResolvedPhaseSystem {
     pub(crate) fn new_with_nist_fallback_policy(
         mut phase_specs: Vec<PhaseSpec>,
         phase_data: HashMap<Option<String>, SubsData>,
-        nist_fallback_enabled: bool,
+        nist_fallback_policy: NistFallbackPolicy,
     ) -> Result<Self, SubstanceSystemFactoryError> {
         phase_specs.sort_by(|left, right| left.id.cmp(&right.id));
         let expected_keys = phase_specs
@@ -281,7 +291,7 @@ impl ResolvedPhaseSystem {
             })
             .collect::<Result<Vec<_>, SubstanceSystemFactoryError>>()?;
         let report = ResolvedPhaseSystemReport {
-            nist_fallback_enabled,
+            nist_fallback_policy,
             phases: phase_reports,
         };
         Ok(Self {

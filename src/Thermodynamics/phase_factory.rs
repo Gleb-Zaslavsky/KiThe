@@ -4,6 +4,8 @@
 //! `SubsData` payloads. It does lookup/I-O and never evaluates or owns
 //! thermodynamic cache state.
 
+#![allow(deprecated)]
+
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -12,6 +14,7 @@ use crate::Thermodynamics::User_PhaseOrSolution2::OnePhase;
 use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData};
 use crate::Thermodynamics::User_substances_error::{SubsDataError, SubsDataResult};
 use crate::Thermodynamics::phase_layout::PhaseId;
+use crate::Thermodynamics::physical_state::NistFallbackPolicy;
 use crate::Thermodynamics::thermo_lib_api::{ThermoData, ThermoLibraryError, ThermoRepository};
 use std::sync::Arc;
 
@@ -110,7 +113,7 @@ pub struct SubstanceSystemSpec {
     library_priorities: Vec<String>,
     permitted_libraries: Vec<String>,
     explicit_search_instructions: Option<HashMap<String, String>>,
-    search_in_nist: bool,
+    nist_fallback_policy: NistFallbackPolicy,
 }
 
 impl SubstanceSystemSpec {
@@ -120,7 +123,7 @@ impl SubstanceSystemSpec {
             library_priorities: Vec::new(),
             permitted_libraries: Vec::new(),
             explicit_search_instructions: None,
-            search_in_nist: false,
+            nist_fallback_policy: NistFallbackPolicy::Disabled,
         };
         SubstanceSystemFactory::validate_spec(&spec)?;
         Ok(spec)
@@ -146,7 +149,17 @@ impl SubstanceSystemSpec {
         self.library_priorities = library_priorities;
         self.permitted_libraries = permitted_libraries;
         self.explicit_search_instructions = explicit_search_instructions;
-        self.search_in_nist = search_in_nist;
+        self.nist_fallback_policy = if search_in_nist {
+            NistFallbackPolicy::ExactRequestedState
+        } else {
+            NistFallbackPolicy::Disabled
+        };
+        self
+    }
+
+    /// Selects the explicit NIST fallback contract for this phase lookup.
+    pub fn with_nist_fallback_policy(mut self, policy: NistFallbackPolicy) -> Self {
+        self.nist_fallback_policy = policy;
         self
     }
 
@@ -163,14 +176,25 @@ impl SubstanceSystemSpec {
     }
 
     pub fn search_in_nist(&self) -> bool {
-        self.search_in_nist
+        self.nist_fallback_policy.enabled()
+    }
+
+    /// Returns the full NIST fallback policy instead of its legacy boolean
+    /// projection.
+    pub fn nist_fallback_policy(&self) -> NistFallbackPolicy {
+        self.nist_fallback_policy
     }
 
     pub fn builder(container: SubstancesContainer) -> SubstanceSystemSpecBuilder {
         SubstanceSystemSpecBuilder::new(container)
     }
 
-    pub fn resolve(self) -> Result<CustomSubstance, SubstanceSystemFactoryError> {
+    /// Resolves this specification into the canonical immutable system.
+    ///
+    /// The returned value is the boundary consumed by chemical-equilibrium
+    /// workflows. It contains the ordered layout, resolved phase payloads,
+    /// and lookup provenance without exposing the historical enum facade.
+    pub fn resolve(self) -> Result<ResolvedPhaseSystem, SubstanceSystemFactoryError> {
         SubstanceSystemFactory::resolve_spec(self)
     }
 
@@ -179,8 +203,24 @@ impl SubstanceSystemSpec {
     pub fn resolve_with_repository(
         self,
         repository: Arc<ThermoRepository>,
-    ) -> Result<CustomSubstance, SubstanceSystemFactoryError> {
+    ) -> Result<ResolvedPhaseSystem, SubstanceSystemFactoryError> {
         SubstanceSystemFactory::resolve_spec_with_repository(self, repository)
+    }
+
+    /// Resolves through the historical `CustomSubstance` compatibility
+    /// facade. New code should use [`Self::resolve`] instead.
+    #[deprecated(note = "use resolve(); retained for phase compatibility")]
+    pub fn resolve_legacy(self) -> Result<CustomSubstance, SubstanceSystemFactoryError> {
+        SubstanceSystemFactory::resolve_spec_legacy(self)
+    }
+
+    /// Compatibility counterpart of [`Self::resolve_with_repository`].
+    #[deprecated(note = "use resolve_with_repository(); retained for phase compatibility")]
+    pub fn resolve_legacy_with_repository(
+        self,
+        repository: Arc<ThermoRepository>,
+    ) -> Result<CustomSubstance, SubstanceSystemFactoryError> {
+        SubstanceSystemFactory::resolve_spec_legacy_with_repository(self, repository)
     }
 }
 
@@ -192,7 +232,7 @@ pub struct SubstanceSystemSpecBuilder {
     library_priorities: Vec<String>,
     permitted_libraries: Vec<String>,
     explicit_search_instructions: Option<HashMap<String, String>>,
-    search_in_nist: bool,
+    nist_fallback_policy: NistFallbackPolicy,
 }
 
 impl SubstanceSystemSpecBuilder {
@@ -203,7 +243,7 @@ impl SubstanceSystemSpecBuilder {
             library_priorities: Vec::new(),
             permitted_libraries: Vec::new(),
             explicit_search_instructions: None,
-            search_in_nist: false,
+            nist_fallback_policy: NistFallbackPolicy::Disabled,
         }
     }
 
@@ -235,7 +275,18 @@ impl SubstanceSystemSpecBuilder {
     }
 
     pub fn with_search_in_nist(mut self, search_in_nist: bool) -> Self {
-        self.search_in_nist = search_in_nist;
+        self.nist_fallback_policy = if search_in_nist {
+            NistFallbackPolicy::ExactRequestedState
+        } else {
+            NistFallbackPolicy::Disabled
+        };
+        self
+    }
+
+    /// Selects the explicit NIST fallback contract for this compatibility
+    /// builder. New code should prefer [`SubstanceSystemSpec::with_nist_fallback_policy`].
+    pub fn with_nist_fallback_policy(mut self, policy: NistFallbackPolicy) -> Self {
+        self.nist_fallback_policy = policy;
         self
     }
 
@@ -246,7 +297,7 @@ impl SubstanceSystemSpecBuilder {
             library_priorities: self.library_priorities,
             permitted_libraries: self.permitted_libraries,
             explicit_search_instructions: self.explicit_search_instructions,
-            search_in_nist: self.search_in_nist,
+            nist_fallback_policy: self.nist_fallback_policy,
         };
         SubstanceSystemFactory::validate_spec(&spec)?;
         Ok(spec)
@@ -397,12 +448,9 @@ impl SubstanceSystemFactory {
 
     fn resolve_subs_data(
         subs_data: &mut SubsData,
-        search_in_nist: bool,
+        nist_fallback_policy: NistFallbackPolicy,
     ) -> Result<(), SubstanceSystemFactoryError> {
-        subs_data.search_substances()?;
-        if search_in_nist {
-            subs_data.if_not_found_go_NIST()?;
-        }
+        subs_data.search_substances_with_nist_fallback(nist_fallback_policy)?;
         subs_data.parse_all_thermal_coeffs()?;
         Ok(())
     }
@@ -430,7 +478,7 @@ impl SubstanceSystemFactory {
             library_priorities,
             permitted_libraries,
             explicit_search_instructions,
-            search_in_nist,
+            nist_fallback_policy,
         } = spec;
         let mut resolved_data = HashMap::with_capacity(phases.len());
         for phase in &phases {
@@ -457,22 +505,48 @@ impl SubstanceSystemFactory {
             // lookup constraint. Downstream property code still reads this
             // view when applying phase-specific activity corrections.
             phase_data.map_of_phases = phase.legacy_component_phase_map();
-            Self::resolve_subs_data(&mut phase_data, search_in_nist)?;
+            Self::resolve_subs_data(&mut phase_data, nist_fallback_policy)?;
             resolved_data.insert(phase_key, phase_data);
         }
-        ResolvedPhaseSystem::new_with_nist_fallback_policy(phases, resolved_data, search_in_nist)
+        ResolvedPhaseSystem::new_with_nist_fallback_policy(
+            phases,
+            resolved_data,
+            nist_fallback_policy,
+        )
     }
 
     pub fn resolve_spec(
         spec: SubstanceSystemSpec,
+    ) -> Result<ResolvedPhaseSystem, SubstanceSystemFactoryError> {
+        let repository = ThermoData::try_default_repository()
+            .map_err(SubstanceSystemFactoryError::Repository)?;
+        Self::resolve_phase_system_with_repository(spec, repository)
+    }
+
+    /// Resolves one canonical system against an explicit repository handle.
+    pub fn resolve_spec_with_repository(
+        spec: SubstanceSystemSpec,
+        repository: Arc<ThermoRepository>,
+    ) -> Result<ResolvedPhaseSystem, SubstanceSystemFactoryError> {
+        Self::resolve_phase_system_with_repository(spec, repository)
+    }
+
+    /// Resolves a compatibility facade against the default repository.
+    ///
+    /// This method is intentionally named as legacy so a caller has to opt in
+    /// to the enum-dispatch API explicitly.
+    #[deprecated(note = "use resolve_spec(); retained for phase compatibility")]
+    pub fn resolve_spec_legacy(
+        spec: SubstanceSystemSpec,
     ) -> Result<CustomSubstance, SubstanceSystemFactoryError> {
         let repository = ThermoData::try_default_repository()
             .map_err(SubstanceSystemFactoryError::Repository)?;
-        Self::resolve_spec_with_repository(spec, repository)
+        Self::resolve_spec_legacy_with_repository(spec, repository)
     }
 
-    /// Resolves a facade against one explicit repository handle.
-    pub fn resolve_spec_with_repository(
+    /// Resolves a compatibility facade against one explicit repository.
+    #[deprecated(note = "use resolve_spec_with_repository(); retained for phase compatibility")]
+    pub fn resolve_spec_legacy_with_repository(
         spec: SubstanceSystemSpec,
         repository: Arc<ThermoRepository>,
     ) -> Result<CustomSubstance, SubstanceSystemFactoryError> {
@@ -488,25 +562,5 @@ impl SubstanceSystemFactory {
             phase_system.install_resolved_system(resolved);
             Ok(CustomSubstance::PhaseOrSolution(phase_system))
         }
-    }
-
-    /// Compatibility adapter returning the legacy string error type.
-    pub fn create_system(
-        container: SubstancesContainer,
-        physical_phase_natures: Option<HashMap<String, Phases>>,
-        library_priorities: Vec<String>,
-        permitted_libraries: Vec<String>,
-        explicit_search_instructions: Option<HashMap<String, String>>,
-        search_in_nist: bool,
-    ) -> Result<CustomSubstance, String> {
-        let spec = SubstanceSystemSpecBuilder::new(container)
-            .with_phase_natures(physical_phase_natures)
-            .with_library_priorities(library_priorities)
-            .with_permitted_libraries(permitted_libraries)
-            .with_explicit_search_instructions(explicit_search_instructions)
-            .with_search_in_nist(search_in_nist)
-            .build()
-            .map_err(|error| error.to_string())?;
-        Self::resolve_spec(spec).map_err(|error| error.to_string())
     }
 }

@@ -317,11 +317,26 @@ pub enum SolverTermination {
     RejectedStepLimit,
 }
 
+/// Callback-level timing reported by a numerical backend when it is available.
+///
+/// RustedSciThe fills this from a transparent wrapper around its symbolic
+/// residual and Jacobian provider. Legacy methods leave it absent rather than
+/// manufacturing an incomparable split.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SolverEvaluationTiming {
+    /// Time spent evaluating residual callbacks inside the backend attempt.
+    pub residual_evaluation_micros: u128,
+    /// Time spent evaluating analytic or symbolic Jacobian callbacks.
+    pub jacobian_evaluation_micros: u128,
+    /// Backend time outside callbacks, including linear algebra and step control.
+    pub solver_overhead_micros: u128,
+}
+
 /// Backend-provided diagnostics for a candidate-producing solve attempt.
 ///
 /// Counters are optional because temporary legacy methods do not expose a
 /// comparable engine-level trace. RST adapters fill every field they receive
-/// from `SolveResult`.
+/// from `SolveResult` and attach callback timing for release diagnosis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SolverAttemptMetrics {
     /// Typed stopping classification reported by the backend.
@@ -340,6 +355,8 @@ pub struct SolverAttemptMetrics {
     pub linear_solves: usize,
     /// Wall-clock time spent in the backend call.
     pub elapsed_millis: u128,
+    /// Optional split between callback work and solver-internal overhead.
+    pub evaluation_timing: Option<SolverEvaluationTiming>,
 }
 
 /// One entry in a deterministic solver-cascade trace.
@@ -351,6 +368,60 @@ pub struct SolverAttemptReport {
     pub outcome: SolverAttemptOutcome,
     /// Numerical counters when the backend exposes them.
     pub metrics: Option<SolverAttemptMetrics>,
+}
+
+/// One deterministic initial-seed attempt in an explicit multi-start solve.
+///
+/// This is deliberately separate from [`SolverAttemptReport`]: one seed may
+/// itself execute a backend cascade, so flattening both levels would lose the
+/// distinction between changing the initial point and changing the nonlinear
+/// method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiStartAttemptReport {
+    /// Position of the seed in the caller-provided ordered seed list.
+    pub start_index: usize,
+    /// Whether this seed produced a candidate accepted by the common gate.
+    pub accepted: bool,
+    /// Candidate residual when accepted, formatted for stable diagnostics.
+    pub residual_l2_norm: Option<String>,
+    /// Typed solve failure rendered as diagnostic text when this seed failed.
+    pub error: Option<String>,
+    /// Number of nonlinear backend attempts started for this seed.
+    ///
+    /// Keeping this at the seed boundary prevents an outer workflow from
+    /// confusing "two seeds" with "two backend calls" when each seed itself
+    /// uses an ordered fallback cascade.
+    pub started_backend_attempts: usize,
+    /// Nonlinear iterations reported by every backend attempt for this seed.
+    pub nonlinear_iterations: usize,
+}
+
+/// Immutable evidence for one explicit multi-start fixed-formulation solve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiStartSolveReport {
+    /// Ordered per-seed outcomes.
+    pub attempts: Vec<MultiStartAttemptReport>,
+    /// Selected seed, using the existing candidate comparison contract.
+    pub selected_start: usize,
+}
+
+impl MultiStartSolveReport {
+    /// Total started backend attempts across every seed in this multi-start
+    /// transaction, including seeds that ultimately failed.
+    pub fn started_backend_attempts(&self) -> usize {
+        self.attempts
+            .iter()
+            .map(|attempt| attempt.started_backend_attempts)
+            .sum()
+    }
+
+    /// Total nonlinear iterations across every seed and backend attempt.
+    pub fn nonlinear_iterations(&self) -> usize {
+        self.attempts
+            .iter()
+            .map(|attempt| attempt.nonlinear_iterations)
+            .sum()
+    }
 }
 
 impl SolverAttemptReport {
@@ -428,6 +499,16 @@ impl EquilibriumSolveReport {
             .iter()
             .filter(|attempt| !matches!(attempt.outcome, SolverAttemptOutcome::Skipped { .. }))
             .count()
+    }
+
+    /// Total nonlinear iterations reported by all started backend attempts.
+    pub fn nonlinear_iterations(&self) -> usize {
+        self.attempts
+            .iter()
+            .filter(|attempt| attempt.is_started())
+            .filter_map(|attempt| attempt.metrics.as_ref())
+            .map(|metrics| metrics.iterations)
+            .sum()
     }
 
     /// Number of fallback attempts after the first recorded backend entry.
@@ -609,5 +690,33 @@ mod tests {
         };
         assert!(skipped.is_skipped());
         assert_eq!(skipped.reason(), Some("budget exhausted"));
+    }
+
+    #[test]
+    fn multi_start_report_sums_backend_attempts_across_seeds() {
+        let report = MultiStartSolveReport {
+            attempts: vec![
+                MultiStartAttemptReport {
+                    start_index: 0,
+                    accepted: false,
+                    residual_l2_norm: None,
+                    error: Some("first seed failed".to_string()),
+                    started_backend_attempts: 3,
+                    nonlinear_iterations: 11,
+                },
+                MultiStartAttemptReport {
+                    start_index: 1,
+                    accepted: true,
+                    residual_l2_norm: Some("1e-12".to_string()),
+                    error: None,
+                    started_backend_attempts: 2,
+                    nonlinear_iterations: 7,
+                },
+            ],
+            selected_start: 1,
+        };
+
+        assert_eq!(report.started_backend_attempts(), 5);
+        assert_eq!(report.nonlinear_iterations(), 18);
     }
 }

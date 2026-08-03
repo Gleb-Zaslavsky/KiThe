@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    #![allow(deprecated)]
+
     use crate::Thermodynamics::User_PhaseOrSolution::ThermodynamicsCalculatorTrait;
     use crate::Thermodynamics::User_PhaseOrSolution::{
         CustomSubstance, NestedPhaseCacheView, PhaseComposition, PhaseDataPreparation,
@@ -11,6 +13,7 @@ mod tests {
     };
     use crate::Thermodynamics::User_PhaseOrSolution2::OnePhase;
     use crate::Thermodynamics::phase_layout::PhaseId;
+    use crate::Thermodynamics::physical_state::NistFallbackPolicy;
 
     use crate::Thermodynamics::User_substances::SubsData;
     use crate::Thermodynamics::User_substances_error::SubsDataError;
@@ -20,6 +23,49 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    /// Online-only integration evidence for the canonical phase lookup path.
+    /// The explicit NIST instruction is a source selection, while the exact
+    /// fallback policy supplies the permission to query online after the local
+    /// NIST payload misses.
+    #[test]
+    #[ignore = "live NIST phase-resolution diagnostic; requires network"]
+    fn phase_resolution_can_use_explicit_online_nist_for_requested_liquid() {
+        let liquid = PhaseSpec::pure_condensed(
+            PhaseId::new(Some("liquid".to_string())),
+            vec!["H2O".to_string()],
+            PhasePhysicalState::Liquid,
+        )
+        .unwrap();
+        let spec = SubstanceSystemSpec::from_phases(vec![liquid])
+            .unwrap()
+            .with_lookup_policy(
+                Vec::new(),
+                Vec::new(),
+                Some(HashMap::from([("H2O".to_string(), "NIST".to_string())])),
+                false,
+            )
+            .with_nist_fallback_policy(NistFallbackPolicy::ExactRequestedState);
+
+        let resolved = spec
+            .resolve()
+            .expect("explicit online NIST liquid resolution should succeed");
+        assert_eq!(
+            resolved.report().nist_fallback_policy(),
+            NistFallbackPolicy::ExactRequestedState
+        );
+        let summary = resolved
+            .report()
+            .phase(&PhaseId::new(Some("liquid".to_string())))
+            .expect("liquid lookup report is missing");
+        assert!(summary.search().rows().iter().any(|row| {
+            row.substance() == "H2O"
+                && row.property() == "Thermo"
+                && row.library() == "NIST"
+                && row.state() == "Found"
+        }));
+    }
+
     #[test]
     fn test_substance_phase_mapping_basic() {
         let subs = vec!["A".to_string(), "B".to_string()];
@@ -42,18 +88,17 @@ mod tests {
     }
 
     #[test]
-    fn test_create_system_single_and_multi_phase() {
+    fn test_explicit_spec_supports_single_and_multi_phase_legacy_facades() {
         // Single phase
         let subs = vec!["CO".to_string(), "CO2".to_string()];
         let container = SubstancesContainer::SinglePhase(subs.clone());
-        let res = SubstanceSystemFactory::create_system(
-            container,
-            None,
-            vec!["NASA_gas".to_string(), "NASA_cond".to_string()],
-            vec!["NIST".to_string()],
-            None,
-            false,
-        );
+        let spec = SubstanceSystemSpec::builder(container)
+            .with_library_priorities(vec!["NASA_gas".to_string(), "NASA_cond".to_string()])
+            .with_permitted_libraries(vec!["NIST".to_string()])
+            .with_search_in_nist(false)
+            .build()
+            .unwrap();
+        let res = spec.resolve_legacy();
         assert!(res.is_ok());
         match res.unwrap() {
             crate::Thermodynamics::User_PhaseOrSolution::CustomSubstance::OnePhase(op) => {
@@ -72,9 +117,8 @@ mod tests {
         phases.insert("gas".to_string(), vec!["H2".to_string(), "O2".to_string()]);
         phases.insert("liquid".to_string(), vec!["H2O".to_string()]);
         let container = SubstancesContainer::MultiPhase(phases);
-        let res = SubstanceSystemFactory::create_system(
-            container,
-            Some(HashMap::from([
+        let spec = SubstanceSystemSpec::builder(container)
+            .with_phase_natures(Some(HashMap::from([
                 (
                     "gas".to_string(),
                     crate::Thermodynamics::User_substances::Phases::Gas,
@@ -83,12 +127,13 @@ mod tests {
                     "liquid".to_string(),
                     crate::Thermodynamics::User_substances::Phases::Liquid,
                 ),
-            ])),
-            vec!["NASA_gas".to_string(), "NASA_cond".to_string()],
-            vec!["NIST".to_string()],
-            None,
-            false,
-        );
+            ])))
+            .with_library_priorities(vec!["NASA_gas".to_string(), "NASA_cond".to_string()])
+            .with_permitted_libraries(vec!["NIST".to_string()])
+            .with_search_in_nist(false)
+            .build()
+            .unwrap();
+        let res = spec.resolve_legacy();
         assert!(res.is_ok());
         match res.unwrap() {
             crate::Thermodynamics::User_PhaseOrSolution::CustomSubstance::PhaseOrSolution(p) => {
@@ -115,7 +160,12 @@ mod tests {
         .build()
         .unwrap();
 
-        let resolved = spec.resolve().unwrap();
+        let resolved = spec.clone().resolve().unwrap();
+        assert_eq!(resolved.phase_specs().len(), 1);
+        assert_eq!(resolved.layout().component_labels(), ["CO", "CO2"]);
+        assert!(!resolved.report().phases().is_empty());
+
+        let resolved = spec.resolve_legacy().unwrap();
         match resolved {
             CustomSubstance::OnePhase(one) => {
                 assert_eq!(
@@ -753,7 +803,7 @@ mod tests {
         .with_search_in_nist(false)
         .build()
         .unwrap();
-        let mut one = match spec.resolve().unwrap() {
+        let mut one = match spec.resolve_legacy().unwrap() {
             CustomSubstance::OnePhase(one) => one,
             _ => panic!("single-phase specification must resolve to OnePhase"),
         };
@@ -819,7 +869,7 @@ mod tests {
         .with_search_in_nist(false)
         .build()
         .unwrap();
-        let mut one = match spec.clone().resolve().unwrap() {
+        let mut one = match spec.clone().resolve_legacy().unwrap() {
             CustomSubstance::OnePhase(one) => one,
             _ => panic!("single-phase specification must resolve to OnePhase"),
         };
@@ -853,7 +903,7 @@ mod tests {
         assert!(one.resolution_report().is_none());
         assert!(one.layout_revision() > revision_before_mutation);
 
-        let rebuilt = match spec.resolve().unwrap() {
+        let rebuilt = match spec.resolve_legacy().unwrap() {
             CustomSubstance::OnePhase(one) => one,
             _ => panic!("rebuilding the same specification must remain one-phase"),
         };
@@ -889,7 +939,7 @@ mod tests {
         .with_search_in_nist(false)
         .build()
         .unwrap();
-        let mut system = match spec.clone().resolve().unwrap() {
+        let mut system = match spec.clone().resolve_legacy().unwrap() {
             CustomSubstance::PhaseOrSolution(system) => system,
             _ => panic!("two named phases must resolve to PhaseOrSolution"),
         };
@@ -935,7 +985,7 @@ mod tests {
         assert!(system.resolution_report().is_none());
         assert!(system.layout_revision() > revision_before_mutation);
 
-        let rebuilt = match spec.resolve().unwrap() {
+        let rebuilt = match spec.resolve_legacy().unwrap() {
             CustomSubstance::PhaseOrSolution(system) => system,
             _ => panic!("rebuilding the same spec must remain multi-phase"),
         };
@@ -966,7 +1016,7 @@ mod tests {
             .with_search_in_nist(false)
             .build()
             .unwrap();
-        let mut system = match spec.resolve().unwrap() {
+        let mut system = match spec.resolve_legacy().unwrap() {
             CustomSubstance::PhaseOrSolution(system) => system,
             _ => panic!("named condensed phase must use the multi-phase facade"),
         };
@@ -1016,7 +1066,7 @@ mod tests {
         .with_search_in_nist(false)
         .build()
         .unwrap();
-        let mut one = match spec.resolve().unwrap() {
+        let mut one = match spec.resolve_legacy().unwrap() {
             CustomSubstance::OnePhase(one) => one,
             _ => panic!("single-phase specification must resolve to OnePhase"),
         };
@@ -1083,7 +1133,7 @@ mod tests {
             .with_search_in_nist(false)
             .build()
             .unwrap();
-        let mut system = match spec.resolve().unwrap() {
+        let mut system = match spec.resolve_legacy().unwrap() {
             CustomSubstance::PhaseOrSolution(system) => system,
             _ => panic!("named condensed phase must use the multi-phase facade"),
         };
@@ -1257,7 +1307,7 @@ mod tests {
         .with_search_in_nist(false)
         .build()
         .unwrap();
-        let mut system = match spec.resolve().unwrap() {
+        let mut system = match spec.resolve_legacy().unwrap() {
             CustomSubstance::PhaseOrSolution(system) => system,
             _ => panic!("two named phases must resolve to PhaseOrSolution"),
         };
@@ -1328,7 +1378,15 @@ mod tests {
         .build()
         .unwrap();
 
-        let resolved = spec.resolve().unwrap();
+        let resolved = spec.clone().resolve().unwrap();
+        assert_eq!(resolved.phase_specs().len(), 2);
+        assert_eq!(
+            resolved.layout().component_labels(),
+            ["gas::H2", "gas::O2", "liquid::H2O"]
+        );
+        assert_eq!(resolved.report().phases().len(), 2);
+
+        let resolved = spec.resolve_legacy().unwrap();
         match resolved {
             CustomSubstance::PhaseOrSolution(pos) => {
                 assert!(pos.phase_data_view().contains_key(&Some("gas".to_string())));
@@ -1490,7 +1548,7 @@ mod tests {
         .build()
         .unwrap();
 
-        let resolved = SubstanceSystemFactory::resolve_spec_with_repository(
+        let resolved = SubstanceSystemFactory::resolve_spec_legacy_with_repository(
             spec,
             Arc::clone(&repository.repository),
         )
@@ -1549,9 +1607,11 @@ mod tests {
             crate::Thermodynamics::thermo_lib_api::ThermoData::try_default_repository()
                 .expect("bundled test catalog must be available");
 
-        let resolved =
-            SubstanceSystemFactory::resolve_spec_with_repository(spec, Arc::clone(&repository))
-                .unwrap();
+        let resolved = SubstanceSystemFactory::resolve_spec_legacy_with_repository(
+            spec,
+            Arc::clone(&repository),
+        )
+        .unwrap();
         match resolved {
             CustomSubstance::PhaseOrSolution(system) => {
                 let report = system
@@ -3017,16 +3077,15 @@ mod tests {
     }
 
     #[test]
-    fn test_substance_system_factory_multi_phase() {
+    fn test_explicit_legacy_facade_workflow() {
         let mut phase_substances = HashMap::new();
         phase_substances.insert("gas".to_string(), vec!["N2".to_string(), "O2".to_string()]);
         phase_substances.insert("gas2".to_string(), vec!["H2O".to_string()]);
 
         let container = SubstancesContainer::MultiPhase(phase_substances);
 
-        let result = SubstanceSystemFactory::create_system(
-            container,
-            Some(HashMap::from([
+        let spec = SubstanceSystemSpec::builder(container)
+            .with_phase_natures(Some(HashMap::from([
                 (
                     "gas".to_string(),
                     crate::Thermodynamics::User_substances::Phases::Gas,
@@ -3035,12 +3094,14 @@ mod tests {
                     "gas2".to_string(),
                     crate::Thermodynamics::User_substances::Phases::Gas,
                 ),
-            ])),
-            vec!["NASA_gas".to_string(), "NASA_cond".to_string()],
-            vec!["NIST".to_string()],
-            None,
-            false,
-        );
+            ])))
+            .with_library_priorities(vec!["NASA_gas".to_string(), "NASA_cond".to_string()])
+            .with_permitted_libraries(vec!["NIST".to_string()])
+            .with_search_in_nist(false)
+            .build()
+            .unwrap();
+
+        let result = spec.resolve_legacy();
 
         assert!(result.is_ok());
 

@@ -7,6 +7,7 @@ mod error_handling_tests {
     use crate::Thermodynamics::DBhandlers::transport_api::TransportError;
     use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData};
     use crate::Thermodynamics::User_substances_error::{LogErrorType, SubsDataError};
+    use crate::Thermodynamics::physical_state::NistFallbackPolicy;
     use std::error::Error;
 
     #[test]
@@ -139,6 +140,37 @@ mod error_handling_tests {
             "unexpected nested NIST source: {}",
             source
         );
+    }
+
+    #[test]
+    fn exact_state_nist_fallback_fails_closed_without_a_state() {
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec!["missing-substance".to_string()];
+        subs_data.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        subs_data.insert_not_found_if_absent("missing-substance");
+
+        let error = subs_data
+            .if_not_found_go_nist(NistFallbackPolicy::ExactRequestedState)
+            .expect_err("exact-state fallback must reject an unconstrained request");
+        assert!(error
+            .to_string()
+            .contains("requires an explicit gas, liquid, or solid requirement"));
+    }
+
+    #[test]
+    fn disabled_nist_fallback_never_touches_the_network() {
+        let mut subs_data = SubsData::new();
+        subs_data.substances = vec!["missing-substance".to_string()];
+        subs_data.set_library_priority("NASA_gas".to_string(), LibraryPriority::Priority);
+        subs_data.insert_not_found_if_absent("missing-substance");
+
+        subs_data
+            .if_not_found_go_nist(NistFallbackPolicy::Disabled)
+            .expect("disabled fallback is an intentional no-op");
+        assert!(subs_data
+            .get_not_found_substances()
+            .iter()
+            .any(|name| name == "missing-substance"));
     }
 
     #[test]

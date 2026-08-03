@@ -269,6 +269,19 @@ fn species_capacity_reports_track_the_limiting_element_for_each_species() {
 }
 
 #[test]
+fn finite_log_mole_bounds_follow_elemental_capacities_and_keep_trace_seeds() {
+    let prepared = PreparedEquilibriumProblem::new(two_species_problem()).unwrap();
+    let bounds = prepared.finite_log_mole_bounds().unwrap();
+
+    assert_eq!(bounds.len(), 2);
+    let trace_seed = 1e-20_f64.ln();
+    assert!(bounds[0].0 <= 0.0 && 0.0 <= bounds[0].1);
+    assert!(bounds[1].0 <= trace_seed && trace_seed <= bounds[1].1);
+    assert!((bounds[0].1 - 1.0_f64.ln()).abs() < 1e-9);
+    assert!((bounds[1].1 - 2.0_f64.ln()).abs() < 1e-9);
+}
+
+#[test]
 fn equilibrium_problem_preview_exposes_read_only_problem_summary() {
     let prepared = PreparedEquilibriumProblem::new(two_species_problem()).unwrap();
     let preview = prepared.preview().unwrap();

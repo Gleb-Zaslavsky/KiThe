@@ -111,6 +111,16 @@ pub struct EasyEquilibrium {
 }
 
 impl EasyEquilibrium {
+    /// Creates a simplified single-reaction equilibrium calculator.
+    ///
+    /// # Arguments
+    /// * `P` — system pressure in Pa (converted to atm internally).
+    /// * `subs_data` — substance database with thermochemical data.
+    /// * `subs_coeffs` — stoichiometric coefficients keyed by substance name.
+    /// * `initial_moles` — initial mole numbers keyed by substance name.
+    ///
+    /// The total mole change `Δν` is computed automatically from the
+    /// stoichiometric coefficients.
     pub fn new(
         P: f64,
         subs_data: SubsData,
@@ -132,6 +142,11 @@ impl EasyEquilibrium {
             n_total,
         }
     }
+    /// Builds a temperature-dependent equilibrium constant function `K(T)`.
+    ///
+    /// Uses the symbolic thermochemical data (`ΔH°`, `ΔS°`) from the substance
+    /// database to compute `ΔG°(T) = ΔH° - T·ΔS°`, then returns
+    /// `K(T) = exp(-ΔG°(T) / (R·T))`.
     pub fn create_equilibrium_const(&self) -> Box<dyn Fn(f64) -> f64> {
         let subs_data = self.subs_data.clone();
         let subs_coeffs = self.subs_coeffs.clone();
@@ -161,6 +176,11 @@ impl EasyEquilibrium {
         K
     }
 
+    /// Builds the symbolic extent-of-reaction equation for the law of mass action.
+    ///
+    /// The left-hand side is `P^{Δν} · Π (n_i0 + ν_i·η)^{ν_i}`, which equals
+    /// `K(T)` at equilibrium. The equation is returned as a symbolic expression
+    /// that can be lambdified and solved numerically.
     pub fn eta_equauion(&mut self) -> Expr {
         let mut LHS = Expr::Const(1.0);
         let subs_coeffs = self.subs_coeffs.clone();
@@ -177,6 +197,12 @@ impl EasyEquilibrium {
         LHS
     }
 
+    /// Solves the equilibrium extent of reaction over a temperature range.
+    ///
+    /// For each temperature from `T0` to `T_end` with step `T_step`, the
+    /// equilibrium constant `K(T)` is evaluated and the extent `η` is found
+    /// by secant root-finding on the mass-action equation. Returns a map from
+    /// substance name to a vector of mole numbers at each temperature.
     pub fn solve(&mut self, T0: f64, T_step: f64, T_end: f64) -> HashMap<String, Vec<f64>> {
         let K = self.create_equilibrium_const();
         let LHS = self.eta_equauion();

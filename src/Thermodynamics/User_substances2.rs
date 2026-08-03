@@ -35,6 +35,7 @@ use crate::Thermodynamics::User_substances::{
 use crate::Thermodynamics::DBhandlers::Diffusion::MultiSubstanceDiffusion;
 use crate::Thermodynamics::User_substances_error::{SubsDataError, SubsDataResult};
 use crate::Thermodynamics::thermo_lib_api::{LibraryCapability, ThermoData};
+use crate::Thermodynamics::physical_state::NistFallbackPolicy;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 use nalgebra::DMatrix;
@@ -843,6 +844,20 @@ impl SubsData {
         Ok(self.search_summary_report())
     }
 
+    /// Runs local lookup and then the selected optional NIST fallback as one
+    /// explicit workflow.
+    ///
+    /// An explicit `NIST` library instruction is honored as the online source
+    /// when its local payload is absent. Explicit instructions for another
+    /// library remain hard pins and are never silently replaced by NIST.
+    pub fn search_substances_with_nist_fallback(
+        &mut self,
+        policy: NistFallbackPolicy,
+    ) -> SubsDataResult<()> {
+        self.search_substances()?;
+        self.if_not_found_go_nist(policy)
+    }
+
     /// Display a comprehensive search results summary.
     ///
     /// This is a formatting adapter over `search_summary_report()`, so the
@@ -859,17 +874,38 @@ impl SubsData {
             report.not_found()
         );
     }
-    /// Fallback to NIST database for substances not found in local libraries
+    /// Fallback to NIST database for substances not found in local libraries.
     ///
-    /// Automatically queries NIST Chemistry WebBook for thermodynamic data
-    /// when substances are not available in local database libraries.
-    ///
-    /// # Behavior
-    /// * Only attempts NIST lookup for thermodynamic libraries
-    /// * Uses substance phase information if available
-    /// * Updates search results with NIST data on success
+    /// This is the historical gas-default compatibility entry point. New
+    /// phase-aware code must call [`Self::if_not_found_go_nist`] with
+    /// [`NistFallbackPolicy::ExactRequestedState`] instead. This compatibility
+    /// method still honors the historical `map_of_phases` hint, but falls back
+    /// to gas when no state was supplied; it must not be used for new phase
+    /// resolution code.
+    #[deprecated(
+        note = "legacy gas-default fallback; use if_not_found_go_nist(NistFallbackPolicy::ExactRequestedState) for phase-aware code"
+    )]
     pub fn if_not_found_go_NIST(&mut self) -> SubsDataResult<()> {
+        self.if_not_found_go_nist(NistFallbackPolicy::LegacyGasDefault)
+    }
+
+    /// Performs the explicitly selected NIST fallback policy.
+    ///
+    /// Local records are always searched first. The exact-state policy only
+    /// queries NIST when a component has an explicit physical-state
+    /// requirement. A network, HTTP, or parser failure is returned as an
+    /// error; it is never converted into a successful lookup in another
+    /// physical state.
+    ///
+    pub fn if_not_found_go_nist(
+        &mut self,
+        policy: NistFallbackPolicy,
+    ) -> SubsDataResult<()> {
         use crate::Thermodynamics::DBhandlers::NIST_parser::{Phase, SearchType};
+        if matches!(policy, NistFallbackPolicy::Disabled) {
+            return Ok(());
+        }
+
         let not_found_substances = self.get_not_found_substances();
         if not_found_substances.is_empty() {
             return Ok(());
@@ -880,6 +916,8 @@ impl SubsData {
                 ThermoData::library_capability(library),
                 Some(LibraryCapability::Thermo)
             )
+        }) || self.explicit_search_instructions.values().any(|library| {
+            ThermoData::canonical_library_name(library) == "NIST"
         });
         if !has_thermo_lookup {
             let reason = "no thermodynamic libraries are enabled for NIST fallback".to_string();
@@ -894,17 +932,47 @@ impl SubsData {
         let mut found_any = false;
 
         for substance in not_found_substances {
+            // An explicit non-NIST instruction is a hard source pin. The
+            // caller asked for that library, so silently replacing it with a
+            // network lookup would make provenance and reproducibility false.
+            if self
+                .explicit_search_instructions
+                .get(&substance)
+                .is_some_and(|library| ThermoData::canonical_library_name(library) != "NIST")
+            {
+                continue;
+            }
             let mut calculator = self.create_calculator("NIST")?;
             if let CalculatorType::Thermo(thermo) = &mut calculator {
-                let phase = if let Some(Some(phase)) = self.map_of_phases.get(&substance) {
-                    match phase {
-                        Phases::Gas => Phase::Gas,
-                        Phases::Solid => Phase::Solid,
-                        Phases::Liquid => Phase::Liquid,
-                        _ => Phase::Gas,
+                let requested_state = match policy {
+                    NistFallbackPolicy::ExactRequestedState => {
+                        self.substance_physical_state(&substance)
                     }
-                } else {
-                    Phase::Gas
+                    NistFallbackPolicy::LegacyGasDefault => self
+                        .substance_physical_state(&substance)
+                        .or_else(|| self.map_of_phases.get(&substance).and_then(|state| *state)),
+                    NistFallbackPolicy::Disabled => unreachable!("disabled policy returned early"),
+                };
+                let phase = match (policy, requested_state) {
+                    (_, Some(Phases::Gas)) => Phase::Gas,
+                    (_, Some(Phases::Solid)) => Phase::Solid,
+                    (_, Some(Phases::Liquid)) => Phase::Liquid,
+                    (NistFallbackPolicy::LegacyGasDefault, None)
+                    | (NistFallbackPolicy::LegacyGasDefault, Some(Phases::Condensed)) => {
+                        Phase::Gas
+                    }
+                    (NistFallbackPolicy::ExactRequestedState, None)
+                    | (NistFallbackPolicy::ExactRequestedState, Some(Phases::Condensed)) => {
+                        let error = SubsDataError::nist_retrieval_failed(
+                            substance.clone(),
+                            "exact physical-state NIST fallback requires an explicit gas, liquid, or solid requirement",
+                        );
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                        continue;
+                    }
+                    (NistFallbackPolicy::Disabled, _) => unreachable!("disabled policy returned early"),
                 };
 
                 match thermo.renew_base(substance.clone(), SearchType::All, phase) {

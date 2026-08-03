@@ -158,6 +158,7 @@
 //! - [`equilibrium_reaction_basis`](super::equilibrium_reaction_basis) — typed reaction basis wrapper
 //!
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptReport;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptOutcome;
 use crate::Thermodynamics::User_substances_error::SubsDataError;
 // These are fallback nonlinear implementations. Keep detailed iteration
 // diagnostics available at debug level without making normal solves noisy.
@@ -203,6 +204,8 @@ pub enum BackendFailureKind {
 /// Comprehensive error types for chemical equilibrium calculations
 #[derive(Debug)]
 pub enum ReactionExtentError {
+    /// The caller cancelled a typed solve before its current transaction boundary.
+    Cancelled,
     /// A typed equilibrium-problem field violates its documented contract.
     InvalidProblem {
         /// Name of the invalid field or invariant.
@@ -261,6 +264,17 @@ pub enum ReactionExtentError {
         /// Human-readable reason for the refusal.
         message: String,
     },
+    /// A selected backend cannot represent the requested nonlinear
+    /// formulation. This is a capability mismatch, not a numerical failure,
+    /// so backend fallback must not hide it.
+    UnsupportedBackendCapability {
+        /// Stable backend name from the solve policy.
+        backend: String,
+        /// Requested formulation/capability identifier.
+        capability: &'static str,
+        /// Alternatives that the caller may select explicitly.
+        alternatives: String,
+    },
     /// Phase-control outer loop exhausted its allowed restart budget.
     PhaseControlDidNotConverge {
         /// Number of outer iterations completed before the budget was hit.
@@ -272,6 +286,38 @@ pub enum ReactionExtentError {
         iteration: usize,
         /// Ordered indices of phases that would be active after the transition.
         active_phases: Vec<usize>,
+    },
+    /// One outer P,H temperature trial failed while evaluating its inner
+    /// fixed-`P,T` equilibrium. The location is retained instead of reducing
+    /// the failure to an unqualified scalar-solver error.
+    TemperatureTrialFailed {
+        /// Zero-based position in the outer temperature trial sequence.
+        trial_index: usize,
+        /// Temperature passed to the inner equilibrium request.
+        temperature: f64,
+        /// Original typed failure from the inner solve or thermochemistry.
+        cause: Box<ReactionExtentError>,
+    },
+    /// One point in a fixed-pressure temperature range failed. Unlike a
+    /// display-only range annotation, this preserves the original backend
+    /// trace and timing/termination metrics for release diagnosis.
+    TemperatureRangePointFailed {
+        /// Zero-based position in the requested temperature grid.
+        point_index: usize,
+        /// Temperature passed to the fixed-`P,T` equilibrium request.
+        temperature: f64,
+        /// Original typed failure from the prepared solve.
+        cause: Box<ReactionExtentError>,
+    },
+    /// An automatic P,H solve exhausted both its monolithic primary route and
+    /// its nested numerical recovery. Keeping both typed causes is essential:
+    /// the final nested error alone cannot explain whether the primary route
+    /// failed because of a phase boundary, a Jacobian problem, or a backend.
+    PhAutoFallbackFailed {
+        /// Rejected coupled log-mole/temperature attempt.
+        monolithic: Box<ReactionExtentError>,
+        /// Rejected safeguarded nested recovery attempt.
+        nested: Box<ReactionExtentError>,
     },
     /// Dimension mismatch between vectors/matrices
     DimensionMismatch(String),
@@ -309,6 +355,7 @@ pub enum ReactionExtentError {
 /// strong, typed way to branch on failure families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReactionExtentErrorKind {
+    Cancelled,
     InvalidInput,
     ThermochemicalLookup,
     Formulation,
@@ -332,6 +379,7 @@ impl From<SubsDataError> for ReactionExtentError {
 impl fmt::Display for ReactionExtentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => write!(f, "equilibrium solve was cancelled"),
             Self::InvalidProblem { field, message } => {
                 write!(f, "invalid equilibrium problem field '{field}': {message}")
             }
@@ -370,6 +418,14 @@ impl fmt::Display for ReactionExtentError {
             Self::ValidationNotApplicable { path, message } => {
                 write!(f, "validation path '{path}' is not applicable: {message}")
             }
+            Self::UnsupportedBackendCapability {
+                backend,
+                capability,
+                alternatives,
+            } => write!(
+                f,
+                "backend '{backend}' does not support capability '{capability}'; supported alternatives: {alternatives}"
+            ),
             Self::PhaseControlDidNotConverge { iterations } => {
                 write!(
                     f,
@@ -382,6 +438,26 @@ impl fmt::Display for ReactionExtentError {
             } => write!(
                 f,
                 "phase-control cycle detected at iteration {iteration} for active phases {active_phases:?}"
+            ),
+            Self::TemperatureTrialFailed {
+                trial_index,
+                temperature,
+                cause,
+            } => write!(
+                f,
+                "P,H temperature trial {trial_index} at {temperature} K failed: {cause}"
+            ),
+            Self::TemperatureRangePointFailed {
+                point_index,
+                temperature,
+                cause,
+            } => write!(
+                f,
+                "equilibrium temperature-range point {point_index} at {temperature} K failed: {cause}"
+            ),
+            Self::PhAutoFallbackFailed { monolithic, nested } => write!(
+                f,
+                "automatic P,H recovery failed; monolithic attempt: {monolithic}; nested recovery: {nested}"
             ),
             Self::DimensionMismatch(message) => {
                 write!(f, "equilibrium dimension mismatch: {message}")
@@ -430,9 +506,13 @@ impl fmt::Display for ReactionExtentError {
 impl Error for ReactionExtentError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Cancelled => None,
             Self::SubsDataError(error) => Some(error),
             Self::SolveError(error) => Some(error),
             Self::CascadeAborted { cause, .. } => Some(cause.as_ref()),
+            Self::TemperatureTrialFailed { cause, .. } => Some(cause.as_ref()),
+            Self::TemperatureRangePointFailed { cause, .. } => Some(cause.as_ref()),
+            Self::PhAutoFallbackFailed { nested, .. } => Some(nested.as_ref()),
             _ => None,
         }
     }
@@ -442,6 +522,7 @@ impl ReactionExtentError {
     /// Returns the machine-readable high-level kind for this error.
     pub fn kind(&self) -> ReactionExtentErrorKind {
         match self {
+            Self::Cancelled => ReactionExtentErrorKind::Cancelled,
             Self::InvalidProblem { .. }
             | Self::InvalidConditions { .. }
             | Self::DimensionMismatch(_)
@@ -459,6 +540,7 @@ impl ReactionExtentError {
             Self::BackendFailure { .. } => ReactionExtentErrorKind::BackendFailure,
             Self::SVDError(_) => ReactionExtentErrorKind::UnsupportedModel,
             Self::ValidationNotApplicable { .. } => ReactionExtentErrorKind::ValidationMismatch,
+            Self::UnsupportedBackendCapability { .. } => ReactionExtentErrorKind::UnsupportedModel,
             Self::PhaseControlDidNotConverge { .. } | Self::PhaseControlCycleDetected { .. } => {
                 ReactionExtentErrorKind::NonConvergence
             }
@@ -466,6 +548,9 @@ impl ReactionExtentError {
             Self::JacobianEvaluation(_) => ReactionExtentErrorKind::JacobianEvaluation,
             Self::AllBackendsFailed { .. } => ReactionExtentErrorKind::AllBackendsFailed,
             Self::CascadeAborted { .. } => ReactionExtentErrorKind::CascadeAborted,
+            Self::TemperatureTrialFailed { cause, .. } => cause.kind(),
+            Self::TemperatureRangePointFailed { cause, .. } => cause.kind(),
+            Self::PhAutoFallbackFailed { nested, .. } => nested.kind(),
         }
     }
 
@@ -482,6 +567,26 @@ impl ReactionExtentError {
                 | ReactionExtentErrorKind::ResidualEvaluation
                 | ReactionExtentErrorKind::JacobianEvaluation
         )
+    }
+
+    /// Returns `true` when a distinct numerical *formulation* may recover the
+    /// request after this error.
+    ///
+    /// An exhausted backend cascade is not retryable by one more backend, but
+    /// it is a valid reason for P,H `Auto` to try the independently formulated
+    /// nested temperature workflow. Non-retryable input and thermochemistry
+    /// errors deliberately remain outside this boundary.
+    pub fn is_retryable_formulation_failure(&self) -> bool {
+        match self {
+            Self::AllBackendsFailed { attempts } => {
+                !attempts.is_empty()
+                    && attempts.iter().all(|attempt| {
+                        matches!(attempt.outcome, SolverAttemptOutcome::Failed { .. })
+                    })
+            }
+            Self::CascadeAborted { cause, .. } => cause.is_retryable_formulation_failure(),
+            _ => self.is_retryable_backend_failure(),
+        }
     }
 
     /// Returns `true` for errors that should fail fast before fallback.
@@ -501,6 +606,10 @@ impl ReactionExtentError {
 #[cfg(test)]
 mod error_contract_tests {
     use super::{ReactionExtentError, ReactionExtentErrorKind, SolveError};
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
+        SolverAttemptFailureKind, SolverAttemptOutcome, SolverAttemptReport, SolverBackend,
+    };
     use crate::Thermodynamics::User_substances_error::SubsDataError;
     use std::error::Error;
 
@@ -530,6 +639,50 @@ mod error_contract_tests {
         );
         assert!(error.source().is_none());
         assert_eq!(error.kind(), ReactionExtentErrorKind::AllBackendsFailed);
+        assert!(!error.is_retryable_backend_failure());
+        assert!(!error.is_retryable_formulation_failure());
+    }
+
+    #[test]
+    fn auto_formulation_retry_requires_only_started_numerical_failures() {
+        let backend = SolverBackend::Legacy(Solvers::NR);
+        let failed = || SolverAttemptReport {
+            backend,
+            outcome: SolverAttemptOutcome::Failed {
+                kind: SolverAttemptFailureKind::Solver,
+                reason: "iteration limit".to_string(),
+            },
+            metrics: None,
+        };
+        let rejected = SolverAttemptReport {
+            backend,
+            outcome: SolverAttemptOutcome::RejectedCandidate {
+                reason: "candidate residual is too large".to_string(),
+            },
+            metrics: None,
+        };
+        let skipped = SolverAttemptReport {
+            backend,
+            outcome: SolverAttemptOutcome::Skipped {
+                reason: "cascade budget exhausted".to_string(),
+            },
+            metrics: None,
+        };
+
+        let retryable = ReactionExtentError::AllBackendsFailed {
+            attempts: vec![failed(), failed()],
+        };
+        assert!(retryable.is_retryable_formulation_failure());
+
+        for attempts in [
+            vec![rejected.clone()],
+            vec![skipped.clone()],
+            vec![failed(), rejected],
+            Vec::new(),
+        ] {
+            let error = ReactionExtentError::AllBackendsFailed { attempts };
+            assert!(!error.is_retryable_formulation_failure());
+        }
     }
 
     #[test]
@@ -548,6 +701,22 @@ mod error_contract_tests {
         );
         assert!(error.source().is_some());
         assert_eq!(error.kind(), ReactionExtentErrorKind::CascadeAborted);
+    }
+
+    #[test]
+    fn auto_ph_failure_retains_primary_and_recovery_causes() {
+        let error = ReactionExtentError::PhAutoFallbackFailed {
+            monolithic: Box::new(ReactionExtentError::AllBackendsFailed {
+                attempts: Vec::new(),
+            }),
+            nested: Box::new(ReactionExtentError::SolveError(SolveError::MaxIterations)),
+        };
+
+        assert!(error.to_string().contains("monolithic attempt"));
+        assert!(error.to_string().contains("nested recovery"));
+        assert!(error.source().is_some());
+        assert_eq!(error.kind(), ReactionExtentErrorKind::NonConvergence);
+        assert!(error.is_retryable_backend_failure());
     }
 
     #[test]
@@ -593,7 +762,53 @@ mod error_contract_tests {
         assert_eq!(phase_error.kind(), ReactionExtentErrorKind::NonConvergence);
         assert!(phase_error.to_string().contains("phase-control outer loop"));
     }
+
+    #[test]
+    fn unsupported_backend_capability_is_typed_and_non_retryable() {
+        let error = ReactionExtentError::UnsupportedBackendCapability {
+            backend: "RustedSciThe".to_string(),
+            capability: "monolithic_p_h",
+            alternatives: "legacy LM, NR, or trust-region backends".to_string(),
+        };
+
+        assert_eq!(error.kind(), ReactionExtentErrorKind::UnsupportedModel);
+        assert!(!error.is_retryable_backend_failure());
+        let message = error.to_string();
+        assert!(message.contains("RustedSciThe"));
+        assert!(message.contains("monolithic_p_h"));
+        assert!(message.contains("legacy LM"));
+    }
+
+    #[test]
+    fn cancellation_is_a_non_retryable_typed_error() {
+        let error = ReactionExtentError::Cancelled;
+        assert_eq!(error.to_string(), "equilibrium solve was cancelled");
+        assert_eq!(error.kind(), ReactionExtentErrorKind::Cancelled);
+        assert!(!error.is_retryable_backend_failure());
+        assert!(!error.is_non_retryable_input_error());
+        assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn temperature_trial_error_preserves_location_source_and_kind() {
+        let cause = ReactionExtentError::InvalidProblem {
+            field: "inner",
+            message: "synthetic endpoint failure".to_string(),
+        };
+        let error = ReactionExtentError::TemperatureTrialFailed {
+            trial_index: 3,
+            temperature: 812.5,
+            cause: Box::new(cause),
+        };
+
+        assert!(error.to_string().contains("trial 3"));
+        assert!(error.to_string().contains("812.5 K"));
+        assert!(error.source().is_some());
+        assert_eq!(error.kind(), ReactionExtentErrorKind::Formulation);
+        assert!(error.is_non_retryable_input_error());
+    }
 }
+
 /// Levenberg-Marquardt solver for nonlinear equation systems
 ///
 /// Robust solver that combines Gauss-Newton with gradient descent using adaptive damping.
@@ -801,10 +1016,6 @@ where
     pub jacobian: J,
     /// Feasibility constraint checker
     pub feasible: C,
-    /// Initial mole numbers (for bound checking)
-    pub n0: Vec<f64>,
-    /// Reaction stoichiometry matrix
-    pub reactions: DMatrix<f64>,
     /// Convergence tolerance for ||f(x)||
     pub tol: f64,
     /// Maximum number of iterations
@@ -1555,8 +1766,6 @@ mod nr_tests {
             f,
             jacobian: j,
             feasible,
-            n0: vec![0.01],
-            reactions: DMatrix::zeros(1, 0),
             tol: 1e-12,
             max_iter: 100,
             alpha_min: 1e-12,

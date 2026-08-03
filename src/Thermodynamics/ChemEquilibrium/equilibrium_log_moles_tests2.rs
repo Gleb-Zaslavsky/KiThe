@@ -10,6 +10,7 @@ mod tests {
         PhaseKind, R, Solvers, TemperatureSolveFailure, TemperatureSolveSnapshot,
         continuation_seed_for_point, equilibrium_logmole_jacobian2, equilibrium_logmole_residual2,
         evaluate_equilibrium_logmole_jacobian, evaluate_equilibrium_logmole_residual,
+        evaluate_equilibrium_logmole_residual_with_standard_gibbs,
         recoverable_backend_failure_kind, scale_jacobian_rows, scale_residual_rows,
         scaled_jacobian, scaled_residual, temperature_failure, validate_logmole_system_dimensions,
         validate_residual_conditions,
@@ -1075,6 +1076,56 @@ mod tests {
         assert_eq!(residual.len(), 2); // r + e = 1 + 1
     }
 
+    #[test]
+    fn numeric_gibbs_snapshot_matches_the_canonical_closure_residual() {
+        let reactions = DMatrix::from_row_slice(2, 1, &[-1.0, 1.0]);
+        let elements = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
+        let element_totals = vec![2.0];
+        let standard_gibbs = vec![-10_000.0, 2_500.0];
+        let gibbs: Vec<GibbsFn> = standard_gibbs
+            .iter()
+            .map(|&value| Rc::new(move |_| value) as GibbsFn)
+            .collect();
+        let phases = vec![Phase {
+            kind: PhaseKind::IdealGas,
+            species: vec![0, 1],
+        }];
+        let species_phase = vec![0, 0];
+        let phase_stoich = vec![vec![-1.0]];
+        let log_moles = [0.75_f64.ln(), 0.5_f64.ln()];
+
+        let closure_residual = evaluate_equilibrium_logmole_residual(
+            &log_moles,
+            &reactions,
+            &elements,
+            &element_totals,
+            &gibbs,
+            &phases,
+            3_000.0,
+            101_325.0,
+            101_325.0,
+            &species_phase,
+            &phase_stoich,
+        )
+        .unwrap();
+        let snapshot_residual = evaluate_equilibrium_logmole_residual_with_standard_gibbs(
+            &log_moles,
+            &reactions,
+            &elements,
+            &element_totals,
+            &standard_gibbs,
+            &phases,
+            3_000.0,
+            101_325.0,
+            101_325.0,
+            &species_phase,
+            &phase_stoich,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot_residual, closure_residual);
+    }
+
     // -----------------------------------------------------------------------
     // D.56 — evaluate_equilibrium_logmole_jacobian()
     // -----------------------------------------------------------------------
@@ -1604,7 +1655,6 @@ mod tests {
         };
         let budget = SolverCascadeBudget::new(1, 100, 100);
         let params = SolverParams::default();
-        let stoich = DMatrix::from_row_slice(0, 0, &[]);
         let result = EquilibriumLogMoles::solve_backend_cascade(
             &[],
             vec![0.0],
@@ -1615,8 +1665,6 @@ mod tests {
             SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)),
             budget,
             &params,
-            &[],
-            &stoich,
             None,
         );
         assert!(result.is_err());
@@ -1642,7 +1690,6 @@ mod tests {
         };
         let budget = SolverCascadeBudget::new(0, 0, 0);
         let params = SolverParams::default();
-        let stoich = DMatrix::from_row_slice(0, 0, &[]);
         let result = EquilibriumLogMoles::solve_backend_cascade(
             &[],
             vec![0.0],
@@ -1653,8 +1700,6 @@ mod tests {
             SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)),
             budget,
             &params,
-            &[],
-            &stoich,
             None,
         );
         assert!(result.is_err());

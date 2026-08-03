@@ -8,11 +8,15 @@
 
 use std::time::{Duration, Instant};
 
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
+    EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::MultiphaseInitialComposition;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     DEFAULT_TRACE_MOLE_FLOOR, EquilibriumConditions, LogMolesInitialGuess, TraceSpeciesSeedPolicy,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingReport;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
     PhaseEquilibriumBuildRequest, SupportedPhaseModelPolicy,
@@ -95,6 +99,38 @@ pub enum TemperatureRangePointPreparation {
     ReusedFormulation,
 }
 
+/// Timing snapshot for one reduced active-set formulation retained by a
+/// phase-control temperature-range solve.
+///
+/// The active mask is expressed in canonical phase order. A point report
+/// contains the complete deterministic cache snapshot, rather than only the
+/// aggregate time spent by that point, so a transition that creates several
+/// formulations remains auditable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemperatureRangeFormulationCacheTiming {
+    active_mask: Vec<bool>,
+    formulation_build: Duration,
+}
+
+impl TemperatureRangeFormulationCacheTiming {
+    pub(crate) fn new(active_mask: Vec<bool>, formulation_build: Duration) -> Self {
+        Self {
+            active_mask,
+            formulation_build,
+        }
+    }
+
+    /// Active phases represented by this reduced formulation.
+    pub fn active_mask(&self) -> &[bool] {
+        &self.active_mask
+    }
+
+    /// Cumulative build time for this cache entry.
+    pub fn formulation_build(&self) -> Duration {
+        self.formulation_build
+    }
+}
+
 /// Immutable timing and continuation evidence for one accepted point.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemperatureRangePointReport {
@@ -106,6 +142,8 @@ pub struct TemperatureRangePointReport {
     phase_control_transitions: usize,
     phase_control_iterations: usize,
     phase_set_reused: bool,
+    formulation_build: Duration,
+    formulation_cache_timings: Vec<TemperatureRangeFormulationCacheTiming>,
     timing: EquilibriumTimingReport,
 }
 
@@ -150,6 +188,19 @@ impl TemperatureRangePointReport {
     /// Whether the previous point's accepted phase set was used as the seed.
     pub fn phase_set_reused(&self) -> bool {
         self.phase_set_reused
+    }
+
+    /// Wall time spent rebuilding a symbolic/reduced formulation for this
+    /// point. The initial formulation is reported by the range-level build
+    /// timing; a zero value here means the point reused all prepared equation
+    /// objects or timing was disabled.
+    pub fn formulation_build(&self) -> Duration {
+        self.formulation_build
+    }
+
+    /// Complete deterministic timing snapshot for reduced cache entries.
+    pub fn formulation_cache_timings(&self) -> &[TemperatureRangeFormulationCacheTiming] {
+        &self.formulation_cache_timings
     }
 
     /// Timing attached to this accepted point.
@@ -392,6 +443,11 @@ impl<'a> TemperatureRangeRequest<'a> {
     /// accepted point. A failure returns an error and publishes no range.
     pub fn solve(self) -> Result<TemperatureRangeSolution, ReactionExtentError> {
         let started = Instant::now();
+        let execution_control: Option<EquilibriumExecutionControl> =
+            self.solve_options.execution_control().cloned();
+        if let Some(control) = &execution_control {
+            control.check_cancelled()?;
+        }
         let timing_mode = self.solve_options.timing_mode();
         let trace_policy = self.solve_options.trace_seed_policy();
         let first_conditions = EquilibriumConditions::new(
@@ -407,6 +463,15 @@ impl<'a> TemperatureRangeRequest<'a> {
             self.model_policy,
         )?;
         let bundle = build_phase_equilibrium_problem_with_timing(build_request, timing_mode)?;
+        if let Some(control) = &execution_control {
+            control.report(EquilibriumProgressEvent::new(
+                EquilibriumProgressStage::FormulationPreparation,
+                None,
+                Some(self.temperatures.values().len()),
+                None,
+            ));
+            control.check_cancelled()?;
+        }
         if let Some(phase_control_policy) = self.phase_control_policy.clone() {
             return self.solve_phase_control_range(
                 bundle,
@@ -414,10 +479,13 @@ impl<'a> TemperatureRangeRequest<'a> {
                 started,
                 timing_mode,
                 trace_policy,
+                execution_control,
             );
         }
-        let mut template =
-            bundle.into_temperature_template(self.solve_options.prepares_rst_backend())?;
+        let mut template = bundle.into_temperature_template(
+            self.solve_options.prepares_rst_backend(),
+            timing_mode,
+        )?;
         let initial_formulation_timing = template.build_timing();
         let symbolic_problem_reused = template.symbolic_problem_reused();
         let mut seed = LogMolesInitialGuess::from_moles_with_policy(
@@ -427,6 +495,15 @@ impl<'a> TemperatureRangeRequest<'a> {
         let mut points = Vec::with_capacity(self.temperatures.values().len());
 
         for (index, &temperature) in self.temperatures.values().iter().enumerate() {
+            if let Some(control) = &execution_control {
+                control.check_cancelled()?;
+                control.report(EquilibriumProgressEvent::new(
+                    EquilibriumProgressStage::PointStarted,
+                    Some(index),
+                    Some(self.temperatures.values().len()),
+                    Some(temperature),
+                ));
+            }
             let conditions =
                 EquilibriumConditions::new(temperature, self.pressure, self.reference_pressure)?;
             let continuation = index > 0;
@@ -453,10 +530,20 @@ impl<'a> TemperatureRangeRequest<'a> {
                     phase_control_transitions: 0,
                     phase_control_iterations: 0,
                     phase_set_reused: false,
+                    formulation_build: template.last_formulation_build(),
+                    formulation_cache_timings: Vec::new(),
                     timing: *solution.timing_report(),
                 },
                 solution,
             });
+            if let Some(control) = &execution_control {
+                control.report(EquilibriumProgressEvent::new(
+                    EquilibriumProgressStage::PointAccepted,
+                    Some(index),
+                    Some(self.temperatures.values().len()),
+                    Some(temperature),
+                ));
+            }
         }
 
         let point_timing = summarize_point_timing(&points);
@@ -485,6 +572,13 @@ impl<'a> TemperatureRangeRequest<'a> {
         })
     }
 
+    /// Solves a temperature sweep with bounded active-set phase control.
+    ///
+    /// Each temperature point uses the [`PreparedPhaseControlRunner`] instead
+    /// of the fixed-active-set path. The phase-control policy, trace seed
+    /// policy, and execution control are forwarded to every point. Timing is
+    /// collected when the timing mode is enabled. A single point failure
+    /// returns an error and publishes no partial range result.
     fn solve_phase_control_range(
         self,
         bundle: crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::PhaseEquilibriumProblemBundle,
@@ -492,6 +586,7 @@ impl<'a> TemperatureRangeRequest<'a> {
         started: Instant,
         timing_mode: crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingMode,
         trace_policy: TraceSpeciesSeedPolicy,
+        execution_control: Option<EquilibriumExecutionControl>,
     ) -> Result<TemperatureRangeSolution, ReactionExtentError> {
         let mut template = bundle.into_phase_control_template(|configured| {
             *configured = phase_control_policy.into_phase_manager()
@@ -505,6 +600,15 @@ impl<'a> TemperatureRangeRequest<'a> {
         let mut transitions = 0usize;
 
         for (index, &temperature) in self.temperatures.values().iter().enumerate() {
+            if let Some(control) = &execution_control {
+                control.check_cancelled()?;
+                control.report(EquilibriumProgressEvent::new(
+                    EquilibriumProgressStage::PointStarted,
+                    Some(index),
+                    Some(self.temperatures.values().len()),
+                    Some(temperature),
+                ));
+            }
             let conditions =
                 EquilibriumConditions::new(temperature, self.pressure, self.reference_pressure)?;
             let continuation = index > 0;
@@ -532,6 +636,13 @@ impl<'a> TemperatureRangeRequest<'a> {
             })?;
             let point_transitions = phase_report.transitions.len();
             transitions += point_transitions;
+            let formulation_cache_timings = template
+                .formulation_cache_timings()
+                .into_iter()
+                .map(|(active_mask, duration)| {
+                    TemperatureRangeFormulationCacheTiming::new(active_mask, duration)
+                })
+                .collect();
             seed = LogMolesInitialGuess::new(solution.accepted_solution().log_moles().to_vec())?;
             points.push(TemperatureRangePoint {
                 report: TemperatureRangePointReport {
@@ -547,10 +658,20 @@ impl<'a> TemperatureRangeRequest<'a> {
                     phase_control_transitions: point_transitions,
                     phase_control_iterations: phase_report.iterations,
                     phase_set_reused: continuation,
+                    formulation_build: template.last_formulation_build(),
+                    formulation_cache_timings,
                     timing: *solution.timing_report(),
                 },
                 solution,
             });
+            if let Some(control) = &execution_control {
+                control.report(EquilibriumProgressEvent::new(
+                    EquilibriumProgressStage::PointAccepted,
+                    Some(index),
+                    Some(self.temperatures.values().len()),
+                    Some(temperature),
+                ));
+            }
         }
 
         Ok(TemperatureRangeSolution {
@@ -617,9 +738,13 @@ fn range_point_error(
     temperature: f64,
     error: ReactionExtentError,
 ) -> ReactionExtentError {
-    ReactionExtentError::InvalidProblem {
-        field: "temperature_range_point",
-        message: format!("point {index} at {temperature} K failed: {error}"),
+    // A release diagnostic needs the real attempt reports, not a string that
+    // merely mentions them. The wrapper adds range coordinates without
+    // destroying backend failure, termination, or timing evidence.
+    ReactionExtentError::TemperatureRangePointFailed {
+        point_index: index,
+        temperature,
+        cause: Box::new(error),
     }
 }
 
@@ -660,5 +785,42 @@ mod tests {
         assert_eq!(summary.mean(), Duration::from_micros(5500));
         assert_eq!(summary.median(), Duration::from_micros(5500));
         assert_eq!(summary.worst(), Duration::from_millis(10));
+    }
+
+    #[test]
+    fn range_point_error_keeps_backend_attempt_diagnostics() {
+        let error = range_point_error(
+            0,
+            1_000.0,
+            ReactionExtentError::AllBackendsFailed {
+                attempts: vec![SolverAttemptReport {
+                    backend: crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverBackend::RustedSciThe(
+                        crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RustedSciTheSolver::LevenbergMarquardt,
+                    ),
+                    outcome: crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptOutcome::Failed {
+                        kind: crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptFailureKind::Solver,
+                        reason: "step too small".to_string(),
+                    },
+                    metrics: None,
+                }],
+            },
+        );
+
+        let ReactionExtentError::TemperatureRangePointFailed {
+            point_index,
+            temperature,
+            cause,
+        } = error
+        else {
+            panic!("range point failure must preserve its typed source");
+        };
+        assert_eq!(point_index, 0);
+        assert_eq!(temperature, 1_000.0);
+        let ReactionExtentError::AllBackendsFailed { attempts } = cause.as_ref() else {
+            panic!("range point source must retain the backend cascade");
+        };
+        assert_eq!(attempts.len(), 1);
+        assert!(attempts[0].summary().contains("outcome=failed"));
+        assert!(attempts[0].summary().contains("step too small"));
     }
 }

@@ -389,6 +389,7 @@ pub struct EquilibriumProblem {
 /// The prepared problem owns every matrix and ordering decision needed by a
 /// nonlinear backend. It is deliberately free of solver progress, caches, and
 /// reports, so multiple backends can evaluate exactly the same formulation.
+#[derive(Clone)]
 pub struct PreparedEquilibriumProblem {
     /// The original validated problem that was prepared.
     problem: EquilibriumProblem,
@@ -525,6 +526,20 @@ impl EquilibriumSolution {
     /// Backend-independent candidate-validation evidence.
     pub fn validation(&self) -> &EquilibriumCandidateReport {
         &self.validation
+    }
+
+    /// Replaces validation evidence for a deliberately malformed test result.
+    ///
+    /// This is a test-only seam for publication-boundary tests. Production
+    /// callers can obtain an `EquilibriumSolution` only through the validated
+    /// constructors and cannot mutate its acceptance evidence.
+    #[cfg(test)]
+    pub(crate) fn with_validation_for_test(
+        mut self,
+        validation: EquilibriumCandidateReport,
+    ) -> Self {
+        self.validation = validation;
+        self
     }
 }
 
@@ -918,6 +933,22 @@ impl PreparedEquilibriumProblem {
         EquilibriumSolution::new(log_moles, moles, self.problem.conditions(), validation)
     }
 
+    /// Packages an accepted coordinate at explicitly retargeted conditions.
+    ///
+    /// A monolithic P,H iterate owns a solved temperature instead of the
+    /// preparation temperature used to build its fixed active set. Keeping
+    /// this constructor here preserves the same mole reconstruction and
+    /// acceptance boundary as the ordinary fixed-P,T result path.
+    pub(crate) fn accepted_solution_at_conditions(
+        &self,
+        log_moles: Vec<f64>,
+        validation: EquilibriumCandidateReport,
+        conditions: EquilibriumConditions,
+    ) -> Result<EquilibriumSolution, ReactionExtentError> {
+        let moles = self.reconstruct_moles(&log_moles)?;
+        EquilibriumSolution::new(log_moles, moles, conditions, validation)
+    }
+
     /// Computes deterministic row scales for this prepared formulation.
     pub fn residual_scale(&self) -> Result<Vec<f64>, ReactionExtentError> {
         self.residual_scaling_contract()
@@ -1047,6 +1078,66 @@ impl PreparedEquilibriumProblem {
     ) -> Result<Vec<SpeciesCapacityReport>, ReactionExtentError> {
         (0..self.problem.species().len())
             .map(|index| self.species_capacity_report(index))
+            .collect()
+    }
+
+    /// Builds finite log-mole box bounds for symbolic nonlinear backends.
+    ///
+    /// The upper side is not a numerical guess: a closed-system component
+    /// cannot consume more of any element than the available inventory, so its
+    /// maximum is the smallest `b_e / A_ie` capacity already reported by this
+    /// prepared formulation. The lower side is the smallest positive normal
+    /// `f64` expressed in log coordinates, widened when a caller supplied an
+    /// even smaller finite seed. This prevents `exp(y)` overflow/underflow in
+    /// a symbolic backend without imposing a physical trace cutoff.
+    pub(crate) fn finite_log_mole_bounds(&self) -> Result<Vec<(f64, f64)>, ReactionExtentError> {
+        let initial_lower = self
+            .problem
+            .initial_log_moles()
+            .as_slice()
+            .iter()
+            .copied()
+            .reduce(f64::min)
+            .ok_or_else(|| ReactionExtentError::InvalidProblem {
+                field: "initial_log_moles",
+                message: "at least one log-mole coordinate is required".to_string(),
+            })?;
+        if !initial_lower.is_finite() {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "initial_log_moles",
+                message: "log-mole seeds must be finite before forming RST bounds".to_string(),
+            });
+        }
+        let lower = f64::MIN_POSITIVE.ln().min(initial_lower);
+
+        self.species_capacity_reports()?
+            .into_iter()
+            .map(|report| {
+                let capacity = report.maximum_moles();
+                if !capacity.is_finite() || capacity < 0.0 {
+                    return Err(ReactionExtentError::InvalidProblem {
+                        field: "species_capacity",
+                        message: format!(
+                            "species {} has invalid elemental capacity {capacity}",
+                            report.species_index
+                        ),
+                    });
+                }
+                // A tiny outward roundoff prevents a mathematically exact
+                // inventory-saturating solution from being rejected because
+                // `b_e / A_ie` landed one ULP below its reconstructed value.
+                let upper = capacity.max(f64::MIN_POSITIVE).ln() + 1e-12;
+                if upper < lower {
+                    return Err(ReactionExtentError::InvalidProblem {
+                        field: "rst_log_mole_bounds",
+                        message: format!(
+                            "species {} upper log-mole bound {upper} is below seed-compatible lower bound {lower}",
+                            report.species_index
+                        ),
+                    });
+                }
+                Ok((lower, upper))
+            })
             .collect()
     }
 

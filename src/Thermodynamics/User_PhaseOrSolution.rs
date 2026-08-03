@@ -7,7 +7,8 @@
 //! ## Key Structures
 //!
 //! - [`PhaseOrSolution`]: Manages multiple phases, each with their own substance data
-//! - [`CustomSubstance`]: Enum that unifies single-phase and multi-phase systems
+//! - [`ResolvedPhaseSystem`]: Canonical immutable result of phase resolution
+//! - [`CustomSubstance`]: Explicitly legacy enum facade for older phase clients
 //!
 //! ## Hierarchy
 //! ```text
@@ -40,6 +41,8 @@
 //! // Calculate Gibbs energy for all phases
 //! // system.calculate_Gibbs_sym(298.15)?;
 //! ```
+
+#![allow(deprecated)]
 
 use std::sync::Arc;
 

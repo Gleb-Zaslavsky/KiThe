@@ -11,8 +11,9 @@
 //! ## None Key Convention
 //!
 //! To maintain API compatibility with multi-phase systems, this module uses `None`
-//! as the phase key in all HashMap returns. This allows seamless integration with
-//! the unified [`CustomSubstance`] interface.
+//! as the phase key in all HashMap returns. The enum facade that historically
+//! unified one- and multi-phase clients is now an explicit legacy adapter;
+//! equilibrium code consumes `ResolvedPhaseSystem` directly.
 //!
 //! ## Example Usage
 //!
@@ -30,6 +31,8 @@
 //! ```
 //!
 //! `OnePhase` is intentionally a small facade, not a separate state model.
+
+#![allow(deprecated)]
 
 use crate::Thermodynamics::User_substances::SubsData;
 use crate::Thermodynamics::User_substances_error::{SubsDataError, SubsDataResult};

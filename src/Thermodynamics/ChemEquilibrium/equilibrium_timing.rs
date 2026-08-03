@@ -110,6 +110,32 @@ impl EquilibriumTimingReport {
     pub fn postprocessing(&self) -> Duration {
         self.postprocessing
     }
+
+    /// Adds one nested timing report to an outer aggregate.
+    ///
+    /// Stage values are inclusive, so callers must interpret the aggregate as
+    /// accumulated evidence rather than summing it with the outer wall clock.
+    pub(crate) fn accumulate(&mut self, nested: Self) {
+        if !nested.enabled {
+            return;
+        }
+        if !self.enabled {
+            *self = nested;
+            return;
+        }
+        self.total += nested.total;
+        self.repository_lookup += nested.repository_lookup;
+        self.thermochemistry_preparation += nested.thermochemistry_preparation;
+        self.numeric_closure_construction += nested.numeric_closure_construction;
+        self.symbolic_construction += nested.symbolic_construction;
+        self.equation_construction += nested.equation_construction;
+        self.numerical_problem_preparation += nested.numerical_problem_preparation;
+        self.projection_build += nested.projection_build;
+        self.nonlinear_solve += nested.nonlinear_solve;
+        self.phase_control += nested.phase_control;
+        self.validation += nested.validation;
+        self.postprocessing += nested.postprocessing;
+    }
 }
 
 /// Internal mutable collector used only while an immutable result is built.

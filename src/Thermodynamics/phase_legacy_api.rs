@@ -4,6 +4,8 @@
 //! preserves the broad legacy surface while routing it through those focused
 //! contracts and the shared `PhaseSystem` engine.
 
+#![allow(deprecated)]
+
 use std::collections::{HashMap, HashSet};
 
 use RustedSciThe::symbolic::symbolic_engine::Expr;
@@ -24,6 +26,9 @@ use super::{
 /// The spelling of established methods remains unchanged here deliberately.
 /// New solvers should depend on narrow typed capabilities instead.
 #[enum_dispatch]
+#[deprecated(
+    note = "use PhaseLayoutAccess, PhaseDataPreparation, PhasePropertyEvaluator, and PhaseEquilibriumAssembly"
+)]
 pub trait ThermodynamicsCalculatorTrait {
     fn extract_all_thermal_coeffs(&mut self, temperature: f64) -> SubsDataResult<()>;
     fn calculate_therm_map_of_properties(&mut self, temperature: f64) -> SubsDataResult<()>;

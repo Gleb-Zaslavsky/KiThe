@@ -126,6 +126,9 @@ mod tests {
         let policy = EquilibriumCandidatePolicy::new(ElementSearchMode::ExactSet);
         assert_eq!(policy.element_mode(), ElementSearchMode::ExactSet);
 
+        let path = PhSolvePath::MonolithicFixedActiveSet;
+        assert_eq!(path, PhSolvePath::MonolithicFixedActiveSet);
+
         let solid = EquilibriumCandidatePhaseAssignment::pure_condensed(
             PhaseId::new(Some("solid".to_string())),
             PhysicalState::Solid,

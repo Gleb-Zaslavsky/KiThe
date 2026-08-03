@@ -408,6 +408,53 @@ mod tests {
         }
     }
 
+    /// Online-only evidence for the state selector used by the NIST parser.
+    ///
+    /// This deliberately stops at `NistInput`: the parser has no authority to
+    /// publish network data into the local repository, and this test must not
+    /// turn a transient WebBook response into equilibrium release evidence.
+    #[test]
+    #[ignore = "live NIST state-matrix diagnostic; requires network"]
+    fn test_real_water_state_specific_payload_matrix() {
+        let parser = NistParser::new();
+        let states = [("gas", Phase::Gas), ("liquid", Phase::Liquid), ("solid", Phase::Solid)];
+        let mut complete_states = 0;
+
+        for (label, phase) in states {
+            let result = parser.get_data("H2O", SearchType::Cp, phase);
+            let data = match result {
+                Ok(data) => data,
+                Err(NistError::RequestedDataUnavailable { property, phase }) => {
+                    assert_eq!(label, "solid");
+                    assert_eq!(property, "Cp");
+                    assert_eq!(phase, "solid");
+                    println!("NIST state payload: state={label} status=INCOMPLETE");
+                    continue;
+                }
+                Err(error) => panic!("NIST H2O {label} lookup failed: {error}"),
+            };
+            match (data.T.as_ref(), data.cp.as_ref()) {
+                (Some(ranges), Some(coefficients)) => {
+                    complete_states += 1;
+                    assert!(!ranges.is_empty(), "NIST H2O {label} ranges must not be empty");
+                    assert_eq!(ranges.len(), coefficients.len());
+                    assert!(ranges
+                        .iter()
+                        .flatten()
+                        .all(|value| value.is_finite() && *value >= 0.0));
+                    assert!(coefficients
+                        .iter()
+                        .flatten()
+                        .all(|value| value.is_finite()));
+                    println!("NIST state payload: state={label} status=COMPLETE ranges={}", ranges.len());
+                }
+                (None, None) => panic!("NIST parser accepted an incomplete Cp payload"),
+                _ => panic!("NIST H2O {label} returned only half of a Cp payload"),
+            }
+        }
+        assert_eq!(complete_states, 2, "gas and liquid should be complete for H2O");
+    }
+
     /*
     #[test]
     fn test_mock_substance_fetch() {

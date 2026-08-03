@@ -17,6 +17,32 @@ pub enum PhysicalState {
     Condensed,
 }
 
+/// Policy controlling the optional live NIST lookup after local catalog
+/// resolution has failed.
+///
+/// The exact-state variant is deliberately fail-closed: a request for a
+/// liquid record may query NIST for liquid data, but it may never silently
+/// accept a gas or solid record.  `LegacyGasDefault` exists only for the old
+/// `SubsData` compatibility method and must not be used by new phase specs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NistFallbackPolicy {
+    /// Do not access the network and do not attempt NIST fallback.
+    Disabled,
+    /// Query NIST only when the component has an explicit physical-state
+    /// requirement matching the requested phase.
+    ExactRequestedState,
+    /// Historical compatibility behavior: an unconstrained component is
+    /// queried as a gas.  This is intentionally not the canonical phase API.
+    LegacyGasDefault,
+}
+
+impl NistFallbackPolicy {
+    /// Returns whether this policy can issue a network request.
+    pub const fn enabled(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+}
+
 impl PhysicalState {
     /// Returns whether an observed record state satisfies this request.
     pub const fn accepts(self, observed: Self) -> bool {
@@ -76,4 +102,24 @@ pub enum PhysicalStateEvidence {
     KeyConvention,
     /// The library family represents one physical state unless a key says otherwise.
     LibraryDefault,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NistFallbackPolicy, PhysicalState};
+
+    #[test]
+    fn exact_state_policy_is_the_only_non_legacy_enabled_choice() {
+        assert!(!NistFallbackPolicy::Disabled.enabled());
+        assert!(NistFallbackPolicy::ExactRequestedState.enabled());
+        assert!(NistFallbackPolicy::LegacyGasDefault.enabled());
+    }
+
+    #[test]
+    fn physical_state_acceptance_does_not_widen_liquid_or_solid_requests() {
+        assert!(PhysicalState::Liquid.accepts(PhysicalState::Liquid));
+        assert!(!PhysicalState::Liquid.accepts(PhysicalState::Gas));
+        assert!(PhysicalState::Solid.accepts(PhysicalState::Solid));
+        assert!(!PhysicalState::Solid.accepts(PhysicalState::Gas));
+    }
 }

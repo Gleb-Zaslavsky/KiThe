@@ -4,6 +4,8 @@
 //! read-only access across `OnePhase` and `PhaseOrSolution` while the shared
 //! `PhaseSystem` remains the engine beneath both variants.
 
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 
 use RustedSciThe::symbolic::symbolic_engine::Expr;
@@ -27,6 +29,9 @@ use super::{
 /// read-only facade for existing consumers that must accept either shape.
 #[derive(Debug, Clone)]
 #[enum_dispatch(ThermodynamicsCalculatorTrait)]
+#[deprecated(
+    note = "use ResolvedPhaseSystem and the narrow phase interfaces; retained for phase compatibility"
+)]
 pub enum CustomSubstance {
     OnePhase(OnePhase),
     PhaseOrSolution(PhaseOrSolution),

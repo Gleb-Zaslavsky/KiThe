@@ -168,6 +168,7 @@ use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::fmt;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 /// Lower bound used when phase-control helpers reconstruct log-mole values.
 ///
@@ -248,6 +249,16 @@ pub enum PhaseSeedPolicy {
 }
 
 impl PhaseSeedPolicy {
+    /// Determines the seed mole number for a newly activated phase.
+    ///
+    /// The seed value depends on the policy variant:
+    /// - [`TraceFloor`](PhaseSeedPolicy::TraceFloor): returns the global
+    ///   phase-control trace floor constant.
+    /// - [`AbsolutePerSpecies`](PhaseSeedPolicy::AbsolutePerSpecies): returns
+    ///   the configured absolute value (clamped to the trace floor).
+    /// - [`RelativeToSystemTotal`](PhaseSeedPolicy::RelativeToSystemTotal):
+    ///   computes a fraction of the current system total inventory, subject
+    ///   to a configured minimum and the global trace floor.
     fn seed_moles(self, log_moles: &[f64]) -> Result<f64, ReactionExtentError> {
         match self {
             Self::TraceFloor => Ok(PHASE_CONTROL_TRACE_MOLE_FLOOR),
@@ -406,6 +417,12 @@ pub struct PhaseSet {
 }
 
 impl PhaseSet {
+    /// Builds the initial phase-status vector from a typed policy and the
+    /// physical activity mask derived from the initial composition.
+    ///
+    /// The policy determines which phases start active, inactive, or excluded.
+    /// At least one phase must be active after construction, or the problem
+    /// has no feasible initial state.
     pub fn from_policy(
         policy: &InitialPhaseSet,
         derived_activity: &[bool],
@@ -461,10 +478,17 @@ impl PhaseSet {
         Ok(Self { statuses })
     }
 
+    /// Returns the current status of one phase by typed index.
     pub fn status(&self, phase: PhaseIndex) -> PhaseStatus {
         self.statuses[phase.index()]
     }
 
+    /// Returns a boolean mask where `true` means the phase is currently active.
+    ///
+    /// Active phases participate in the nonlinear solve; inactive and excluded
+    /// phases are held at trace levels. The mask follows the declared phase
+    /// ordering and is used by stability analysis, transition planning, and
+    /// active-set projection.
     pub fn active_mask(&self) -> Vec<bool> {
         self.statuses
             .iter()
@@ -472,6 +496,11 @@ impl PhaseSet {
             .collect()
     }
 
+    /// Returns typed indices of all currently active phases.
+    ///
+    /// Fails if the active-set is empty, which should never happen after
+    /// [`from_policy`](Self::from_policy) has validated at least one active
+    /// phase.
     pub fn active_phases(&self) -> Result<Vec<PhaseIndex>, ReactionExtentError> {
         self.statuses
             .iter()
@@ -523,17 +552,32 @@ impl PhaseSet {
         Ok(normalized)
     }
 
+    /// Converts transient `Appeared`/`Disappeared` statuses into their settled
+    /// equivalents (`Active`/`Inactive`) after a phase-control iteration.
+    ///
+    /// This must be called before the next transition decision so that the
+    /// hysteresis policy sees a clean slate.
     pub(crate) fn settle_transitions(&mut self) {
         for status in &mut self.statuses {
             *status = status.settled();
         }
     }
 
+    /// Marks one phase as having appeared in the current iteration.
+    ///
+    /// The transition is recorded as [`PhaseStatus::Appeared`]; call
+    /// [`settle_transitions`](Self::settle_transitions) before the next
+    /// classification pass.
     pub(crate) fn activate(&mut self, phase: PhaseIndex) {
         self.settle_transitions();
         self.statuses[phase.index()] = PhaseStatus::Appeared;
     }
 
+    /// Marks one phase as having disappeared in the current iteration.
+    ///
+    /// The transition is recorded as [`PhaseStatus::Disappeared`]; call
+    /// [`settle_transitions`](Self::settle_transitions) before the next
+    /// classification pass.
     pub(crate) fn deactivate(&mut self, phase: PhaseIndex) {
         self.settle_transitions();
         self.statuses[phase.index()] = PhaseStatus::Disappeared;
@@ -757,6 +801,12 @@ pub fn compute_phase_stability_reports(
     Ok(reports)
 }
 
+/// Assembles the final multiphase acceptance report from phase-control
+/// history, stability evidence, and hysteresis thresholds.
+///
+/// The report bundles the phase-control trace, per-phase stability reports,
+/// and a complementarity summary into one auditable result. Callers use it
+/// to decide whether the outer phase-control loop has converged.
 pub fn build_multiphase_acceptance_report(
     phase_control: PhaseControlledSolveReport,
     phase_stability: Vec<PhaseStabilityReport>,
@@ -783,6 +833,11 @@ pub fn build_multiphase_acceptance_report(
     })
 }
 
+/// Sets log-mole coordinates for all species in a newly activated phase.
+///
+/// The seed value is determined by the supplied [`PhaseSeedPolicy`] and
+/// replaces the previous trace-level coordinates. This is called during
+/// phase activation before the next nonlinear solve.
 pub fn seed_activated_phase(
     log_moles: &mut [f64],
     phase_id: PhaseIndex,
@@ -817,6 +872,11 @@ pub fn seed_activated_phase(
     Ok(())
 }
 
+/// Sets log-mole coordinates for deactivated phases to a trace floor.
+///
+/// This is a seed-only operation: it does not modify the phase-set status.
+/// The caller is responsible for updating the phase-set separately. The
+/// trace floor must be finite and strictly positive.
 pub fn deactivate_phases_seed_only(
     y: &mut [f64], // log-moles (modified in place)
     phases_to_deactivate: &[PhaseIndex],
@@ -888,6 +948,10 @@ pub enum PhaseTransitionReason {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PhaseTransitionRecord {
     pub iteration: usize,
+    /// Wall time spent in the phase-control pass that produced this change.
+    /// This includes the fixed-set candidate and the stability/transition
+    /// decision, and is zero only for synthetic records.
+    pub transition_duration: Duration,
     pub activated: Vec<PhaseIndex>,
     pub deactivated: Vec<PhaseIndex>,
     pub phase_totals: Vec<f64>,
@@ -1537,6 +1601,11 @@ impl PhaseManager {
         })
     }
 
+    /// Classifies phase transitions using temperature-scaled hysteresis thresholds.
+    ///
+    /// This is a convenience wrapper that resolves the temperature-dependent
+    /// thresholds via [`thresholds_at`](Self::thresholds_at) and delegates to
+    /// the private [`classify_phases_with_thresholds`] method.
     pub fn classify_phases_at_temperature(
         &self,
         temperature: f64,
@@ -1558,6 +1627,11 @@ impl Default for PhaseManager {
         }
     }
 }
+/// Computes total physical moles in each phase from log-mole coordinates.
+///
+/// The result has one entry per phase, ordered by phase index. This is a
+/// pure function that does not inspect solver state or modify any cached
+/// problem data.
 pub fn compute_phase_totals(
     y: &[f64],               // log-moles
     species_phase: &[usize], // m
@@ -1645,6 +1719,12 @@ pub fn initial_phase_activity(
     initial_phase_activity_from_moles(&physical_moles, species_phase, phase_count, phase_eps)
 }
 
+/// Detects phase-control cycles by comparing the current phase set against
+/// all previously visited sets.
+///
+/// A cycle is declared when the settled phase set has been seen before. This
+/// prevents infinite loops in the outer phase-control iteration. The
+/// iteration number is preserved in the error for diagnostics.
 pub(crate) fn reject_repeated_phase_set(
     visited: &mut HashSet<PhaseSet>,
     phase_set: &PhaseSet,
@@ -1665,6 +1745,11 @@ pub(crate) fn reject_repeated_phase_set(
     })
 }
 
+/// Validates that a phase-set candidate has consistent dimensions and that
+/// every active phase has positive physical inventory.
+///
+/// This is called after each nonlinear solve to ensure the candidate phase
+/// configuration is physically meaningful before accepting a transition.
 pub(crate) fn validate_phase_set_candidate(
     phase_totals: &[f64],
     active: &[bool],
@@ -1872,6 +1957,7 @@ impl EquilibriumLogMoles {
         let mut nonlinear_reports = Vec::new();
 
         for iteration in 0..max_phase_iterations {
+            let transition_started = Instant::now();
             phase_set.settle_transitions();
             let phase_active = phase_set.active_mask();
             let mut candidate = self.solve_fixed_active_set_candidate(&phase_active, &seed)?;
@@ -1932,6 +2018,7 @@ impl EquilibriumLogMoles {
                     let new_phase_set = phase_set.clone();
                     transitions.push(PhaseTransitionRecord {
                         iteration,
+                        transition_duration: transition_started.elapsed(),
                         activated: Vec::new(),
                         deactivated: vec![phase],
                         phase_totals: n_phase,
@@ -1975,6 +2062,7 @@ impl EquilibriumLogMoles {
                     let new_phase_set = phase_set.clone();
                     transitions.push(PhaseTransitionRecord {
                         iteration,
+                        transition_duration: transition_started.elapsed(),
                         activated: vec![phase],
                         deactivated: Vec::new(),
                         phase_totals: n_phase,
@@ -2052,6 +2140,35 @@ pub fn multiphase_equilibrium_residual_generator_sym(
     pressure: f64,
     p0: f64,
 ) -> Result<Vec<Expr>, ReactionExtentError> {
+    multiphase_equilibrium_residual_generator_sym_at_temperature(
+        reactions,
+        elements,
+        element_totals,
+        gibbs_sym,
+        phases,
+        pressure,
+        p0,
+        Expr::Var("T".to_string()),
+    )
+}
+
+/// Builds the same symbolic fixed-phase residual at an explicit temperature
+/// expression.
+///
+/// Fixed-`P,T` uses the `T` equation parameter through the public wrapper
+/// above. Coupled `P,H` instead supplies its bounded temperature expression,
+/// so RST can differentiate the full system with respect to the additional
+/// temperature coordinate rather than receiving a fixed-`P,T` Jacobian.
+pub(crate) fn multiphase_equilibrium_residual_generator_sym_at_temperature(
+    reactions: DMatrix<f64>,
+    elements: DMatrix<f64>,
+    element_totals: Vec<f64>,
+    gibbs_sym: Vec<Expr>,
+    phases: Vec<Phase>,
+    pressure: f64,
+    p0: f64,
+    temperature: Expr,
+) -> Result<Vec<Expr>, ReactionExtentError> {
     let m = reactions.nrows();
     let r = reactions.ncols();
     let e = elements.ncols();
@@ -2066,7 +2183,7 @@ pub fn multiphase_equilibrium_residual_generator_sym(
 
     let species_phase = species_to_phase_map(&phases, m)?;
     let delta_n = reaction_phase_stoichiometry(&reactions, &phases);
-    let rt = Expr::Const(R) * Expr::Var("T".to_string());
+    let rt = Expr::Const(R) * temperature;
 
     // log-mole symbolic variables (y_i = ln n_i)
     let y = Expr::IndexedVars(m, "y").0;

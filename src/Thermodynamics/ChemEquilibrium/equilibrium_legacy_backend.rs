@@ -87,8 +87,6 @@ pub(crate) fn solve_legacy_backend(
     jacobian: Option<&JacobianFn<'_>>,
     feasible: &FeasibilityFn<'_>,
     params: &SolverParams,
-    initial_moles: &[f64],
-    reactions: &DMatrix<f64>,
     max_iterations: usize,
 ) -> Result<Vec<f64>, ReactionExtentError> {
     let jacobian = jacobian.ok_or_else(|| ReactionExtentError::InvalidProblem {
@@ -116,8 +114,6 @@ pub(crate) fn solve_legacy_backend(
                 f: residual,
                 jacobian,
                 feasible,
-                n0: initial_moles.to_vec(),
-                reactions: reactions.clone(),
                 tol: params.tol,
                 max_iter: max_iterations,
                 alpha_min: params.alpha_min,
@@ -149,7 +145,6 @@ mod tests {
     use super::solve_legacy_backend;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{SolverParams, Solvers};
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
-    use nalgebra::DMatrix;
 
     #[test]
     fn missing_legacy_jacobian_is_a_typed_configuration_error() {
@@ -164,8 +159,6 @@ mod tests {
                 None,
                 &feasible,
                 &SolverParams::default(),
-                &[1.0],
-                &DMatrix::zeros(1, 0),
                 1,
             ),
             Err(ReactionExtentError::InvalidProblem {

@@ -11,8 +11,17 @@ mod combustion_story_tests;
 mod combustion_test;
 pub mod condition_parser;
 pub mod document_lifecycle;
+pub mod equilibrium_gui;
+pub mod equilibrium_gui_candidate;
+pub mod equilibrium_gui_execution;
+pub mod equilibrium_gui_model;
+pub mod equilibrium_gui_plot;
+pub mod equilibrium_gui_request;
+pub mod equilibrium_gui_result;
 pub mod read_only_snapshot;
 
+#[cfg(test)]
+mod equilibrium_gui_tests;
 pub mod experimental_kinetics_gui;
 pub mod gui_main;
 pub mod gui_plot;

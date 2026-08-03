@@ -9,6 +9,7 @@ PROJECT NEWS: Experimental kinetics pipeline (with GUI)  added
 - [Kinetics](#Kinetics)
 - [Thermodynamics](#Thermodynamics)
 - [Chemical thermodynamics](#Chemical_thermodynamics)
+- [Chemical equilibrium](#chemical-equilibrium)
 - [NIST scrapper](#NIST_scrapper)
 - [Testing](#Testing)
 - [Contributing](#contributing)
@@ -62,6 +63,34 @@ When install as library:
     * Transport properies: Diffusion, viscosity, thermal condusctivity for many substances;
     * solid state kinetics models
     * Solid GUI for Thermogravimetric Analysis suite:1) window for columns manipulations, filtering, scaling, filtering and smoothing,2) window for Table operations 3) window to create and redact plots (almost publishing level) 
+
+## Chemical equilibrium
+
+KiThe includes a typed chemical-equilibrium workflow intended for real
+thermochemical calculations rather than a standalone textbook reaction
+solver. It resolves species and phase records from local thermochemical
+libraries, preserves source provenance, validates the resulting phase system,
+and publishes an accepted solution only after nonlinear and conservation
+checks succeed.
+
+The calculator supports ideal fixed-pressure systems at constant `P,T` and
+constant `P,H`. Both modes work for a single state and for continued ranges:
+temperature grids for `P,T`, and target-enthalpy grids for `P,H`. Range solves
+reuse accepted states and prepared data while keeping publication
+transactional, so a failed point does not masquerade as a partially completed
+physical result.
+
+Users can declare a phase system directly or build candidate systems from
+library-backed data. Gas, liquid, and solid records remain phase-qualified,
+which lets the same molecular formula participate independently in different
+physical phases. The workflow records lookup provenance, solver attempts,
+timing, residuals, elemental-balance diagnostics, phase-control transitions,
+and route-specific `P,H` evidence. Several nonlinear backends are available
+through typed policies; conservative validation remains common to all of them.
+
+The bundled examples in [`examples/chem_equilibrium_guides.md`](examples/chem_equilibrium_guides.md)
+show the four primary scenarios: one-point and range calculations for both
+`P,T` and `P,H`.
 
 ## Kinetics
 - parse reaction equations into a list of substances 
@@ -450,9 +479,7 @@ If you have any questions, comments or want to contribute, please feel free to c
 
 ## To do
 - [x] Add libraries of chemical reactions with appropriate methods for processing, searching, and retrieving data.
-- [ ] Add libraries of chemical substances...
-- [ ] Add numerical methods (may be cpp open source...)
-
-
+- [x] Add libraries of chemical substances...
+- [x] Add numerical methods (may be cpp open source...)
 
 

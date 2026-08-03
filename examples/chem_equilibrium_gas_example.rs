@@ -1,28 +1,35 @@
 //! Guide: canonical gas-phase equilibrium solve.
 //!
-//! This is the production equilibrium path: build a gas-phase solver, run the
-//! solve, and inspect the accepted solution snapshot plus the reconstructed
-//! mole table.
+//! The example uses the same production facade as resolved multiphase users:
+//! declare a phase specification, let the repository-backed pipeline resolve
+//! its thermochemistry, and inspect the immutable outcome. The handwritten
+//! nonlinear solvers remain fallback implementations selected by the typed
+//! cascade; they are not the orchestration API shown to users.
 
-use KiThe::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers;
-use KiThe::Thermodynamics::ChemEquilibrium::equilibrium_workflows::gas_solver;
+use KiThe::Thermodynamics::ChemEquilibrium::prelude::{
+    EquilibriumConditions, EquilibriumSolveOptions, PhaseEquilibriumPipelineRequest,
+    SubstanceSystemSpecBuilder, SubstancesContainer,
+};
 
-fn main() {
-    let mut solver = gas_solver(
-        vec!["CO".to_string(), "CO2".to_string(), "O2".to_string()],
-        1500.0,
-        101_325.0,
-        Solvers::LM,
-        Some("info"),
-        true,
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let spec = SubstanceSystemSpecBuilder::new(SubstancesContainer::SinglePhase(vec![
+        "CO".to_string(),
+        "CO2".to_string(),
+        "O2".to_string(),
+    ]))
+    .with_library_priorities(vec!["NASA_gas".to_string()])
+    .with_search_in_nist(false)
+    .build()?;
+
+    let outcome = PhaseEquilibriumPipelineRequest::new(
+        spec,
+        vec![0.25, 0.25, 0.5],
+        EquilibriumConditions::new(1_500.0, 101_325.0, 101_325.0)?,
     )
-    .expect("failed to prepare equilibrium solver");
+    .with_solve_options(EquilibriumSolveOptions::new().with_production_cascade())
+    .solve()?;
 
-    solver.solve().expect("equilibrium solve failed");
-    let accepted = solver
-        .accepted_solution()
-        .expect("equilibrium solve did not publish an accepted solution");
-
-    println!("accepted solution: {accepted:?}");
-    println!("{}", solver.moles_table());
+    println!("lookup report: {:?}", outcome.lookup_report());
+    println!("accepted solution:\n{}", outcome.solution());
+    Ok(())
 }

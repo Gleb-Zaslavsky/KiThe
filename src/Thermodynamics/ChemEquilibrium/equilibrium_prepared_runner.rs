@@ -31,7 +31,8 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
     RstPreparedProblem, prepare_rst_symbolic_problem_from_prepared,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
-    EquilibriumSolveReport, SolverBackend, SolverCascadeBudget, SolverPolicy,
+    EquilibriumSolveReport, MultiStartAttemptReport, MultiStartSolveReport, SolverBackend,
+    SolverCascadeBudget, SolverPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::{
     EquilibriumAcceptanceCriteria, EquilibriumCandidateResiduals, validate_equilibrium_candidate,
@@ -51,6 +52,8 @@ pub(crate) struct PreparedSolveOutcome {
     pub(crate) keq_validation_status: Option<EquilibriumConstantCrossValidationStatus>,
     /// Time spent in the independent validation stage after backend solving.
     pub(crate) validation_duration: Duration,
+    /// Optional explicit multi-start evidence for this accepted result.
+    pub(crate) multi_start_report: Option<MultiStartSolveReport>,
 }
 
 /// Immutable fixed-formulation numerical runner.
@@ -60,6 +63,7 @@ pub(crate) struct PreparedSolveOutcome {
 /// leave a partially updated solver object behind. Active-set orchestration is
 /// a separate concern and remains on its compatibility path until its own
 /// immutable transition state is extracted.
+#[derive(Clone)]
 pub(crate) struct PreparedEquilibriumRunner {
     prepared: PreparedEquilibriumProblem,
     symbolic_standard_gibbs: Vec<Expr>,
@@ -123,12 +127,175 @@ impl PreparedEquilibriumRunner {
         self.solve_with_initial_guess(seed.as_slice().to_vec(), Some(rst_problem))
     }
 
+    /// Runs the same prepared formulation from ordered deterministic seeds and
+    /// keeps the best accepted candidate. This is an explicit recovery tool,
+    /// not an automatic replacement for the backend cascade.
+    pub(crate) fn solve_from_initial_guesses(
+        self,
+        seeds: Vec<LogMolesInitialGuess>,
+    ) -> Result<PreparedSolveOutcome, ReactionExtentError> {
+        self.solve_from_initial_guesses_with_optional_rst(seeds, None)
+    }
+
+    /// Runs explicit multi-start recovery while borrowing a prepared RST
+    /// symbolic problem from a higher-level continuation workflow.
+    ///
+    /// Only the initial log-mole vector changes between starts. Reusing the
+    /// caller-owned symbolic problem avoids rebuilding the equation graph for
+    /// every `P,H` temperature trial and preserves the same candidate
+    /// comparison contract as the standalone method above.
+    pub(crate) fn solve_from_initial_guesses_with_rst(
+        self,
+        seeds: Vec<LogMolesInitialGuess>,
+        rst_problem: &RstPreparedProblem,
+    ) -> Result<PreparedSolveOutcome, ReactionExtentError> {
+        self.solve_from_initial_guesses_with_optional_rst(seeds, Some(rst_problem))
+    }
+
+    /// Core multi-start dispatch shared by the public RST and non-RST paths.
+    ///
+    /// Iterates over the supplied initial seeds, solves each one via
+    /// [`solve_with_initial_guess`], and selects the best candidate using
+    /// [`select_preferred_candidate_index`]. The optional external RST problem
+    /// is forwarded to every seed attempt so the symbolic problem is reused
+    /// across starts rather than rebuilt for each one. Returns an error when
+    /// all seeds fail, retaining the first error for diagnostics.
+    fn solve_from_initial_guesses_with_optional_rst(
+        self,
+        seeds: Vec<LogMolesInitialGuess>,
+        external_rst_problem: Option<&RstPreparedProblem>,
+    ) -> Result<PreparedSolveOutcome, ReactionExtentError> {
+        if seeds.is_empty() {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "multi_start_seeds",
+                message: "at least one initial seed is required".to_string(),
+            });
+        }
+        let expected_dimension = self.prepared.problem().initial_moles().len();
+        if let Some((seed_index, seed)) = seeds
+            .iter()
+            .enumerate()
+            .find(|(_, seed)| seed.as_slice().len() != expected_dimension)
+        {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "multi_start_seed_dimension",
+                message: format!(
+                    "seed {seed_index} has dimension {}, expected {expected_dimension}",
+                    seed.as_slice().len()
+                ),
+            });
+        }
+
+        // Prepare one symbolic RST problem for the whole seed batch. A
+        // multi-start recovery changes only the initial point; rebuilding the
+        // equation graph for every seed would obscure the cost of the actual
+        // numerical recovery and defeat prepared-problem reuse.
+        self.settings.validate()?;
+        let policy = self.settings.solver_policy.clone().unwrap_or_else(|| {
+            if self.symbolic_standard_gibbs.is_empty() {
+                SolverPolicy::legacy_default(self.settings.solver)
+            } else {
+                SolverPolicy::production_default(self.settings.solver)
+            }
+        });
+        let rst_problem = if external_rst_problem.is_none()
+            && policy
+                .ordered_backends()
+                .iter()
+                .any(|backend| matches!(backend, SolverBackend::RustedSciThe(_)))
+        {
+            Some(prepare_rst_symbolic_problem_from_prepared(
+                &self.prepared,
+                &self.symbolic_standard_gibbs,
+            )?)
+        } else {
+            None
+        };
+
+        let mut attempts = Vec::with_capacity(seeds.len());
+        let mut best: Option<(usize, PreparedSolveOutcome)> = None;
+        let mut first_error = None;
+
+        for (start_index, seed) in seeds.into_iter().enumerate() {
+            if let Some(control) = &self.settings.execution_control {
+                control.check_cancelled()?;
+            }
+            match self.clone().solve_with_initial_guess(
+                seed.as_slice().to_vec(),
+                external_rst_problem.or(rst_problem.as_ref()),
+            ) {
+                Ok(outcome) => {
+                    let residual = outcome.solution.validation().residual_l2_norm;
+                    attempts.push(MultiStartAttemptReport {
+                        start_index,
+                        accepted: true,
+                        residual_l2_norm: Some(format!("{residual:.17e}")),
+                        error: None,
+                        started_backend_attempts: outcome.solve_report.started_attempt_count(),
+                        nonlinear_iterations: outcome.solve_report.nonlinear_iterations(),
+                    });
+                    let replace = best.as_ref().is_none_or(|(_, current)| {
+                        crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::
+                            compare_candidate_reports(
+                                outcome.solution.validation(),
+                                current.solution.validation(),
+                            )
+                                == std::cmp::Ordering::Less
+                    });
+                    if replace {
+                        best = Some((start_index, outcome));
+                    }
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error.to_string());
+                    }
+                    attempts.push(MultiStartAttemptReport {
+                        start_index,
+                        accepted: false,
+                        residual_l2_norm: None,
+                        error: Some(error.to_string()),
+                        started_backend_attempts: started_backend_attempts_from_error(&error),
+                        nonlinear_iterations: nonlinear_iterations_from_error(&error),
+                    });
+                }
+            }
+        }
+
+        let Some((selected_start, mut outcome)) = best else {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "multi_start_solve",
+                message: format!(
+                    "all {} initial seeds failed; first error: {}",
+                    attempts.len(),
+                    first_error.unwrap_or_else(|| "unknown multi-start failure".to_string())
+                ),
+            });
+        };
+        outcome.multi_start_report = Some(MultiStartSolveReport {
+            attempts,
+            selected_start,
+        });
+        Ok(outcome)
+    }
+
+    /// Solves one prepared equilibrium problem from a single initial guess.
+    ///
+    /// Validates solver settings, checks for cancellation, resolves the solver
+    /// policy and cascade budget, then dispatches through the common backend
+    /// adapter. The optional RST symbolic problem is forwarded when the policy
+    /// selects a RustedSciThe backend. The result includes the accepted
+    /// solution, validation report, backend cascade evidence, and optional
+    /// equilibrium-constant cross-validation.
     fn solve_with_initial_guess(
         self,
         initial_guess: Vec<f64>,
         external_rst_problem: Option<&RstPreparedProblem>,
     ) -> Result<PreparedSolveOutcome, ReactionExtentError> {
         self.settings.validate()?;
+        if let Some(control) = &self.settings.execution_control {
+            control.check_cancelled()?;
+        }
         let policy = self.settings.solver_policy.clone().unwrap_or_else(|| {
             if self.symbolic_standard_gibbs.is_empty() {
                 SolverPolicy::legacy_default(self.settings.solver)
@@ -144,7 +311,13 @@ impl PreparedEquilibriumRunner {
             });
         }
 
-        let residual = |values: &[f64]| self.prepared.residual(values);
+        let execution_control = self.settings.execution_control.clone();
+        let residual = |values: &[f64]| {
+            if let Some(control) = &execution_control {
+                control.check_cancelled()?;
+            }
+            self.prepared.residual(values)
+        };
         let scale = if self.settings.scaling_flag {
             Some(self.prepared.residual_scaling_contract()?.scale().to_vec())
         } else {
@@ -225,22 +398,25 @@ impl PreparedEquilibriumRunner {
             .iter()
             .map(|backend| backend as &dyn EquilibriumNonlinearBackend)
             .collect();
-        let (log_moles, validation, solve_report) = EquilibriumLogMoles::solve_backend_cascade(
-            &backend_refs,
-            initial_guess,
-            &scaled_residual,
-            jacobian.as_ref().map(|function| {
-                function as &dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError>
-            }),
-            &feasible,
-            &validate_candidate,
-            policy,
-            budget,
-            &self.settings.solver_params,
-            self.prepared.problem().initial_moles(),
-            &self.prepared.reaction_basis().reactions,
-            rst_problem,
-        )?;
+        let (log_moles, validation, solve_report) =
+            EquilibriumLogMoles::solve_backend_cascade_with_control(
+                &backend_refs,
+                initial_guess,
+                &scaled_residual,
+                jacobian.as_ref().map(|function| {
+                    function as &dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError>
+                }),
+                &feasible,
+                &validate_candidate,
+                policy,
+                budget,
+                &self.settings.solver_params,
+                rst_problem,
+                execution_control.as_ref(),
+            )?;
+        if let Some(control) = &execution_control {
+            control.check_cancelled()?;
+        }
         let solution = self.prepared.accepted_solution(log_moles, validation)?;
         let validation_started = Instant::now();
         let keq_validation_status =
@@ -250,7 +426,32 @@ impl PreparedEquilibriumRunner {
             solve_report,
             keq_validation_status,
             validation_duration: validation_started.elapsed(),
+            multi_start_report: None,
         })
+    }
+}
+
+fn started_backend_attempts_from_error(error: &ReactionExtentError) -> usize {
+    match error {
+        ReactionExtentError::AllBackendsFailed { attempts }
+        | ReactionExtentError::CascadeAborted { attempts, .. } => attempts
+            .iter()
+            .filter(|attempt| attempt.is_started())
+            .count(),
+        _ => 0,
+    }
+}
+
+fn nonlinear_iterations_from_error(error: &ReactionExtentError) -> usize {
+    match error {
+        ReactionExtentError::AllBackendsFailed { attempts }
+        | ReactionExtentError::CascadeAborted { attempts, .. } => attempts
+            .iter()
+            .filter(|attempt| attempt.is_started())
+            .filter_map(|attempt| attempt.metrics.as_ref())
+            .map(|metrics| metrics.iterations)
+            .sum(),
+        _ => 0,
     }
 }
 

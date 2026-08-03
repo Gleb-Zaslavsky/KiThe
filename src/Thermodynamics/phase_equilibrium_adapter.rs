@@ -4,6 +4,8 @@
 //! caches. They consume a `SystemLayout`, a borrowed property view, and an
 //! element matrix whose rows are aligned with the layout components.
 
+#![allow(deprecated)]
+
 use crate::Thermodynamics::User_PhaseOrSolution::{PhaseLagrangeFunction, PhaseThermoPropertyView};
 use crate::Thermodynamics::User_substances_error::{SubsDataError, SubsDataResult};
 use crate::Thermodynamics::phase_layout::SystemLayout;
@@ -15,7 +17,9 @@ const R: f64 = 8.314;
 
 /// Legacy callable shape retained at the solver boundary while the phase API
 /// transitions to borrowed typed compositions.
+#[deprecated(note = "use a typed fallible composition/state evaluator; retained for compatibility")]
 pub type LegacyGibbsFunction = Box<dyn Fn(f64, Option<Vec<f64>>, Option<f64>) -> f64>;
+#[deprecated(note = "use a typed fallible composition/state evaluator; retained for compatibility")]
 pub type LegacyPhaseGibbsFunctions = HashMap<Option<String>, HashMap<String, LegacyGibbsFunction>>;
 
 /// Builds the symbolic stationarity equations for Gibbs-energy minimisation.

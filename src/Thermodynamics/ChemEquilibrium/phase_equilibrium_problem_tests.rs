@@ -18,7 +18,9 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExten
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RustedSciTheSolver;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
+    RustedSciTheSolver, prepare_rst_symbolic_problem_from_prepared,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     SolverBackend, SolverPolicy,
 };
@@ -26,7 +28,9 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::multiphase_eq
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
     PhaseEquilibriumBuildRequest, PhaseEquilibriumMetadata, PhaseEquilibriumProblemBundle,
     SupportedPhaseModelPolicy, build_phase_equilibrium_problem,
+    build_phase_equilibrium_problem_with_timing,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingMode;
 use crate::Thermodynamics::User_PhaseOrSolution::{PhaseModel, PhaseSpec, ResolvedPhaseSystem};
 use crate::Thermodynamics::User_substances::{LibraryPriority, SubsData};
 use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
@@ -89,6 +93,33 @@ fn prepared_local_nasa_gas() -> PhaseEquilibriumProblemBundle {
         .unwrap(),
     )
     .unwrap()
+}
+
+#[test]
+fn bridge_timing_total_encloses_every_recorded_setup_stage() {
+    let resolved = resolved_local_nasa_gas();
+    let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
+    let composition =
+        MultiphaseInitialComposition::from_dense(&layout, vec![0.1, 0.05, 1.9]).unwrap();
+    let bundle = build_phase_equilibrium_problem_with_timing(
+        PhaseEquilibriumBuildRequest::new(
+            &resolved,
+            EquilibriumConditions::new(1200.0, 101_325.0, 101_325.0).unwrap(),
+            composition,
+            TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 },
+            Default::default(),
+        )
+        .unwrap(),
+        EquilibriumTimingMode::Enabled,
+    )
+    .unwrap();
+    let timing = bundle.timing_report();
+
+    assert!(timing.enabled());
+    assert!(timing.total() >= timing.thermochemistry_preparation());
+    assert!(timing.total() >= timing.numeric_closure_construction());
+    assert!(timing.total() >= timing.symbolic_construction());
+    assert!(timing.total() >= timing.equation_construction());
 }
 
 fn resolved_local_gas_and_condensed_water() -> ResolvedPhaseSystem {
@@ -925,6 +956,44 @@ fn physical_bridge_numeric_closure_and_symbolic_contracts_agree() {
                 (symbolic_jacobian - numeric_jacobian[(row, column)]).abs() <= 1e-10,
                 "physical Jacobian entry ({row}, {column}) diverged: symbolic={symbolic_jacobian}, numeric={}",
                 numeric_jacobian[(row, column)]
+            );
+        }
+    }
+}
+
+#[test]
+fn parameterized_rst_graph_matches_the_canonical_real_nasa_formulation() {
+    // The reusable temperature-range graph replaces baked `G0(T)` expressions
+    // with parameters. This must be algebraically invisible to a backend.
+    let bundle = prepared_local_nasa_gas();
+    let symbolic_standard_gibbs = bundle.symbolic_standard_gibbs().to_vec();
+    let prepared = PreparedEquilibriumProblem::new(bundle.into_problem()).unwrap();
+    let log_moles = prepared.problem().initial_log_moles().as_slice().to_vec();
+    let expected_residual = prepared.residual(&log_moles).unwrap();
+    let expected_jacobian = prepared.jacobian(&log_moles).unwrap();
+    let parameterized =
+        prepare_rst_symbolic_problem_from_prepared(&prepared, &symbolic_standard_gibbs).unwrap();
+
+    let actual_residual = parameterized.residual_for_test(&log_moles).unwrap();
+    assert_eq!(actual_residual.len(), expected_residual.len());
+    for (row, (&actual, &expected)) in actual_residual.iter().zip(expected_residual.iter()).enumerate()
+    {
+        assert!(
+            (actual - expected).abs() <= 1e-10,
+            "parameterized residual row {row} diverged: actual={actual}, expected={expected}"
+        );
+    }
+
+    let actual_jacobian = parameterized.jacobian_for_test(&log_moles).unwrap();
+    assert_eq!(actual_jacobian.shape(), expected_jacobian.shape());
+    for row in 0..actual_jacobian.nrows() {
+        for column in 0..actual_jacobian.ncols() {
+            assert!(
+                (actual_jacobian[(row, column)] - expected_jacobian[(row, column)]).abs()
+                    <= 1e-10,
+                "parameterized Jacobian entry ({row}, {column}) diverged: actual={}, expected={}",
+                actual_jacobian[(row, column)],
+                expected_jacobian[(row, column)]
             );
         }
     }

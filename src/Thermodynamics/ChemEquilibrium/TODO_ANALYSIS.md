@@ -869,12 +869,18 @@ the handwritten LM/NR/TR fallback implementations.
   record projection, Jacobian, nonlinear, outer-loop, and total timings.
   Synthetic 20/50/100/200 active-set timings are recorded in
   `PHASE_CONTROL_BENCHMARK.md`; real exact-element NASA coverage exercises
-  20/50/100 candidates because the local exact C/H/O catalog does not contain
-  200 suitable records.
-  - [x] Add an ignored release story over 20/50/100 real exact C/H/O NASA
+  20/50/100 candidates from the local NASA gas catalog, using the allowed
+  element alphabet `{C,H,O}`. The strict all-three-element subset contains
+  only about 20 records and is covered separately.
+  - [x] Add an ignored release story over 20/50/100 real C/H/O-limited NASA
     candidates using the same legacy-NR contract and a byte-for-byte library
-    immutability check. Target-machine release measurements remain an
-    operator-run evidence step and do not block the API contract.
+    immutability check. Release evidence was captured on 2026-07-28 and is
+    recorded in `PHASE_CONTROL_BENCHMARK.md`.
+    The first run exposed a fixture-contract error rather than a solver limit:
+    strict all-three-element matching has only about 20 local NASA gas records,
+    while the allowed-element (`SubsetOf`) search supplies 100+ candidates.
+    The live regression now pins both semantics and the low-level search keeps
+    element sets isolated per `(library, substance)`.
 - [x] Cache `ActiveSetProjection` and reduced numeric formulations for repeated
   `A -> B -> A` phase sets. The bounded range runner now retains one numeric
   and, for RST policies, one symbolic preparation per active mask; cache
@@ -1612,10 +1618,10 @@ transitions.
     range point, plus a byte-for-byte no-file-mutation check for the live local
     repository.
   - [x] Add the release characterization in release mode over at least 20,
-    50, and 100 real species where exact element search supplies enough local
-    records; retain the smaller five-point story as the fast regression
-    fixture. The printed timing baseline still has to be collected on the
-    target machine.
+  50, and 100 real species where exact element search supplies enough local
+  records; retain the smaller five-point story as the fast regression
+  fixture. The printed timing baseline still has to be collected on the
+  target machine.
 - [x] Make the retained `gas_solver_for_T_range` compatibility boundary honor
   its explicit legacy `Solvers` argument. It now installs
   `SolverPolicy::legacy_default` instead of allowing symbolic context to
@@ -1730,8 +1736,9 @@ paths are stable.
   those real inputs. Water gas/liquid/ice, graphite, reactive H/O, lookup
   provenance, conservation, lifecycle, and transactionality are now covered;
   synthetic cases remain as the fast unit layer.
-- [x] Add an opt-in real large-system characterization: select 20 exact C/H/O
-  candidates from the local element catalog, resolve them from `NASA_gas`,
+- [x] Add an opt-in real large-system characterization: select 20
+  C/H/O-limited candidates from the local element catalog, resolve them from
+  `NASA_gas`,
   solve the fixed-`P,T` system, and print the stage timing report. This is a
   performance/diagnostic fixture, not a replacement for the smaller stable
   physical regressions.
@@ -1749,11 +1756,102 @@ paths are stable.
 - [x] Add the corresponding real-data temperature-range characterization after
   the typed range facade is finalized; report per-point coefficient refresh,
   continuation, rebuild, and solve timings. The ignored live story
-  `live_large_exact_element_typed_temperature_range_story` covers real local
+  `live_large_element_limited_typed_temperature_range_story` covers real local
   NASA data in both directions and checks one formulation build, continuation,
   symbolic reuse, and point reports. The release run now passes and prints the
   measured point timing baseline; a broader 20/50/100-species release matrix
   remains separate characterization work.
+- [x] Add an ignored release characterization over 100 real local NASA
+  C/H/O-limited species and 50 temperature points, running every supported RST
+  and retained legacy backend as an isolated `Single` policy. The test reports
+  per-backend total/mean/median/worst timings, formulation builds and reuses,
+  symbolic updates, residuals, conservation error, continuation usage, and
+  preserves the JSON-library snapshot. Rebuilds are allowed at genuine NASA
+  coefficient-interval boundaries; the contract requires complete build/reuse
+  accounting rather than assuming one formulation for the whole grid. The
+  target-machine release run is now recorded in `PHASE_CONTROL_BENCHMARK.md`:
+  six backends succeeded and three reported explicit first-point failures.
+- [x] Diagnose backend-specific failures and rare slow points from the 100 x 50
+  release matrix before changing the production default. The range error
+  boundary now preserves the boxed `ReactionExtentError` instead of flattening
+  the backend trace into a string; the ignored 100 x 50 story prints the three
+  slowest accepted points for each successful backend with seed-to-result
+  log-coordinate movement, detailed stage timings, and RST counters, plus a
+  separate typed attempt table for every failure. The strict monolithic P,H
+  matrix additionally records failure point and `ReactionExtentErrorKind`.
+
+  A concrete defect has now been corrected in the canonical fixed-`P,T` RST
+  path: symbolic methods previously received unbounded log-mole coordinates,
+  so a trial step could make `exp(y)` overflow before the common candidate
+  validator ran. `PreparedEquilibriumProblem` now derives finite per-species
+  box bounds from exact elemental capacities and the caller's trace seed, and
+  passes them through `RustedSciTheSolveContract` into RST. The focused live
+  20-species C/H/O backend matrix now accepts Nielsen LM, Powell Dogleg, and
+  legacy TR; the old Nielsen non-finite residual no longer reproduces there.
+  Damped Newton instead exposes an independent stagnation/high-residual
+  rejection, which remains a valid method-specific outcome.
+
+  The enhanced target-machine report isolated the common 1010 K anomaly:
+  RST residual/Jacobian callbacks and the nonlinear solve took only about
+  10--20 ms, while KiThe rebuilt `SymbolicNonlinearProblem` after a NASA
+  coefficient-interval change. The canonical fixed-`P,T` graph now carries
+  `G0_i` as checked equation parameters. A range point updates `[T, G0...]`
+  in place, so an unchanged active set may never rebuild its symbolic graph;
+  the same rule now applies to the cached bounded phase-control runner.
+  Initial graph construction is recorded in `initial_formulation_timing`, and
+  live 20-species stories assert zero per-point formulation build across an
+  unchanged layout / active set. The 100 x 50 operator table now prints
+  initial setup, initial symbolic construction, and initial numerical-problem
+  preparation separately from later per-point formulation builds. The bridge
+  builder now also records its outer `total`; a focused local-NASA test guards
+  the invariant that setup total encloses every recorded setup stage. A second
+  local-NASA contract compares residual and Jacobian entries of the
+  parameterized RST graph directly against `PreparedEquilibriumProblem`, so a
+  performance change cannot silently alter the fixed-`P,T` equations.
+
+  - [x] Re-run the 100 x 50 release matrix after parameterizing `G0_i`.
+    The recorded release table confirms 49 reuses, 49 parameter updates, and
+    zero later `formulation_build` for every successful RST backend. The old
+    9--11 second coefficient-boundary point is gone; the remaining roughly
+    4.2--4.3 second cost is the explicitly reported one-time symbolic setup.
+    A test-only baked-vs-parameterized 20-species Damped-Newton comparison
+    rejects both graphs under the same strict gate, while an entrywise
+    residual/Jacobian contract proves the reusable graph matches the canonical
+    real NASA formulation. Rebuilding the historical baked 100-species graph
+    is itself too expensive for a practical regression (it exceeded two
+    release minutes), which is precisely why it is not retained as a fallback.
+  - [ ] Classify the remaining strict-single-backend outcomes without weakening
+    acceptance: the latest 100 x 50 release matrix shows Nielsen LM stopping
+    at the first point with a finite residual after `MaxIterations`, Damped
+    Newton stagnating after two iterations with a high residual, and legacy TR
+    exhausting its iteration budget. The Damped Newton 20-species real-data
+    baked-vs-parameterized regression already rules out a reusable-graph
+    regression for that method. Add minimal regression only for behaviour that
+    changes unexpectedly (especially renewed non-finite residual), rather
+    than forcing every method to be a production default.
+
+  RST attempt metrics split residual-callback time, Jacobian-callback time,
+  and remaining engine overhead; the enhanced report prints that split for
+  each slow accepted point and typed failure attempt. Legacy methods
+  deliberately leave this optional evidence absent rather than inventing
+  incomparable counters. Do not weaken the common acceptance gate or select a
+  universal default from one inventory.
+
+- [x] Add an explicit fixed-`P,T` multi-start recovery policy. The typed
+  `ResolvedPhaseEquilibriumRequest` and high-level pipeline now accept an
+  ordered list of `LogMolesInitialGuess` values, reuse the prepared formulation
+  and one symbolic RST problem across seeds, compare all accepted candidates
+  through the common validation ordering, and publish selected-seed evidence in
+  both solution bundles. Multi-start is intentionally rejected for bounded
+  phase control and temperature ranges until those workflows have a separate
+  lifecycle-aware policy; it is not silently applied to an incompatible outer
+  loop.
+- [x] Keep the live-cycle evidence boundary explicit. Real local water/ice and
+  liquid fixtures cover appearance, disappearance, hysteresis retention,
+  rollback, and budget termination. A physically credible continued run that
+  actually revisits an active phase set has not been observed; synthetic cycle
+  state-machine tests remain the mandatory correctness layer, while a live
+  cycle remains deferred rather than being manufactured with an invalid policy.
 
 ## P5 - Public API, GUI, and cleanup
 
@@ -1767,12 +1865,26 @@ with their current status here. GUI and deferred physical models remain open.
   `ChemEquilibrium::prelude` and covers fixed-`P,T`, one-point range parity,
   typed phase-qualified lookup, duplicate sparse-inventory rejection, backend
   policy selection, element-selection policy, and physical phase assignment.
-- [ ] Expose backend selection and cascade diagnostics in GUI only through typed
-  controls; never require users to type internal enum names.
-- [ ] Show conservation, residual, fallback-attempt, and K_eq validation status
-  as first-class result sections.
-- [ ] Add GUI story tests for success, fallback success, all-backends-failed,
-  invalid input, validation mismatch, and save/load roundtrip.
+- [x] Expose backend selection and cascade diagnostics in GUI only through typed
+  controls; never require users to type internal enum names. The editor uses
+  `GuiSolverBackend` and ordered typed cascade controls; egui tests cover every
+  concrete backend and duplicate rejection.
+- [x] Show conservation, residual, fallback-attempt, and K_eq validation status
+  as first-class result sections. The result view reads the immutable accepted
+  report and does not reconstruct solver diagnostics in the GUI.
+- [x] Complete GUI story tests for success, fallback success, all-backends-
+  failed, invalid input, validation mismatch, and save/load roundtrip.
+  - [x] Success, invalid editor input, worker failure/rollback, lifecycle, and
+    document roundtrip stories are covered.
+  - [x] The ignored local fallback story covers accepted backend attempts and
+    renders the diagnostic sections.
+  - [x] The ignored local H2/O2/H2O P,H stories cover inner fallback and a
+    true engine `AllBackendsFailed` publication failure; a generic worker
+    error is not used as a substitute.
+  - [x] Add a deterministic accepted-result layout-mismatch fixture. The
+    ignored GUI result-layer story solves two real NASA systems, combines their
+    accepted snapshots as one range payload, and verifies transactional
+    rejection before any partial table can be published.
 - [x] Split the implementation by responsibility: `domain`, `formulation`,
   `validation`, `backend`, `solver_policy`, `keq_validation`, and `report`.
 - [x] Review `easy_equilibrium.rs` as the future facade: it is rejected as the
@@ -1784,6 +1896,974 @@ with their current status here. GUI and deferred physical models remain open.
   temperature-sweep orchestration. `Untitled-1.rs` is deleted; timing output is
   confined to opt-in ignored characterization tests. The retained
   single-reaction legacy helper no longer emits `println!`/`dbg!` output.
+
+## P6 - Production fixed-pressure, fixed-enthalpy equilibrium
+
+This stage adds the closed-system `P,H = const` formulation after the fixed
+`P,T` engine has become the canonical production core. Temperature is an
+unknown result, while pressure, total elemental inventory, and total enthalpy
+are prescribed.
+
+The first implemented path is a bounded scalar temperature solve around the
+existing accepted `P,T` solve:
+
+```text
+target H, pressure, temperature bracket
+                    |
+                    v
+        evaluate F(T) = H_eq(P, T) - H_target
+                    |
+                    v
+        canonical solve_resolved_pt at trial T
+                    |
+                    v
+      accepted composition + phase-control report
+```
+
+This path remains valuable as an independent reference and safeguarded
+fallback. It must not, however, be presented as the final production
+architecture: the canonical target is a coupled composition-temperature
+system with an analytic Jacobian.
+
+### P6.A Architectural correction: monolithic P,H is the production target
+
+Current dependency map (30.07.2026):
+
+```text
+ResolvedPhaseEnthalpyRequest
+  |
+  +-- ResolvedThermochemistry / EnthalpyModel
+  |
+  +-- solve_resolved_ph
+        |
+        +-- fixed declared phases:
+        |     PreparedMonolithicPhRunner          [enabled, RST symbolic + analytic legacy backends]
+        |
+        +-- nested/reference path:
+        |     solve_bracketed_temperature_from
+        |       |
+        |       +-- PhTrialEvaluator::evaluate(T)
+        |             |
+        |             +-- PreparedPhaseEquilibriumTemplate::solve_at(T)
+        |
+        +-- bounded monolithic path:
+              PreparedPhaseControlTemplate
+                |
+                +-- PreparedPhaseControlRunner
+                      |
+                      +-- solve_monolithic_active_set_candidate
+```
+
+The fixed-`P,T` equations that must be reused rather than copied are:
+
+- `PreparedEquilibriumProblem::residual` and
+  `evaluate_equilibrium_logmole_residual` for the canonical reaction and
+  element rows;
+- `PreparedEquilibriumProblem::jacobian` and
+  `evaluate_equilibrium_logmole_jacobian` for the analytic log-mole block;
+- `ResidualScalingContract` for matching residual/Jacobian row scaling;
+- `PreparedEquilibriumRunner` and `EquilibriumNonlinearBackend` as the current
+  backend-cascade boundary. The dedicated P,H RST payload now carries the
+  coupled `(ln(n), theta_T)` residual rather than reusing a fixed-P,T problem;
+  its exact symbolic route is deliberately limited to one native coefficient
+  interval per component. A range crossing stays on the analytic P,H path
+  until a piecewise-symbolic contract is designed explicitly.
+
+The active-set boundary is `PreparedPhaseControlRunner::solve`: phase
+activation/deactivation, hysteresis, projection caches, and transition reports
+remain outside the nonlinear fixed-active-set solve. P,H must provide one
+monolithic fixed-set candidate solver to this outer loop; phase-control state
+must never enter the P,H residual.
+
+The existing P,H code is split by ownership as follows:
+
+- `equilibrium_ph_thermochemistry.rs`:
+  `ThermochemistryProvenance`, `ResolvedThermochemistry`,
+  `MolarThermoFunction`, `EnthalpyModel`, `EnthalpyEvaluation`, and private
+  property/capability construction;
+- `equilibrium_ph_formulation.rs`:
+  monolithic unknown/row layouts, bounded temperature transform, P,H
+  residual/Jacobian evaluation, row scaling, and dimension validation;
+- `equilibrium_ph_monolithic.rs`:
+  prepared fixed-active-set P,H problem, backend cascade, candidate
+  reconstruction, and monolithic diagnostics;
+- `equilibrium_ph_nested.rs`:
+  the current safeguarded bracket, trial evaluator, nested budgets,
+  monotonicity policy, and nested evidence;
+- `equilibrium_ph_workflow.rs`:
+  public request/result facade, `PhSolveMode`, classified fallback policy,
+  phase-control integration, and final publication validation.
+
+Reference tests retained during migration:
+
+- `nonreacting_sensible_heat_fixture_recovers_the_analytic_root`;
+- `inventory_scaling_preserves_temperature_and_mole_fractions`;
+- `sampled_non_monotone_branch_is_rejected_by_default_but_explicit_compatibility_allows_it`;
+- `ph_temperature_seed_is_a_real_trial_and_can_accept_the_root`;
+- `bracketed_solver_rejects_unreachable_target`;
+- live `live_reactive_pt_to_h_to_ph_recovers_temperature_and_composition`;
+- live `live_bounded_water_pt_to_h_to_ph_preserves_phase_evidence_and_json`;
+- live `live_reactive_gas_ph_backend_matrix`.
+
+Migration contract:
+
+- [x] Introduce `PhSolveMode::{Monolithic, NestedTemperature, Auto}`. The
+  resolved-thermochemistry facade now defaults to `Monolithic`, the coupled
+  production target. The generic closure constructor remains explicitly
+  nested because it cannot provide the Gibbs/Cp bundle required by the
+  coupled formulation; `NestedTemperature` remains available as an
+  independent reference route and `Auto` as the classified recovery mode.
+- [x] Make `Auto` run monolithic first and fall back solely for classified
+  numerical failures. Input, thermochemistry, dimension, and
+  unsupported-physics errors never trigger fallback; the immutable report
+  retains the typed fallback reason. The default does not hide a formulation
+  failure behind nested solving; callers select `Auto` when recovery is
+  desired.
+- [x] Add unknown vector `[ln(n_0), ..., ln(n_{m-1}), theta_T]` with a smooth
+  bounded temperature transform. Do not clip temperature inside residual
+  evaluation. `equilibrium_ph_formulation` now owns deterministic unknown and
+  row layouts plus a tested logistic transform that rejects floating-point
+  saturation instead of clipping.
+- [x] Add residual rows `[reaction equilibrium, element balances, enthalpy]`
+  while preserving the exact P,T row ordering and one explicit energy scale.
+  The prepared formulation is solver-agnostic and is published through the
+  fixed-declared-phase facade only after the common candidate gate accepts it.
+- [x] Reuse the analytic P,T log-mole Jacobian as the upper-left block and add
+  the temperature column plus enthalpy row analytically.
+- [x] Require component-aligned `Cp(T)` for the production monolithic path.
+  Any finite-difference fallback must be a typed thermochemistry capability
+  with provenance, not an implicit numerical trick in the solver. The prepared
+  monolithic formulation rejects a missing component capability explicitly.
+- [x] Keep resolved `G0(T)` synchronized with the coefficient interval used by
+  the canonical `P,T` bridge. `ResolvedThermochemistry` now owns a private
+  per-phase, temperature-keyed Gibbs snapshot: it selects all phase
+  coefficients and constructs the phase `G0` functions once per temperature,
+  then shares them across component residual rows. This fixed the live
+  `P,T -> H -> monolithic P,H` mismatch without mutating resolved data or JSON
+  libraries.
+- [x] Extend the activity contract with `d ln(a) / dT`. The current ideal-gas
+  and ideal-solution models have zero derivative at fixed pressure; future
+  non-ideal models must provide or explicitly decline this capability.
+- [x] Compare the full analytic P,H Jacobian against central finite
+  differences block by block, including the temperature chain rule.
+  The initial test covers reaction, element, and enthalpy rows against all
+  log-mole and temperature columns; live thermochemistry fixtures remain part
+  of backend integration.
+- [x] Run one monolithic solve per fixed active set and carry its accepted
+  composition and temperature into the next phase-control transition.
+  - [x] `equilibrium_ph_monolithic::PreparedMonolithicPhRunner` now performs
+    the coupled fixed-active-set solve through the common legacy backend
+    cascade, reuses the shared P,T candidate gate, and rejects the existing
+    P,T-only RST symbolic payload explicitly instead of faking compatibility.
+  - [x] The fixed declared public facade bridges the accepted monolithic
+    snapshot into the ordinary immutable phase-aware result with the solved
+    temperature, matching lookup report, and backend evidence. No mutable
+    `EquilibriumLogMoles` compatibility object participates in that path.
+  - [x] Let `PreparedPhaseControlRunner` invoke this fixed-set runner after
+    active-set transitions. This is implemented through the existing injected
+    candidate callback, not a second orchestration facade. A monolithic
+    candidate may probe a trace-seeded wider mask when the current reduced
+    branch has no enthalpy root; the runner records that mask expansion as an
+    ordinary activation transition before final publication.
+    - [x] Extract the shared active-set lifecycle behind an injected fixed-set
+      candidate callback. The existing P,T runner uses that path now, while
+      hysteresis, boundary recovery, cycle detection, transition reports, and
+      publication remain owned by `PreparedPhaseControlRunner`.
+    - [x] Make phase-stability evaluation candidate-local: it now consumes the
+      accepted candidate's Gibbs capabilities and conditions rather than the
+      runner construction temperature. This is required before a P,H candidate
+      with solved temperature can enter the same loop.
+    - [x] Add the reduced monolithic P,H candidate adapter. It projects
+      both `PreparedEquilibriumProblem` and `ResolvedThermochemistry` by the
+      active mask, solve `[ln(n_active), theta_T]`, scatter back to the full
+      layout, and provides full-layout `G0(T_solution)` to stability checks.
+- [x] Return one result type for monolithic, nested, and fallback paths, with
+  the selected path, fallback reason, backend attempts, residual blocks,
+  energy error, conservation evidence, and timing stated explicitly.
+  - [x] The existing `FixedPressureEnthalpySolution` now exposes the actual
+    `PhSolvePath` through its common report; nested and monolithic live paths
+    are both asserted, including `MonolithicPhaseControl`. A classified
+    fallback reason and `Auto` policy remain open.
+
+### P6.0 Freeze the physical and dimensional contract
+
+- [x] Introduce a typed top-level equilibrium constraint instead of boolean
+  flags. Keep fixed pressure/reference pressure in the existing condition
+  types and distinguish:
+  - prescribed `P,T`;
+  - prescribed `P,H`;
+  - the `P,H` temperature seed or bracket hint;
+  - the accepted equilibrium temperature;
+  - the prescribed total extensive enthalpy.
+  `equilibrium_constraints::EquilibriumConstraint` now provides this boundary
+  and is consumed by the typed P,H facade.
+- [x] Make total enthalpy in joules the canonical engine input. The total is
+  tied to the supplied closed-system inventory; any GUI molar, mass-specific,
+  or mixture-normalized input is an explicit conversion before entering the
+  engine. `TotalEnthalpyJoules` is now the typed `PH` boundary, while the raw
+  constructor remains as a transition convenience.
+- [x] Document the initial supported physical scope: ideal-gas phases and pure
+  condensed phases at fixed pressure, using the current standard-state
+  thermochemistry. Do not imply support for non-ideal solution enthalpy,
+  pressure-dependent real-fluid enthalpy, excess enthalpy, kinetic/potential
+  energy, or unmodelled heat/work terms. The public module documentation now
+  makes this boundary explicit before any GUI exposes the workflow.
+- [x] Define the enthalpy reference convention. All component enthalpies in one
+  solve must come from thermochemically compatible records and reference
+  states; `H_target` must use the same convention. The public contract states
+  this explicitly and `ResolvedThermochemistry` already pins every component
+  to its selected record and provenance.
+- [x] State precisely when `P,H` represents an adiabatic isobaric calculation:
+  no unaccounted heat transfer, no shaft/electrical work, and no omitted
+  kinetic or potential energy. This is now part of the public module contract,
+  not a hidden assumption of the scalar solver.
+- [x] Do not require source compatibility at any cost. Preserve `P,T`
+  numerical behavior and provide a clear migration path, but remove or
+  deprecate an old constructor if retaining it would duplicate the canonical
+  condition model. Compatibility constructors that duplicate the canonical
+  resolved-thermochemistry boundary are now explicitly deprecated; the narrow
+  `from_resolved_thermochemistry(...)` builder remains the production entry.
+
+### P6.1 Extend the resolved thermochemistry capability
+
+- [x] Add the first resolved-system `dH(T)` bridge. `EnthalpyModel::from_resolved_system`
+  aligns capabilities to `SystemLayout` and rebuilds temperature-dependent
+  property readers in private `SubsData` copies.
+- [x] Add a typed per-component thermochemistry capability aligned exactly to
+  `SystemLayout`, carrying at least:
+  - standard Gibbs free energy `g0(T)`;
+  - molar enthalpy `h(T)`;
+  - optional heat capacity `cp(T)`;
+  - valid temperature interval;
+  - source library, record key, phase/state evidence, and lookup provenance.
+  `ResolvedThermochemistry` carries this bundle and the accepted P,H result
+  retains it for diagnostics.
+- [x] Reuse the existing `SubsData` `dH(T)` and `Cp(T)` calculators and
+  closures. Do not reconstruct enthalpy by differentiating Gibbs free energy,
+  and do not copy NASA/NIST formula implementations into `ChemEquilibrium`.
+  The resolved P,H bundle is format-agnostic: it consumes the common
+  `ThermoCalculator` capability API after lookup and never branches on a
+  library name or polynomial representation.
+- [x] Build Gibbs, enthalpy, and optional heat-capacity capabilities from the
+  same selected thermochemical record. Reject mixed-record property bundles
+  unless an explicit, validated reconciliation policy is introduced later.
+- [x] Preserve the current read-only repository transaction: resolving or
+  evaluating `P,H` thermochemistry must never mutate the JSON libraries.
+- [x] Compute the admissible temperature domain as the intersection of all
+  selected records' valid intervals. Reject an empty intersection before any
+  nonlinear or scalar solver starts.
+- [ ] Replace the current single interval/envelope representation with an
+  exact ordered set of disjoint valid segments if a supported NASA/NIST
+  record can contain gaps. Until then, runtime property evaluation must still
+  reject a temperature that falls inside an envelope gap; the envelope is not
+  permission to extrapolate across missing coefficients.
+- [x] Treat enthalpy as mandatory for the first production outer-temperature
+  workflow. Keep `Cp` optional there; it becomes mandatory only for an
+  analytic derivative/Newton acceleration or the monolithic formulation.
+- [x] Expose a pure additive derivative-ready primitive for
+  `dH/dT|n = sum_i n_i Cp_i`. Its result is explicitly named a partial
+  derivative and does not pretend to include the implicit equilibrium term
+  `sum_i h_i d(n_i)/dT`.
+- [ ] Define a future extension point for phase-model enthalpy contributions.
+  The current additive contract
+  `H = sum_i n_i h_i(T)` must fail explicitly for any model requiring an
+  unimplemented excess/mixing enthalpy term.
+
+### P6.2 Add the canonical outer-temperature workflow
+
+- [x] Add the first closure-backed bracketed workflow. The
+  `equilibrium_ph_workflow` module provides `EnthalpyModel`, the
+  `ResolvedThermochemistry` bundle, validated scalar controls, trial/report
+  types, and `solve_resolved_ph` over the canonical `solve_resolved_pt`
+  facade. The bundle-backed constructor is now the resolved-data boundary;
+  continuation, budgets, and phase-transition policy remain open below.
+- [x] Promote the prototype into the final narrow typed `P,H` request above
+  the resolved-phase facade. The production request must own:
+  - immutable `ResolvedPhaseSystem`;
+  - typed initial composition;
+  - pressure and reference pressure;
+  - target total enthalpy;
+  - validated temperature bounds and optional seed;
+  - fixed-`P,T` solve options and phase-control policy;
+  - scalar temperature-solver policy, budgets, cancellation, and timing mode.
+  `ResolvedPhaseEnthalpyRequest` now captures an owned immutable
+  `ResolvedPhaseSystem` snapshot, typed composition/constraint/bounds, inner
+  solver and phase policy, scalar policy, budgets, cancellation, and timing.
+- [x] Define a pure trial evaluation:
+  `F(T) = H(solution_of_P_T(T), T) - H_target`.
+  A trial is usable only after the inner `P,T` candidate passes the existing
+  backend-independent acceptance gate. `PhTrialEvaluator` now creates the
+  local immutable outcome while the outer workflow alone owns budgets,
+  progress, continuation, and final publication.
+- [x] Use a proven safeguarded bracketed scalar method (Brent-style or
+  equivalent bisection/interpolation hybrid) as the production default.
+  The current default accepts a secant proposal only inside a guarded interior
+  portion of the valid sign bracket and otherwise uses bisection. Trial
+  reports retain `LowerBound`, `UpperBound`, `Seed`, `Interpolation`, or
+  `Bisection`, so the scalar path is auditable. No unguarded Newton step is
+  enabled.
+- [x] Add deterministic bracket construction and validation:
+  - explicit user bracket takes precedence;
+  - the required `P,H` temperature seed is evaluated as an additional trial
+    strictly inside, and never instead of, user bounds; it deterministically
+    narrows an already valid bracket when possible;
+  - [x] endpoint and midpoint trial failures retain the zero-based trial
+    index, temperature, typed inner cause, source chain, and retryability
+    classification instead of becoming an unqualified scalar-solver error;
+  - an unbracketed or unreachable target returns a typed error; a seed that
+    exposes two sign-change intervals returns `enthalpy_multiple_brackets`
+    instead of selecting a root by incidental evaluation order.
+- [x] Reuse expensive immutable preparation across fixed-declared-phase trial
+  temperatures: `PreparedPhaseEquilibriumTemplate` now retains the resolved
+  layout, element matrix, reaction basis, provenance, numeric closures, and
+  optional RST symbolic problem. The P,H workflow creates it lazily at the
+  first real trial, then retargets only temperature-dependent
+  thermochemistry while preserving deterministic multi-start recovery. The
+  report publishes one build and per-trial reuse evidence. Bounded phase
+  control remains intentionally separate because its active-set lifecycle
+  cannot be reused across the non-monotone temperature order of a scalar
+  bracket without changing the physical contract.
+- [x] Use the nearest accepted fixed-declared-phase composition as an
+  additional typed log-mole continuation seed without publishing trial state.
+  Bounded phase control intentionally keeps its ordinary inventory seed until
+  active-set-aware continuation is implemented; no active set is assumed to
+  remain unchanged across a phase transition.
+- [x] Add one global scalar temperature-evaluation budget and enforce it in
+  the bracket helper itself, so endpoint and interior evaluations share the
+  same limit rather than receiving a fresh budget per trial.
+- [x] Forward `EquilibriumExecutionControl` into the outer P,H workflow and
+  every inner P,T request, with explicit temperature-trial progress stages.
+- [x] Enforce an optional wall-time budget at the scalar evaluation gate. The
+  budget is global to the outer operation; inner cooperative cancellation is
+  still required for interruption during a long backend call. The deadline is
+  now checked after evaluator return as well, so a trial that finishes after
+  the deadline cannot be accepted retroactively.
+- [x] Make the complete `P,H` solve transactional. Failed trial solves,
+  rejected phase transitions, cancellation, exhausted budgets, or a failed
+  final acceptance check must not publish a partial result or mutate the
+  caller's resolved system.
+- [x] Define nested resource budgets explicitly: scalar evaluations, total
+  inner backend attempts, total nonlinear iterations/evaluations, wall time,
+  and phase-control transitions. A per-trial budget must not accidentally
+  multiply into an unbounded outer budget. The scalar evaluation budget is
+  global, and `PhTemperatureSolveOptions` now adds optional global
+  `max_inner_backend_attempts`, `max_inner_nonlinear_iterations`, and
+  `max_phase_control_transitions` limits.
+  The outer transaction accounts for every started inner backend attempt and
+  every reported nonlinear iteration before publishing its trial result,
+  including all work belonging to every continuation multi-start seed. Phase
+  transitions are counted from the immutable solution report and are subject
+  to the same global outer budget.
+  The request owns an immutable resolved snapshot, while accepted trials and
+  the final result remain local until the scalar bracket and enthalpy contract
+  succeed.
+- [x] Integrate cooperative cancellation and progress events at both levels:
+  bracket preparation, temperature trial start/accept/reject, inner backend
+  attempt, phase transition, and final publication. Trial-level cancellation
+  and progress are wired, including a typed rejected-trial event for inner
+  P,T or enthalpy-evaluation failures. The P,H report now also emits inner
+  backend start/finish, accepted transition, and publication start/finish
+  events; cancellation is checked at each publication boundary.
+
+### P6.3 Handle phase transitions and non-smooth enthalpy honestly
+
+- [ ] Do not assume `H_eq(P,T)` is globally smooth or monotone. Phase
+  appearance/disappearance can create derivative discontinuities, and
+  coexistence can create very flat or discontinuous-looking numerical
+  branches.
+  - [x] The safeguarded outer solver now has an explicit
+  `PhMonotonicityPolicy`. Its default rejects an observed reversal in the
+  sampled enthalpy branch with a typed error; the legacy sign-bracket
+  behavior is available only through an explicit compatibility policy and
+  is recorded in the immutable solve report. This is sampled evidence, not
+  a claim of global monotonicity.
+  - [x] Every accepted temperature trial now retains the exact phase-id to
+    lifecycle-status snapshot accepted by its inner P,T solve. Consumers can
+    therefore compare adjacent active sets instead of inferring a transition
+    only from aggregate counters.
+- [ ] Define how the scalar solver treats active-set changes inside a bracket.
+  Retain transition evidence per trial and prevent interpolation steps from
+  treating values from incompatible failed branches as a smooth derivative.
+  - [x] The bounded phase-control P,H path now forces bisection. Safeguarded
+    secant interpolation remains available only for fixed declared phases,
+    where the phase layout is invariant. This prevents a numerical slope from
+    being inferred across two potentially different active sets.
+  - [x] Every published trial now exposes a typed preparation reason:
+    `FixedFormulationInitial`, `FixedFormulationReused`, or
+    `BoundedPhaseControlIsolated`. The latter makes the absence of active-set
+    reuse explicit rather than looking like a missed performance metric.
+- [ ] Detect and report multiple brackets/multiple roots when sampled evidence
+  reveals them. The first production policy must be deterministic (for
+  example, nearest valid root to the requested seed), not dependent on hash or
+  backend iteration order.
+  - [x] The mandatory interior seed already detects the first concrete
+    multiple-bracket evidence: equal-sign endpoints with an opposite-sign seed
+    are rejected as `enthalpy_multiple_brackets`. Broader scan-based root
+    enumeration remains intentionally deferred until phase-boundary semantics
+    are finalized.
+- [ ] Define boundary behavior for latent-heat/coexistence cases. If the
+  requested enthalpy is achieved by changing phase fractions at nearly fixed
+  temperature, the accepted result still must satisfy composition,
+  complementarity, conservation, and enthalpy tolerances.
+  - [x] Add a release-only real gas/ice `P,T -> H -> P,H` boundary fixture.
+    The monolithic active-set candidate exhausts its backend cascade, but
+    explicit `Auto` deterministically recovers through bounded nested `P,T`
+    phase control, retains `AllBackendsFailed` as fallback evidence, activates
+    the solid phase, preserves balances/enthalpy, and leaves local libraries
+    unchanged.
+  - [ ] Define a true phase-fraction/coexistence formulation only after the
+    physical model and complementarity contract are specified. The successful
+    ice recovery is evidence for one point solution, not proof that every
+    latent-heat plateau is represented correctly.
+- [x] Reuse the bounded phase-control hysteresis and cycle/budget protections.
+  The bounded monolithic P,H adapter now runs through
+  `PreparedPhaseControlRunner`, so hysteresis, transition limits, cycle
+  detection, rollback, and typed lifecycle reports are shared with the P,T
+  path. A scalar P,H trial cannot hide an inner phase-control cycle as a
+  generic scalar-function failure; the accepted water fixture also verifies
+  trace-seeded activation of a zero-inventory liquid phase.
+
+### P6.4 Publish an immutable `P,H` solution and diagnostics
+
+- [x] Return an immutable result that contains the accepted temperature,
+  pressure, component moles, phase states, target/calculated total enthalpy,
+  raw enthalpy error in joules, relative/scaled error, and the normal
+  fixed-`P,T` acceptance reports. Bundle-backed results also retain the
+  component-aligned thermochemistry provenance and common domain.
+- [x] Add a validated enthalpy acceptance contract with both absolute and
+  scale-aware relative tolerances. The scalar solver accepts only when
+  `|H-H_target| <= max(abs_tol, relative_tol * scale)`; near-zero targets
+  therefore retain a meaningful absolute floor.
+- [x] Define one positive finite enthalpy scale from the immutable request and
+  initial state, not from arbitrary solver iterates. Record the scale and both
+  tolerance components in the report so acceptance is reproducible.
+- [x] Retain complete nested evidence:
+  - bracket endpoints and accepted root;
+  - every temperature trial and its status;
+  - inner backend attempts and solver metrics;
+  - phase transitions and active-set changes;
+  - rebuild/reuse reasons;
+  - thermochemistry provenance;
+  - timing by repository, property refresh, preparation, nonlinear solve,
+    phase control, enthalpy evaluation, scalar orchestration, and
+    postprocessing.
+  Every accepted trial now retains its complete inner backend cascade,
+  optional multi-start comparison, phase-control lifecycle, and final
+  acceptance snapshots alongside compact counters and timing. Rejected scalar
+  trials remain typed errors rather than partial result rows. Each published
+  trial now also carries an immutable `PhTrialTimingReport` separating trial
+  wall time, nested `P,T` time, and additive enthalpy evaluation. The timing
+  report is opt-in and covered by the P,H unit evidence test. Each inner
+  `PhaseTransitionRecord` now also carries a measured control-pass duration;
+  live activation/deactivation stories verify that this timing is published.
+  - [x] Publish a point-level `formulation_build` duration for typed T-range
+    points. It accounts for reduced formulation and RST symbolic construction
+    performed during that point and is covered by the live ice-transition
+    range story.
+   - [x] Preserve separate stopwatch intervals for every individual formulation
+     cache entry when one point creates multiple active-set formulations. The
+     public point duration remains an aggregate, while each accepted range
+     point now carries a deterministic active-mask/cache-entry timing snapshot.
+  - [x] Per-trial and aggregate backend-attempt, nonlinear-iteration, and
+    phase-transition counters are now published together with nested timing;
+    trial/evidence cardinality is validated before report publication.
+  - [x] Fixed-declared-phase P,H reports now state the number of immutable
+  formulation builds and retarget reuses. Bounded phase control deliberately
+  reports no such reuse because rejected scalar trials cannot safely mutate
+  or seed its active-set lifecycle.
+  - [x] `Auto` now preserves both typed failure trees when its monolithic
+    attempt and nested recovery both fail. Successful recovery retains the
+    classified fallback reason in the immutable P,H report; failed recovery
+    returns `PhAutoFallbackFailed { monolithic, nested }` rather than erasing
+    the primary active-set evidence.
+  - [x] Keep the default production cascade free of unsolicited console
+    output. RustedSciThe Powell Dogleg remains an explicit benchmark/backend
+    option, but is excluded from the default cascade because version 0.4.12
+    prints internal `beta` diagnostics and rejected the large real-data case.
+- [x] Keep independent `K_eq` validation scoped to applicable inner
+  fixed-phase chemical-equilibrium candidates. It does not independently
+  validate the outer enthalpy root and must not be presented as doing so. The
+  P,H module documentation now explicitly separates this observational inner
+  evidence from enthalpy-root acceptance.
+- [x] Add a compact stable public facade and prelude exports only after the
+  request/result/error contracts are validated. Keep raw prepared state and
+  scalar orchestration internals crate-private. `solve_resolved_ph`, its typed
+  request/result/report types, and constrained solver controls are exported
+  from `ChemEquilibrium::prelude`; prepared runner/template internals remain
+  crate-private.
+
+### P6.5 Verification and release evidence
+
+- [x] Add a typed fixed-pressure, fixed-enthalpy target-range facade with a
+  strictly monotone ascending/descending enthalpy grid, continuation from the
+  previous accepted physical composition and temperature, per-point timing,
+  phase-transition evidence, and transactional publication. `PhRangeRequest`
+  is the canonical engine boundary; it does not publish a partially solved
+  batch after a point failure.
+- [x] Cover the continuation contract with unit tests for grid/error/report
+  semantics and an ignored live NASA H/O story that checks ascending and
+  descending targets, accepted temperatures, provenance, conservation, and
+  the seed hand-off between adjacent points.
+- [x] Reuse prepared monolithic P,H formulation state across fixed-phase target
+  points. Reaction basis, element totals, phase projection, analytic row
+  structure, and RST symbolic expressions are built once; accepted
+  `[log-moles, T]` state plus target/scale parameters are retargeted between
+  points. The range report exposes formulation build/reuse counters.
+- [x] Extend the same prepared-state contract to nested P,H batches without
+  conflating it with the monolithic formulation. The nested route now shares
+  only its fixed-P,T prepared template across target batches; every target
+  retains an independent scalar bracket, while bounded phase-control remains
+  isolated whenever active-set lifecycle can change. The live continuation
+  story asserts one template build across the nested target range.
+- [x] Add a live backend matrix for the fixed-phase monolithic P,H target
+  range with strict single-backend policies and per-point timing. The ignored
+  matrix keeps backend failure visible instead of hiding it behind a cascade.
+- [x] Extend the live route matrix with nested/Auto batches, a real
+  phase-transition range, and rollback after an unreachable target; these are
+  separate lifecycle stories and must not be implied by the fixed-phase
+  matrix. The ignored real-data route matrix now prints all three rows and
+  keeps the rollback point index typed. Its release evidence is recorded in
+  `STORY_TESTS.md`.
+- [x] Add a large real-data nested P,H continuation story: twenty exact
+  element-limited C/H/O species, nine interior target enthalpies, accepted
+  temperature/composition hand-off, one fixed-P,T template build, conservation
+  and enthalpy acceptance at every point.
+- [x] Add a denser real water/ice Auto P,H story: five target enthalpies from
+  250 to 270 K, route-dependent monolithic/nested acceptance, retained
+  fallback reason, phase-transition evidence, and transactional output.
+- [x] Record release evidence for the nested/Auto route matrix, the large
+  twenty-species nested story, and the dense water/ice Auto story in
+  `STORY_TESTS.md`. Keep these large live tests out of the default suite.
+- [x] Implement and document the strict fixed-phase monolithic P,H target-range
+  backend matrix. It remains separate because backend failures are deliberate
+  characterization evidence rather than a route-lifecycle failure; the release
+  command and aligned backend table are recorded in `STORY_TESTS.md` for the
+  target-machine evidence refresh.
+  - [x] The matrix now emits one aligned row per backend with point count,
+    formulation builds/reuses, solve and wall timing, maximum residual,
+    maximum element-balance error, and the complete typed failure reason.
+    A debug characterization currently shows \`legacy_tr\` completing all
+    three points while the other rows expose backend-specific acceptance or
+    iteration-limit failures; this is evidence, not a production-default
+    decision.
+
+- [x] Keep every existing fixed-`P,T` regression green and add direct parity
+  between the resolve/build pipeline request and the resolved `P,T` facade.
+  The parity story fixes one backend policy, compares component amounts,
+  residual quality, and layout fingerprint, and therefore checks orchestration
+  equivalence without conflating it with backend-cascade selection.
+- [x] Add the primary inverse story:
+  solve a stable `P,T` problem at `T*`, calculate `H*`, then solve the same
+  inventory at `P,H*` from a different seed/bracket and recover temperature,
+  composition, conservation, and enthalpy within explicit tolerances.
+  The ignored live NASA H2/O2/H2O story now exercises this contract through
+  `ResolvedThermochemistry::from_resolved_system` and `solve_resolved_ph`.
+- [x] Cover synthetic analytic fixtures where `h(T)` and the expected
+  temperature/root are known exactly. Include a non-reacting sensible-heat
+  case so failures in chemistry cannot mask errors in the energy equation;
+  the same unit layer also checks inventory scaling invariance.
+- [ ] Add real offline cross-format gas and gas-plus-pure-condensed stories
+  with pinned lookup policy and provenance. Snapshot all canonical JSON files
+  before and after the tests. The solver contract is library/polynomial-format
+  agnostic, so this must include at least one stable non-NASA fixture rather
+  than treating NASA as the production format.
+  - [x] Ignored release stories now cover NASA-gas reactive P,T -> H -> P,H
+    inversion and NASA-gas plus NASA-condensed bounded water inversion. Both
+    retain provenance, verify the P,H reuse/phase evidence appropriate to
+    their solve mode, and compare the canonical library files byte-for-byte.
+  - [ ] Add a pinned local NIST P,T -> H -> P,H inverse fixture once the
+    read-only repository actually contains a stable NIST record set. The
+    current `all_keys_substance.json` advertises historical NIST addresses,
+    but the canonical local repository does not contain the corresponding
+    H2/O2/H2O records, so an offline test would only pin stale-index failure.
+    Repair the library/index consistency first; do not turn this into a
+    network-dependent regression. This fixture is evidence for the
+    format-agnostic capability boundary, not an alternate solver path.
+  - [x] Make the fallback contract explicit before adding that fixture:
+    local data is authoritative; an enabled canonical fallback queries NIST
+    only for the requested gas/liquid/solid state; an unspecified state fails
+    closed; and parser/network failures are preserved as failures. The old
+    unconstrained gas fallback remains compatibility-only and deprecated.
+  - [x] Add an ignored online NIST state-matrix smoke test for the parser
+    boundary. It may validate gas/liquid/solid payload availability and finite
+    Shomate data, but it must not be used as equilibrium evidence or mutate
+    local JSON. Offline NIST parity remains blocked until real payloads are
+    checked into the repository.
+    - [x] The current H2O run reports complete gas/liquid payloads and an
+      incomplete solid navigation payload without Cp intervals. The latter is
+      recorded as unavailable solid thermochemistry, never as a phase fallback.
+  - [x] Add a read-only catalog consistency report before repairing that
+    fixture. It canonicalizes library aliases and reports missing payload,
+    orphan payload, and duplicate index pairs without modifying JSON. The
+    live release diagnostic currently reports `5519` indexed pairs, `5472`
+    payload pairs, and `47` indexed records without payload; this is now an
+    explicit data-release blocker rather than a hidden solver failure.
+- [x] Add phase-transition stories for water vapor/liquid/ice and another
+  physically credible condensed system. Check latent-heat/coexistence
+  behavior, hysteresis, rollback, and final complementarity.
+   - [x] Real P,T water liquid/ice appearance and disappearance stories are
+     covered; the ignored P,H gas/ice inverse story verifies bounded nested
+     recovery after a rejected monolithic candidate. The release rerun
+     recovered `T=250 K`, `solid_moles=4.998093e-1`, one transition, and zero
+     scaled enthalpy error through `Auto`.
+   - [x] The ignored real phase-transition release matrix now reports water
+     gas/ice, water gas/liquid, hot-water disappearance, and graphite
+     appearance/disappearance in one table. Every row checks finite
+     non-negative amounts, conservation, complementarity, transition evidence,
+     and byte-for-byte JSON immutability. The release run passed for all five
+     scenarios, with per-case solve times from roughly 1.1 to 5.0 ms.
+   - [x] The real ice temperature-range story now retains one deterministic
+     build-duration snapshot per prepared active-set cache entry, instead of
+     exposing only the aggregate point duration.
+- [x] Test invalid and unreachable inputs: non-finite enthalpy, invalid
+  pressure/temperature bounds, missing enthalpy capability, incompatible
+  record intervals, unsupported phase enthalpy model, unbracketed target,
+  inner all-backends-failed, cancellation, and exhausted global budget.
+  - [x] The P,H unit layer already covers non-finite targets, invalid scalar
+    budgets, missing/misaligned `Cp`, wrong enthalpy component counts,
+    incompatible bundle domains, unbracketed targets, observed multiple
+    brackets, endpoint/midpoint inner failures, cancellation before and after
+    inner start, and global evaluation/wall-time budgets. These paths return
+    typed errors and never publish a partial `FixedPressureEnthalpySolution`.
+  - [ ] Add the remaining resolved-data cases only when their physical source
+    exists: an actual record without `dH`, an unsupported non-additive phase
+    model, and a repaired local NIST fixture. Do not fabricate malformed
+    production records merely to make this checklist look complete.
+  - [x] The ignored real-data validation matrix covers non-finite target,
+    reversed bounds, non-positive pressure, unreachable target rollback, and
+    JSON immutability.
+- [x] Add metamorphic inventory-scaling tests. Multiplying every initial mole
+  and total target enthalpy by the same factor should preserve equilibrium
+  temperature and mole fractions while scaling extensive amounts. The
+  analytic outer-solver fixture now pins this contract independently of
+  chemistry.
+- [x] Add a backend/cascade matrix for the inner `P,T` solves and a release
+  characterization over small, medium, and large real systems. Report outer
+  evaluations separately from measured inner nonlinear solve time; do not
+  select a production default from wall time alone.
+  - [x] The ignored live H2/O2/H2O `P,H` backend matrix runs each RST and
+    legacy backend under a strict `Single` policy against one independently
+    constructed `H*`. Its rounded table reports outer trials, total/wall and
+    inner nonlinear timings, formulation build/reuse counts, inner work,
+    final temperature, energy error, residual, balance, and an explicit error
+    row for failed methods. It snapshots canonical JSON libraries before and
+  after the complete matrix.
+   - [x] The strict monolithic P,H target-range matrix now emits aligned
+     per-backend timing, attempts, accepted-backend, enthalpy, residual,
+     conservation, failure-point, failure-kind, and full typed-error evidence.
+     Release execution remains the final characterization step.
+   - [x] `live_nested_ph_inner_pt_cascade_release_matrix` now covers 5, 20,
+     and 100 real local NASA candidates over three target enthalpies. It reports
+     outer evaluations, inner backend attempts, inner solve time, formulation
+     reuse, conservation, and immutable-library evidence. The debug baseline
+     passes; the release command is recorded in `STORY_TESTS.md`.
+- [x] Verify deterministic ascending/descending enthalpy sweeps in the typed
+  P,H batch facade. Reuse accepted neighboring solutions transactionally,
+  while keeping the semantic distinction explicit: one P,H target has one
+  solved temperature.
+
+### P6.6 Evaluate and promote the monolithic formulation
+
+- [x] Only after the outer-temperature workflow was accepted, prototype a
+  coupled unknown layout with log-moles and bounded/logarithmic temperature.
+  The canonical reaction and element rows remain embedded in the prepared
+  problem; no second multiplier-based formulation was introduced. Keep the
+  layout typed; do not spread arithmetic such as `n_species + n_elements`
+  through residual code.
+- [x] Reuse the existing chemical and balance blocks and append exactly one
+  scaled enthalpy equation. Do not create a second copy of the `P,T`
+  formulation.
+- [x] Derive and test the full temperature column of every chemical residual,
+  including `g0(T)/(RT)`, pressure/activity terms, and any phase-model
+  temperature dependency. A zero temperature column is invalid.
+- [x] For additive ideal enthalpy, verify the analytic energy derivatives:
+  `dH/dln(n_i) = n_i h_i(T)` and
+  `dH/dln(T) = T sum_i n_i cp_i(T)`.
+  Extend these formulas before enabling any excess-enthalpy model.
+- [ ] If analytic `Cp` or activity derivatives are unavailable, isolate a
+  scale-aware finite-difference fallback and compare the complete Jacobian
+  against central differences away from phase boundaries. Do not replace the
+  established analytic composition Jacobian wholesale.
+- [x] Bound temperature through a validated transform or safeguarded step
+  policy over the common thermochemistry interval; `ln(T)` alone enforces
+  positivity but does not enforce the upper/lower data bounds.
+- [ ] Compare monolithic and outer-temperature formulations on convergence
+  basin, phase transitions, backend fallback behavior, residual quality,
+  thermochemistry evaluations, and release timing. The real reactive inverse
+  story now compares both paths and establishes monolithic as the default for
+  resolved requests. A real water/liquid phase-activation story now directly
+  compares explicit monolithic and nested routes with the same `P,H` target,
+  phase lifecycle evidence, accepted temperature, composition, residual, and
+  conservation. The real gas/ice story now additionally proves the hard-route
+  contract: direct monolithic returns `AllBackendsFailed`, explicit nested
+  accepts, and `Auto` publishes the nested-equivalent state while retaining the
+  same fallback reason. The broader phase-transition/release matrix remains
+  before declaring promotion complete.
+
+### P6.7 GUI integration gate
+
+- [x] The fixed-phase ideal/pure-condensed engine facade, immutable reports,
+  typed errors, cancellation, budgets, and release backend evidence are now
+  sufficient to begin GUI integration within the documented P6.0 scope. GUI
+  must not advertise non-ideal phases, latent-heat coexistence, or an
+  enthalpy-temperature range sweep as implemented capabilities.
+- [x] Expose total enthalpy in explicit joules, temperature seed and bracket,
+  inner solver policy, progress, cancellation, immutable energy evidence, and
+  route-dependent diagnostics through typed GUI controls. Nested routes expose
+  scalar trial rows; monolithic routes expose backend attempts, accepted
+  backend, acceptance, and phase-control evidence without fabricated trials.
+  The GUI selects the canonical monolithic route when the resolved
+  thermochemistry supports one exact symbolic interval; a bracket crossing a
+  native coefficient switch remains on the nested numeric reference route.
+- [x] Do not offer a temperature-range control in `P,H` mode. A future batch
+  operation should sweep target enthalpy and report the solved temperature at
+  each point.
+- [x] Add the basic GUI stories: valid local P,H solve, immutable energy and
+  outer-trial diagnostics, lifecycle staleness, cancellation boundary, and
+  document roundtrip.
+- [x] Add GUI stories for unreachable target, inner fallback success,
+  all-backends-failed, cancellation/rollback during an active P,H worker, and
+  a real phase-transition publication using stable local fixtures.
+  - [x] The ignored local GUI story now covers an unreachable finite P,H target:
+    the worker fails visibly, publishes no partial snapshot, and leaves the
+    canonical JSON files unchanged.
+  - [x] Existing local GUI stories cover fallback acceptance, transactional
+    range failure, cancellation/stale-result rejection, and real water/ice
+    phase publication.
+  - [x] All-backends-failed is a separate ignored local fixture and asserts
+    the typed engine error plus absence of a partial snapshot; it does not
+    manufacture a generic worker failure solely to satisfy the checklist.
+
+## P6.8 Release-oriented monolithic P,H architecture hardening
+
+The external architecture review is accepted as a follow-up plan, with the
+following corrections to its scope. The coupled P,H mathematics and the
+nested reference route already exist; this work must preserve the P,T facade,
+the phase-control boundary, and the existing typed result contract. The GUI
+now covers the basic P,H editor, worker, immutable energy/outer diagnostics,
+trial table, cancellation boundary, and document lifecycle. The remaining
+items below are engine architecture and release evidence, not a reason to
+rebuild the GUI.
+
+### P6.8.1 Dependency map and module boundaries
+
+- [x] Produce a checked dependency map for `equilibrium_ph_workflow.rs`,
+  `equilibrium_ph_formulation.rs`, `equilibrium_ph_monolithic.rs`, and the
+  nested implementation. Record every shared type, thermochemistry adapter,
+  `GibbsFn` construction site, `Cp` capability check, option/report type, and
+  fallback decision before moving code. The map above is now synchronized
+  with the extracted nested/thermochemistry modules and the shared typed
+  nonlinear-system adapter.
+- [x] Move `ResolvedThermochemistry`, its provenance, molar property
+  function types, interval intersection, and Gibbs/enthalpy/Cp evaluation
+  into a lower-level thermochemistry module. Formulation and runners may
+  depend on this module; it must not depend on workflow orchestration,
+  publication, phase lifecycle, GUI progress, or scalar bracket policy. The
+  workflow retains only compatibility re-exports and the nested enthalpy
+  adapter.
+- [x] Extract the nested scalar-temperature algorithm and its trial types,
+  bracket policy, monotonicity policy, continuation, budgets, and
+  nested-specific report into `equilibrium_ph_nested.rs`. Keep the workflow
+  as a facade, mode selector, fallback coordinator, and common publication
+  boundary.
+  - [x] Extract the stateless safeguarded interpolation, wall-time guard,
+    sampled-monotonicity helpers, and the scalar bracket loop with unit tests.
+    The module also owns `PhTemperatureTrial`, phase-state snapshots, timing,
+    and inner-solve evidence. The workflow re-exports those types, adapts
+    scalar records, attaches phase evidence, and publishes the final common
+    result.
+- [x] Do not introduce a second thermochemistry bundle or a second public
+  result merely to perform this extraction. Reuse the existing immutable
+  bundle and expose accessors where the current result already owns the data.
+  The nested module owns scalar trial/evidence snapshots only; the common
+  `FixedPressureEnthalpySolution` remains the single published result.
+
+### P6.8.2 Typed thermochemistry evaluation
+
+- [x] Remove every `unwrap_or(f64::NAN)` conversion from the new monolithic
+  P,H path. An out-of-domain evaluation, missing coefficient, database error,
+  or property evaluation failure must retain its typed cause through
+  preparation/residual evaluation and must not be reported as an anonymous
+  numerical backend breakdown. The remaining infallible `GibbsFn` crossing is
+  an explicit, finite snapshot adapter at the accepted temperature.
+- [x] Choose one explicit fallible boundary for P,H: either a fallible
+  prepared-property/evaluation context or residual helpers that consume
+  already evaluated Gibbs/enthalpy/Cp vectors. Do not change the established
+  P,T closure API wholesale solely to introduce a new closure alias. The
+  monolithic residual already consumes the typed evaluated context; phase
+  control remains a documented compatibility boundary until its callback is
+  made fallible.
+- [ ] Replace the snapshot compatibility adapter with a fallible stability
+  evaluator once phase-control no longer requires `GibbsFn = Fn(T) -> f64`.
+- [x] Move mandatory `Cp(T)` capability validation to formulation preparation.
+  Validate component count/order, common temperature domain, finite initial
+  Gibbs/enthalpy/Cp values, and the selected capability policy before a
+  nonlinear backend starts. Missing Cp is now an `InvalidProblem` before
+  backend execution; a deliberately enabled finite-difference policy remains
+  future work.
+- [ ] If finite-difference Cp is supported, add explicit analytic/central,
+  forward, and backward source diagnostics, boundary-aware step selection,
+  and a Jacobian comparison test. Do not enforce an unconditional positive-Cp
+  rule without first defining its physical scope.
+
+### P6.8.3 Separate solve policies and diagnostics
+
+- [x] Separate common physical/acceptance/execution options from monolithic
+  nonlinear options and nested scalar/bracket options. Nested-only controls
+  must not affect monolithic solves, and monolithic-only controls must not be
+  silently applied to nested recovery.
+  - [x] `PhAcceptanceOptions`, `PhMonolithicOptions`, and `PhNestedOptions`
+    are typed route contracts; `PhTemperatureSolveOptions` exposes validated
+    projections into them while retaining the compatibility builder surface.
+  - [x] The fixed-active-set monolithic runner now receives only an immutable
+    enthalpy acceptance contract; scalar bracket limits, phase-transition
+    budgets, and progress controls remain in the workflow. The nested scalar
+    engine now receives its own smaller `NestedBracketOptions` contract.
+- [x] Separate monolithic diagnostics from nested diagnostics. A monolithic
+  Newton iteration must not be represented as an outer temperature trial;
+  nested reports must retain trials, bracket evidence, inner P,T work, and
+  scalar residuals. Shared counters may remain in a common immutable result
+  only when their semantics are identical. Monolithic backend and phase
+  lifecycle evidence now lives in `PhMonolithicEvidence`, while `trials` is
+  populated only by the nested scalar route.
+- [x] Isolate the compatibility constructor
+  `ResolvedPhaseEnthalpyRequest::new(...)` from the canonical API. It is now
+  deprecated, explicitly documented as nested/reference-only, and the
+  production `from_resolved_thermochemistry(...)` builder no longer calls it.
+- [x] Audit `Auto`: retry nested only for classified retryable numerical
+  failures; never retry for invalid input, missing capability, layout/data
+  errors, cancellation, unsupported phase models, or invariant failures.
+  Preserve the original monolithic error tree and test the classification
+  table explicitly. `AllBackendsFailed` is retryable only when its non-empty
+  trace consists solely of started numerical failures; rejected candidates,
+  skipped attempts, and empty traces fail fast.
+- [x] Keep phase-control lifecycle outside the monolithic residual and keep
+  the nested route as a reference/fallback. Do not move hysteresis or phase
+  transitions into the coupled equation itself without a new physical
+  complementarity contract.
+
+### P6.8.4 Backend and publication contracts
+
+- [x] Remove the monolithic runner's dependence on `EquilibriumLogMoles` as a
+  mutable orchestration host. Reuse neutral residual/backend helpers only;
+  preparation, iteration, phase lifecycle, and result publication must use
+  immutable prepared state and local candidates. The backend cascade is now a
+  stateless adapter function; the old associated method is only a legacy
+  wrapper.
+- [x] Define a domain-independent prepared nonlinear-system contract that can
+  represent both fixed P,T and P,H residual/Jacobian dimensions. RST must
+  receive residual/Jacobian capabilities without knowing which coordinate is
+  temperature or which row is enthalpy. The adapter now carries
+  `PreparedNonlinearSystem` with dimension, residual, Jacobian, feasibility,
+  and optional backend payload without attaching thermodynamic meaning to any
+  coordinate.
+  - [x] Add a dedicated symbolic monolithic `P,H` payload for RST. It uses the
+    exact resolved component order, substitutes the bounded `T(theta)`
+    expression into phase-qualified `G0(T)` and `H(T)`, appends the scaled
+    enthalpy row, and gives RST the complete `(N + 1)` system. The analytic
+    formulation remains an independent legacy/fallback route; no fixed-P,T
+    payload or fake zero temperature column is reused.
+  - [x] Keep symbolic thermochemistry optional in `ResolvedThermochemistry`.
+    Numeric resolved data remain valid for legacy and nested P,H solving.
+    Real symbolic capabilities are materialised lazily from private
+    phase-local `SubsData` copies for the requested P,H bounds and are
+    accepted only when every component remains inside one native NASA/NIST
+    coefficient interval. Selecting RST without `G0/H` expressions, or across
+    a native polynomial boundary, fails with a typed unsupported-capability
+    error instead of fitting/extrapolating silently or changing lookup
+    semantics.
+- [x] Retain one physical P,H publication gate for both paths: finite and
+  in-range temperature, finite log-moles/reconstructed moles, reaction and
+  element residuals, enthalpy error, conservation, phase stability, and
+  active-set consistency. Diagnostics may differ, acceptance meaning may not.
+- [x] Refresh the immutable build report at the accepted monolithic
+  temperature before publication. A fixed-active P,H solve is prepared at its
+  seed temperature but may converge elsewhere; the report and accepted
+  solution must carry the same `(P,T)` conditions. The live GUI monolithic
+  story covers this publication contract.
+- [x] Add a typed capability error that names the requested incompatible
+  backend and the supported alternatives. The monolithic RST guard now uses
+  `UnsupportedBackendCapability` both for absent symbolic capabilities and
+  for a requested symbolic range crossing a native coefficient boundary. The
+  error is non-retryable and therefore cannot be hidden by fallback.
+
+### P6.8.5 Architecture tests and release characterization
+
+- [x] Add architecture tests proving that monolithic mode performs no outer
+  nested temperature trials, nested mode reports real scalar trials, and
+  `Auto` records monolithic-then-nested fallback only after a retryable
+  failure. Include an invalid-input case proving nested is not started.
+  - [x] The real-data P,H story now asserts that monolithic reports no scalar
+    trials and exposes `PhMonolithicEvidence`; the unit contract also records
+    that invalid monolithic input emits no `TemperatureTrialStarted` event.
+- [x] Add a route-dependent GUI diagnostics snapshot. The monolithic GUI view
+  now presents backend-attempt summaries, accepted backend, acceptance rows,
+  phase-control rows, and inner timing; it does not render a zero-valued
+  temperature-trial section. Nested routes retain their real trial table.
+- [ ] Extend the analytic Jacobian matrix with missing-Cp, typed property
+  error, analytic/finite-difference Cp, zero activity-temperature derivative,
+  non-zero activity-temperature derivative, lower/upper interval boundary,
+  scaling, and every P,H block-column/row comparison.
+  - [x] Add a synthetic RST P,H regression that verifies the symbolic
+    `(ln(n), theta_T)` system converges through the normal candidate gate and
+    never reuses the fixed-P,T symbolic payload.
+  - [x] Add an ignored real-data NASA-gas parity case for RST-monolithic P,H
+    against the independent analytic/legacy route. The 1900..2900 K fixture
+    stays within the common native interval and compares accepted temperature,
+    composition, conservation, and enthalpy rather than backend iteration
+    counts. A companion real-data guard proves that 900..1100 K is rejected
+    for the RST symbolic path when it crosses a coefficient switch, while the
+    JSON repository remains unchanged.
+   - [x] Add an ignored real-data NASA-gas Jacobian central-difference matrix.
+     The fixture uses five locally resolved C/H/O records and points immediately
+     inside both common temperature boundaries plus an interior point. It
+     compares every analytic P,H block entry and verifies that the JSON source
+     files remain unchanged. The test intentionally keeps ideal-model activity
+     temperature derivatives at their physical zero value.
+    - [x] Extend that real matrix across four inventory scales from `1e-6` to
+      `1e3`, while retaining both native-interval boundaries and the complete
+      residual/Jacobian block comparison.
+    - [x] Release rerun confirms the same real Jacobian matrix: 432 entries,
+      four inventory scales, three boundary/interior temperatures, and a
+      six-dimensional coupled formulation.
+  - [ ] Add the corresponding ignored NIST P,H parity fixture after a stable
+    locally bundled NIST record set is selected. Do not weaken the exact
+    single-native-interval contract to make this fixture pass.
+- [x] Add one release characterization over the same real problem for
+  monolithic and nested paths. Report backend attempts, residual/Jacobian and
+  thermochemistry evaluations, active-set work, temperature trials, total
+  inner P,T solves, reuse, and wall time. Keep performance ratios out of unit
+  test assertions; use an ignored release benchmark instead. The ignored live
+  P,H story now prints a table for nested, analytic monolithic, symbolic
+  RST-LM monolithic, and Auto with backend metrics plus
+  thermochemistry-preparation timing.
+- [x] Add the remaining GUI stories when their engine fixtures exist:
+  unreachable target, P,H inner fallback, all-backends-failed,
+  cancellation/rollback, and a real phase-transition publication. The stories
+  now exist in `equilibrium_gui_tests`; catalog-dependent cases remain
+  explicitly ignored and preserve JSON immutability checks. The mixed
+  gas/condensed phase-publication story selects Legacy NR explicitly because
+  the symbolic monolithic route requires one native coefficient interval per
+  component. The basic valid P,H, diagnostics, lifecycle, and
+  document-roundtrip stories are covered.
+
+### P6.8.6 Documentation and explicit non-goals
+
+- [x] Update module rustdoc after extraction: workflow as facade, monolithic
+  as fixed-active-set coupled solve, nested as reference/recovery algorithm,
+  thermochemistry as capability/provenance layer, and formulation as the
+  complete `[F_rxn, F_elem, F_H]` system with its block Jacobian. The module
+  headers now describe these ownership boundaries and explicitly distinguish
+  outer scalar trials from monolithic coupled evidence.
+- [x] Define and implement typed P,H temperature-range batch solving with
+  accepted-state continuation, transactional publication, and per-point
+  evidence. Export/import, latent-heat coexistence modeling, and non-ideal
+  phase physics remain outside this technical hardening pass until their
+  separate contracts are defined.
+- [x] Re-run the full P,T regression suite after every logical extraction;
+  the current full `ChemEquilibrium` library run passes after the option and
+  prepared-system extractions, and no P,T compatibility workaround became a
+  hidden dependency of the monolithic P,H path.
 
 ## Recommended implementation passes
 

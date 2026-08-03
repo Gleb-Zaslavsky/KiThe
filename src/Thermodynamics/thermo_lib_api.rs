@@ -5,7 +5,7 @@ use crate::library_manager::with_library_manager;
 use prettytable::{Table, row};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -218,6 +218,63 @@ pub struct ThermoRepository {
     pub transport_libs: Arc<Vec<String>>,
 }
 
+/// Read-only evidence that the address index and thermochemical payload agree.
+///
+/// The repository historically exposed `compare_2_libs`, which printed a
+/// table and compared raw library strings. That made aliases look broken and
+/// made the result difficult to assert in release tests. This value object
+/// normalizes library aliases, sorts every difference, and performs no I/O or
+/// mutation. It is intentionally a diagnostic, not an automatic repair step.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ThermoCatalogConsistencyReport {
+    indexed_pair_count: usize,
+    unique_indexed_pair_count: usize,
+    payload_pair_count: usize,
+    duplicate_index_pairs: Vec<(String, String)>,
+    indexed_without_payload: Vec<(String, String)>,
+    payload_without_index: Vec<(String, String)>,
+}
+
+impl ThermoCatalogConsistencyReport {
+    /// Number of raw address-index entries, including duplicates.
+    pub fn indexed_pair_count(&self) -> usize {
+        self.indexed_pair_count
+    }
+
+    /// Number of distinct normalized address-index entries.
+    pub fn unique_indexed_pair_count(&self) -> usize {
+        self.unique_indexed_pair_count
+    }
+
+    /// Number of library/substance pairs in the payload.
+    pub fn payload_pair_count(&self) -> usize {
+        self.payload_pair_count
+    }
+
+    /// Duplicate normalized pairs found in the address index.
+    pub fn duplicate_index_pairs(&self) -> &[(String, String)] {
+        &self.duplicate_index_pairs
+    }
+
+    /// Address entries whose normalized payload record is absent.
+    pub fn indexed_without_payload(&self) -> &[(String, String)] {
+        &self.indexed_without_payload
+    }
+
+    /// Payload records that have no corresponding address-index entry.
+    pub fn payload_without_index(&self) -> &[(String, String)] {
+        &self.payload_without_index
+    }
+
+    /// Whether the index and payload are exactly aligned after alias
+    /// normalization.
+    pub fn is_consistent(&self) -> bool {
+        self.duplicate_index_pairs.is_empty()
+            && self.indexed_without_payload.is_empty()
+            && self.payload_without_index.is_empty()
+    }
+}
+
 /// A record selected from a catalog with explicit lookup provenance.
 #[derive(Debug, Clone)]
 pub struct ResolvedThermoRecord {
@@ -275,6 +332,55 @@ impl ThermoRepository {
         query: &ThermoRecordQuery,
     ) -> Result<Option<ResolvedThermoRecord>, ThermoLibraryError> {
         resolve_thermo_record_from_catalog(self.LibThermoData.as_ref(), library, query)
+    }
+
+    /// Compares the immutable address index with the immutable payload.
+    ///
+    /// Library aliases are canonicalized before comparison, so an address
+    /// under `Cantera_nasa_base_gas` correctly matches the `NASA_gas` payload.
+    /// The report is suitable for release evidence and never attempts to
+    /// repair stale files or fetch missing records from the network.
+    pub fn consistency_report(&self) -> ThermoCatalogConsistencyReport {
+        let indexed_pair_count = self.VecOfSubsAdresses.len();
+        let mut indexed_counts: std::collections::BTreeMap<(String, String), usize> =
+            std::collections::BTreeMap::new();
+        for (library, substance) in self.VecOfSubsAdresses.iter() {
+            let pair = (ThermoData::canonical_library_name(library), substance.clone());
+            *indexed_counts.entry(pair).or_default() += 1;
+        }
+
+        let indexed_pairs: BTreeSet<(String, String)> = indexed_counts.keys().cloned().collect();
+        let duplicate_index_pairs = indexed_counts
+            .into_iter()
+            .filter_map(|(pair, count)| (count > 1).then_some(pair))
+            .collect::<Vec<_>>();
+        let payload_pairs = self
+            .LibThermoData
+            .iter()
+            .flat_map(|(library, records)| {
+                let canonical_library = ThermoData::canonical_library_name(library);
+                records
+                    .keys()
+                    .map(move |substance| (canonical_library.clone(), substance.clone()))
+            })
+            .collect::<BTreeSet<_>>();
+        let indexed_without_payload = indexed_pairs
+            .difference(&payload_pairs)
+            .cloned()
+            .collect::<Vec<_>>();
+        let payload_without_index = payload_pairs
+            .difference(&indexed_pairs)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        ThermoCatalogConsistencyReport {
+            indexed_pair_count,
+            unique_indexed_pair_count: indexed_pairs.len(),
+            payload_pair_count: payload_pairs.len(),
+            duplicate_index_pairs,
+            indexed_without_payload,
+            payload_without_index,
+        }
     }
 }
 
@@ -897,9 +1003,10 @@ impl ThermoData {
         let mut hashmap_of_thermo_data: HashMap<String, HashMap<String, Value>> = HashMap::new();
         let allowed_elements: HashSet<String> = elements.into_iter().collect();
 
-        // Collect all substances and their elements
-        let mut substance_elements: HashMap<String, (HashSet<String>, HashSet<String>)> =
-            HashMap::new();
+        // Keep element sets per `(library, substance)`. Aggregating by bare
+        // substance name would let a record from another library or physical
+        // state contaminate an exact-match query.
+        let mut substance_elements: HashMap<(String, String), HashSet<String>> = HashMap::new();
 
         let mut element_keys: Vec<String> = self.ElementsData.keys().cloned().collect();
         element_keys.sort();
@@ -914,49 +1021,52 @@ impl ThermoData {
                     let database_name = &pair[1];
 
                     substance_elements
-                        .entry(substance_name.clone())
-                        .or_insert_with(|| (HashSet::new(), HashSet::new()))
-                        .0
-                        .insert(database_name.clone());
-                    substance_elements
-                        .entry(substance_name.clone())
-                        .or_insert_with(|| (HashSet::new(), HashSet::new()))
-                        .1
+                        .entry((database_name.clone(), substance_name.clone()))
+                        .or_default()
                         .insert(element.clone());
                 }
             }
         }
 
-        // Filter substances that contain only allowed elements (or subsets)
-        let mut substance_names: Vec<String> = substance_elements.keys().cloned().collect();
-        substance_names.sort();
-
-        for substance_name in substance_names {
-            let Some((database_names, substance_element_set)) =
-                substance_elements.remove(&substance_name)
-            else {
-                continue;
-            };
+        // Group matching records by bare name only after the per-library
+        // element contract has been evaluated. The public legacy API returns
+        // bare names, so preserve its deterministic first-library behavior.
+        let mut matching_by_substance: HashMap<String, Vec<(String, HashSet<String>)>> =
+            HashMap::new();
+        for ((database_name, substance_name), substance_element_set) in substance_elements {
             let matches = if exact {
                 substance_element_set == allowed_elements
             } else {
                 substance_element_set.is_subset(&allowed_elements)
             };
             if matches {
-                let mut libraries: Vec<String> = database_names.into_iter().collect();
-                libraries.sort();
-                if let Some(database_name) = libraries.first() {
-                    if let Some(lib_data) = self.LibThermoData.get(database_name) {
-                        if let Some(substance_data) = lib_data.get(&substance_name) {
-                            hashmap_of_thermo_data
-                                .entry(substance_name.clone())
-                                .or_insert_with(HashMap::new)
-                                .insert(database_name.clone(), substance_data.clone());
+                matching_by_substance
+                    .entry(substance_name)
+                    .or_default()
+                    .push((database_name, substance_element_set));
+            }
+        }
 
-                            if seen_substances.insert(substance_name.clone()) {
-                                found_substances.push(substance_name);
-                            }
+        // Filter substances that contain only allowed elements (or subsets).
+        let mut substance_names: Vec<String> = matching_by_substance.keys().cloned().collect();
+        substance_names.sort();
+
+        for substance_name in substance_names {
+            let Some(mut matching_libraries) = matching_by_substance.remove(&substance_name) else {
+                continue;
+            };
+            matching_libraries.sort_by(|left, right| left.0.cmp(&right.0));
+            for (database_name, _) in matching_libraries {
+                if let Some(lib_data) = self.LibThermoData.get(&database_name) {
+                    if let Some(substance_data) = lib_data.get(&substance_name) {
+                        hashmap_of_thermo_data
+                            .entry(substance_name.clone())
+                            .or_insert_with(HashMap::new)
+                            .insert(database_name, substance_data.clone());
+                        if seen_substances.insert(substance_name.clone()) {
+                            found_substances.push(substance_name.clone());
                         }
+                        break;
                     }
                 }
             }
@@ -1627,6 +1737,52 @@ mod tests {
     }
 
     #[test]
+    fn test_exact_element_search_does_not_cross_contaminate_libraries() {
+        let mut thermo_data = ThermoData::new();
+        Arc::make_mut(&mut thermo_data.LibThermoData).insert(
+            "alpha_lib".to_string(),
+            HashMap::from([("H2O".to_string(), Value::Null)]),
+        );
+        Arc::make_mut(&mut thermo_data.LibThermoData).insert(
+            "beta_lib".to_string(),
+            HashMap::from([("H2O".to_string(), Value::Null)]),
+        );
+
+        thermo_data.set_elements_data(HashMap::from([
+            (
+                "H".to_string(),
+                vec![
+                    vec!["H2O".to_string(), "alpha_lib".to_string()],
+                    vec!["H2O".to_string(), "beta_lib".to_string()],
+                ],
+            ),
+            (
+                "O".to_string(),
+                vec![
+                    vec!["H2O".to_string(), "alpha_lib".to_string()],
+                    vec!["H2O".to_string(), "beta_lib".to_string()],
+                ],
+            ),
+            (
+                "C".to_string(),
+                vec![vec!["H2O".to_string(), "beta_lib".to_string()]],
+            ),
+        ]));
+
+        let found = thermo_data.search_by_exact_elements(vec!["H".into(), "O".into()]);
+
+        assert_eq!(found, vec!["H2O".to_string()]);
+        assert_eq!(
+            thermo_data
+                .hashmap_of_thermo_data
+                .get("H2O")
+                .and_then(|libraries| libraries.keys().next())
+                .map(String::as_str),
+            Some("alpha_lib")
+        );
+    }
+
+    #[test]
     fn test_search_by_elements_only_picks_deterministic_library_for_duplicate_matches() {
         let mut thermo_data = ThermoData::new();
 
@@ -1974,5 +2130,47 @@ mod tests {
                 .unwrap();
             assert_eq!(record.physical_state, Some(PhysicalState::Solid));
         }
+    }
+
+    #[test]
+    fn catalog_consistency_report_normalizes_aliases_and_sorts_differences() {
+        let repository = ThermoRepository::from_parts(
+            vec![
+                ("Cantera_nasa_base_gas".into(), "H2".into()),
+                ("NASA_gas".into(), "H2".into()),
+                ("NIST".into(), "O2".into()),
+            ],
+            HashMap::from([(
+                "NASA_gas".into(),
+                HashMap::from([
+                    ("H2".into(), serde_json::json!({})),
+                    ("CO2".into(), serde_json::json!({})),
+                ]),
+            )]),
+            HashMap::new(),
+            vec!["NASA_gas".into()],
+            HashMap::new(),
+            HashMap::new(),
+            vec!["NASA_gas".into()],
+            Vec::new(),
+        );
+
+        let report = repository.consistency_report();
+        assert_eq!(report.indexed_pair_count(), 3);
+        assert_eq!(report.unique_indexed_pair_count(), 2);
+        assert_eq!(report.payload_pair_count(), 2);
+        assert_eq!(
+            report.duplicate_index_pairs(),
+            &[("NASA_gas".into(), "H2".into())]
+        );
+        assert_eq!(
+            report.indexed_without_payload(),
+            &[("NIST".into(), "O2".into())]
+        );
+        assert_eq!(
+            report.payload_without_index(),
+            &[("NASA_gas".into(), "CO2".into())]
+        );
+        assert!(!report.is_consistent());
     }
 }

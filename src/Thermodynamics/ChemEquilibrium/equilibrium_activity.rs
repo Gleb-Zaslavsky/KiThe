@@ -174,6 +174,24 @@ impl PhaseActivityModel {
         Ok((species_moles / phase_moles).ln()
             + self.log_phase_offset(pressure, reference_pressure)?)
     }
+
+    /// Temperature derivative of `ln(a_i)` at fixed composition and pressure.
+    ///
+    /// The currently supported ideal-gas and ideal-solution models have no
+    /// explicit temperature dependence. Keeping this capability on the
+    /// activity boundary prevents a future non-ideal model from being
+    /// silently treated as temperature independent by the monolithic P,H
+    /// Jacobian.
+    pub fn d_log_activity_d_temperature(
+        self,
+        pressure: f64,
+        reference_pressure: f64,
+    ) -> Result<f64, ReactionExtentError> {
+        self.log_phase_offset(pressure, reference_pressure)?;
+        Ok(match self {
+            Self::IdealGas | Self::IdealSolution => 0.0,
+        })
+    }
 }
 
 /// Builds models in declared phase order.
@@ -210,6 +228,26 @@ mod tests {
                 .log_activity(3.0, 3.0, 101_325.0, 101_325.0)
                 .unwrap(),
             0.0
+        );
+    }
+
+    #[test]
+    fn supported_ideal_activities_have_no_explicit_temperature_derivative() {
+        for model in [
+            PhaseActivityModel::IdealGas,
+            PhaseActivityModel::IdealSolution,
+        ] {
+            assert_eq!(
+                model
+                    .d_log_activity_d_temperature(101_325.0, 101_325.0)
+                    .unwrap(),
+                0.0
+            );
+        }
+        assert!(
+            PhaseActivityModel::IdealGas
+                .d_log_activity_d_temperature(0.0, 101_325.0)
+                .is_err()
         );
     }
 }

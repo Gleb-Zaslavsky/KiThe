@@ -14,7 +14,11 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExten
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, EquilibriumSolution,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::EquilibriumSolveReport;
+#[cfg(test)]
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
+    EquilibriumSolveReport, MultiStartSolveReport,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
     EquilibriumTimingCollector, EquilibriumTimingReport, EquilibriumTimingStage,
 };
@@ -73,6 +77,8 @@ pub struct MultiphaseEquilibriumSolution {
     phase_statuses: Vec<PhaseStatus>,
     /// Ordered backend cascade evidence for the accepted result.
     solve_report: EquilibriumSolveReport,
+    /// Explicit multi-start seed comparison evidence, when requested.
+    multi_start_report: Option<MultiStartSolveReport>,
     /// Optional independent equilibrium-constant cross-validation status.
     keq_validation_status: Option<EquilibriumConstantCrossValidationStatus>,
     /// Bounded active-set transition evidence when phase control was used.
@@ -98,6 +104,7 @@ impl MultiphaseEquilibriumSolution {
         let build_report = bundle.build_report().clone();
         let accepted_solution = bundle.solution().clone();
         let solve_report = bundle.solve_report().clone();
+        let multi_start_report = bundle.multi_start_report().cloned();
         let keq_validation_status = bundle.keq_validation_status().cloned();
         let timing = *bundle.timing_report();
 
@@ -106,7 +113,34 @@ impl MultiphaseEquilibriumSolution {
             build_report,
             accepted_solution,
             solve_report,
+            multi_start_report,
             keq_validation_status,
+            None,
+            None,
+            None,
+            timing,
+        )
+    }
+
+    /// Builds the public fixed-active view from an internally prepared
+    /// formulation whose accepted temperature differs from its build seed.
+    ///
+    /// This is crate-private so only the phase bridge can bind numerical
+    /// evidence to matching lookup provenance and layout metadata.
+    pub(crate) fn from_fixed_active_parts(
+        metadata: PhaseEquilibriumMetadata,
+        build_report: PhaseEquilibriumBuildReport,
+        accepted_solution: EquilibriumSolution,
+        solve_report: EquilibriumSolveReport,
+        timing: EquilibriumTimingReport,
+    ) -> Result<Self, ReactionExtentError> {
+        Self::from_parts(
+            metadata,
+            build_report,
+            accepted_solution,
+            solve_report,
+            None,
+            None,
             None,
             None,
             None,
@@ -143,6 +177,7 @@ impl MultiphaseEquilibriumSolution {
             build_report,
             accepted_solution,
             solve_report,
+            None,
             keq_validation_status,
             Some(phase_control_report),
             Some(acceptance_report),
@@ -156,6 +191,7 @@ impl MultiphaseEquilibriumSolution {
         build_report: PhaseEquilibriumBuildReport,
         accepted_solution: EquilibriumSolution,
         solve_report: EquilibriumSolveReport,
+        multi_start_report: Option<MultiStartSolveReport>,
         keq_validation_status: Option<EquilibriumConstantCrossValidationStatus>,
         phase_control_report: Option<PhaseControlledSolveReport>,
         acceptance_report: Option<MultiphaseAcceptanceReport>,
@@ -240,6 +276,7 @@ impl MultiphaseEquilibriumSolution {
             numerical_phase_totals,
             phase_statuses,
             solve_report,
+            multi_start_report,
             keq_validation_status,
             phase_control_report,
             acceptance_report,
@@ -303,6 +340,24 @@ impl MultiphaseEquilibriumSolution {
     /// amounts for absent phases and is therefore not the physical result view.
     pub fn accepted_solution(&self) -> &EquilibriumSolution {
         &self.accepted_solution
+    }
+
+    /// Replaces only the validation payload for a test-built malformed
+    /// worker result.
+    ///
+    /// The production constructors never expose this operation. GUI tests use
+    /// it to model a particularly important publication boundary: a worker
+    /// may hand the UI an object labelled as accepted while its copied
+    /// validation evidence no longer describes the physical mole vector.
+    #[cfg(test)]
+    pub(crate) fn with_validation_for_test(
+        mut self,
+        validation: EquilibriumCandidateReport,
+    ) -> Self {
+        self.accepted_solution = self
+            .accepted_solution
+            .with_validation_for_test(validation);
+        self
     }
 
     /// Published physical component amounts in exact `SystemLayout` order.
@@ -405,6 +460,40 @@ impl MultiphaseEquilibriumSolution {
     /// Complete backend cascade evidence for the accepted solve.
     pub fn solve_report(&self) -> &EquilibriumSolveReport {
         &self.solve_report
+    }
+
+    /// Total number of started nonlinear backend attempts represented by this
+    /// accepted solution.
+    ///
+    /// A multi-start solve owns one backend trace per seed. In that case the
+    /// seed-level aggregate is authoritative; otherwise the ordinary cascade
+    /// report is sufficient.
+    pub fn started_backend_attempts(&self) -> usize {
+        self.multi_start_report.as_ref().map_or_else(
+            || self.solve_report.started_attempt_count(),
+            MultiStartSolveReport::started_backend_attempts,
+        )
+    }
+
+    /// Total nonlinear iterations represented by this accepted solve,
+    /// including every continuation multi-start seed when present.
+    pub fn nonlinear_iterations(&self) -> usize {
+        self.multi_start_report.as_ref().map_or_else(
+            || self.solve_report.nonlinear_iterations(),
+            MultiStartSolveReport::nonlinear_iterations,
+        )
+    }
+
+    /// Number of accepted phase transitions represented by this solution.
+    pub fn phase_control_transitions(&self) -> usize {
+        self.phase_control_report
+            .as_ref()
+            .map_or(0, |report| report.transitions.len())
+    }
+
+    /// Explicit multi-start seed comparison evidence, when requested.
+    pub fn multi_start_report(&self) -> Option<&MultiStartSolveReport> {
+        self.multi_start_report.as_ref()
     }
 
     /// Optional independent equilibrium-constant validation evidence.
@@ -610,6 +699,7 @@ mod tests {
             other.build_report().clone(),
             gas.solution().clone(),
             gas.solve_report().clone(),
+            None,
             gas.keq_validation_status().cloned(),
             None,
             None,

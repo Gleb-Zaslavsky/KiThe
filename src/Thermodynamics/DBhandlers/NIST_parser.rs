@@ -76,6 +76,8 @@ pub enum NistError {
     BatchAllFailed { attempts: usize, last_error: String },
     #[error("Substance not found")]
     SubstanceNotFound,
+    #[error("requested NIST {property} data is unavailable for the {phase} phase")]
+    RequestedDataUnavailable { property: String, phase: String },
     #[error("Invalid data format")]
     InvalidDataFormat,
 }
@@ -213,7 +215,44 @@ impl<C: HttpClient> NistParser<C> {
             data.dh = Some(0.0);
         }
 
+        self.validate_requested_data(&data, search_type, phase)?;
+
         Ok(data)
+    }
+
+    /// A navigable WebBook page is not necessarily a usable thermochemical
+    /// record. Reject incomplete requested payloads here so callers do not
+    /// mistake a missing phase table for a successful lookup.
+    fn validate_requested_data(
+        &self,
+        data: &NistInput,
+        search_type: SearchType,
+        phase: Phase,
+    ) -> Result<(), NistError> {
+        let available = match search_type {
+            SearchType::Cp | SearchType::All => {
+                data.T.as_ref().is_some_and(|ranges| !ranges.is_empty())
+                    && data.cp.as_ref().is_some_and(|coeffs| !coeffs.is_empty())
+            }
+            SearchType::DeltaH => data.dh.is_some(),
+            SearchType::DeltaS => data.ds.is_some(),
+            SearchType::MolarMass => data.molar_mass.is_some(),
+        };
+        if available {
+            Ok(())
+        } else {
+            Err(NistError::RequestedDataUnavailable {
+                property: match search_type {
+                    SearchType::Cp => "Cp",
+                    SearchType::DeltaH => "dH",
+                    SearchType::DeltaS => "dS",
+                    SearchType::MolarMass => "molar mass",
+                    SearchType::All => "thermochemistry",
+                }
+                .to_string(),
+                phase: phase.as_str().to_string(),
+            })
+        }
     }
 
     /// Fetch multiple substances and collect a per-item report.

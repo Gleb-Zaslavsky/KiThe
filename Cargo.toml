@@ -1,11 +1,11 @@
 [package]
 name = "KiThe"
-version = "0.3.7"
+version = "0.3.9"
 edition = "2024"
 author = "Gleb Zasllavsky"
 license = "MIT"
 keywords = [ "thermodynamics", "chemistry", "CFD", "chemical_kinetics"]
-description = "A numerical suite for chemical kinetics and thermodynamics, combustion, heat and mass transfer,chemical engeneering. Work in progress. Advices and contributions will be appreciated"
+description = "A numerical suite for chemical kinetics and thermodynamics, combustion, heat and mass transfer,chemical equilibrium, chemical engeneering"
 repository = "https://github.com/Gleb-Zaslavsky/KiThe"
 
 [dependencies]
@@ -16,7 +16,7 @@ strum = "0.28.0"
 strum_macros = "0.28.0"
 serde_json = "1.0.150"
 loc = "0.5.0"
-RustedSciThe = "0.4.12"
+RustedSciThe = "0.4.15"
 rayon = "1.11.0"
 nalgebra = { version = "0.35.0", features = ["serde"] }
 prettytable-rs = "0.10.0"
@@ -52,7 +52,7 @@ bspline = "1.1.0"
 
 lstsq = "0.7.0"
 KiThePlot = "0.6.0"
-fastLowess = "1.1.2"
+
 [build-dependencies]
 winres = "0.1"
 

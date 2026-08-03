@@ -281,3 +281,498 @@ Priority definitions:
   can assert the same GUI-vs-SubsData contract.
 - [x] Cover plot-window lifecycle and visible range-calculation failures.
 - [x] Assert exact encoding-safe unit labels and result text.
+
+# Chemical Equilibrium GUI Technical TODO
+
+This section defines the GUI boundary for the production chemical-equilibrium
+API. The editor must consume only
+`Thermodynamics::ChemEquilibrium::prelude`; legacy mutable equilibrium
+orchestrators are not a GUI dependency.
+
+The first implementation target is ideal fixed-pressure equilibrium with
+explicitly declared phases at `P,T = const`. Bounded phase control and
+temperature ranges are supported extensions of the same typed model. The
+fixed-pressure, fixed-total-enthalpy (`P,H`) engine is now also connected
+through a separate typed request path; the GUI must never simulate it by
+silently substituting a temperature.
+
+## Architectural decisions
+
+- [x] Start the feature as focused modules instead of one large application
+  file:
+  - [x] `equilibrium_gui.rs`: first egui editor/application surface;
+  - [x] `equilibrium_gui_model.rs`: serializable editor/document model and pure
+    validation;
+  - [x] `equilibrium_gui_request.rs`: the only conversion boundary from validated
+    GUI values to production `ChemEquilibrium::prelude` requests;
+  - [x] `equilibrium_gui_execution.rs`: transactional run gate and
+    stale-result policy; background resolve/solve worker and
+    immutable outcomes;
+  - `equilibrium_gui_plot.rs`: equilibrium result series and adapters for both
+    the existing embedded plot window and KiThePlot;
+  - separate config, kittest, lifecycle, story, and plot-adapter test modules.
+
+- [x] Introduce a versioned `EquilibriumGuiDocument` that owns only editable,
+  serializable values. Keep transient catalog previews, repository handles,
+  workers, plots, and accepted solver results outside the document.
+
+- [x] Make `EquilibriumGuiConfig` a sum of typed policy blocks rather than a
+  collection of booleans:
+
+  ```text
+  EquilibriumGuiConfig
+  +-- problem: EquilibriumProblemSpec
+  +-- inventory: EquilibriumInventorySpec
+  +-- lookup: EquilibriumLookupPolicy
+  +-- phase_mode: EquilibriumPhaseMode
+  +-- solver: EquilibriumSolverPolicy
+  +-- diagnostics: EquilibriumDiagnosticsPolicy
+  +-- postprocessing: EquilibriumPostprocessingPolicy
+  ```
+
+- [x] Store physical values in canonical SI units after parsing. Editable text
+  and display-unit choices belong to field drafts; validated requests must not
+  contain unit-dependent strings.
+
+- [x] Key every initial amount and result column by a phase-qualified component
+  identity (phase plus exact record/substance key), never by a bare substance
+  name. `gas::H2O` and `liquid::H2O` are distinct components even when their
+  molecular compositions are equal.
+
+- [x] Publish one immutable GUI-owned result snapshot per successful run.
+  `EquilibriumGuiResultSnapshot` is built transactionally from accepted point
+  or range outcomes, retains the source solution through `Arc`, and rejects
+  empty or layout-inconsistent range payloads before publication.
+  Point and range snapshots must retain conditions, canonical component order,
+  physical moles, mole fractions, phase status, lookup provenance,
+  conservation/acceptance evidence, backend attempt reports, optional
+  equilibrium-constant validation, and optional timing. Plot windows receive
+  `Arc` snapshots and never borrow mutable solver state.
+
+- [x] Keep production defaults in the engine. The GUI expresses
+  `ProductionDefault` explicitly and only construct detailed tolerances,
+  cascades, or phase-control parameters when the user selects an advanced
+  override. The remaining advanced override surface is tracked separately.
+
+## Engine/API gaps discovered during GUI planning
+
+- [x] Re-export every type required by the GUI request builder through
+  `ChemEquilibrium::prelude`. In particular,
+  `EquilibriumConstantValidationMode` is accepted by
+  `EquilibriumSolveOptions` and is now exported through the production
+  prelude; the GUI does not import an internal equilibrium path to reach it.
+
+- [x] Give production point/range workflows a cloneable cooperative execution
+  control with an optional typed progress sink. Cancellation is checked before
+  lookup/formulation, between range points, before/after backend attempts, and
+  from residual evaluation where the backend exposes that callback. A
+  cancelled request returns typed `ReactionExtentError::Cancelled`; the GUI
+  keeps the worker receiver until its terminal message and never publishes a
+  partial range.
+
+- [x] Report progress only at stable engine boundaries: repository lookup,
+  formulation preparation, point start, and accepted point. The GUI renders
+  the last typed event and does not invent percentages from elapsed time.
+  Backend-attempt progress remains a solver-report concern until the backend
+  contract exposes safe attempt callbacks.
+
+## P0: typed document and request boundary
+
+### P0.1 Thermodynamic problem
+
+- [x] Model the thermodynamic constraint as an enum:
+  - `FixedPT { pressure, reference_pressure, temperature }`;
+  - `FixedPH { pressure, reference_pressure, target_total_enthalpy_j,
+    temperature_bounds, seed }`.
+  P,H uses extensive joules at the GUI boundary and validates the scalar
+  bracket/seed before repository access. Its request resolves thermochemistry
+  in the worker and publishes a read-only energy-contract report.
+
+- [x] Model fixed-`P,T` temperature input as:
+  - `Point { temperature }`;
+  - `Range { start, end, point_count }`.
+  Validate finite positive temperatures, finite positive pressures,
+  `point_count >= 2`, non-equal endpoints, and both ascending and descending
+  grids. Use the production `TemperatureGrid` for final validation.
+
+- [x] Reserve an advanced postprocessing range policy independent from the
+  solver grid: no resampling, or PCHIP resampling with a user-selected output
+  grid/count and interpolation space. Resampling must never masquerade as
+  additional solved equilibrium points. The display adapter now implements
+  linear/log PCHIP, clamping, descending grids, and explicit rejection of
+  single-point or non-positive log data.
+
+### P0.2 Inventory modes
+
+- [x] Model substance input as an enum, not as two simultaneously active
+  panels:
+  - `ExplicitPhases`: phase rows with typed physical state, activity model,
+    exact component keys, and initial moles;
+  - `ElementCandidates`: requested elements plus a typed candidate-selection
+    policy.
+
+- [x] Provide a simple explicit-species preset that creates one ideal-gas phase,
+  while retaining an advanced phase editor. The simple mode is only a builder
+  for the same canonical phase specification; it must not have a separate
+  solving path. The typed document constructor and editor action now use the
+  same explicit-phase request path.
+
+- [x] Define the element-mode data contract as a two-stage workflow:
+  1. preview deterministic candidates with selected/rejected reasons,
+     temperature support, physical state, library, record key, and provenance;
+  2. confirm candidate-to-phase assignments and edit initial component moles.
+  Candidate discovery cannot directly launch a solve because the solver
+  requires an explicit initial inventory. The GUI now runs local-catalog
+  discovery in a background worker and renders an immutable audit projection;
+  assignment controls now exist and preserve the selected record's library
+  provenance; the candidate table now also edits assigned initial amounts.
+  Manual inclusion toggles beyond explicit assignment remain.
+
+- [x] Keep the candidate preview as derived state tied to the document
+  fingerprint. Any change to elements, library policy, state filters,
+  temperature interval, or candidate limit makes the preview stale; the
+  fingerprint gate prevents it from being shown as current.
+
+- [x] Expose candidate selection controls already supported by the engine:
+  exact element set versus subset-of set, allowed physical states,
+  temperature-coverage filter, deterministic candidate limit, and explicit
+  candidate-to-phase assignments. Exact/subset, state filters, temperature
+  bounds, element rows, and candidate limits are now editable in the GUI;
+  candidate-to-phase assignment is now wired to the document and pins the
+  selected library into the production lookup instructions. Manual inclusion
+  toggles remain; assignment amounts and pinned provenance are editable and
+  visible. Do not infer phase activity models from catalog metadata.
+
+- [x] Validate unique phase IDs, unique phase-qualified components, finite
+  non-negative initial moles, at least one positive amount, and complete
+  candidate phase assignment before constructing a production request.
+
+### P0.3 Library lookup
+
+- [x] Model lookup as:
+  - `DefaultPolicy`, using canonical repository defaults;
+  - `ExplicitPolicy`, with ordered priority libraries, permitted libraries,
+    explicit record instructions, and NIST fallback policy.
+
+- [x] Populate library choices through the repository/API rather than a
+  hard-coded GUI list. Preserve library order where it represents preference,
+  but sort unordered catalog display lists deterministically. The editor now
+  loads the local catalog in a background worker, normalizes the choices, and
+  uses them to seed ordered priority/permitted entries; manual canonical-name
+  editing remains available when the catalog is not loaded.
+
+- [x] Treat library selection and physical phase as separate dimensions.
+  Selecting `NASA_cond` does not itself mean “solid”, and requesting a liquid
+  phase does not silently rewrite a substance name.
+
+- [x] Display lookup/build provenance and failures per phase-qualified
+  component. A partially resolved system must not become runnable.
+
+### P0.4 Solver and phase-control policies
+
+- [x] Model nonlinear backend selection as:
+  - `ProductionDefault`;
+  - `Single(SolverBackendChoice)`;
+  - an advanced ordered custom cascade, if exposed.
+  Include all supported RST backends and retained legacy LM/NR/TR numerical
+  fallbacks, using stable display names mapped in one place.
+
+- [x] Add typed advanced overrides for tolerance, maximum iterations, scaling,
+  cascade budget, and trace-species seed policy. Defaults remain unset so the
+  engine owns canonical production values.
+  Progress: tolerance, iteration, scaling, trace-species seed overrides, and a
+  user-owned ordered backend cascade are typed and validated. The GUI exposes
+  add/remove/reorder controls and the request boundary maps the cascade to the
+  engine policy, including the optional validated cascade budget. Scaling now defaults to the engine's stable `false` value;
+  enabling it remains an explicit advanced choice after the real water/ice
+  story exposed its sensitivity. The budget remains absent unless explicitly
+  enabled by the user.
+
+- [x] Model phase behavior as:
+  - fixed declared phases;
+  - bounded phase control with `PhaseControlPolicy`.
+  Advanced controls include initial active phases, phase epsilon, outer-loop
+  budget, and explicit or temperature-scaled hysteresis.
+
+- [x] Enforce capability constraints in validation:
+  multi-start is available only for the fixed active-set `P,T` workflow;
+  range continuation and phase-control policies use their production typed
+  contracts; unsupported combinations are disabled with a reason rather than
+  silently downgraded. The GUI currently exposes no multi-start control, so it
+  cannot be selected accidentally; the engine request boundary rejects it for
+  ranges and bounded phase control. `P,H` uses a separate outer scalar solve,
+  the same inner solver policy, and the same explicit phase-mode boundary. A
+  future multi-start UI must add capability metadata before exposing that option.
+
+### P0.5 Diagnostics and logging
+
+- [x] Separate three concepts currently easy to conflate:
+  - timing collection (`EquilibriumTimingMode`);
+  - solver/report detail retained in the result;
+  - application logging visibility.
+  The default production solve remains quiet and timing-free.
+
+- [x] Add diagnostics policy controls for timing, backend-attempt details,
+  conservation/acceptance details, phase-transition reports, and independent
+  equilibrium-constant validation when applicable.
+
+- [x] Keep equilibrium-constant validation off or “when applicable” by default.
+  The GUI default is `WhenApplicable`; it is an independent validator for
+  suitable systems, not a mandatory production gate for arbitrary multiphase
+  problems. The default is covered by a model contract test.
+
+- [x] Never change process-global logger configuration from an equilibrium
+  document. GUI “logging” means retaining and displaying this run's typed
+  diagnostic events; the document and request builder contain no logger
+  initialization or global logger mutation.
+
+### P0.6 Pure validation and conversion
+
+- [x] Implement pure, field-addressable validation returning
+  `EquilibriumGuiValidationReport`, with errors and non-blocking warnings.
+  Validation must not open databases, mutate libraries, start threads, or
+  construct solver state.
+
+- [x] Implement one request builder that consumes only a validated config and
+  either:
+  - builds `PhaseEquilibriumPipelineRequest` for a single point;
+  - resolves once and builds `TemperatureRangeRequest` for a range;
+  - builds a deferred P,H request which resolves one immutable system and
+    `ResolvedThermochemistry` bundle inside the worker.
+  No view code may assemble engine requests directly. The first implementation
+  lives in `equilibrium_gui_request.rs`; repository resolution and candidate
+  discovery remain execution-layer work.
+
+- [x] Add initial unit tests for enum transitions and invalid combinations,
+  including P,H bracket/seed validation, duplicate components, zero inventory,
+  stale element previews, descending grids, phase-control options, and
+  single-backend selection. The remaining request-builder-specific cases stay
+  pending with the production conversion boundary.
+
+- [x] Implement the first production request boundary in
+  `equilibrium_gui_request.rs`: map validated phases and sparse initial moles
+  to the PT pipeline or P,H request, map point/range temperatures to the
+  canonical condition/grid types, and map GUI solver/phase/diagnostic policies
+  to engine policies. Repository resolution and actual candidate discovery are
+  intentionally still execution-layer work.
+
+## P1: execution lifecycle and editor
+
+### P1.1 Background execution
+
+- [x] Define a background-worker-facing lifecycle gate for candidate preview,
+  repository resolution, point solve, and range solve. Long solves must not
+  block egui. Cancel requests cooperative engine cancellation and the worker
+  remains owned until its terminal event is drained. `EquilibriumApp` moves a
+  canonical point/range request to a background thread and drains progress plus
+  one terminal event on the egui thread.
+
+- [x] Tag every worker message with a monotonically increasing run ID and an
+  input fingerprint. Discard stale previews/results after any owning input
+  changes, following the reactor IVP lifecycle contract.
+
+- [x] Model lifecycle explicitly:
+  `Idle -> Resolving -> Solving -> Cancelling -> Completed/Failed`.
+  Range execution also reports accepted point count and current temperature
+  when the engine exposes progress. Closing the window must not publish an
+  orphaned result into a later document.
+
+- [x] Publish results transactionally. A failed point or range leaves the last
+  accepted result clearly marked as belonging to the previous fingerprint; it
+  never mixes new inputs with old output. The app also rejects late worker
+  messages after an editor fingerprint change, and result snapshots validate
+  homogeneous phase/component layouts before publication.
+
+### P1.2 Editor workflow
+
+- [x] Build one work-focused editor with stable sections: Problem, Components,
+  Lookup, Phase policy, Solver, Diagnostics, Run status, Results. Avoid a
+  marketing/landing screen and avoid nested cards. Result panels remain pending
+  until immutable solve snapshots are connected.
+
+- [x] Use segmented controls for mutually exclusive modes, checkboxes/toggles
+  for binary diagnostics, numeric fields for physical values, and menus for
+  solver/library policies. Advanced controls remain collapsed until selected.
+
+- [x] Provide add/remove/reorder controls for phases, components, elements, and
+  custom solver cascades. All four editors are present and invalidate prepared
+  requests. Phase, component, and element rows use semantic egui scopes with a
+  deterministic fallback while a row is incomplete, so reorder does not bind
+  text-editor state to the vector index. The phase identity behavior is covered
+  by egui-kittest; persisted row IDs are intentionally not duplicated in the
+  document schema because phase IDs and catalog keys already provide the
+  canonical identity.
+
+- [x] Show candidate-preview rows as an auditable table with inclusion state,
+  exact record key, phase/state, library, temperature support, and rejection
+  reason. Selection and phase assignment are visually explicit; manual
+  inclusion overrides beyond the engine's selected/rejected decision remain a
+  separate policy question.
+
+- [x] Keep accepted results read-only. Show point composition or range summary,
+  phase statuses/transitions, residual and balance contracts, selected backend,
+  fallback attempts, lookup provenance, timing, and validation status. The
+  first read-only result table now shows phase-qualified component values,
+  phase status, solver-attempt count, and range reuse evidence; the result view
+  now also exposes first-class read-only sections for conservation, residuals,
+  fallback attempts, K_eq validation, phase/acceptance evidence, and per-
+  component lookup provenance. The sections read the immutable engine report;
+  the GUI does not recompute acceptance metrics.
+
+### P1.3 Main GUI integration
+
+- [x] Register the equilibrium modules in `src/gui.rs`.
+
+- [x] Add an independently owned `EquilibriumApp` window to `MainApp`; opening,
+  closing, and reopening must preserve the current document without sharing
+  mutable state with thermochemistry or reactor windows. The menu ownership
+  helper, native child-window kittest, and persistence regression test now
+  exercise this boundary.
+
+- [x] Add a clearly named main-menu action. Ownership/lifecycle interaction
+  tests for the `MainApp` menu owner and native child-window rendering are
+  covered.
+
+## P2: result postprocessing and both plot systems
+
+- [x] Define one `EquilibriumPlotSeries` domain model containing temperatures,
+  phase-qualified labels, units, moles, mole fractions, phase totals, and
+  active/inactive masks. The role is provided by the immutable
+  `EquilibriumGuiResultSnapshot` plus the shared `EquilibriumGuiPlotData`
+  projection: basis-specific units and lifecycle masks are aligned with every
+  column, and both plot backends consume the same metadata-bearing adapter.
+  The public type name remains GUI-specific until a cross-application plotting
+  domain is actually needed.
+
+- [x] Add an initial adapter from `EquilibriumGuiPlotData` to the existing
+  embedded `gui_plot::PlotWindow`/`egui_plot` path. PNG/export wiring remains
+  part of the display-policy pass and does not run another solve. The editor
+  now exposes an explicit Open embedded plot action for an accepted snapshot.
+
+- [x] Add an initial KiThePlot `kithe_plot::DataSource` adapter for
+  `EquilibriumGuiPlotData` without depending on experimental-kinetics
+  `SampledColumns` or `PlotModel`; general display-policy integration remains.
+
+- [x] Let the user choose embedded plot, KiThePlot, both, or neither. This is a
+  display policy and must not trigger another solve; both actions now consume
+  the same accepted immutable plot adapter.
+
+- [x] Support result basis selection: component moles, component mole
+  fractions, and phase totals. Use phase-qualified legend labels and preserve
+  exact solver-grid values alongside optional resampled display series.
+
+- [x] Add filtering for visible components/phases and optional logarithmic
+  display handling that never rewrites stored zeros or accepted physical
+  values.
+  Progress: component/phase series can now be hidden through transient GUI
+  display state and the common adapter rejects an empty visible selection.
+  Stored results are not rewritten. Lifecycle masks are preserved through
+  filtering and display resampling; `log10` is a shared display projection
+  with explicit positive-value validation, so accepted zeros are never faked.
+
+- [x] Verify point-result table behavior separately from range plots. A
+  one-point solve remains one exact point in the shared plot adapter and is
+  never sent through PCHIP resampling.
+
+## P3: persistence, hardening, and deferred features
+
+- [x] Add versioned save/load roundtrip tests for `EquilibriumGuiDocument`.
+  Solver results, repository instances, workers, and open plot windows are not
+  serialized; `EquilibriumApp::load_document_json` starts in a clean idle
+  state and drops accepted results, workers, prepared requests, and plots.
+
+- [x] Add `egui_kittest` coverage for:
+  direct-species versus element modes; simple gas versus multiphase editing;
+  default versus explicit libraries; point versus ascending/descending range;
+  production default versus every concrete backend; diagnostics toggles;
+  P,H controls and energy-report visibility; phase-control capability constraints; visible validation
+  errors; candidate preview and invalidation.
+  Progress: element mode, P,H controls, phase hysteresis controls, visible
+  validation errors, candidate invalidation, custom cascade editing, and all
+  nine concrete backend request preparations are covered. Range direction and
+  display-resampling controls, explicit lookup policy, and diagnostics
+  sections are now exercised too; postprocessing is kept
+  outside the solver fingerprint. MainApp ownership and native child-window
+  rendering are covered; OS-level native window behavior remains outside
+  this egui test boundary.
+
+- [x] Add lifecycle tests for cancellation, stale preview/result discard,
+  success followed by editor changes, close/reopen, failed fallback cascades,
+  and transactional range failure.
+  Progress: cancellation, stale publication, previous-result retention after a
+  current failure, document load reset, and close/reopen ownership are covered
+  by direct lifecycle and egui tests. A real repository-backed range failure
+  now verifies visible failure, no partial snapshot publication, and catalog
+  immutability; real H2/O2/H2O P,H stories now verify inner fallback,
+  all-backends-failed publication, cancellation, and rendered backend-attempt
+  diagnostics. The complete ignored `equilibrium_gui_tests` story set passed
+  in the release profile with serialized execution.
+
+- [x] Complete the real-worker diagnostic matrix with a deterministic
+  accepted-candidate validation-mismatch story. The true engine
+  `AllBackendsFailed` story and P,H inner-fallback story are covered by the
+  ignored local-catalog suite; the regular suite covers the UI and lifecycle
+  contracts. The new ignored result-layer story mutates only a test copy of a
+  real accepted candidate's validation payload and verifies that the GUI
+  rejects it transactionally. Repository-backed stories remain explicitly
+  ignored and require the local thermochemical catalogs.
+
+- [x] Add offline story tests using stable local thermochemical fixtures for:
+  ideal-gas `P,T`; a real multiphase system; element-defined candidate preview;
+  same molecule in two phases; temperature continuation with and without phase
+  transitions; provenance, conservation, timing, and backend-attempt display.
+  Snapshot the relevant library files before/after tests and assert that GUI
+  workflows never mutate them. Progress: ignored local-catalog `H2O` point,
+  gas/ice multiphase point, water temperature-range, and exact H/O
+  element-candidate preview stories now run through the GUI worker or the
+  repository-backed preview path. The candidate story renders the assignment
+  audit and snapshots the canonical substance, key, and element-index files
+  before and after the workflow; it also assigns one live candidate and
+  prepares the canonical request through the solver boundary. The point/range
+  stories verify immutable
+  provenance, phase-qualified layout, backend-attempt evidence, continuation
+  reuse, and non-zero point timing. Both transition and no-transition
+  continuation stories are covered, and a separate out-of-coverage range story
+  verifies transactional failure without partial result publication.
+  The range fixture stays at 250--270 K because the bundled `NASA_cond`
+  `H2O(s)` record ends at 273.15 K; the GUI transition story stays inside
+  that phase-specific coefficient coverage. The element-defined
+  candidate preview now uses the live local catalog and verifies file
+  immutability; the GUI water range also asserts a real phase-control
+  transition. A separate no-transition continuation story remains useful.
+
+- [x] Add plot-adapter tests asserting identical labels, x grids, values, and
+  units for embedded and KiThePlot paths, plus empty/single-point/filtered data
+  behavior. Embedded/KiThePlot parity, single-point PCHIP rejection,
+  filtered-column behavior, unit metadata, mask preservation, and the shared
+  positive-only `log10` display projection are covered. Physical zeros remain
+  in the accepted snapshot and are rejected explicitly by the log projection;
+  they are not rewritten to a fake finite value.
+
+- [x] Connect `P,H = const` only after the engine-level typed workflow exists.
+  The GUI uses total joules, explicit temperature bounds, worker-side
+  thermochemistry resolution, and an immutable result energy contract. The
+  accepted snapshot also retains the outer route, trial/iteration counts,
+  fallback reason, phase transitions, formulation reuse, acceptance limit,
+  and optional wall-time evidence; Results renders these diagnostics and the
+  complete outer temperature-trial table in a dedicated P,H section. The
+  editor fingerprint invalidates a prepared P,H
+  request after target, bound, seed, or pressure changes. The
+  ignored local-catalog story
+  `offline_local_h2o_ph_story_publishes_energy_contract` is the real-data gate.
+
+- [ ] Defer generic export/import formats until the point/range result schema
+  stabilizes. When implemented, export immutable typed snapshots rather than
+  screen text or mutable solver objects.
+
+## First implementation sequence
+
+1. Create the typed document/config enums and pure validation tests.
+2. Implement the production request builder and engine-boundary unit tests.
+3. Add worker lifecycle with injected executor fakes and stale-result tests.
+4. Build the explicit-species point editor and result diagnostics.
+5. Add element candidate preview and phase assignment.
+6. Add typed temperature ranges and continuation reports.
+7. Add the shared plot-series model and both plotting adapters.
+8. Integrate `EquilibriumApp` into `MainApp`, then complete offline story and
+   `egui_kittest` matrices.

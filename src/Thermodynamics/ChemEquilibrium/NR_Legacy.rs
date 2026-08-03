@@ -249,6 +249,12 @@ pub struct NR {
 }
 
 impl NR {
+    /// Creates a new legacy NR solver with default settings.
+    ///
+    /// The solver starts with an empty equation system, zero-length vectors,
+    /// default tolerance of 1e-6, 100 max iterations, and the `simple` Newton
+    /// method. Call [`set_equation_system`](Self::set_equation_system) and
+    /// [`eq_generate`](Self::eq_generate) before solving.
     pub fn new() -> NR {
         //jacobian: Jacobian, initial_guess: Vec<f64>, tolerance: f64, max_iterations: usize, max_error: f64, result: Option<Vec<f64>>
         NR {
@@ -339,6 +345,11 @@ impl NR {
         Ok(())
     }
 
+    /// Parses string expressions and configures the equation system in one call.
+    ///
+    /// This is a convenience wrapper around [`set_equation_system`] followed by
+    /// [`eq_generate`]. Errors during parsing or configuration are logged but
+    /// do not panic; the solver's result is set to `None` on failure.
     pub fn eq_generate_from_str(
         &mut self,
         eq_system_string: Vec<String>,
@@ -368,6 +379,12 @@ impl NR {
     }
 
     /// check if solver parameters are set correctly if not set default values
+    /// Merges user-supplied solver parameters with method-specific defaults.
+    ///
+    /// Each solver method has its own set of default parameters. User-supplied
+    /// values override the defaults; missing parameters keep their default
+    /// values. The `simple` method has no parameters; the `damped` method
+    /// defaults to `maxDampIter = 50`.
     pub fn parameters_handle(&mut self, parameters: Option<HashMap<String, f64>>) {
         // set default parameters for each method if not set by user
         macro_rules! merge_parameters {
@@ -569,6 +586,12 @@ impl NR {
         self.eq_params_values = Some(eq_params_values.clone());
     }
 
+    /// Computes and applies residual weighting based on the initial Jacobian.
+    ///
+    /// Each equation is scaled by the reciprocal of its initial residual
+    /// magnitude, so that equations with small initial values do not dominate
+    /// the convergence criterion. This is an experimental feature and is not
+    /// used by the canonical equilibrium path.
     pub fn implement_weights(&mut self) {
         info!("\n implementing weights!");
 
@@ -622,6 +645,10 @@ impl NR {
     /////////////////////////////////////////////////////////////////////////////////////////////
     //                ITERATIONS
     /////////////////////////////////////////////////////////////////////////////////////////////
+    /// Evaluates the residual vector at a given iterate.
+    ///
+    /// Dispatches to the lambdified function (with or without equation
+    /// parameters) and records the evaluation time in the internal timer.
     pub fn evaluate_function(&mut self, y: DVector<f64>) -> DVector<f64> {
         let y_data = y;
         self.custom_timer.fun_tic();
@@ -635,6 +662,10 @@ impl NR {
         self.custom_timer.fun_tac();
         residual
     }
+    /// Evaluates the analytical Jacobian matrix at a given iterate.
+    ///
+    /// Dispatches to the lambdified Jacobian (with or without equation
+    /// parameters) and records the evaluation time in the internal timer.
     pub fn evaluate_jacobian(&mut self, y: DVector<f64>) -> DMatrix<f64> {
         let y_data = y;
         self.custom_timer.jac_tic();
@@ -648,6 +679,12 @@ impl NR {
         self.custom_timer.jac_tac();
         jac
     }
+    /// Computes one undamped Newton step by solving the linear system.
+    ///
+    /// Returns `(step, residual)` where `step` is the Newton direction and
+    /// `residual` is the function value at `y`. If the linear solve fails or
+    /// produces non-finite values, a zero step with a large residual is
+    /// returned as a safe fallback.
     pub fn step(&mut self, y: DVector<f64>) -> (DVector<f64>, DVector<f64>) {
         let method = self.linear_sys_method.clone().unwrap();
 
@@ -694,6 +731,11 @@ impl NR {
         }
         (undamped_step_k, f_k.clone())
     }
+    /// Performs one simple (undamped) Newton iteration with optional bound clipping.
+    ///
+    /// Returns a status code and the updated iterate:
+    /// - `1`: convergence reached (residual below tolerance).
+    /// - `0`: iteration continues.
     pub fn simple_newton_step(&mut self) -> (i32, Option<DVector<f64>>) {
         let now = Instant::now();
         let y_k_minus_1 = self.y.clone();
@@ -813,6 +855,12 @@ impl NR {
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     //
 
+    /// Runs the full solver pipeline: symbolic generation, main loop, and statistics.
+    ///
+    /// This is the internal entry point that calls [`eq_generate`](Self::eq_generate)
+    /// to build the lambdified Jacobian and residual, then runs
+    /// [`main_loop`](Self::main_loop) until convergence or iteration limit.
+    /// Timing and solver statistics are recorded automatically.
     pub fn solver(&mut self) -> Option<DVector<f64>> {
         self.custom_timer.start();
         self.custom_timer.symbolic_operations_tic();
@@ -833,6 +881,11 @@ impl NR {
         self.result.clone()
     }
     // wrapper around solver function to implement logging
+    /// Public solve entry point with optional logging control.
+    ///
+    /// If the solver's loglevel is `"off"` or `"none"`, the solve runs without
+    /// log output. Otherwise, a terminal logger is initialized at the configured
+    /// level before delegating to [`solver`](Self::solver).
     pub fn solve(&mut self) -> Option<DVector<f64>> {
         let is_logging_disabled = self
             .loglevel
@@ -885,6 +938,10 @@ impl NR {
     pub fn get_result(&self) -> Option<DVector<f64>> {
         self.result.clone()
     }
+    /// Prints solver statistics (Jacobian size, iteration count, timing) to the log.
+    ///
+    /// This is called automatically at the end of [`solver`](Self::solver) and
+    /// is provided for diagnostic purposes only.
     fn calc_statistics(&self) {
         let mut stats = self.calc_statistics.clone();
         let jac = &self.jac;
@@ -984,6 +1041,15 @@ impl NR {
 }
 
 impl NR {
+    /// Performs one damped Newton iteration with backtracking line search.
+    ///
+    /// The damping factor is determined by an Armijo-type sufficient decrease
+    /// condition. Bounds are enforced via [`bound_step`] and the iterate is
+    /// clipped to the feasible domain after each trial. Returns a status code
+    /// and the updated iterate:
+    /// - `1`: convergence reached.
+    /// - `0`: iteration continues.
+    /// - `-2`: damped step rejected without a fallback candidate.
     pub fn step_damped(&mut self) -> (i32, Option<DVector<f64>>) {
         // DAMPED NEWTON STEPS
         // BOUNDS ARE SET
@@ -1157,6 +1223,11 @@ impl NR {
         }
     }
 
+    /// Clips an iterate to stay within the declared variable bounds.
+    ///
+    /// Each component is clamped to its `[lower, upper]` interval. This is
+    /// used after damped Newton steps to ensure the next iterate satisfies
+    /// all bound constraints.
     pub fn clip(&self, y: &DVector<f64>, vec_of_bounds: &Vec<(f64, f64)>) -> DVector<f64> {
         let mut clipped_y = y.clone();
         for (i, y_i) in y.iter().enumerate() {
@@ -1176,6 +1247,14 @@ impl NR {
 //////////////////////////////////////////////////////////////////////////////////////////////
 ///                 LINEAR SYSTEM SOLVERS
 //////////////////////////////////////////////////////////////////////////////////////////////
+/// Solves the linear system `A * x = b` using the specified method.
+///
+/// Supported methods:
+/// - `"lu"`: LU decomposition with partial pivoting.
+/// - `"inv"`: explicit inverse multiplication (less stable, use only for
+///   small systems).
+///
+/// Returns the solution vector or an error if the system is singular.
 pub fn solve_linear_system(
     solver: String,
     A: &DMatrix<f64>,

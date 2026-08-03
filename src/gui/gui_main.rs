@@ -1,6 +1,7 @@
 use crate::gui::all_libs_gui;
 use crate::gui::combustion;
 
+use crate::gui::equilibrium_gui;
 use crate::gui::experimental_kinetics_gui::experimental_kinetics_gui_main;
 use crate::gui::gui_main::egui::IconData;
 use crate::gui::gui_solid_ivp;
@@ -88,6 +89,8 @@ struct MainApp {
     solid_ivp_app: Option<gui_solid_ivp::SolidIVPApp>,
     experimental_kinetics_open: bool,
     experimental_kinetics_app: Option<experimental_kinetics_gui_main::PlotApp>,
+    equilibrium_open: bool,
+    equilibrium_app: Option<equilibrium_gui::EquilibriumApp>,
     logo_texture: Option<egui::TextureHandle>,
 }
 impl MainApp {
@@ -117,7 +120,18 @@ impl MainApp {
             solid_ivp_app: None,
             experimental_kinetics_open: false,
             experimental_kinetics_app: None,
+            equilibrium_open: false,
+            equilibrium_app: None,
             logo_texture,
+        }
+    }
+
+    /// Opens the equilibrium window without sharing its document or runtime
+    /// state with any other application owned by the main menu.
+    fn open_equilibrium(&mut self) {
+        self.equilibrium_open = true;
+        if self.equilibrium_app.is_none() {
+            self.equilibrium_app = Some(equilibrium_gui::EquilibriumApp::new());
         }
     }
 
@@ -150,8 +164,74 @@ impl MainApp {
         None
     }
 }
-impl eframe::App for MainApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+
+#[cfg(test)]
+mod tests {
+    use super::MainApp;
+    use crate::gui::equilibrium_gui_model::{EquilibriumProblemDraft, TemperatureDraft};
+    use egui::accesskit::Role;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn equilibrium_menu_owns_one_persistent_document() {
+        let mut main = MainApp::default();
+        main.open_equilibrium();
+        assert!(main.equilibrium_open);
+        let equilibrium = main
+            .equilibrium_app
+            .as_mut()
+            .expect("opening the menu creates the equilibrium app");
+        equilibrium.document.config.problem = EquilibriumProblemDraft::FixedPt {
+            pressure_pa: "90000".into(),
+            reference_pressure_pa: "101325".into(),
+            temperature: TemperatureDraft::Point {
+                temperature_k: "777".into(),
+            },
+        };
+        let expected = equilibrium.document.clone();
+
+        main.equilibrium_open = false;
+        main.open_equilibrium();
+        assert_eq!(
+            main.equilibrium_app
+                .as_ref()
+                .expect("reopen keeps the app instance")
+                .document,
+            expected
+        );
+        assert!(main.kinetics_app.is_none());
+        assert!(main.thermochemistry_app.is_none());
+        assert!(main.transport_app.is_none());
+    }
+
+    #[test]
+    fn equilibrium_menu_opens_a_real_child_window_through_egui() {
+        let main = Rc::new(RefCell::new(MainApp::default()));
+        let main_for_ui = Rc::clone(&main);
+        let mut harness = Harness::new_ui(move |ui| {
+            main_for_ui.borrow_mut().render(ui);
+        });
+
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Chemical equilibrium")
+            .click_accesskit();
+        harness.run();
+
+        harness.get_by_role_and_label(Role::Window, "Chemical equilibrium");
+        assert!(main.borrow().equilibrium_open);
+        assert!(main.borrow().equilibrium_app.is_some());
+    }
+}
+
+impl MainApp {
+    /// Renders the main menu and owned child windows without requiring an
+    /// `eframe::Frame`. Keeping this boundary separate makes native menu
+    /// ownership testable with the same egui harness used by child GUIs.
+    fn render(&mut self, ui: &mut egui::Ui) {
         // Set button text color and size to be more visible.
         {
             let style = ui.style_mut();
@@ -189,6 +269,13 @@ impl eframe::App for MainApp {
                                 if self.thermochemistry_app.is_none() {
                                     self.thermochemistry_app = Some(thermochemistry_gui::ThermochemistryApp::new());
                                 }
+                            }
+                        });
+
+                        ui.add_space(20.0);
+                        ui.horizontal(|ui| {
+                            if ui.add_sized([200.0, 60.0], egui::Button::new("Chemical equilibrium")).clicked() {
+                                self.open_equilibrium();
                             }
                         });
                         ui.add_space(20.0);
@@ -337,5 +424,17 @@ impl eframe::App for MainApp {
                 experimental_kinetics_app.show(&ctx, &mut self.experimental_kinetics_open);
             }
         }
+
+        if self.equilibrium_open {
+            if let Some(equilibrium_app) = &mut self.equilibrium_app {
+                equilibrium_app.show(&ctx, &mut self.equilibrium_open);
+            }
+        }
+    }
+}
+
+impl eframe::App for MainApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.render(ui);
     }
 }
