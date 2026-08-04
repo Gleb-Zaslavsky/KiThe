@@ -142,14 +142,14 @@
 //!
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_active_set::ActiveSetProjection;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::{
-    PhaseActivityModel, phase_activity_models,
+    phase_activity_models, PhaseActivityModel,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-    EquilibriumLogMoles, EquilibriumSolveCandidate, GibbsFn, Phase, R, Solvers,
     compute_element_totals, reaction_phase_stoichiometry, species_to_phase_map,
+    EquilibriumLogMoles, EquilibriumSolveCandidate, GibbsFn, Phase, Solvers, R,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::PreparedEquilibriumRunner;
@@ -161,14 +161,14 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
 use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData};
-use RustedSciThe::symbolic::symbolic_engine::Expr;
 use log::info;
-use nalgebra::{DMatrix, DVector, linalg::SVD};
+use nalgebra::{linalg::SVD, DMatrix, DVector};
 use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::fmt;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 /// Lower bound used when phase-control helpers reconstruct log-mole values.
 ///

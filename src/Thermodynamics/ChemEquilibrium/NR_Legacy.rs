@@ -99,7 +99,7 @@
 //! - [`equilibrium_legacy_backend`](super::equilibrium_legacy_backend) — adapter that calls this module
 //!
 use RustedSciThe::numerical::BVP_Damp::BVP_utils::checkmem;
-use RustedSciThe::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
+use RustedSciThe::numerical::BVP_Damp::BVP_utils::{elapsed_time, CustomTimer};
 /// A framework for solving system of nonlinear equations using
 /// - Newton-Raphson method;
 /// - damped Newton-Raphson method;
@@ -820,7 +820,7 @@ impl NR {
                     }
                 };
                 let result = Some(y_k_plus_1); // save the successful result of the iteration
-                // before refining in case it will go wrong
+                                               // before refining in case it will go wrong
                 self.result = result.clone();
                 info!(
                     "\n \n solutioon found for {}",
@@ -932,7 +932,7 @@ impl NR {
                     let res = self.solver();
                     res
                 } //end Error
-            } // end mat 
+            } // end mat
         }
     }
     pub fn get_result(&self) -> Option<DVector<f64>> {

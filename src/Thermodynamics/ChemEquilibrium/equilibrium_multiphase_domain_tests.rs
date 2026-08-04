@@ -4,12 +4,12 @@
 //! zeroes are not confused with phase exclusion, and unsupported activity
 //! models fail before numerical solver construction.
 
+use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
+use crate::Thermodynamics::physical_state::PhysicalState;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
 };
 use crate::Thermodynamics::User_PhaseOrSolution::{PhaseModel, PhaseSpec};
-use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
-use crate::Thermodynamics::physical_state::PhysicalState;
 use nalgebra::DMatrix;
 
 fn gas(name: &str, components: &[&str]) -> PhaseSpec {
@@ -136,11 +136,9 @@ fn composition_rejects_reconstruction_against_a_foreign_layout() {
     let elements = DMatrix::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 2.0, 1.0, 0.0]);
 
     let error = composition.element_totals(&other, &elements).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("composition belongs to a different multiphase layout")
-    );
+    assert!(error
+        .to_string()
+        .contains("composition belongs to a different multiphase layout"));
 }
 
 #[test]

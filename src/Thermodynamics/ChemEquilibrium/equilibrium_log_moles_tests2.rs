@@ -6,14 +6,14 @@ mod tests {
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::SolverParams;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-        ContinuationSeedPolicy, EquilibriumLogMoles, EquilibriumSolveCandidate, GibbsFn, Phase,
-        PhaseKind, R, Solvers, TemperatureSolveFailure, TemperatureSolveSnapshot,
         continuation_seed_for_point, equilibrium_logmole_jacobian2, equilibrium_logmole_residual2,
         evaluate_equilibrium_logmole_jacobian, evaluate_equilibrium_logmole_residual,
         evaluate_equilibrium_logmole_residual_with_standard_gibbs,
         recoverable_backend_failure_kind, scale_jacobian_rows, scale_residual_rows,
         scaled_jacobian, scaled_residual, temperature_failure, validate_logmole_system_dimensions,
-        validate_residual_conditions,
+        validate_residual_conditions, ContinuationSeedPolicy, EquilibriumLogMoles,
+        EquilibriumSolveCandidate, GibbsFn, Phase, PhaseKind, Solvers, TemperatureSolveFailure,
+        TemperatureSolveSnapshot, R,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
         ReactionExtentError, SolveError,
@@ -25,9 +25,9 @@ mod tests {
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseControlledSolveReport;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
-        InitialPhaseSet, PHASE_CONTROL_TRACE_MOLE_FLOOR, PhaseManager, PhaseSeedPolicy, PhaseSet,
-        PhaseStabilityReport, PhaseTransitionPlan, build_multiphase_acceptance_report,
-        deactivate_phases_seed_only, gas_solver, seed_activated_phase,
+        build_multiphase_acceptance_report, deactivate_phases_seed_only, gas_solver,
+        seed_activated_phase, InitialPhaseSet, PhaseManager, PhaseSeedPolicy, PhaseSet,
+        PhaseStabilityReport, PhaseTransitionPlan, PHASE_CONTROL_TRACE_MOLE_FLOOR,
     };
     use nalgebra::DMatrix;
     use std::collections::HashMap;

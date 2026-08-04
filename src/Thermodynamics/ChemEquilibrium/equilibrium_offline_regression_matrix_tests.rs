@@ -11,7 +11,7 @@
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::*;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
-    PHASE_CONTROL_TRACE_MOLE_FLOOR, gas_solver,
+    gas_solver, PHASE_CONTROL_TRACE_MOLE_FLOOR,
 };
 use nalgebra::DMatrix;
 use std::rc::Rc;
@@ -86,12 +86,10 @@ fn synthetic_condensed_fixture(candidate_gibbs: f64) -> EquilibriumLogMoles {
 }
 
 fn assert_balanced_and_finite(instance: &EquilibriumLogMoles) {
-    assert!(
-        instance
-            .moles
-            .iter()
-            .all(|value| value.is_finite() && *value >= 0.0)
-    );
+    assert!(instance
+        .moles
+        .iter()
+        .all(|value| value.is_finite() && *value >= 0.0));
     let validation = instance
         .last_validation_report
         .as_ref()

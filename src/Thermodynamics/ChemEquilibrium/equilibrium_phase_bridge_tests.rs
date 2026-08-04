@@ -12,6 +12,8 @@
 
 use std::collections::HashMap;
 
+use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
+use crate::Thermodynamics::physical_state::PhysicalState;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
 };
@@ -19,15 +21,13 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, TraceSpeciesSeedPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-    PhaseEquilibriumBuildRequest, build_phase_equilibrium_problem,
+    build_phase_equilibrium_problem, PhaseEquilibriumBuildRequest,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
-    ResolvedPhaseEquilibriumRequest, solve_resolved_pt,
+    solve_resolved_pt, ResolvedPhaseEquilibriumRequest,
 };
 use crate::Thermodynamics::User_PhaseOrSolution::{PhaseSpec, ResolvedPhaseSystem};
 use crate::Thermodynamics::User_substances::{LibraryPriority, SubsData};
-use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
-use crate::Thermodynamics::physical_state::PhysicalState;
 
 fn offline_nasa_gas_and_condensed_water() -> ResolvedPhaseSystem {
     let gas = PhaseSpec::ideal_gas(
@@ -105,8 +105,8 @@ fn offline_nasa_gas_and_condensed_solid_water() -> ResolvedPhaseSystem {
     .unwrap()
 }
 
-fn offline_problem()
--> crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::PhaseEquilibriumProblemBundle
+fn offline_problem(
+) -> crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::PhaseEquilibriumProblemBundle
 {
     let resolved = offline_nasa_gas_and_condensed_water();
     let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
@@ -222,12 +222,10 @@ fn offline_bounded_bridge_starts_zero_condensed_candidate_inactive() {
         result.phase_status(&liquid),
         Some(crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseStatus::Inactive)
     );
-    assert!(
-        result
-            .summary_rows()
-            .iter()
-            .any(|row| row.section == "phase_control" && row.label == "iterations")
-    );
+    assert!(result
+        .summary_rows()
+        .iter()
+        .any(|row| row.section == "phase_control" && row.label == "iterations"));
     assert!(result.phase_total(&liquid).unwrap() >= 0.0);
 }
 

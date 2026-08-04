@@ -24,18 +24,18 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumProblem, LogMolesInitialGuess, PreparedEquilibriumProblem,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    RstPreparedProblem, prepare_rst_symbolic_problem_from_prepared,
+    prepare_rst_symbolic_problem_from_prepared, RstPreparedProblem,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, SolverBackend,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
-    MultiphaseAcceptanceReport, PHASE_CONTROL_TRACE_MOLE_FLOOR, PhaseControlledSolveReport,
+    build_multiphase_acceptance_report, compute_phase_stability_reports, compute_phase_totals,
+    initial_phase_activity_from_moles, reject_repeated_phase_set, seed_activated_phase,
+    validate_phase_set_candidate, MultiphaseAcceptanceReport, PhaseControlledSolveReport,
     PhaseManager, PhaseSeedPolicy, PhaseSet, PhaseStatus, PhaseTransitionPlan,
-    PhaseTransitionReason, PhaseTransitionRecord, build_multiphase_acceptance_report,
-    compute_phase_stability_reports, compute_phase_totals, initial_phase_activity_from_moles,
-    reject_repeated_phase_set, seed_activated_phase, validate_phase_set_candidate,
+    PhaseTransitionReason, PhaseTransitionRecord, PHASE_CONTROL_TRACE_MOLE_FLOOR,
 };
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
@@ -485,8 +485,9 @@ impl PreparedPhaseControlRunner {
             {
                 return Err(ReactionExtentError::InvalidCandidate {
                     field: "phase_active_set",
-                    message: "a fixed-set candidate cannot silently remove a lifecycle-active phase"
-                        .to_string(),
+                    message:
+                        "a fixed-set candidate cannot silently remove a lifecycle-active phase"
+                            .to_string(),
                 });
             }
             let mut probe_expanded = false;
@@ -495,14 +496,15 @@ impl PreparedPhaseControlRunner {
                     continue;
                 }
                 let phase = PhaseIndex::new(phase_index, phase_active.len())?;
-                let driving_force = probe_stability[phase_index]
-                    .driving_force
-                    .ok_or_else(|| ReactionExtentError::InvalidCandidate {
-                        field: "phase_stability",
-                        message: format!(
+                let driving_force =
+                    probe_stability[phase_index].driving_force.ok_or_else(|| {
+                        ReactionExtentError::InvalidCandidate {
+                            field: "phase_stability",
+                            message: format!(
                             "monolithic active-set probe expanded phase {} without a driving force",
                             phase.index()
                         ),
+                        }
                     })?;
                 let previous_phase_set = phase_set.clone();
                 phase_set.activate(phase);
@@ -748,8 +750,7 @@ impl PreparedPhaseControlRunner {
                 seed,
                 species_phase,
                 full_element_totals,
-            )
-            else {
+            ) else {
                 continue;
             };
             let Ok(stability) = compute_phase_stability_reports(

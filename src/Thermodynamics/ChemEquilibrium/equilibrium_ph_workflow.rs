@@ -2304,12 +2304,10 @@ impl<'request, 'enthalpy> PhTrialEvaluator<'request, 'enthalpy> {
                         build_request,
                         self.solve_options.timing_mode(),
                     )?;
-                    *template = Some(
-                        bundle.into_temperature_template(
-                            self.solve_options.prepares_rst_backend(),
-                            self.solve_options.timing_mode(),
-                        )?,
-                    );
+                    *template = Some(bundle.into_temperature_template(
+                        self.solve_options.prepares_rst_backend(),
+                        self.solve_options.timing_mode(),
+                    )?);
                 }
                 let solution = template
                     .as_mut()

@@ -13,10 +13,10 @@
 //!                                  +--> physical element totals
 //! ```
 
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
-use crate::Thermodynamics::User_PhaseOrSolution::{PhaseModel, PhaseSpec};
 use crate::Thermodynamics::phase_layout::{PhaseComponentId, SystemLayout};
 use crate::Thermodynamics::physical_state::PhysicalState;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
+use crate::Thermodynamics::User_PhaseOrSolution::{PhaseModel, PhaseSpec};
 use nalgebra::DMatrix;
 use std::collections::HashSet;
 

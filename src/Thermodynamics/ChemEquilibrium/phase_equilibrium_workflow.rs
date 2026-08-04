@@ -5,9 +5,12 @@
 //! result publication. It does not duplicate residual construction or expose
 //! the historical mutable solver as an alternative public engine.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 
+use crate::Thermodynamics::phase_layout::PhaseComponentId;
+use crate::Thermodynamics::thermo_lib_api::ThermoRepository;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::{
     EquilibriumCandidatePhasePlan, EquilibriumCandidateSelectionReport,
 };
@@ -43,8 +46,6 @@ use crate::Thermodynamics::User_PhaseOrSolution::{
     ResolvedPhaseSystem, ResolvedPhaseSystemReport, SubstanceSystemFactory,
     SubstanceSystemFactoryError, SubstanceSystemSpec,
 };
-use crate::Thermodynamics::phase_layout::PhaseComponentId;
-use crate::Thermodynamics::thermo_lib_api::ThermoRepository;
 
 /// Current solve mode exposed by the typed public facade.
 ///
@@ -90,6 +91,36 @@ pub struct EquilibriumSolveOptions {
     settings: EquilibriumSolverSettings,
     timing_mode: EquilibriumTimingMode,
     execution_control: Option<EquilibriumExecutionControl>,
+}
+
+/// Serializable, read-only record of effective numerical controls.
+///
+/// This deliberately records the resolved backend order rather than only the
+/// caller's optional `SolverPolicy`: an absent explicit policy still expands
+/// to the production cascade at solve time. It excludes the live execution
+/// handle because cancellation/progress callbacks are process-local, not part
+/// of a reproducible numerical contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EquilibriumSolveOptionsSnapshot {
+    pub preferred_legacy_backend: String,
+    pub effective_backend_order: Vec<String>,
+    pub max_iterations: usize,
+    pub tolerance: f64,
+    pub scaling_enabled: bool,
+    pub trace_seed_policy: String,
+    pub continuation_seed_policy: String,
+    pub equilibrium_constant_validation_mode: String,
+    pub timing_mode: String,
+    pub solver_budget: Option<EquilibriumSolverBudgetSnapshot>,
+    pub execution_control_attached: bool,
+}
+
+/// Serializable resource limits attached to a solver-cascade snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EquilibriumSolverBudgetSnapshot {
+    pub max_attempts: usize,
+    pub max_iterations_per_attempt: usize,
+    pub max_total_iterations: usize,
 }
 
 impl fmt::Debug for EquilibriumSolveOptions {
@@ -240,6 +271,43 @@ impl EquilibriumSolveOptions {
     /// Returns the timing policy carried by this solve request.
     pub fn timing_mode(&self) -> EquilibriumTimingMode {
         self.timing_mode
+    }
+
+    /// Captures the effective immutable numerical contract for reports or
+    /// reproducibility records. Calling this never changes the options or the
+    /// attached execution handle.
+    pub fn reproducibility_snapshot(&self) -> EquilibriumSolveOptionsSnapshot {
+        let policy = self
+            .settings
+            .solver_policy
+            .clone()
+            .unwrap_or_else(|| SolverPolicy::production_default(self.settings.solver));
+        EquilibriumSolveOptionsSnapshot {
+            preferred_legacy_backend: format!("{:?}", self.settings.solver),
+            effective_backend_order: policy
+                .ordered_backends()
+                .into_iter()
+                .map(|backend| format!("{backend:?}"))
+                .collect(),
+            max_iterations: self.settings.solver_params.max_iter,
+            tolerance: self.settings.solver_params.tol,
+            scaling_enabled: self.settings.scaling_flag,
+            trace_seed_policy: format!("{:?}", self.settings.trace_seed_policy),
+            continuation_seed_policy: format!("{:?}", self.settings.continuation_seed_policy),
+            equilibrium_constant_validation_mode: format!(
+                "{:?}",
+                self.settings.keq_validation_mode
+            ),
+            timing_mode: format!("{:?}", self.timing_mode),
+            solver_budget: self.settings.solver_budget.map(|budget| {
+                EquilibriumSolverBudgetSnapshot {
+                    max_attempts: budget.max_attempts,
+                    max_iterations_per_attempt: budget.max_iterations_per_attempt,
+                    max_total_iterations: budget.max_total_iterations,
+                }
+            }),
+            execution_control_attached: self.execution_control.is_some(),
+        }
     }
 
     /// Returns whether this policy can execute an RST symbolic backend.
@@ -909,6 +977,7 @@ pub fn solve_resolved_pt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
     use crate::Thermodynamics::ChemEquilibrium::prelude::{
         LegacyEquilibriumSolver, LogMolesInitialGuess, RustedSciTheSolver, SolverBackend,
         SolverPolicy,
@@ -916,7 +985,6 @@ mod tests {
     use crate::Thermodynamics::User_PhaseOrSolution::{
         SubstanceSystemSpecBuilder, SubstancesContainer,
     };
-    use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 
     #[test]
     fn solve_options_round_trip_explicit_cascade_budget() {
@@ -941,7 +1009,7 @@ mod tests {
     #[test]
     fn cancelled_pipeline_stops_before_repository_resolution_for_point_and_range() {
         let spec = SubstanceSystemSpecBuilder::new(SubstancesContainer::SinglePhase(vec![
-            "N2".to_string(),
+            "N2".to_string()
         ]))
         .with_library_priorities(vec!["NASA_gas".to_string()])
         .with_search_in_nist(false)
@@ -1062,12 +1130,8 @@ mod tests {
         let options = EquilibriumSolveOptions::new()
             .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
             .expect("single legacy backend policy must validate");
-        let pipeline = PhaseEquilibriumPipelineRequest::new(
-            spec,
-            vec![0.79, 0.21],
-            conditions,
-        )
-        .with_solve_options(options.clone());
+        let pipeline = PhaseEquilibriumPipelineRequest::new(spec, vec![0.79, 0.21], conditions)
+            .with_solve_options(options.clone());
         let resolved = pipeline
             .clone()
             .resolve()
@@ -1285,26 +1349,18 @@ mod tests {
 
     #[test]
     fn typed_policy_builders_reject_invalid_limits_before_solving() {
-        assert!(
-            EquilibriumSolveOptions::default()
-                .with_max_iterations(0)
-                .is_err()
-        );
-        assert!(
-            EquilibriumSolveOptions::default()
-                .with_tolerance(0.0)
-                .is_err()
-        );
-        assert!(
-            PhaseControlPolicy::default()
-                .with_phase_epsilon(0.0)
-                .is_err()
-        );
-        assert!(
-            PhaseControlPolicy::default()
-                .with_max_phase_iterations(0)
-                .is_err()
-        );
+        assert!(EquilibriumSolveOptions::default()
+            .with_max_iterations(0)
+            .is_err());
+        assert!(EquilibriumSolveOptions::default()
+            .with_tolerance(0.0)
+            .is_err());
+        assert!(PhaseControlPolicy::default()
+            .with_phase_epsilon(0.0)
+            .is_err());
+        assert!(PhaseControlPolicy::default()
+            .with_max_phase_iterations(0)
+            .is_err());
     }
 
     #[test]

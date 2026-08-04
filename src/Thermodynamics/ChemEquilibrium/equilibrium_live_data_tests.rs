@@ -44,13 +44,13 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::{
     PhTemperatureSolveReport, PhTrialPreparation, ResolvedPhaseEnthalpyRequest,
     ResolvedThermochemistry,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::PreparedEquilibriumRunner;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::PreparedEquilibriumRunner;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    RustedSciTheSolver, prepare_baked_rst_symbolic_problem_for_test,
-    prepare_rst_symbolic_problem_from_prepared,
+    prepare_baked_rst_symbolic_problem_for_test, prepare_rst_symbolic_problem_from_prepared,
+    RustedSciTheSolver,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     SolverAttemptFailureKind, SolverAttemptMetrics, SolverAttemptOutcome, SolverAttemptReport,
@@ -930,7 +930,10 @@ fn live_bounded_water_ph_monolithic_and_nested_routes_agree_after_phase_activati
     )
     .expect("nested P,H phase-control solve must succeed");
 
-    assert_eq!(monolithic.report().solve_path(), PhSolvePath::MonolithicPhaseControl);
+    assert_eq!(
+        monolithic.report().solve_path(),
+        PhSolvePath::MonolithicPhaseControl
+    );
     assert_eq!(nested.report().solve_path(), PhSolvePath::NestedTemperature);
     assert!(monolithic.report().trials().is_empty());
     assert!(!nested.report().trials().is_empty());
@@ -981,7 +984,11 @@ fn live_bounded_water_ph_monolithic_and_nested_routes_agree_after_phase_activati
     println!(
         "live bounded water P,H route comparison\n{}",
         Table::new([
-            live_ph_path_row("monolithic-phase-control", &monolithic, monolithic_started.elapsed()),
+            live_ph_path_row(
+                "monolithic-phase-control",
+                &monolithic,
+                monolithic_started.elapsed()
+            ),
             live_ph_path_row("nested-phase-control", &nested, nested_started.elapsed()),
         ])
         .with(Style::rounded())
@@ -1821,9 +1828,7 @@ fn live_log_coordinate_range(values: &[f64]) -> String {
 }
 
 fn live_log_coordinate_delta_inf(seed: &[f64], result: &[f64]) -> String {
-    if seed.len() != result.len()
-        || seed.iter().chain(result).any(|value| !value.is_finite())
-    {
+    if seed.len() != result.len() || seed.iter().chain(result).any(|value| !value.is_finite()) {
         return "non-finite".to_string();
     }
     let delta = seed
@@ -1836,7 +1841,9 @@ fn live_log_coordinate_delta_inf(seed: &[f64], result: &[f64]) -> String {
 
 fn live_attempt_metric<T>(
     attempt: Option<&SolverAttemptReport>,
-    render: impl FnOnce(&crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptMetrics) -> T,
+    render: impl FnOnce(
+        &crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptMetrics,
+    ) -> T,
 ) -> String
 where
     T: ToString,
@@ -1999,7 +2006,10 @@ fn live_temperature_range_failure_diagnostics_preserve_backend_metrics() {
     assert_eq!(rows[0].point_index, "7");
     assert_eq!(rows[0].temperature, "1010.0");
     assert_eq!(rows[0].error_kind, "AllBackendsFailed");
-    assert_eq!(rows[0].attempt_backend, "RustedSciThe(NielsenLevenbergMarquardt)");
+    assert_eq!(
+        rows[0].attempt_backend,
+        "RustedSciThe(NielsenLevenbergMarquardt)"
+    );
     assert_eq!(rows[0].outcome, "Failed(ResidualEvaluation)");
     assert_eq!(rows[0].termination, "Stagnation");
     assert_eq!(rows[0].iterations, "3");
@@ -2388,9 +2398,7 @@ fn live_large_element_limited_gas_timing_report() {
     );
     println!(
         "  validation                     residual={:.3e} balance={:.3e} limit={:.3e}",
-        validation.residual_l2_norm,
-        validation.max_abs_element_balance_error,
-        balance_limit,
+        validation.residual_l2_norm, validation.max_abs_element_balance_error, balance_limit,
     );
     println!("  total                          {:?}", timing.total());
 }
@@ -2523,7 +2531,10 @@ fn live_bounded_backend_regression_avoids_nonfinite_and_iteration_failures() {
                 )
             });
         let validation = outcome.solution().accepted_solution().validation();
-        assert!(validation.residual_l2_norm.is_finite(), "{name} returned a non-finite residual");
+        assert!(
+            validation.residual_l2_norm.is_finite(),
+            "{name} returned a non-finite residual"
+        );
         assert!(
             outcome
                 .solution()
@@ -2757,11 +2768,9 @@ fn live_damped_newton_parameterized_graph_matches_baked_graph_outcome() {
     ));
 
     let (parameterized_prepared, parameterized_symbols, parameterized_seed) = build_prepared();
-    let parameterized_graph = prepare_rst_symbolic_problem_from_prepared(
-        &parameterized_prepared,
-        &parameterized_symbols,
-    )
-    .expect("parameterized real RST graph must build");
+    let parameterized_graph =
+        prepare_rst_symbolic_problem_from_prepared(&parameterized_prepared, &parameterized_symbols)
+            .expect("parameterized real RST graph must build");
     let mut parameterized_runner =
         PreparedEquilibriumRunner::new(parameterized_prepared, parameterized_symbols)
             .expect("parameterized real RST runner must build");
@@ -2799,8 +2808,16 @@ fn live_damped_newton_parameterized_graph_matches_baked_graph_outcome() {
     println!(
         "live Damped Newton graph comparison: species={} parameterized={} baked={}",
         selected.len(),
-        if parameterized.is_ok() { "accepted" } else { "rejected" },
-        if baked.is_ok() { "accepted" } else { "rejected" },
+        if parameterized.is_ok() {
+            "accepted"
+        } else {
+            "rejected"
+        },
+        if baked.is_ok() {
+            "accepted"
+        } else {
+            "rejected"
+        },
     );
     assert_eq!(before, live_library_file_snapshot());
 }
@@ -5032,11 +5049,8 @@ fn live_nested_ph_inner_pt_cascade_release_matrix() {
         let (selected, resolved) = live_element_limited_gas_resolved_up_to(species_count);
         let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())
             .expect("nested cascade layout must validate");
-        let initial = MultiphaseInitialComposition::from_dense(
-            &layout,
-            vec![1e-3; selected.len()],
-        )
-        .expect("nested cascade composition must validate");
+        let initial = MultiphaseInitialComposition::from_dense(&layout, vec![1e-3; selected.len()])
+            .expect("nested cascade composition must validate");
         let thermochemistry = ResolvedThermochemistry::from_resolved_system(&resolved)
             .expect("nested cascade thermochemistry must resolve");
         let mut targets = temperatures
@@ -5294,7 +5308,10 @@ fn live_real_ph_invalid_input_and_rollback_matrix() {
 
     let mut rows = Vec::new();
     let non_finite = PhEnthalpyGrid::new(vec![f64::NAN]);
-    assert!(matches!(non_finite, Err(ReactionExtentError::InvalidProblem { .. })));
+    assert!(matches!(
+        non_finite,
+        Err(ReactionExtentError::InvalidProblem { .. })
+    ));
     rows.push(LivePhValidationRow {
         scenario: "non-finite target".to_string(),
         status: "REJECTED".to_string(),

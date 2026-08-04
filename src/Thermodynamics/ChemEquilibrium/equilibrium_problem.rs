@@ -139,15 +139,15 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::{
     ElementId, PhaseIndex, ReactionId, SpeciesId,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-    GibbsFn, Phase, compute_species_moles, equilibrium_scaling,
-    evaluate_equilibrium_logmole_jacobian, evaluate_equilibrium_logmole_residual,
-    reaction_phase_stoichiometry, scale_jacobian_rows, scale_residual_rows, species_to_phase_map,
+    compute_species_moles, equilibrium_scaling, evaluate_equilibrium_logmole_jacobian,
+    evaluate_equilibrium_logmole_residual, reaction_phase_stoichiometry, scale_jacobian_rows,
+    scale_residual_rows, species_to_phase_map, GibbsFn, Phase,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
-    ReactionBasis, ReactionExtentError, compute_reaction_basis,
+    compute_reaction_basis, ReactionBasis, ReactionExtentError,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
-use nalgebra::{DMatrix, linalg::SVD};
+use nalgebra::{linalg::SVD, DMatrix};
 use std::collections::HashSet;
 use std::fmt;
 use std::ops::Range;

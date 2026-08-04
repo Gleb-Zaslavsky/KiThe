@@ -9,9 +9,9 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Phase;
 #[cfg(test)]
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionBasis;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
-    ReactionExtentError, compute_reaction_basis,
+    compute_reaction_basis, ReactionExtentError,
 };
-use nalgebra::{DMatrix, DVector, linalg::SVD};
+use nalgebra::{linalg::SVD, DMatrix, DVector};
 
 /// Prepared local coordinate system for one immutable active-phase set.
 ///

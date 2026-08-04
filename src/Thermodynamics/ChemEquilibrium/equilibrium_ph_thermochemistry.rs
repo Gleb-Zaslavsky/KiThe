@@ -9,13 +9,13 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use crate::Thermodynamics::phase_layout::PhaseComponentId;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::TemperatureBounds;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::GibbsFn;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::DBhandlers::thermo_api::ThermoCalculator;
 use crate::Thermodynamics::User_PhaseOrSolution::ResolvedPhaseSystem;
 use crate::Thermodynamics::User_substances::{CalculatorType, DataType, SubsData, WhatIsFound};
-use crate::Thermodynamics::phase_layout::PhaseComponentId;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 /// One temperature-dependent molar enthalpy capability in J/mol.
@@ -643,9 +643,7 @@ impl ResolvedThermochemistry {
 
     /// Returns the optional Cp capabilities for the compatibility enthalpy
     /// model owned by the workflow facade.
-    pub(crate) fn heat_capacity_functions(
-        &self,
-    ) -> Vec<Option<MolarEnthalpyFunction<'static>>> {
+    pub(crate) fn heat_capacity_functions(&self) -> Vec<Option<MolarEnthalpyFunction<'static>>> {
         self.heat_capacity.clone()
     }
 
@@ -804,11 +802,7 @@ impl PhaseGibbsSource {
         }
     }
 
-    fn evaluate(
-        &mut self,
-        substance: &str,
-        temperature: f64,
-    ) -> Result<f64, ReactionExtentError> {
+    fn evaluate(&mut self, substance: &str, temperature: f64) -> Result<f64, ReactionExtentError> {
         if self.selected_temperature != Some(temperature) {
             self.data
                 .extract_all_thermal_coeffs(temperature)
@@ -828,12 +822,13 @@ impl PhaseGibbsSource {
             })?;
             self.selected_temperature = Some(temperature);
         }
-        let function = self.functions.get(substance).ok_or_else(|| {
-            ReactionExtentError::InvalidProblem {
-                field: "thermochemistry_gibbs",
-                message: format!("missing standard Gibbs function for '{substance}'"),
-            }
-        })?;
+        let function =
+            self.functions
+                .get(substance)
+                .ok_or_else(|| ReactionExtentError::InvalidProblem {
+                    field: "thermochemistry_gibbs",
+                    message: format!("missing standard Gibbs function for '{substance}'"),
+                })?;
         let value = function(temperature);
         if !value.is_finite() {
             return Err(ReactionExtentError::InvalidProblem {

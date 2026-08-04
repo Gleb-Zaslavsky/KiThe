@@ -25,6 +25,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
+use crate::Thermodynamics::phase_layout::{
+    PhaseComponentId, PhaseId as SemanticPhaseId, SystemLayout,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
 pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_component::{
     EquilibriumComponentDescriptor, EquilibriumPhaseDescriptor,
@@ -44,7 +47,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    RstPreparedProblem, prepare_rst_symbolic_problem_from_prepared,
+    prepare_rst_symbolic_problem_from_prepared, RstPreparedProblem,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::EquilibriumSolveReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::MultiStartSolveReport;
@@ -60,12 +63,9 @@ use crate::Thermodynamics::User_PhaseOrSolution::{
 };
 use crate::Thermodynamics::User_substances::SubsData;
 use crate::Thermodynamics::User_substances2::SearchSummaryRow;
-use crate::Thermodynamics::phase_layout::{
-    PhaseComponentId, PhaseId as SemanticPhaseId, SystemLayout,
-};
-use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::DMatrix;
 use std::time::{Duration, Instant};
+use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 /// Explicit version of the phase-model contract accepted by the bridge.
 ///
@@ -588,17 +588,20 @@ impl PhaseEquilibriumProblemBundle {
         let prior_timing = self.timing;
         let started = Instant::now();
         let mut timing = EquilibriumTimingCollector::from_report(prior_timing);
-        let prepared = timing.measure(EquilibriumTimingStage::NumericalProblemPreparation, || {
-            crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::
+        let prepared =
+            timing.measure(EquilibriumTimingStage::NumericalProblemPreparation, || {
+                crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::
                 PreparedEquilibriumProblem::new(self.problem)
-        })?;
+            })?;
         let rst_problem = if prepare_rst {
-            Some(timing.measure(EquilibriumTimingStage::SymbolicConstruction, || {
-                prepare_rst_symbolic_problem_from_prepared(
-                    &prepared,
-                    &self.symbolic_standard_gibbs,
-                )
-            })?)
+            Some(
+                timing.measure(EquilibriumTimingStage::SymbolicConstruction, || {
+                    prepare_rst_symbolic_problem_from_prepared(
+                        &prepared,
+                        &self.symbolic_standard_gibbs,
+                    )
+                })?,
+            )
         } else {
             None
         };
@@ -826,7 +829,8 @@ impl PreparedPhaseControlTemplate {
         // The phase-control runner retains the initial symbolic capability
         // snapshot. Canonical RST fixed-P,T problems parameterize `G0_i`, so
         // a range point needs only refreshed numeric thermochemistry.
-        self.runner.retarget_numeric(conditions, seed, gibbs.clone())?;
+        self.runner
+            .retarget_numeric(conditions, seed, gibbs.clone())?;
         if let Some(phase_set) = continuation_phase_set {
             self.runner.set_continuation_phase_set(phase_set)?;
         }
@@ -882,11 +886,11 @@ impl PreparedPhaseControlTemplate {
     {
         let started = Instant::now();
         *self.runner.configure_solver() = settings;
-        let outcome = self
-            .runner
-            .solve_with_fixed_active_solver(|runner, active, seed, species_phase, totals| {
+        let outcome = self.runner.solve_with_fixed_active_solver(
+            |runner, active, seed, species_phase, totals| {
                 solve_active_set(runner, active, seed, species_phase, totals)
-            })?;
+            },
+        )?;
         self.last_rst_symbolic_reused = outcome.rst_symbolic_reused;
         let mut timing = EquilibriumTimingCollector::from_report(self.timing);
         timing.record(
@@ -967,7 +971,6 @@ impl PreparedPhaseControlTemplate {
             })
             .collect()
     }
-
 }
 
 impl PreparedPhaseEquilibriumTemplate {
@@ -1154,7 +1157,6 @@ impl PreparedPhaseEquilibriumTemplate {
         }
         Ok(gibbs)
     }
-
 }
 
 /// Immutable accepted result of a phase-system equilibrium solve.

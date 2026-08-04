@@ -19,31 +19,30 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_active_set::ActiveSetPro
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::{
     solve_backend_cascade_with_control, EquilibriumNonlinearBackend,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::EquilibriumSolverSettings;
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::prepare_rst_symbolic_ph_problem;
-pub(crate) use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_options::PhAcceptanceOptions
-    as MonolithicPhAcceptanceOptions;
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_formulation::{
-    PhCandidateSnapshot, PreparedPhFormulation,
-};
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_thermochemistry::ResolvedThermochemistry;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
     EnthalpyScale, TemperatureBounds,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::EquilibriumSolverSettings;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_formulation::{
+    PhCandidateSnapshot, PreparedPhFormulation,
+};
+pub(crate) use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_options::PhAcceptanceOptions as MonolithicPhAcceptanceOptions;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_thermochemistry::ResolvedThermochemistry;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, EquilibriumProblem, LogMolesInitialGuess, PreparedEquilibriumProblem,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::prepare_rst_symbolic_ph_problem;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, SolverBackend, SolverCascadeBudget, SolverPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::{
-    EquilibriumAcceptanceCriteria, EquilibriumCandidateReport, EquilibriumCandidateResiduals,
-    validate_equilibrium_candidate,
+    validate_equilibrium_candidate, EquilibriumAcceptanceCriteria, EquilibriumCandidateReport,
+    EquilibriumCandidateResiduals,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
-    PhaseSeedPolicy, seed_activated_phase,
+    seed_activated_phase, PhaseSeedPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::prepared_phase_control_runner::{
     PreparedActiveSetCandidate, PreparedPhaseControlRunner,
@@ -107,8 +106,9 @@ impl PreparedMonolithicPhRunner {
         log_moles: &crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::
             LogMolesInitialGuess,
         temperature_seed: f64,
-        rst_problem: Option<&crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::
-            RstPreparedProblem>,
+        rst_problem: Option<
+            &crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RstPreparedProblem,
+        >,
     ) -> Result<MonolithicPhSolveOutcome, ReactionExtentError> {
         let initial_unknowns = self
             .formulation
@@ -125,8 +125,9 @@ impl PreparedMonolithicPhRunner {
     fn solve_from_initial_unknowns(
         &self,
         initial_unknowns: Vec<f64>,
-        prepared_rst_problem: Option<&crate::Thermodynamics::ChemEquilibrium::
-            equilibrium_rst_backend::RstPreparedProblem>,
+        prepared_rst_problem: Option<
+            &crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RstPreparedProblem,
+        >,
     ) -> Result<MonolithicPhSolveOutcome, ReactionExtentError> {
         let policy = self.monolithic_policy()?;
         let backends = policy.ordered_backends();
@@ -193,20 +194,19 @@ impl PreparedMonolithicPhRunner {
             }
             Ok(validation)
         };
-        let (unknowns, pt_validation, solve_report) =
-            solve_backend_cascade_with_control(
-                &backend_refs,
-                initial_unknowns,
-                &residual,
-                Some(&jacobian as &dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError>),
-                &feasible,
-                &validate_candidate,
-                policy,
-                budget,
-                &self.settings.solver_params,
-                rst_problem,
-                None,
-            )?;
+        let (unknowns, pt_validation, solve_report) = solve_backend_cascade_with_control(
+            &backend_refs,
+            initial_unknowns,
+            &residual,
+            Some(&jacobian as &dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError>),
+            &feasible,
+            &validate_candidate,
+            policy,
+            budget,
+            &self.settings.solver_params,
+            rst_problem,
+            None,
+        )?;
         let snapshot = self.formulation.candidate_snapshot(&unknowns)?;
         Ok(MonolithicPhSolveOutcome {
             unknowns,
@@ -358,7 +358,8 @@ fn solve_monolithic_active_set_candidate_inner(
         active,
         settings.solver_params.tol,
     )?;
-    projection.validate_element_totals_representable(full_element_totals, settings.solver_params.tol)?;
+    projection
+        .validate_element_totals_representable(full_element_totals, settings.solver_params.tol)?;
 
     let reduced_log_seed = projection.project_log_moles(full_seed)?;
     let indices = projection
@@ -379,8 +380,8 @@ fn solve_monolithic_active_set_candidate_inner(
     // Gibbs closure even though the monolithic formulation evaluates the
     // typed thermochemistry bundle directly.  Cross that boundary only with
     // a fully validated finite snapshot; never encode a source error as NaN.
-    let reduced_gibbs = reduced_thermochemistry
-        .gibbs_snapshot_for_legacy_boundary(*temperature_seed)?;
+    let reduced_gibbs =
+        reduced_thermochemistry.gibbs_snapshot_for_legacy_boundary(*temperature_seed)?;
     let conditions = EquilibriumConditions::new(
         *temperature_seed,
         problem.problem().conditions().pressure(),
@@ -396,10 +397,8 @@ fn solve_monolithic_active_set_candidate_inner(
         projection.phases.clone(),
         conditions,
     )?;
-    let prepared = PreparedEquilibriumProblem::new_with_element_totals(
-        reduced_problem,
-        Some(reduced_totals),
-    )?;
+    let prepared =
+        PreparedEquilibriumProblem::new_with_element_totals(reduced_problem, Some(reduced_totals))?;
     let formulation = PreparedPhFormulation::new(
         prepared,
         reduced_thermochemistry,
@@ -407,11 +406,7 @@ fn solve_monolithic_active_set_candidate_inner(
         target_enthalpy,
         enthalpy_scale,
     )?;
-    let monolithic = PreparedMonolithicPhRunner::new(
-        formulation,
-        settings,
-        *acceptance_options,
-    )?;
+    let monolithic = PreparedMonolithicPhRunner::new(formulation, settings, *acceptance_options)?;
     let outcome = monolithic.solve_from_temperature_seed(*temperature_seed)?;
     *temperature_seed = outcome.snapshot.temperature;
     let solved_conditions = EquilibriumConditions::new(
@@ -428,8 +423,8 @@ fn solve_monolithic_active_set_candidate_inner(
     // Stability is evaluated at `outcome.snapshot.temperature` by the phase
     // lifecycle.  The snapshot adapter validates that exact point before the
     // legacy infallible callback is published to phase-control.
-    let stability_gibbs = thermochemistry
-        .gibbs_snapshot_for_legacy_boundary(outcome.snapshot.temperature)?;
+    let stability_gibbs =
+        thermochemistry.gibbs_snapshot_for_legacy_boundary(outcome.snapshot.temperature)?;
     Ok(PreparedActiveSetCandidate {
         log_moles,
         solved_active_mask: active.to_vec(),
@@ -454,6 +449,7 @@ mod tests {
     use RustedSciThe::symbolic::symbolic_engine::Expr;
 
     use super::*;
+    use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
         EnthalpyScale, TemperatureBounds,
     };
@@ -466,7 +462,6 @@ mod tests {
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
         EquilibriumConditions, EquilibriumProblem, LogMolesInitialGuess, PreparedEquilibriumProblem,
     };
-    use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 
     fn one_species_formulation(with_symbolic_capability: bool) -> PreparedPhFormulation {
         let initial_moles = vec![1.0];

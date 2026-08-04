@@ -76,13 +76,11 @@ mod tests {
             .moles_for(&nitrogen)
             .expect("phase-qualified public lookup must find N2");
         assert!(nitrogen_moles.is_finite() && nitrogen_moles > 0.0);
-        assert!(
-            fixed_solution
-                .accepted_solution()
-                .validation()
-                .residual_l2_norm
-                .is_finite()
-        );
+        assert!(fixed_solution
+            .accepted_solution()
+            .validation()
+            .residual_l2_norm
+            .is_finite());
         assert!(
             fixed_solution
                 .accepted_solution()

@@ -14,13 +14,13 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::MultiphaseInitialComposition;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
-    DEFAULT_TRACE_MOLE_FLOOR, EquilibriumConditions, LogMolesInitialGuess, TraceSpeciesSeedPolicy,
+    EquilibriumConditions, LogMolesInitialGuess, TraceSpeciesSeedPolicy, DEFAULT_TRACE_MOLE_FLOOR,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptReport;
+
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingReport;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-    PhaseEquilibriumBuildRequest, SupportedPhaseModelPolicy,
-    build_phase_equilibrium_problem_with_timing,
+    build_phase_equilibrium_problem_with_timing, PhaseEquilibriumBuildRequest,
+    SupportedPhaseModelPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::MultiphaseEquilibriumSolution;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::EquilibriumSolveOptions;
@@ -482,10 +482,8 @@ impl<'a> TemperatureRangeRequest<'a> {
                 execution_control,
             );
         }
-        let mut template = bundle.into_temperature_template(
-            self.solve_options.prepares_rst_backend(),
-            timing_mode,
-        )?;
+        let mut template = bundle
+            .into_temperature_template(self.solve_options.prepares_rst_backend(), timing_mode)?;
         let initial_formulation_timing = template.build_timing();
         let symbolic_problem_reused = template.symbolic_problem_reused();
         let mut seed = LogMolesInitialGuess::from_moles_with_policy(
@@ -789,6 +787,7 @@ mod tests {
 
     #[test]
     fn range_point_error_keeps_backend_attempt_diagnostics() {
+        use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptReport;
         let error = range_point_error(
             0,
             1_000.0,

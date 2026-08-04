@@ -2478,7 +2478,8 @@ Migration contract:
     H2/O2/H2O records, so an offline test would only pin stale-index failure.
     Repair the library/index consistency first; do not turn this into a
     network-dependent regression. This fixture is evidence for the
-    format-agnostic capability boundary, not an alternate solver path.
+    format-agnostic capability boundary, not an alternate solver path. See
+    **F1** for the required atomic data-release and full offline matrix.
   - [x] Make the fallback contract explicit before adding that fixture:
     local data is authoritative; an enabled canonical fallback queries NIST
     only for the requested gas/liquid/solid state; an unspecified state fails
@@ -2864,6 +2865,122 @@ rebuild the GUI.
   the current full `ChemEquilibrium` library run passes after the option and
   prepared-system extractions, and no P,T compatibility workaround became a
   hidden dependency of the monolithic P,H path.
+
+## Deferred Foundation: Local NIST Fixture and New Physics
+
+The current production path is deliberately scoped to ideal, fixed-pressure
+equilibrium with local data. The items in this section are not small cleanup
+tasks. They require an explicit data release or a new physical contract, and
+must not be quietly approximated by the existing NASA-gas fixtures.
+
+### F1. Local NIST fixture is a data-release blocker
+
+- [ ] **Create a stable, read-only local NIST thermochemistry fixture.**
+  The NIST parser is an online acquisition boundary, while production and
+  regression equilibrium calculations must remain offline and deterministic.
+  The current local index advertises historical NIST addresses but has no
+  matching payload records; that is not an acceptable cross-format fixture.
+
+  Required deliverables:
+  - choose a small physically meaningful record set with pinned canonical
+    names, library keys, physical states, temperature intervals, elemental
+    composition, and NIST/Shomate payloads;
+  - write the payload, address/index, and elemental-composition entries as one
+    reviewed atomic data update, plus a manifest/fingerprint that identifies
+    the data release used by the tests;
+  - make the repository consistency report show every selected NIST index
+    entry paired with an exact payload, without orphan aliases;
+  - add offline `P,T` point/range and `P,H` inverse/range stories that retain
+    NIST provenance, verify conservation and acceptance, and prove that no
+    network call or JSON mutation occurred;
+  - add at least one mixed local NASA/NIST story only after the individual
+    NIST records are stable, with explicit per-component provenance and a
+    documented temperature-domain intersection.
+
+  Do not use live NIST access, a parser mock, or an incomplete historical
+  index as a substitute. This fixture proves the format-agnostic contract; it
+  is not a second solver implementation.
+
+### F2. Future physical extensions: explicitly outside the current model
+
+- [ ] **Non-ideal phase thermodynamics.** Introduce activity/fugacity models
+  with typed parameters, temperature/pressure validity ranges, and analytic or
+  independently validated derivative contracts. Ideal-gas and pure-condensed
+  activity semantics must remain selectable baselines, not implicit fallbacks.
+- [ ] **Liquid/solid solution models.** Support real solution excess Gibbs
+  models, composition-dependent chemical potentials, and phase-qualified
+  parameter provenance. Reject unsupported solution models before a nonlinear
+  backend starts; never silently treat them as ideal.
+- [ ] **Phase coexistence and latent heat.** Define the physical contract for
+  liquid-solid, liquid-vapor, and solid-solid coexistence, phase fractions,
+  and latent contributions in `P,H` solves. Existing phase-control appearance
+  evidence is not a general coexistence model.
+- [ ] **General phase-stability/minimization criteria.** Extend phase creation
+  and removal beyond the current ideal active-set assumptions, using chemical
+  potentials and complementarity/stability evidence valid for each supported
+  model.
+- [ ] **Additional constraints and state variables.** Design separate typed
+  workflows for `P,V`, `U,V`, pressure sweeps, and reactive-flash problems.
+  They must not be encoded as ad-hoc switches inside the fixed-pressure
+  `P,T`/`P,H` request types.
+- [ ] **Electrolyte/charged-species support.** Add electroneutrality,
+  reference-state conventions, ionic-strength/activity models, and a clear
+  contract for aqueous phases only when suitable local data and validation
+  fixtures exist.
+
+### F3. Quality-of-life and observability backlog
+
+These items are safe to implement independently of new physics. They must
+consume immutable solution/report snapshots and must not reopen `SubsData` or
+change accepted numerical results.
+
+- [x] **Human-readable report views.** `equilibrium_presentation` now projects
+  an accepted immutable solution into deterministic phase, component/provenance,
+  backend-attempt, and timing rows for GUI, CLI, or export consumers. Its
+  compact ASCII renderer is a convenience view only; structured rows remain the
+  canonical presentation contract and retain failure evidence.
+- [x] **Range presentation and plotting series.** `TemperatureRangePresentationReport`
+  now exposes stable ordered `P,T` component-mole and phase-total series,
+  point-level continuation/timing/validation rows, and explicit phase-transition
+  boundaries. `PhRangePresentationReport` now mirrors this with a correctly
+  typed target-enthalpy axis plus solved-temperature/component/phase raw series
+  and route/fallback/continuation evidence. Both range views also publish raw
+  residual/balance/per-point-time columns and phase-local component mole
+  fractions. `EquilibriumDisplayPolicy::visible_amount_columns()` returns
+  display-column indices without rebuilding or dropping the canonical raw
+  series, so plotting/UI code can apply trace filtering safely.
+- [x] **Phase-aware postprocessing.** PCHIP remains an optional presentation
+  layer, but typed `P,T` range resampling is now forbidden when accepted
+  phase-control transitions occurred; callers keep raw points or explicitly
+  split phase-stable ranges. Raw and resampled rows remain distinct, and the
+  existing policy still makes the linear/log interpolation space explicit.
+  Future range presentation must extend the same guard to failed gaps and any
+  future layout-changing workflow.
+- [x] **Run comparison report.** `EquilibriumComparisonReport` compares two
+  accepted single-point solutions only after exact phase-qualified layout
+  validation. It reports component/phase mole deltas, conditions, backend,
+  balance/residual evidence, and lookup provenance changes. A future range
+  comparison may aggregate these immutable point comparisons without altering
+  the strict layout contract.
+- [x] **Reproducibility capsule.** `equilibrium_reproducibility` now exports
+  a JSON-compatible immutable snapshot of solved conditions, phase specs,
+  selected per-component record identities/provenance, effective backend
+  cascade and numerical options, acceptance evidence, optional candidate
+  selection, catalog consistency, and a caller-supplied data-release label.
+  The record fingerprint is deliberately an identity fingerprint and the
+  catalog value is structural evidence, not a false claim of a payload-content
+  hash; **F1** remains responsible for a versioned local-data manifest. This
+  is provenance/report export, not mutable project import/export.
+- [x] **Failure-focused diagnostics.** `backend_attempt_rows_from_error()`
+  exposes the complete ordered trace retained by `AllBackendsFailed` and
+  `CascadeAborted`, including termination, iterations, callback timing, and
+  typed cause. Range-point/seed context remains owned by the range reports and
+  can be paired with these rows without fabricating a successful solution.
+- [x] **Display thresholds and units policy.** `equilibrium_display` now
+  provides validated trace-row filtering, scientific/fixed/engineering-SI
+  number styles, and explicit fraction-versus-percent rendering. It only
+  borrows or projects immutable presentation rows: thresholding never alters
+  solver inputs, conservation checks, or raw data retained for export.
 
 ## Recommended implementation passes
 

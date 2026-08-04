@@ -5,11 +5,11 @@
 //! This module is deliberately independent from bridge construction and from
 //! nonlinear solvers so both layers share one identity contract.
 
+use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
+use crate::Thermodynamics::physical_state::PhysicalState;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
 use crate::Thermodynamics::User_PhaseOrSolution::PhaseModel;
-use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
-use crate::Thermodynamics::physical_state::PhysicalState;
 use std::ops::Range;
 
 /// Solver-facing identity and thermodynamic interpretation of one component.

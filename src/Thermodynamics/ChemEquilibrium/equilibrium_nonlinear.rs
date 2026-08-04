@@ -157,8 +157,8 @@
 //! - [`equilibrium_legacy_backend`](super::equilibrium_legacy_backend) — adapter wrapping these solvers
 //! - [`equilibrium_reaction_basis`](super::equilibrium_reaction_basis) — typed reaction basis wrapper
 //!
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptOutcome;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptReport;
 use crate::Thermodynamics::User_substances_error::SubsDataError;
 // These are fallback nonlinear implementations. Keep detailed iteration
 // diagnostics available at debug level without making normal solves noisy.
@@ -694,11 +694,9 @@ mod error_contract_tests {
                 message: "missing backend".to_string(),
             }),
         };
-        assert!(
-            error
-                .to_string()
-                .contains("cascade aborted after 0 attempt(s)")
-        );
+        assert!(error
+            .to_string()
+            .contains("cascade aborted after 0 attempt(s)"));
         assert!(error.source().is_some());
         assert_eq!(error.kind(), ReactionExtentErrorKind::CascadeAborted);
     }

@@ -7,12 +7,12 @@
 //! decisions explicit and returns an auditable report instead of mutating
 //! `SubsData` or the repository.
 
-use crate::Thermodynamics::User_PhaseOrSolution::{
-    PhaseModel, PhaseSpec, SubstanceSystemFactoryError, SubstanceSystemSpec,
-};
 use crate::Thermodynamics::phase_layout::PhaseId;
 use crate::Thermodynamics::physical_state::PhysicalState;
 use crate::Thermodynamics::thermo_lib_api::{ElementSearchMode, ThermoData, ThermoRepository};
+use crate::Thermodynamics::User_PhaseOrSolution::{
+    PhaseModel, PhaseSpec, SubstanceSystemFactoryError, SubstanceSystemSpec,
+};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -743,11 +743,9 @@ mod tests {
     fn policy_validates_temperature_and_candidate_limits() {
         assert!(CandidateTemperatureRange::new(300.0, 1000.0).is_ok());
         assert!(CandidateTemperatureRange::new(0.0, 1000.0).is_err());
-        assert!(
-            EquilibriumCandidatePolicy::default()
-                .with_max_candidates(0)
-                .is_err()
-        );
+        assert!(EquilibriumCandidatePolicy::default()
+            .with_max_candidates(0)
+            .is_err());
     }
 
     #[test]

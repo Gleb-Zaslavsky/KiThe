@@ -91,8 +91,7 @@ impl PhAcceptanceOptions {
 
     /// Tests the complete absolute-plus-relative acceptance contract.
     pub fn accepts_error(self, error_joules: f64, scale: EnthalpyScale) -> bool {
-        error_joules.is_finite()
-            && error_joules.abs() <= self.accepted_error_limit_joules(scale)
+        error_joules.is_finite() && error_joules.abs() <= self.accepted_error_limit_joules(scale)
     }
 
     /// Crate-internal spelling used by the monolithic runner.

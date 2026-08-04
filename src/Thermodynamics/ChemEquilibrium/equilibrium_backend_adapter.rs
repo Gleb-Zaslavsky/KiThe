@@ -69,10 +69,10 @@
 //! - [`equilibrium_rst_backend`](super::equilibrium_rst_backend) — RST adapter
 //!
 
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_legacy_backend::solve_legacy_backend;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
     EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_legacy_backend::solve_legacy_backend;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     recoverable_backend_failure_kind, SolverParams,
 };
@@ -220,17 +220,13 @@ pub(crate) fn solve_backend_cascade_with_control(
     f: &dyn Fn(&[f64]) -> Result<Vec<f64>, ReactionExtentError>,
     j: Option<&dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError>>,
     feasible: &dyn Fn(&[f64]) -> bool,
-    validate_candidate: &dyn Fn(
-        &[f64],
-    )
-        -> Result<EquilibriumCandidateReport, ReactionExtentError>,
+    validate_candidate: &dyn Fn(&[f64]) -> Result<EquilibriumCandidateReport, ReactionExtentError>,
     policy: SolverPolicy,
     budget: SolverCascadeBudget,
     solver_params: &SolverParams,
     rst_problem: Option<&RstPreparedProblem>,
     execution_control: Option<&EquilibriumExecutionControl>,
-) -> Result<(Vec<f64>, EquilibriumCandidateReport, EquilibriumSolveReport), ReactionExtentError>
-{
+) -> Result<(Vec<f64>, EquilibriumCandidateReport, EquilibriumSolveReport), ReactionExtentError> {
     if backends.is_empty() {
         return Err(ReactionExtentError::InvalidProblem {
             field: "solver_policy",
@@ -249,13 +245,7 @@ pub(crate) fn solve_backend_cascade_with_control(
         });
     }
 
-    let system = PreparedNonlinearSystem::new(
-        initial_guess.len(),
-        f,
-        j,
-        feasible,
-        rst_problem,
-    )?;
+    let system = PreparedNonlinearSystem::new(initial_guess.len(), f, j, feasible, rst_problem)?;
 
     let mut attempts = Vec::with_capacity(backends.len());
     let mut started_attempts = 0usize;

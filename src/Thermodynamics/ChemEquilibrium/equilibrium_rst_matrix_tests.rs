@@ -213,10 +213,8 @@ fn rusted_scithe_default_policy_has_a_stable_documented_backend_order() {
             SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton),
         ]
     );
-    assert!(
-        policy
-            .ordered_backends()
-            .iter()
-            .all(|backend| matches!(backend, SolverBackend::RustedSciThe(_)))
-    );
+    assert!(policy
+        .ordered_backends()
+        .iter()
+        .all(|backend| matches!(backend, SolverBackend::RustedSciThe(_))));
 }

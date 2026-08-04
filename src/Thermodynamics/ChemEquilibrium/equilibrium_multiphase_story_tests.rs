@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 
+use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
@@ -32,14 +33,13 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     InitialPhaseSet, PhaseManager, PhaseStatus,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-    PhaseEquilibriumBuildRequest, build_phase_equilibrium_problem,
+    build_phase_equilibrium_problem, PhaseEquilibriumBuildRequest,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
-    EquilibriumSolveOptions, PhaseControlPolicy, ResolvedPhaseEquilibriumRequest, solve_resolved_pt,
+    solve_resolved_pt, EquilibriumSolveOptions, PhaseControlPolicy, ResolvedPhaseEquilibriumRequest,
 };
 use crate::Thermodynamics::User_PhaseOrSolution::{PhaseSpec, ResolvedPhaseSystem};
 use crate::Thermodynamics::User_substances::{LibraryPriority, SubsData};
-use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 
 fn resolved_local_nasa_gas() -> ResolvedPhaseSystem {
     let phase = PhaseSpec::ideal_gas(
@@ -209,12 +209,10 @@ fn accepted_fixed_phase_solution_exposes_qualified_amounts_totals_and_summary() 
     );
     assert!(result.aggregate_moles_by_substance().contains_key("H2O"));
     assert!(result.to_string().contains("[component] gas::H2"));
-    assert!(
-        result
-            .summary_rows()
-            .iter()
-            .any(|row| row.section == "backend" && row.label == "accepted")
-    );
+    assert!(result
+        .summary_rows()
+        .iter()
+        .any(|row| row.section == "backend" && row.label == "accepted"));
 }
 
 #[test]
@@ -375,12 +373,10 @@ fn default_resolved_solve_does_not_run_limited_keq_validator() {
     .unwrap();
 
     assert!(result.keq_validation_status().is_none());
-    assert!(
-        !result
-            .summary_rows()
-            .iter()
-            .any(|row| row.section == "keq_validation")
-    );
+    assert!(!result
+        .summary_rows()
+        .iter()
+        .any(|row| row.section == "keq_validation"));
 }
 
 #[test]
@@ -400,12 +396,10 @@ fn bounded_phase_control_publishes_its_acceptance_evidence_in_the_same_result() 
         .expect("bounded solve must retain its complementarity gate");
     assert_eq!(phase_control.final_phase_set.active_mask(), vec![true]);
     assert!(acceptance.complementarity.satisfied);
-    assert!(
-        result
-            .summary_rows()
-            .iter()
-            .any(|row| row.section == "acceptance" && row.label == "complementarity_satisfied")
-    );
+    assert!(result
+        .summary_rows()
+        .iter()
+        .any(|row| row.section == "acceptance" && row.label == "complementarity_satisfied"));
 }
 
 #[test]
@@ -445,12 +439,10 @@ fn bounded_mixed_phase_control_publishes_keq_not_applicable_status() {
         result.keq_validation_status(),
         Some(EquilibriumConstantCrossValidationStatus::ValidatorNotApplicable { .. })
     ));
-    assert!(
-        result
-            .summary_rows()
-            .iter()
-            .any(|row| row.section == "keq_validation" && row.value == "not_applicable")
-    );
+    assert!(result
+        .summary_rows()
+        .iter()
+        .any(|row| row.section == "keq_validation" && row.value == "not_applicable"));
 
     let liquid = PhaseId::new(Some("liquid".to_string()));
     let solid = PhaseId::new(Some("solid".to_string()));
@@ -521,12 +513,10 @@ fn facade_retains_independent_keq_status_in_the_immutable_result_summary() {
         }
         other => panic!("expected a compared keq validation status, got {other:?}"),
     }
-    assert!(
-        result
-            .summary_rows()
-            .iter()
-            .any(|row| row.section == "keq_validation" && row.label == "status")
-    );
+    assert!(result
+        .summary_rows()
+        .iter()
+        .any(|row| row.section == "keq_validation" && row.label == "status"));
 }
 
 #[test]

@@ -346,18 +346,15 @@ mod tests {
             .unwrap();
         let rows = solution.report.summary_rows();
 
-        assert!(
-            rows.iter()
-                .any(|row| row.section == "solve" && row.label == "converged")
-        );
-        assert!(
-            rows.iter()
-                .any(|row| row.section == "solve" && row.label == "iterations")
-        );
-        assert!(
-            rows.iter()
-                .any(|row| row.section == "solve" && row.label == "bracketed")
-        );
+        assert!(rows
+            .iter()
+            .any(|row| row.section == "solve" && row.label == "converged"));
+        assert!(rows
+            .iter()
+            .any(|row| row.section == "solve" && row.label == "iterations"));
+        assert!(rows
+            .iter()
+            .any(|row| row.section == "solve" && row.label == "bracketed"));
         let rendered = format!("{}", solution.report);
         assert!(rendered.contains("[solve] converged = true"));
         assert!(rendered.contains("[solve] iterations = "));

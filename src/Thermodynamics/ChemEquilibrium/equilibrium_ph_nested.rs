@@ -10,6 +10,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::Thermodynamics::phase_layout::PhaseId;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
     EnthalpyScale, TemperatureBounds,
 };
@@ -21,7 +22,6 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimin
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     MultiphaseAcceptanceReport, PhaseControlledSolveReport, PhaseStatus,
 };
-use crate::Thermodynamics::phase_layout::PhaseId;
 
 /// Final lifecycle state of one semantic phase at an accepted temperature
 /// trial. The phase id remains explicit because the same substance can occur
@@ -263,8 +263,6 @@ impl PhTrialTimingReport {
     }
 }
 
-
-
 /// Scalar controls consumed by the nested bracket engine.
 ///
 /// This is intentionally smaller than the public workflow options. Inner
@@ -292,9 +290,7 @@ impl NestedBracketOptions {
     /// constraint is violated, so callers receive a diagnostic message instead
     /// of a silent default or a panic during the scalar search.
     fn validate(self) -> Result<(), ReactionExtentError> {
-        if !self.scaled_enthalpy_tolerance.is_finite()
-            || self.scaled_enthalpy_tolerance <= 0.0
-        {
+        if !self.scaled_enthalpy_tolerance.is_finite() || self.scaled_enthalpy_tolerance <= 0.0 {
             return Err(ReactionExtentError::InvalidProblem {
                 field: "scaled_enthalpy_tolerance",
                 message: "tolerance must be finite and positive".to_string(),
@@ -461,8 +457,8 @@ where
 
     ensure_temperature_budget(trials.len())?;
     let lower_temperature = bounds.lower();
-    let (lower_value, lower_enthalpy) = evaluate(lower_temperature)
-        .map_err(|cause| trial_error(0, lower_temperature, cause))?;
+    let (lower_value, lower_enthalpy) =
+        evaluate(lower_temperature).map_err(|cause| trial_error(0, lower_temperature, cause))?;
     ensure_wall_time_budget(started, options.max_wall_time)?;
     let lower_trial = make_trial(
         lower_temperature,
@@ -483,8 +479,8 @@ where
 
     ensure_temperature_budget(trials.len())?;
     let upper_temperature = bounds.upper();
-    let (upper_value, upper_enthalpy) = evaluate(upper_temperature)
-        .map_err(|cause| trial_error(1, upper_temperature, cause))?;
+    let (upper_value, upper_enthalpy) =
+        evaluate(upper_temperature).map_err(|cause| trial_error(1, upper_temperature, cause))?;
     ensure_wall_time_budget(started, options.max_wall_time)?;
     let upper_trial = make_trial(
         upper_temperature,
@@ -565,10 +561,10 @@ where
     for iteration in 1..=options.max_iterations {
         let midpoint = lower + (upper - lower) * 0.5;
         let (trial_temperature, step_kind) = if options.allow_interpolation {
-            safeguarded_interpolation_step(lower, lower_error, upper, upper_error).map_or(
-                (midpoint, NestedStepKind::Bisection),
-                |temperature| (temperature, NestedStepKind::Interpolation),
-            )
+            safeguarded_interpolation_step(lower, lower_error, upper, upper_error)
+                .map_or((midpoint, NestedStepKind::Bisection), |temperature| {
+                    (temperature, NestedStepKind::Interpolation)
+                })
         } else {
             (midpoint, NestedStepKind::Bisection)
         };

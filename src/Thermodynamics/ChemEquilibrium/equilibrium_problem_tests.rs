@@ -5,6 +5,8 @@
 //! log-mole nonlinear iterate, and ensure malformed input is rejected before
 //! residual/Jacobian construction can panic.
 
+use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
+use crate::Thermodynamics::physical_state::PhysicalState;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_component::{
     EquilibriumComponentDescriptor, EquilibriumPhaseDescriptor,
@@ -13,8 +15,8 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validatio
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-    ContinuationSeedPolicy, EquilibriumLogMoles, GibbsFn, Phase, PhaseKind, Solvers,
     compute_species_moles, equilibrium_logmole_jacobian, equilibrium_logmole_residual,
+    ContinuationSeedPolicy, EquilibriumLogMoles, GibbsFn, Phase, PhaseKind, Solvers,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
@@ -25,15 +27,13 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     SolverBackend, SolverCascadeBudget, SolverPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::{
-    EquilibriumAcceptanceCriteria, EquilibriumCandidateResiduals, validate_equilibrium_candidate,
+    validate_equilibrium_candidate, EquilibriumAcceptanceCriteria, EquilibriumCandidateResiduals,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::multiphase_equilibrium_residual_generator_sym;
 use crate::Thermodynamics::User_PhaseOrSolution::PhaseModel;
-use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
-use crate::Thermodynamics::physical_state::PhysicalState;
-use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::DMatrix;
 use std::rc::Rc;
+use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 fn assert_jacobian_matches_central_difference(
     prepared: &PreparedEquilibriumProblem,
@@ -320,19 +320,15 @@ fn equilibrium_problem_preview_summary_rows_are_stable_and_human_readable() {
     let preview = prepared.preview_with_diagnostics(1e-12).unwrap();
     let rows = preview.summary_rows();
 
-    assert!(
-        rows.iter().any(|row| row.section == "problem"
-            && row.label == "species_count"
-            && row.value == "2")
-    );
-    assert!(
-        rows.iter()
-            .any(|row| row.section == "species_capacity" && row.label == "O2")
-    );
-    assert!(
-        rows.iter()
-            .any(|row| row.section == "diagnostics" && row.label == "element_rank")
-    );
+    assert!(rows
+        .iter()
+        .any(|row| row.section == "problem" && row.label == "species_count" && row.value == "2"));
+    assert!(rows
+        .iter()
+        .any(|row| row.section == "species_capacity" && row.label == "O2"));
+    assert!(rows
+        .iter()
+        .any(|row| row.section == "diagnostics" && row.label == "element_rank"));
 
     let rendered = format!("{preview}");
     assert!(rendered.contains("[problem] temperature = 1000.000000"));
@@ -866,12 +862,10 @@ fn solve_problem_returns_the_immutable_accepted_snapshot() {
     assert_eq!(solution.moles().len(), 2);
     assert!(solution.moles().iter().all(|value| *value > 0.0));
     assert!(solution.validation().residual_l2_norm.is_finite());
-    assert!(
-        solution
-            .validation()
-            .max_abs_element_balance_error
-            .is_finite()
-    );
+    assert!(solution
+        .validation()
+        .max_abs_element_balance_error
+        .is_finite());
 }
 
 #[test]

@@ -7,6 +7,8 @@
 
 use std::collections::HashMap;
 
+use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
+use crate::Thermodynamics::physical_state::PhysicalState;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     equilibrium_logmole_jacobian, equilibrium_logmole_residual,
@@ -19,22 +21,20 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    RustedSciTheSolver, prepare_rst_symbolic_problem_from_prepared,
+    prepare_rst_symbolic_problem_from_prepared, RustedSciTheSolver,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     SolverBackend, SolverPolicy,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::multiphase_equilibrium_residual_generator_sym;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
+    build_phase_equilibrium_problem, build_phase_equilibrium_problem_with_timing,
     PhaseEquilibriumBuildRequest, PhaseEquilibriumMetadata, PhaseEquilibriumProblemBundle,
-    SupportedPhaseModelPolicy, build_phase_equilibrium_problem,
-    build_phase_equilibrium_problem_with_timing,
+    SupportedPhaseModelPolicy,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingMode;
 use crate::Thermodynamics::User_PhaseOrSolution::{PhaseModel, PhaseSpec, ResolvedPhaseSystem};
 use crate::Thermodynamics::User_substances::{LibraryPriority, SubsData};
-use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
-use crate::Thermodynamics::physical_state::PhysicalState;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 fn gas_spec() -> PhaseSpec {
@@ -341,13 +341,11 @@ fn metadata_retains_the_resolution_report_in_canonical_phase_order() {
 #[test]
 fn build_request_rejects_composition_from_a_different_layout() {
     let resolved = resolved_system(vec![gas_spec(), liquid_spec()], false);
-    let foreign_layout = MultiphaseEquilibriumLayout::new(vec![
-        PhaseSpec::ideal_gas(
-            PhaseId::new(Some("other".to_string())),
-            vec!["H2O".to_string(), "O2".to_string()],
-        )
-        .unwrap(),
-    ])
+    let foreign_layout = MultiphaseEquilibriumLayout::new(vec![PhaseSpec::ideal_gas(
+        PhaseId::new(Some("other".to_string())),
+        vec!["H2O".to_string(), "O2".to_string()],
+    )
+    .unwrap()])
     .unwrap();
     let foreign_composition =
         MultiphaseInitialComposition::from_dense(&foreign_layout, vec![1.0, 1.0]).unwrap();
@@ -362,11 +360,9 @@ fn build_request_rejects_composition_from_a_different_layout() {
     )
     .unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("composition belongs to a different multiphase layout")
-    );
+    assert!(error
+        .to_string()
+        .contains("composition belongs to a different multiphase layout"));
 }
 
 #[test]
@@ -430,18 +426,14 @@ fn local_nasa_gas_builds_a_complete_problem_and_retains_provenance() {
     let report = bundle.report();
     assert_eq!(report.conditions(), conditions);
     assert_eq!(report.components().len(), 3);
-    assert!(
-        report
-            .components()
-            .iter()
-            .all(|row| row.standard_gibbs_at_conditions().is_finite())
-    );
-    assert!(
-        report
-            .components()
-            .iter()
-            .all(|row| row.thermo_source().library() == "NASA_gas")
-    );
+    assert!(report
+        .components()
+        .iter()
+        .all(|row| row.standard_gibbs_at_conditions().is_finite()));
+    assert!(report
+        .components()
+        .iter()
+        .all(|row| row.thermo_source().library() == "NASA_gas"));
 
     let totals = report
         .element_labels()
@@ -480,13 +472,11 @@ fn local_phase_data_solves_through_one_accepted_bridge_bundle() {
     assert_eq!(accepted.solution().moles().len(), 3);
     assert!(accepted.solution().moles().iter().all(|moles| *moles > 0.0));
     assert!(accepted.solution().validation().min_moles > 0.0);
-    assert!(
-        accepted
-            .solution()
-            .validation()
-            .max_abs_element_balance_error
-            .is_finite()
-    );
+    assert!(accepted
+        .solution()
+        .validation()
+        .max_abs_element_balance_error
+        .is_finite());
     assert!(accepted.solve_report().accepted_attempt().is_some());
     assert!(matches!(
         accepted.solve_report().accepted_backend,
@@ -976,7 +966,10 @@ fn parameterized_rst_graph_matches_the_canonical_real_nasa_formulation() {
 
     let actual_residual = parameterized.residual_for_test(&log_moles).unwrap();
     assert_eq!(actual_residual.len(), expected_residual.len());
-    for (row, (&actual, &expected)) in actual_residual.iter().zip(expected_residual.iter()).enumerate()
+    for (row, (&actual, &expected)) in actual_residual
+        .iter()
+        .zip(expected_residual.iter())
+        .enumerate()
     {
         assert!(
             (actual - expected).abs() <= 1e-10,
@@ -989,8 +982,7 @@ fn parameterized_rst_graph_matches_the_canonical_real_nasa_formulation() {
     for row in 0..actual_jacobian.nrows() {
         for column in 0..actual_jacobian.ncols() {
             assert!(
-                (actual_jacobian[(row, column)] - expected_jacobian[(row, column)]).abs()
-                    <= 1e-10,
+                (actual_jacobian[(row, column)] - expected_jacobian[(row, column)]).abs() <= 1e-10,
                 "parameterized Jacobian entry ({row}, {column}) diverged: actual={}, expected={}",
                 actual_jacobian[(row, column)],
                 expected_jacobian[(row, column)]
@@ -1026,11 +1018,9 @@ fn missing_last_phase_data_returns_no_bundle_and_does_not_mutate_resolved_input(
         Err(error) => error,
     };
 
-    assert!(
-        error
-            .to_string()
-            .contains("equilibrium data preparation failed")
-    );
+    assert!(error
+        .to_string()
+        .contains("equilibrium data preparation failed"));
     let gas_after = resolved
         .phase_data()
         .get(&Some("gas".to_string()))

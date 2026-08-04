@@ -9,19 +9,20 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, EquilibriumSolution,
 };
-#[cfg(test)]
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, MultiStartSolveReport,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
     EquilibriumTimingCollector, EquilibriumTimingReport, EquilibriumTimingStage,
 };
+#[cfg(test)]
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     MultiphaseAcceptanceReport, PhaseControlledSolveReport, PhaseStatus,
 };
@@ -29,7 +30,6 @@ use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
     EquilibriumPhaseDescriptor, PhaseEquilibriumBuildReport, PhaseEquilibriumMetadata,
     PhaseEquilibriumSolutionBundle,
 };
-use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 
 /// One stable row in a multiphase result summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,9 +354,7 @@ impl MultiphaseEquilibriumSolution {
         mut self,
         validation: EquilibriumCandidateReport,
     ) -> Self {
-        self.accepted_solution = self
-            .accepted_solution
-            .with_validation_for_test(validation);
+        self.accepted_solution = self.accepted_solution.with_validation_for_test(validation);
         self
     }
 
@@ -631,6 +629,7 @@ mod tests {
 
     use std::collections::HashMap;
 
+    use crate::Thermodynamics::phase_layout::PhaseId;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
         MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
     };
@@ -638,11 +637,10 @@ mod tests {
         EquilibriumConditions, TraceSpeciesSeedPolicy,
     };
     use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-        PhaseEquilibriumBuildRequest, build_phase_equilibrium_problem,
+        build_phase_equilibrium_problem, PhaseEquilibriumBuildRequest,
     };
     use crate::Thermodynamics::User_PhaseOrSolution::{PhaseSpec, ResolvedPhaseSystem};
     use crate::Thermodynamics::User_substances::{LibraryPriority, SubsData};
-    use crate::Thermodynamics::phase_layout::PhaseId;
 
     use super::MultiphaseEquilibriumSolution;
 

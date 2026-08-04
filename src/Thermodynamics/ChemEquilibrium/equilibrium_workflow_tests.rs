@@ -3,18 +3,18 @@ mod tests {
     // This module is the explicit characterization layer for the deprecated
     // mutable workflows retained as numerical fallback coverage.
     #![allow(deprecated)]
+    use crate::Thermodynamics::thermo_lib_api::LibraryId;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_active_set::ActiveSetProjection;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::*;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentErrorKind;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverPolicy;
-    use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PHASE_CONTROL_TRACE_MOLE_FLOOR;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseSeedPolicy;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PHASE_CONTROL_TRACE_MOLE_FLOOR;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::*;
     use crate::Thermodynamics::ChemEquilibrium::legacy::gas_solver as legacy_gas_solver;
     use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData, WhatIsFound};
-    use crate::Thermodynamics::thermo_lib_api::LibraryId;
     use nalgebra::DMatrix;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -863,14 +863,12 @@ mod tests {
 
         assert!(solver.moles[2] <= PHASE_CONTROL_TRACE_MOLE_FLOOR * 1.01);
         assert_eq!(solver.phase_active_mask, vec![true, false]);
-        assert!(
-            solver
-                .last_phase_control_report
-                .as_ref()
-                .unwrap()
-                .transitions
-                .is_empty()
-        );
+        assert!(solver
+            .last_phase_control_report
+            .as_ref()
+            .unwrap()
+            .transitions
+            .is_empty());
     }
 
     #[test]
@@ -938,14 +936,12 @@ mod tests {
 
         assert_eq!(solver.phase_active_mask, vec![true, false]);
         assert!(solver.moles[2] <= PHASE_CONTROL_TRACE_MOLE_FLOOR * 1.01);
-        assert!(
-            solver
-                .last_phase_control_report
-                .as_ref()
-                .unwrap()
-                .transitions
-                .is_empty()
-        );
+        assert!(solver
+            .last_phase_control_report
+            .as_ref()
+            .unwrap()
+            .transitions
+            .is_empty());
     }
 
     #[test]
@@ -1178,20 +1174,16 @@ mod tests {
                         "element {element} drifted at T={temperature}, candidate_gibbs={candidate_gibbs}"
                     );
                 }
-                assert!(
-                    solver
-                        .moles
-                        .iter()
-                        .all(|value| value.is_finite() && *value >= 0.0)
-                );
-                assert!(
-                    solver
-                        .last_phase_control_report
-                        .as_ref()
-                        .is_some_and(
-                            |report| report.iterations <= solver.phase_manager.max_phase_iterations
-                        )
-                );
+                assert!(solver
+                    .moles
+                    .iter()
+                    .all(|value| value.is_finite() && *value >= 0.0));
+                assert!(solver
+                    .last_phase_control_report
+                    .as_ref()
+                    .is_some_and(
+                        |report| report.iterations <= solver.phase_manager.max_phase_iterations
+                    ));
             }
         }
     }
@@ -1216,12 +1208,10 @@ mod tests {
             let observed = compute_element_totals(&solver.elem_composition, &solver.moles)
                 .expect("accepted moles must remain element-representable");
 
-            assert!(
-                solver
-                    .moles
-                    .iter()
-                    .all(|value| value.is_finite() && *value >= 0.0)
-            );
+            assert!(solver
+                .moles
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0));
             assert_eq!(solver.phase_active_mask.len(), 3);
             assert!(solver.phase_active_mask[0]);
             for element in 0..expected.len() {
@@ -1284,11 +1274,9 @@ mod tests {
 
         assert_eq!(solver.phase_active_mask, vec![true, true]);
         assert_eq!(first_report.transitions.len(), 1);
-        assert!(
-            first_report
-                .final_active_phases
-                .contains(&PhaseIndex::new(1, 2).unwrap())
-        );
+        assert!(first_report
+            .final_active_phases
+            .contains(&PhaseIndex::new(1, 2).unwrap()));
 
         *candidate_gibbs.borrow_mut() = 1_000.0;
         let second_result = solver.solve_with_phase_control();
@@ -1432,18 +1420,15 @@ mod tests {
         let rows = report.summary_rows();
         let rendered = report.to_string();
 
-        assert!(
-            rows.iter()
-                .any(|row| row.section == "phase_control" && row.label == "iterations")
-        );
-        assert!(
-            rows.iter()
-                .any(|row| row.section == "validation" && row.label == "residual_l2_norm")
-        );
-        assert!(
-            rows.iter()
-                .any(|row| row.section == "nonlinear" && row.label == "accepted_reports")
-        );
+        assert!(rows
+            .iter()
+            .any(|row| row.section == "phase_control" && row.label == "iterations"));
+        assert!(rows
+            .iter()
+            .any(|row| row.section == "validation" && row.label == "residual_l2_norm"));
+        assert!(rows
+            .iter()
+            .any(|row| row.section == "nonlinear" && row.label == "accepted_reports"));
         assert!(rendered.contains("[phase_control] iterations = "));
         assert!(rendered.contains("[validation] residual_l2_norm = "));
     }
@@ -1477,14 +1462,12 @@ mod tests {
         let rendered = report.to_string();
 
         assert!(report.complementarity.satisfied);
-        assert!(
-            rows.iter()
-                .any(|row| row.section == "acceptance" && row.label == "phase_iterations")
-        );
-        assert!(
-            rows.iter()
-                .any(|row| row.section == "complementarity" && row.label == "satisfied")
-        );
+        assert!(rows
+            .iter()
+            .any(|row| row.section == "acceptance" && row.label == "phase_iterations"));
+        assert!(rows
+            .iter()
+            .any(|row| row.section == "complementarity" && row.label == "satisfied"));
         assert!(rendered.contains("[acceptance] phase_iterations = "));
         assert!(rendered.contains("[complementarity] satisfied = true"));
     }
@@ -1739,16 +1722,12 @@ mod tests {
                 .map(|result| result.library()),
             Some("nuig_thermo")
         );
-        assert!(
-            subs_data
-                .get_search_result("CO2", WhatIsFound::Thermo)
-                .is_some()
-        );
-        assert!(
-            subs_data
-                .get_search_result("CH4", WhatIsFound::Thermo)
-                .is_some()
-        );
+        assert!(subs_data
+            .get_search_result("CO2", WhatIsFound::Thermo)
+            .is_some());
+        assert!(subs_data
+            .get_search_result("CH4", WhatIsFound::Thermo)
+            .is_some());
     }
 
     #[test]

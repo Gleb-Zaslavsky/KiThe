@@ -100,11 +100,11 @@
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_range::TemperatureRangeSolution;
+use prettytable::{Cell, Row, Table};
+use std::fmt;
 use RustedSciThe::numerical::optimization::inter_n_extrapolate::{
     InterpolationSpace as PchipSpace, Pchip,
 };
-use prettytable::{Cell, Row, Table};
-use std::fmt;
 
 /// How the output temperature grid should be constructed.
 #[derive(Debug, Clone, PartialEq)]
@@ -497,9 +497,11 @@ pub fn postprocess_temperature_series(
 /// points are sorted by temperature because PCHIP requires an increasing
 /// interpolation coordinate, so descending solver grids are supported without
 /// exposing solver-order assumptions to the interpolation layer. Physical
-/// component amounts are used rather than numerical trace coordinates; a log
-/// policy therefore rejects an exact zero at a phase transition instead of
-/// silently treating a numerical floor as physical material.
+/// component amounts are used rather than numerical trace coordinates. Raw
+/// points remain available across phase transitions, but interpolation is
+/// rejected when a phase lifecycle transition was accepted: connecting both
+/// sides with one smooth curve would manufacture nonphysical intermediate
+/// states.
 pub fn postprocess_temperature_range_solution(
     solution: &TemperatureRangeSolution,
     policy: &TemperaturePostprocessingPolicy,
@@ -507,6 +509,13 @@ pub fn postprocess_temperature_range_solution(
     if solution.points().is_empty() {
         return Err(invalid_series(
             "typed temperature range must contain at least one accepted point",
+        ));
+    }
+    if !resampling_allowed_across_phase_transition(policy)
+        && range_contains_phase_transition(solution)
+    {
+        return Err(invalid_series(
+            "temperature-range resampling is forbidden across accepted phase transitions; keep raw points or split the range into phase-stable segments",
         ));
     }
 
@@ -535,6 +544,23 @@ pub fn postprocess_temperature_range_solution(
         .collect::<Vec<_>>();
 
     postprocess_temperature_series(labels, &rows, policy)
+}
+
+/// Returns whether a range contains an accepted phase lifecycle transition.
+///
+/// A point report is the authoritative phase-control evidence. This helper is
+/// intentionally narrow: it does not infer a transition from an amount merely
+/// becoming small, because trace floors and display thresholds must not change
+/// the physical interpolation contract.
+fn range_contains_phase_transition(solution: &TemperatureRangeSolution) -> bool {
+    solution
+        .points()
+        .iter()
+        .any(|point| point.report().phase_control_transitions() > 0)
+}
+
+fn resampling_allowed_across_phase_transition(policy: &TemperaturePostprocessingPolicy) -> bool {
+    matches!(policy.grid, TemperatureResamplingGrid::RawOnly)
 }
 
 fn validate_and_build_pchip(
@@ -598,6 +624,21 @@ mod tests {
     }
 
     #[test]
+    fn phase_transition_guard_only_allows_raw_points() {
+        let raw = TemperaturePostprocessingPolicy {
+            grid: TemperatureResamplingGrid::RawOnly,
+            interpolation: TemperatureInterpolationPolicy::default(),
+        };
+        let smooth = TemperaturePostprocessingPolicy {
+            grid: TemperatureResamplingGrid::Uniform { points: 5 },
+            interpolation: TemperatureInterpolationPolicy::default(),
+        };
+
+        assert!(resampling_allowed_across_phase_transition(&raw));
+        assert!(!resampling_allowed_across_phase_transition(&smooth));
+    }
+
+    #[test]
     fn raw_series_preserves_row_and_column_order() {
         let series = TemperatureSweepSeries::from_rows(
             vec!["A".to_string(), "B".to_string()],
@@ -637,12 +678,10 @@ mod tests {
             &[300.0, 350.0, 400.0, 450.0, 500.0]
         );
         assert_eq!(resampled.series_count(), 2);
-        assert!(
-            resampled
-                .rows()
-                .iter()
-                .all(|row| row.iter().all(|v| v.is_finite()))
-        );
+        assert!(resampled
+            .rows()
+            .iter()
+            .all(|row| row.iter().all(|v| v.is_finite())));
     }
 
     #[test]
@@ -666,12 +705,10 @@ mod tests {
         let resampled = series.resample(&policy).unwrap().unwrap();
 
         assert!(resampled.rows().iter().all(|row| row[0] > 0.0));
-        assert!(
-            resampled
-                .rows()
-                .windows(2)
-                .all(|window| window[0][0] <= window[1][0])
-        );
+        assert!(resampled
+            .rows()
+            .windows(2)
+            .all(|window| window[0][0] <= window[1][0]));
     }
 
     #[test]
@@ -721,12 +758,10 @@ mod tests {
 
         assert_eq!(result.raw.point_count(), 3);
         assert_eq!(result.resampled.as_ref().unwrap().point_count(), 4);
-        assert!(
-            result
-                .summary_rows()
-                .iter()
-                .any(|row| row.section == "postprocessing" && row.label == "resampled")
-        );
+        assert!(result
+            .summary_rows()
+            .iter()
+            .any(|row| row.section == "postprocessing" && row.label == "resampled"));
     }
 
     #[test]

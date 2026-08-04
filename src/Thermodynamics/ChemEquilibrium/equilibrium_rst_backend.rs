@@ -11,8 +11,8 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{EquilibriumL
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
     BackendFailureKind, ReactionExtentError,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::PreparedEquilibriumProblem;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_formulation::PreparedPhFormulation;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::PreparedEquilibriumProblem;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     SolverAttemptMetrics, SolverEvaluationTiming, SolverTermination,
 };
@@ -21,19 +21,19 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     multiphase_equilibrium_residual_generator_sym_at_temperature,
 };
 use crate::Thermodynamics::User_substances_error::SubsDataError;
+use nalgebra::{DMatrix, DVector};
+use std::cell::Cell;
+use std::time::{Duration, Instant};
 use RustedSciThe::numerical::Nonlinear_systems::error::SolveError as RstSolveError;
-use RustedSciThe::numerical::Nonlinear_systems::problem::{
-    Bounds, JacobianProvider, NonlinearProblem,
-};
 use RustedSciThe::numerical::Nonlinear_systems::prelude::{
     DampedNewtonMethod, LevenbergMarquardtMethod, LevenbergMarquardtMinpack,
     NielsenLevenbergMarquardtMethod, NonlinearSolverMethod, PowellDoglegMethod, SolveOptions,
     SymbolicNonlinearProblem, SymbolicProblemOptions, TerminationReason, TrustRegionLMMethod,
 };
+use RustedSciThe::numerical::Nonlinear_systems::problem::{
+    Bounds, JacobianProvider, NonlinearProblem,
+};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
-use nalgebra::{DMatrix, DVector};
-use std::cell::Cell;
-use std::time::{Duration, Instant};
 
 /// Immutable symbolic thermochemistry snapshot prepared for the RST adapter.
 ///
@@ -154,9 +154,7 @@ impl RustedSciTheSolveContract {
             if !lower.is_finite() || !upper.is_finite() || lower > upper {
                 return Err(ReactionExtentError::InvalidProblem {
                     field: "rst_log_mole_bounds",
-                    message: format!(
-                        "bound {index} must be finite and satisfy lower <= upper"
-                    ),
+                    message: format!("bound {index} must be finite and satisfy lower <= upper"),
                 });
             }
         }
@@ -224,13 +222,16 @@ impl RstPreparedProblem {
         temperature: f64,
         standard_gibbs: &[f64],
     ) -> Result<(), ReactionExtentError> {
-        let species_count = self.fixed_pt_species_count.ok_or_else(|| {
-            ReactionExtentError::InvalidProblem {
+        let species_count =
+            self.fixed_pt_species_count
+                .ok_or_else(|| {
+                    ReactionExtentError::InvalidProblem {
                 field: "rst_fixed_pt_parameters",
-                message: "this RST problem was not prepared for parameterized fixed-P,T thermochemistry"
-                    .to_string(),
+                message:
+                    "this RST problem was not prepared for parameterized fixed-P,T thermochemistry"
+                        .to_string(),
             }
-        })?;
+                })?;
         if !temperature.is_finite()
             || standard_gibbs.len() != species_count
             || standard_gibbs.iter().any(|value| !value.is_finite())
@@ -505,7 +506,10 @@ impl RustedSciTheSolver {
                     solution: result.x.as_slice().to_vec(),
                     metrics: SolverAttemptMetrics {
                         termination: map_termination(result.termination.clone()),
-                        backend_converged: matches!(result.termination, TerminationReason::Converged),
+                        backend_converged: matches!(
+                            result.termination,
+                            TerminationReason::Converged
+                        ),
                         iterations: result.iterations,
                         residual_evaluations: result.statistics.residual_evaluations,
                         jacobian_evaluations: result.statistics.jacobian_evaluations,
@@ -832,9 +836,10 @@ pub(crate) fn prepare_baked_rst_symbolic_problem_for_test(
     let options = SymbolicProblemOptions::new()
         .with_variables(variables)
         .with_equation_parameters(vec!["T".to_string()])
-        .with_equation_parameter_values(DVector::from_vec(vec![
-            prepared.problem().conditions().temperature(),
-        ]))
+        .with_equation_parameter_values(DVector::from_vec(vec![prepared
+            .problem()
+            .conditions()
+            .temperature()]))
         .with_lambdify_backend();
     let log_mole_bounds = prepared.finite_log_mole_bounds()?;
     SymbolicNonlinearProblem::from_expressions_with_options(equations, options)
@@ -914,7 +919,9 @@ pub(crate) fn prepare_rst_symbolic_ph_problem(
         })?;
     let prepared = formulation.prepared_pt();
     let species_count = prepared.problem().species().len();
-    if symbolic.standard_gibbs().len() != species_count || symbolic.enthalpy().len() != species_count {
+    if symbolic.standard_gibbs().len() != species_count
+        || symbolic.enthalpy().len() != species_count
+    {
         return Err(ReactionExtentError::DimensionMismatch(format!(
             "symbolic P,H thermochemistry has {} Gibbs and {} enthalpy expressions for {species_count} species",
             symbolic.standard_gibbs().len(),
@@ -1000,8 +1007,7 @@ fn bounded_temperature_expression(
     bounds: crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::TemperatureBounds,
 ) -> Expr {
     let theta = Expr::Var("theta_T".to_string());
-    let sigmoid = Expr::Const(1.0)
-        / (Expr::Const(1.0) + (Expr::Const(-1.0) * theta).exp());
+    let sigmoid = Expr::Const(1.0) / (Expr::Const(1.0) + (Expr::Const(-1.0) * theta).exp());
     Expr::Const(bounds.lower()) + Expr::Const(bounds.upper() - bounds.lower()) * sigmoid
 }
 
@@ -1011,14 +1017,18 @@ fn substitute_temperature(expression: Expr, temperature: &Expr) -> Expr {
     match expression {
         Expr::Var(name) if name == "T" => temperature.clone(),
         Expr::Var(_) | Expr::Const(_) => expression,
-        Expr::Add(left, right) => substitute_temperature(*left, temperature)
-            + substitute_temperature(*right, temperature),
-        Expr::Sub(left, right) => substitute_temperature(*left, temperature)
-            - substitute_temperature(*right, temperature),
-        Expr::Mul(left, right) => substitute_temperature(*left, temperature)
-            * substitute_temperature(*right, temperature),
-        Expr::Div(left, right) => substitute_temperature(*left, temperature)
-            / substitute_temperature(*right, temperature),
+        Expr::Add(left, right) => {
+            substitute_temperature(*left, temperature) + substitute_temperature(*right, temperature)
+        }
+        Expr::Sub(left, right) => {
+            substitute_temperature(*left, temperature) - substitute_temperature(*right, temperature)
+        }
+        Expr::Mul(left, right) => {
+            substitute_temperature(*left, temperature) * substitute_temperature(*right, temperature)
+        }
+        Expr::Div(left, right) => {
+            substitute_temperature(*left, temperature) / substitute_temperature(*right, temperature)
+        }
         Expr::Pow(left, right) => substitute_temperature(*left, temperature)
             .pow(substitute_temperature(*right, temperature)),
         Expr::Exp(value) => substitute_temperature(*value, temperature).exp(),

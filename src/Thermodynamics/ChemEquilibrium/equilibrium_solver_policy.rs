@@ -598,11 +598,9 @@ mod tests {
         let rst_count = RustedSciTheSolver::recommended_cascade().len();
 
         assert_eq!(ordered.len(), rst_count + 3);
-        assert!(
-            ordered[..rst_count]
-                .iter()
-                .all(|backend| matches!(backend, SolverBackend::RustedSciThe(_)))
-        );
+        assert!(ordered[..rst_count]
+            .iter()
+            .all(|backend| matches!(backend, SolverBackend::RustedSciThe(_))));
         assert_eq!(
             ordered[rst_count..],
             [
