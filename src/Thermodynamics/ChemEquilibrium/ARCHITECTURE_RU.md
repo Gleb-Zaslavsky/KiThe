@@ -445,7 +445,7 @@ EquilibriumLogMoles::solve_with_phase_control()
     │     ├── PhaseManager::classify_phases_at_temperature()
     │     │   └── PhaseTransitionPlan:
     │     │       ├── Deactivate → deactivate_phases_seed_only()
-    │     │       ├── Activate → seed_activated_phase()
+    │     │       ├── Activate → seed_activated_phase_with_composition(x*)
     │     │       ├── Hold → публикация с предупреждением
     │     │       └── NoTransition → публикация, выход
     │     │   [equilibrium_workflows.rs → PhaseManager]
@@ -597,7 +597,7 @@ ResidualScalingContract {
 
 **Зачем:** В многофазной системе нужно решить, какие фазы активны. Простое правило «активна, если n > 0» приводит к флип-флопу (фаза появляется-исчезает на соседних итерациях).
 
-**Гистерезис** — две границы: `dg_create` (создание) и `dg_keep` (удержание). Фаза создаётся только если `driving_force < dg_create`, удаляется только если `driving_force > dg_keep`. Между ними — гистерезисная петля.
+**Гистерезис** — две границы: `dg_create` (создание) и `dg_keep` (удержание). Они применяются только после принятой TPD-минимизации: фаза создаётся при `minimum_tpd < dg_create`, а исчезает при малом количестве и `minimum_tpd > dg_keep`. Между ними — гистерезисная петля.
 
 ```rust
 enum PhaseHysteresisPolicy {

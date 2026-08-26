@@ -694,9 +694,11 @@ mod error_contract_tests {
                 message: "missing backend".to_string(),
             }),
         };
-        assert!(error
-            .to_string()
-            .contains("cascade aborted after 0 attempt(s)"));
+        assert!(
+            error
+                .to_string()
+                .contains("cascade aborted after 0 attempt(s)")
+        );
         assert!(error.source().is_some());
         assert_eq!(error.kind(), ReactionExtentErrorKind::CascadeAborted);
     }

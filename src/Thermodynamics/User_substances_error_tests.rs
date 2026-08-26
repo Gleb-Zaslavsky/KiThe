@@ -152,9 +152,11 @@ mod error_handling_tests {
         let error = subs_data
             .if_not_found_go_nist(NistFallbackPolicy::ExactRequestedState)
             .expect_err("exact-state fallback must reject an unconstrained request");
-        assert!(error
-            .to_string()
-            .contains("requires an explicit gas, liquid, or solid requirement"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires an explicit gas, liquid, or solid requirement")
+        );
     }
 
     #[test]
@@ -167,10 +169,12 @@ mod error_handling_tests {
         subs_data
             .if_not_found_go_nist(NistFallbackPolicy::Disabled)
             .expect("disabled fallback is an intentional no-op");
-        assert!(subs_data
-            .get_not_found_substances()
-            .iter()
-            .any(|name| name == "missing-substance"));
+        assert!(
+            subs_data
+                .get_not_found_substances()
+                .iter()
+                .any(|name| name == "missing-substance")
+        );
     }
 
     #[test]

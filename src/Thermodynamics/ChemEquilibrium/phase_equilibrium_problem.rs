@@ -25,14 +25,12 @@
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
-use crate::Thermodynamics::phase_layout::{
-    PhaseComponentId, PhaseId as SemanticPhaseId, SystemLayout,
-};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
 pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_component::{
     EquilibriumComponentDescriptor, EquilibriumPhaseDescriptor,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumDiagnosticsOptions;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     EquilibriumSolverSettings, GibbsFn,
@@ -47,7 +45,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    prepare_rst_symbolic_problem_from_prepared, RstPreparedProblem,
+    RstPreparedProblem, prepare_rst_symbolic_problem_from_prepared,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::EquilibriumSolveReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::MultiStartSolveReport;
@@ -63,9 +61,12 @@ use crate::Thermodynamics::User_PhaseOrSolution::{
 };
 use crate::Thermodynamics::User_substances::SubsData;
 use crate::Thermodynamics::User_substances2::SearchSummaryRow;
+use crate::Thermodynamics::phase_layout::{
+    PhaseComponentId, PhaseId as SemanticPhaseId, SystemLayout,
+};
+use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::DMatrix;
 use std::time::{Duration, Instant};
-use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 /// Explicit version of the phase-model contract accepted by the bridge.
 ///
@@ -74,10 +75,10 @@ use RustedSciThe::symbolic::symbolic_engine::Expr;
 /// chemical-potential equation has not been implemented and tested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SupportedPhaseModelPolicy {
-    /// One ideal-gas phase and any number of one-component pure condensed
-    /// phases at fixed pressure and temperature.
+    /// Ideal gas, pure condensed, and multicomponent ideal-solution phases
+    /// using the canonical constrained-TPD lifecycle.
     #[default]
-    FixedPressureTemperatureV1,
+    IdealPhaseModelsV1,
 }
 
 /// Immutable structural projection shared by bridge construction and results.
@@ -113,7 +114,7 @@ impl PhaseEquilibriumMetadata {
         policy: SupportedPhaseModelPolicy,
     ) -> Result<Self, ReactionExtentError> {
         match policy {
-            SupportedPhaseModelPolicy::FixedPressureTemperatureV1 => {}
+            SupportedPhaseModelPolicy::IdealPhaseModelsV1 => {}
         }
 
         let multiphase_layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
@@ -639,24 +640,22 @@ impl PhaseEquilibriumProblemBundle {
         })
     }
 
-    /// Converts the bundle into a reusable bounded phase-control template.
-    ///
-    /// Unlike the fixed-layout template, this value retains the prepared
-    /// phase-control runner and its active-set state. A temperature point can
-    /// therefore continue from the previous accepted phase set; a new
-    /// projection is built only when the outer loop actually changes that set.
-    pub(crate) fn into_phase_control_template<F>(
+    /// Converts the bundle into a phase-control template with an explicit
+    /// observational diagnostics policy retained by its canonical runner.
+    pub(crate) fn into_phase_control_template_with_diagnostics<F>(
         self,
         configure_phase_control: F,
+        diagnostics: EquilibriumDiagnosticsOptions,
     ) -> Result<PreparedPhaseControlTemplate, ReactionExtentError>
     where
         F: FnOnce(&mut PhaseManager),
     {
         let timing_enabled = self.timing.enabled();
-        let mut runner = PreparedPhaseControlRunner::new(
+        let mut runner = PreparedPhaseControlRunner::new_with_diagnostics(
             self.problem,
             self.symbolic_standard_gibbs.clone(),
             timing_enabled,
+            diagnostics,
         )?;
         configure_phase_control(runner.configure_phase_control());
         Ok(PreparedPhaseControlTemplate {
@@ -688,14 +687,34 @@ impl PhaseEquilibriumProblemBundle {
         F: FnOnce(&mut EquilibriumSolverSettings),
         G: FnOnce(&mut PhaseManager),
     {
+        self.solve_with_bounded_phase_control_with_diagnostics(
+            configure_solver,
+            configure_phase_control,
+            EquilibriumDiagnosticsOptions::disabled(),
+        )
+    }
+
+    /// Solves through bounded phase control with explicit observational
+    /// diagnostics. The compatibility overload above keeps diagnostics off.
+    pub fn solve_with_bounded_phase_control_with_diagnostics<F, G>(
+        self,
+        configure_solver: F,
+        configure_phase_control: G,
+        diagnostics: EquilibriumDiagnosticsOptions,
+    ) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError>
+    where
+        F: FnOnce(&mut EquilibriumSolverSettings),
+        G: FnOnce(&mut PhaseManager),
+    {
         let timing_enabled = self.timing.enabled();
         let mut timing = EquilibriumTimingCollector::from_report(self.timing);
         let mut runner =
             timing.measure(EquilibriumTimingStage::NumericalProblemPreparation, || {
-                PreparedPhaseControlRunner::new(
+                PreparedPhaseControlRunner::new_with_diagnostics(
                     self.problem,
                     self.symbolic_standard_gibbs,
                     timing_enabled,
+                    diagnostics,
                 )
             })?;
         configure_solver(runner.configure_solver());
@@ -722,6 +741,7 @@ impl PhaseEquilibriumProblemBundle {
             outcome.phase_statuses,
             timing_report,
         )
+        .map(|solution| solution.with_diagnostics(outcome.diagnostics))
     }
 }
 
@@ -774,6 +794,11 @@ pub(crate) struct PreparedPhaseControlTemplate {
 }
 
 impl PreparedPhaseControlTemplate {
+    /// Selects diagnostics for the next independent range point.
+    pub(crate) fn set_diagnostics_options(&mut self, diagnostics: EquilibriumDiagnosticsOptions) {
+        self.runner.set_diagnostics_options(diagnostics);
+    }
+
     pub(crate) fn build_timing(&self) -> EquilibriumTimingReport {
         self.timing
     }
@@ -791,6 +816,14 @@ impl PreparedPhaseControlTemplate {
     /// phase-control active mask changes.
     pub(crate) fn rst_cache_size(&self) -> usize {
         self.runner.rst_prepared_cache_size()
+    }
+
+    /// TPD elemental-geometry cache evidence retained across accepted points.
+    pub(crate) fn phase_stability_geometry_cache_statistics(
+        &self,
+    ) -> crate::Thermodynamics::ChemEquilibrium::equilibrium_phase_stability::PhaseStabilityGeometryCacheStats
+    {
+        self.runner.phase_stability_geometry_cache_statistics()
     }
 
     /// Per-active-set formulation timing retained for range diagnostics.
@@ -860,6 +893,7 @@ impl PreparedPhaseControlTemplate {
             outcome.phase_statuses,
             timing.finish(),
         )
+        .map(|solution| solution.with_diagnostics(outcome.diagnostics))
     }
 
     /// Consumes this phase-control template through a caller-supplied
@@ -917,6 +951,7 @@ impl PreparedPhaseControlTemplate {
             outcome.phase_statuses,
             timing.finish(),
         )
+        .map(|solution| solution.with_diagnostics(outcome.diagnostics))
     }
 
     fn refresh_gibbs(
@@ -1538,6 +1573,7 @@ fn element_totals(initial_moles: &[f64], element_composition: &DMatrix<f64>) -> 
 fn activity_model_for(model: PhaseModel) -> PhaseActivityModel {
     match model {
         PhaseModel::IdealGas => PhaseActivityModel::IdealGas,
+        PhaseModel::IdealSolution => PhaseActivityModel::IdealSolution,
         PhaseModel::PureCondensed => PhaseActivityModel::IdealSolution,
     }
 }

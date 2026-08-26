@@ -417,7 +417,11 @@ mod tests {
     #[ignore = "live NIST state-matrix diagnostic; requires network"]
     fn test_real_water_state_specific_payload_matrix() {
         let parser = NistParser::new();
-        let states = [("gas", Phase::Gas), ("liquid", Phase::Liquid), ("solid", Phase::Solid)];
+        let states = [
+            ("gas", Phase::Gas),
+            ("liquid", Phase::Liquid),
+            ("solid", Phase::Solid),
+        ];
         let mut complete_states = 0;
 
         for (label, phase) in states {
@@ -436,23 +440,31 @@ mod tests {
             match (data.T.as_ref(), data.cp.as_ref()) {
                 (Some(ranges), Some(coefficients)) => {
                     complete_states += 1;
-                    assert!(!ranges.is_empty(), "NIST H2O {label} ranges must not be empty");
+                    assert!(
+                        !ranges.is_empty(),
+                        "NIST H2O {label} ranges must not be empty"
+                    );
                     assert_eq!(ranges.len(), coefficients.len());
-                    assert!(ranges
-                        .iter()
-                        .flatten()
-                        .all(|value| value.is_finite() && *value >= 0.0));
-                    assert!(coefficients
-                        .iter()
-                        .flatten()
-                        .all(|value| value.is_finite()));
-                    println!("NIST state payload: state={label} status=COMPLETE ranges={}", ranges.len());
+                    assert!(
+                        ranges
+                            .iter()
+                            .flatten()
+                            .all(|value| value.is_finite() && *value >= 0.0)
+                    );
+                    assert!(coefficients.iter().flatten().all(|value| value.is_finite()));
+                    println!(
+                        "NIST state payload: state={label} status=COMPLETE ranges={}",
+                        ranges.len()
+                    );
                 }
                 (None, None) => panic!("NIST parser accepted an incomplete Cp payload"),
                 _ => panic!("NIST H2O {label} returned only half of a Cp payload"),
             }
         }
-        assert_eq!(complete_states, 2, "gas and liquid should be complete for H2O");
+        assert_eq!(
+            complete_states, 2,
+            "gas and liquid should be complete for H2O"
+        );
     }
 
     /*

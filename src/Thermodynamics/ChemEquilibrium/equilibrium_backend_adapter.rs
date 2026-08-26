@@ -74,7 +74,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_legacy_backend::solve_legacy_backend;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-    recoverable_backend_failure_kind, SolverParams,
+    SolverParams, recoverable_backend_failure_kind,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{

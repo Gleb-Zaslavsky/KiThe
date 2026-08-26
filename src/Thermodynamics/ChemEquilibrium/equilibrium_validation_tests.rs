@@ -2,8 +2,8 @@
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::{
-    compare_candidate_reports, select_preferred_candidate_index, validate_equilibrium_candidate,
-    EquilibriumAcceptanceCriteria, EquilibriumCandidateResiduals,
+    EquilibriumAcceptanceCriteria, EquilibriumCandidateResiduals, compare_candidate_reports,
+    select_preferred_candidate_index, validate_equilibrium_candidate,
 };
 use nalgebra::DMatrix;
 

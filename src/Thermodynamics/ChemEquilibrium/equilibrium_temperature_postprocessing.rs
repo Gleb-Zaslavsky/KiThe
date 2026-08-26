@@ -100,11 +100,11 @@
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_range::TemperatureRangeSolution;
-use prettytable::{Cell, Row, Table};
-use std::fmt;
 use RustedSciThe::numerical::optimization::inter_n_extrapolate::{
     InterpolationSpace as PchipSpace, Pchip,
 };
+use prettytable::{Cell, Row, Table};
+use std::fmt;
 
 /// How the output temperature grid should be constructed.
 #[derive(Debug, Clone, PartialEq)]
@@ -678,10 +678,12 @@ mod tests {
             &[300.0, 350.0, 400.0, 450.0, 500.0]
         );
         assert_eq!(resampled.series_count(), 2);
-        assert!(resampled
-            .rows()
-            .iter()
-            .all(|row| row.iter().all(|v| v.is_finite())));
+        assert!(
+            resampled
+                .rows()
+                .iter()
+                .all(|row| row.iter().all(|v| v.is_finite()))
+        );
     }
 
     #[test]
@@ -705,10 +707,12 @@ mod tests {
         let resampled = series.resample(&policy).unwrap().unwrap();
 
         assert!(resampled.rows().iter().all(|row| row[0] > 0.0));
-        assert!(resampled
-            .rows()
-            .windows(2)
-            .all(|window| window[0][0] <= window[1][0]));
+        assert!(
+            resampled
+                .rows()
+                .windows(2)
+                .all(|window| window[0][0] <= window[1][0])
+        );
     }
 
     #[test]
@@ -758,10 +762,12 @@ mod tests {
 
         assert_eq!(result.raw.point_count(), 3);
         assert_eq!(result.resampled.as_ref().unwrap().point_count(), 4);
-        assert!(result
-            .summary_rows()
-            .iter()
-            .any(|row| row.section == "postprocessing" && row.label == "resampled"));
+        assert!(
+            result
+                .summary_rows()
+                .iter()
+                .any(|row| row.section == "postprocessing" && row.label == "resampled")
+        );
     }
 
     #[test]

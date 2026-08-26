@@ -4,27 +4,27 @@ mod tests {
     // surface; production callers must use the typed resolved-phase facade.
     #![allow(deprecated)]
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-        compute_element_totals, compute_species_moles, equilibrium_logmole_jacobian,
-        equilibrium_logmole_residual, equilibrium_scaling, reaction_phase_stoichiometry,
-        reaction_standard_gibbs, scaled_jacobian, scaled_residual, species_to_phase_map,
         ContinuationSeedPolicy, EquilibriumLogMoles, EquilibriumSolverSettings, GibbsFn, Phase,
-        PhaseKind, Solvers,
+        PhaseKind, Solvers, compute_element_totals, compute_species_moles,
+        equilibrium_logmole_jacobian, equilibrium_logmole_residual, equilibrium_scaling,
+        reaction_phase_stoichiometry, reaction_standard_gibbs, scaled_jacobian, scaled_residual,
+        species_to_phase_map,
     };
-    use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::compute_reaction_basis;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::compute_reaction_basis;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RustedSciTheSolver;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptOutcome;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
         SolverBackend, SolverCascadeBudget, SolverPolicy,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
-        compute_phase_totals, finite_difference_jacobian, gas_solver, gas_solver_for_T_range,
-        gas_solver_for_T_range_for_elements, gas_solver_from_elements, initial_phase_activity,
-        reject_repeated_phase_set, validate_phase_set_candidate, InitialPhaseSet, PhaseSet,
+        InitialPhaseSet, PhaseSet, compute_phase_totals, finite_difference_jacobian, gas_solver,
+        gas_solver_for_T_range, gas_solver_for_T_range_for_elements, gas_solver_from_elements,
+        initial_phase_activity, reject_repeated_phase_set, validate_phase_set_candidate,
     };
     use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData};
-    use approx::assert_relative_eq;
     use RustedSciThe::symbolic::symbolic_engine::Expr;
+    use approx::assert_relative_eq;
 
     use nalgebra::DMatrix;
     use std::collections::{HashMap, HashSet};
@@ -975,10 +975,12 @@ mod tests {
             .expect("RST attempt must preserve engine diagnostics");
         assert!(metrics.residual_evaluations > 0);
         assert!(metrics.jacobian_evaluations > 0);
-        assert!(instance
-            .moles
-            .iter()
-            .all(|moles| moles.is_finite() && *moles > 0.0));
+        assert!(
+            instance
+                .moles
+                .iter()
+                .all(|moles| moles.is_finite() && *moles > 0.0)
+        );
     }
 
     #[test]
@@ -1012,10 +1014,12 @@ mod tests {
             SolverPolicy::production_default(Solvers::LM),
             "default policy should prefer RST while retaining legacy fallbacks"
         );
-        assert!(report
-            .attempts
-            .iter()
-            .all(|attempt| matches!(attempt.backend, SolverBackend::RustedSciThe(_))));
+        assert!(
+            report
+                .attempts
+                .iter()
+                .all(|attempt| matches!(attempt.backend, SolverBackend::RustedSciThe(_)))
+        );
         assert!(matches!(
             report.accepted_backend,
             SolverBackend::RustedSciThe(RustedSciTheSolver::LevenbergMarquardt)

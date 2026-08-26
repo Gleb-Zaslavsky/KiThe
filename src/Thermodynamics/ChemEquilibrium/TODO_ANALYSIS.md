@@ -2866,6 +2866,511 @@ rebuild the GUI.
   prepared-system extractions, and no P,T compatibility workaround became a
   hidden dependency of the monolithic P,H path.
 
+## P7 - Replace phase stability with reacting-system TPD
+
+This is a correctness replacement for the current ideal phase-control path,
+not a future non-ideal extension. The contracts in `task.md` and
+`arch_contract.md` were compared with the implementation on 24.08.2026.
+
+### P7 review verdict
+
+- [x] **Confirmed:** the present implementation already evaluates canonical
+  chemical potentials as `mu_i = g_i^0(T) + R*T*ln(a_i)` through
+  `PhaseActivityModel::log_activity`. Preserve and reuse that boundary; do not
+  introduce a second activity implementation inside phase stability.
+- [x] **Confirmed:** the current stability criterion is not general. It
+  special-cases one-component condensed phases, rejects a multicomponent
+  `IdealSolution`, and rejects a rank-deficient active elemental assemblage.
+  Those restrictions are implementation artifacts rather than the required
+  reacting-system stability contract.
+- [x] **Confirmed:** `PhaseStabilityModel`, `driving_force`, and the current
+  per-species `PhaseSeedPolicy` encode the old `q = 1` workflow. In particular,
+  phase activation does not seed the candidate with the composition that
+  minimizes its tangent-plane distance.
+- [x] **Confirmed:** stability mathematics currently lives in
+  `equilibrium_workflows.rs`, while both the prepared `P,T` runner and the
+  monolithic `P,H` route consume its limited report and seed semantics.
+- [x] **Retain:** active-set projection, bounded outer iterations, hysteresis,
+  cycle detection, rollback, and transactional publication remain valid
+  orchestration mechanisms. Rewire them to typed TPD evidence rather than
+  reimplementing them.
+- [x] **Qualified:** a one-component phase may retain an analytical fast path,
+  but only as an internal optimization proven equivalent to the general
+  `q = 1` TPD problem. It must not remain a separate public physical criterion
+  or a hidden fallback.
+- [x] **Qualified:** the solver core has `PhaseActivityModel::IdealSolution`,
+  while the resolved phase domain currently exposes only `IdealGas` and
+  `PureCondensed`. The migration must introduce an explicit ideal-solution
+  capability at the phase-domain boundary before the top-level facade claims
+  support for a multicomponent condensed solution. This does not imply any
+  non-ideal excess-Gibbs model.
+
+### P7.0 Freeze the contract and dependency graph (P0)
+
+- [x] Record every producer and consumer of `compute_phase_stability_reports`,
+  `PhaseStabilityReport`, `PhaseStabilityModel`, `ElementPotentialReport`,
+  `driving_force`, `dg_create`, `dg_keep`, `seed_activated_phase`,
+  `PhaseSeedPolicy`, `PhaseManager`, `PreparedActiveSetCandidate`,
+  `PreparedPhaseControlRunner`, monolithic `P,H` active-set restarts,
+  complementarity reports, GUI snapshots, presentation/export helpers, and
+  reproducibility capsules.
+- [x] Freeze the mathematical units and signs: `minimum_tpd`, `dg_create`, and
+  `dg_keep` are molar Gibbs quantities in `J/mol`; a sufficiently negative
+  minimum requests activation, zero is coexistence within tolerance, and a
+  positive minimum is stable against creation of that candidate phase.
+- [x] Define phase capability explicitly. `Excluded` means intentionally not
+  evaluated and must remain distinct from an unsupported activity model, an
+  elementally infeasible candidate, and a failed TPD minimization.
+- [x] Add `IdealSolution` to the resolved phase-model contract with validation
+  of its allowed physical states and ordered components. Keep
+  `PureCondensed` as a one-component convenience constructor or normalize it
+  to the same ideal-solution activity implementation; do not infer ideal
+  mixing merely from a liquid/solid phase name.
+  - [x] **Corrective audit closed:** `PhaseModel::IdealSolution` is now an
+    explicit condensed ideal-mixing declaration, while `PureCondensed` rejects
+    every component count other than one. `MultiphaseEquilibriumLayout` accepts
+    the new semantic model and the bridge maps it explicitly to
+    `PhaseActivityModel::IdealSolution`.
+- [x] Treat this as an intentional API replacement. Do not add adapters that
+  fabricate old `driving_force` or `PureCondensedSpecies` semantics from a new
+  TPD result. Migrate all retained consumers in one dependency-directed pass.
+  - [x] The audit leaves exactly one mutable owner: `PreparedPhaseControlRunner`.
+    The pure `equilibrium_phase_stability` service receives immutable state and
+    returns evidence only; workflows classify that evidence and no production
+    caller retains obsolete driving-force or per-species seed semantics.
+  - [x] `PhaseStabilityStatus` distinguishes policy exclusion,
+    `FixedGasAssemblage`, absence of an independent reference assemblage, and
+    a genuine evaluated TPD result. Typed errors cover failed construction or
+    infeasible minimization rather than being encoded as a numeric status.
+
+### P7.0a Corrective semantic-boundary audit (P0)
+
+The post-refactor architecture review confirms that the constrained TPD kernel
+is the right foundation and must not be replaced by the historical pure-phase
+criterion. The unfinished work is at the semantic construction boundary and
+in lifecycle evidence around it.
+
+- [x] **Accept the diagnostic's central finding.** The current chain is
+  inconsistent: `PhaseModel` has only `IdealGas` and `PureCondensed`, while
+  `PhaseActivityModel` already has `IdealSolution`; `activity_model_for`
+  currently maps `PureCondensed` to that numerical law, and the production
+  layout enforces one component for the semantic condensed model. Unit-level
+  multicomponent TPD tests therefore do not prove production support.
+- [x] Introduce an explicit semantic `PhaseModel::IdealSolution` and validate
+  the physical states for which the present ideal-mixing contract is defined.
+  Keep `PureCondensed` semantically distinct and one-component, even though its
+  numerical activity law is the `q = 1` special case of `IdealSolution`.
+- [x] Migrate the complete definition chain without a compatibility adapter:
+  `PhaseSpec -> ResolvedPhaseSystem -> MultiphaseEquilibriumLayout ->
+  PhaseEquilibriumMetadata -> EquilibriumPhaseDescriptor ->
+  PhaseActivityModel`. Update canonical ordering/fingerprints, factories,
+  candidate selection, public prelude types, and all exhaustive matches.
+- [x] Add a production bridge regression that constructs a multicomponent
+  `IdealSolution` through `SubstanceSystemFactory` and the local repository,
+  then through `ResolvedPhaseSystem` and `PhaseEquilibriumBuildRequest`, and
+  proves that every ordered component,
+  thermochemistry capability, element row, phase range, and
+  `PhaseActivityModel::IdealSolution` reaches the resulting problem bundle.
+  No branch on this path may require `components.len() == 1` for
+  `IdealSolution`. The local NASA-condensed fixture proves two thermochemistry
+  records, lookup provenance, element rows, descriptors, activity laws, and
+  the full component range reach `PhaseEquilibriumProblemBundle` unchanged.
+- [ ] Add an end-to-end fixed-`P,T` lifecycle story in which an initially
+  inactive multicomponent ideal solution has negative accepted `minimum_tpd`,
+  is seeded with the reported `incipient_composition`, is re-solved, and is
+  published only after residual, conservation, feasibility, KKT, and
+  complementarity validation pass.
+- [x] Redesign `SupportedPhaseModelPolicy` after its dependency audit. The
+  retained versioned capability contract is now `IdealPhaseModelsV1`; its
+  documentation names ideal gas, pure condensed, multicomponent ideal
+  solution, and canonical constrained TPD. The obsolete
+  `FixedPressureTemperatureV1` spelling has no compatibility alias.
+- [x] Extend the GUI phase-model enum and validation after the engine
+  semantic bridge is canonical. The GUI must serialize/construct
+  `IdealSolution` explicitly rather than disguising it as `PureCondensed`.
+- [x] Audit reference-assemblage construction for inactive candidates, active
+  retention, a single active phase, multiple active condensed phases, and a
+  rank-deficient active elemental space. The audit retained the canonical rule:
+  every candidate is compared only against other active phases, a single active
+  condensed phase reports `ActiveWithoutReferenceAssemblage`, policy-excluded
+  phases are never assigned a numeric TPD, and rank-deficient reference rows
+  use the SVD geometry rather than an accidental full-rank assumption. Focused
+  orchestration regressions cover exclusion, the missing-reference state,
+  multiple active condensed phases, and a rank-one H/O reference space.
+- [ ] Add the remaining monolithic `P,H` recovery matrix with typed evidence:
+  reduced active-set success without a probe; reduced failure followed by a
+  successful bounded all-active probe; a probed but TPD-stable phase remaining
+  inactive; a TPD-unstable phase activated from `x*` rather than the neutral
+  probe composition; stability evaluated at accepted `T*`; and complete
+  rollback when both reduced and recovery solves fail. The recovery probe is
+  numerical branch discovery, never an activation criterion.
+  - [x] The runner now treats all-active probe occupancy as non-publishable.
+    It restores inactive probe phases to trace and permits one deterministic
+    transition only when `minimum_tpd < dg_create`, seeded from `x*`; after an
+    activation it re-solves the new fixed set before acceptance. Real water
+    stories prove that strict `Monolithic` and `Auto` reject a TPD-stable
+    liquid probe rather than manufacturing appearance. Deterministic
+    reduced-success/recovery/restart/rollback fixtures now protect the
+    lifecycle itself; the remaining observability gap is typed probe counters
+    in report evidence.
+  - [x] **Regression review, retained evidence:** real strict/`Auto` water
+    stories prove that a wider numerical probe with `minimum_tpd >= dg_create`
+    is rejected rather than published; the dense water/ice `P,H` range proves
+    every published TPD report carries the accepted point temperature; generic
+    runner rollback preserves accepted continuation; direct multicomponent
+    deactivation uses total phase amount; and capsules preserve
+    `CanonicalTpdV1` plus named `IdealSolution` semantics.
+  - [x] **Deterministic lifecycle harness:** crate-private injected-candidate
+    stories now force, independently: (a) a reduced fixed-set success with no
+    wider candidate; (b) a numerically wider TPD-stable candidate rejection;
+    (c) a TPD-unstable multicomponent `IdealSolution` activation from a
+    visibly non-uniform `x*`, followed by a new fixed-set solve; and (d)
+    rollback when that restart fails. They assert masks, transition reason,
+    `minimum_tpd`, `incipient_composition`, seed ratios, accepted candidate
+    temperature, validation evidence, and unchanged accepted continuation.
+    The real P,H stories remain responsible for enthalpy residuals; neither
+    suite fixes optimizer iteration counts or SVD-call order.
+  - [ ] Add compact typed numerical-probe evidence to the P,H lifecycle report
+    for the preceding stories: attempted wider masks, outcome class
+    (unneeded/failed/TPD-rejected/TPD-activated), and restart outcome. It must
+    describe numerical branch discovery without presenting a probe candidate
+    as a physical phase transition or adding a public mutable API.
+- [x] Strengthen multicomponent deactivation regressions. A phase with one
+  trace-small component but substantial `sum_i n_i` must remain active; a
+  phase may be deactivated only from its total amount plus the accepted
+  retention TPD criterion. The direct regression covers both a trace-small
+  component with substantial phase total and a truly vanishing total phase.
+- [x] Replace stale production wording such as `inactive pure phase` and
+  `Detect phases that must be created (Delta G < 0)` with candidate-phase,
+  minimum-TPD, and phase-stability terminology. Retain legitimate historical
+  `q = 1` explanations and schema tests that deliberately reject the old
+  `driving_force` representation.
+- [x] Reassess reproducibility schema compatibility after the serialized
+  semantic `PhaseModel` change. `EquilibriumPhaseSpecSnapshot` stores explicit
+  model names rather than enum ordinals, so prior `IdealGas` and
+  `PureCondensed` capsules retain their exact meaning while current capsules
+  can record `IdealSolution`. `CanonicalTpdV1` and capsule schema v2 remain
+  correct; the regression round-trips the new symbolic model value. GUI
+  documents have the same named-enum property, so their schema remains v1 and
+  older documents need no migration.
+- [x] **Already satisfied:** canonical state construction, element-potential
+  reconstruction, exact elemental feasibility, constrained ideal TPD,
+  TPD-derived activation composition, transactional publication, typed
+  stability evidence, presentation-only diagnostics, and rejection of stale
+  `driving_force` fields are retained. No parallel pure-phase fast path or
+  replacement minimizer is required by this audit.
+- [x] **Deferred physical decision:** `FixedGasAssemblage` remains explicit
+  until the project decides whether multiple gas declarations represent one
+  shared mixture, separate compartments, or competing phases. Generic gas
+  TPD cannot be chosen as an engineering cleanup because activity
+  normalization depends on that physical contract.
+- [x] **Out of scope:** non-ideal activity coefficients, fugacity/EOS phase
+  split, and global non-convex multi-start TPD remain in the future-physics
+  section. The semantic ideal-solution bridge must not imply these models.
+
+### P7.1 Extract the stability domain and canonical inputs (P0)
+
+- [x] Create `equilibrium_phase_stability.rs`. It owns chemical-potential
+  snapshots, element-potential reconstruction, elemental-direction
+  feasibility, candidate TPD problems, minimization, and typed stability
+  reports. It must not mutate `PhaseSet`, choose transitions, publish a solve,
+  or own cycle/hysteresis policy.
+- [x] Keep `equilibrium_workflows.rs` and `PreparedPhaseControlRunner`
+  responsible only for orchestration: fixed-active-set solve, request a pure
+  stability analysis, classify the returned evidence, seed/reproject, detect
+  cycles/budgets, and transactionally publish an accepted result.
+- [x] Build one immutable accepted-state input containing solver-order moles,
+  phase totals, canonical `g_i^0`, canonical activities/chemical potentials,
+  conditions, element matrix, active/candidate masks, and layout identity.
+  Validate dimensions, finiteness, positivity requirements, and snapshot
+  alignment once at construction.
+- [x] Reuse `PhaseActivityModel` for `ln(a_i)` and expose only the additional
+  composition-level operation needed by TPD. The residual, Jacobian, and
+  stability paths must share the same standard-state and pressure convention.
+  - [x] First extraction: `equilibrium_phase_stability.rs` now owns an
+    immutable canonical-state snapshot. The retained pure-phase workflow
+    obtains `mu_i` from that snapshot rather than recomputing its own activity
+    convention.
+
+### P7.2 Reconstruct element potentials without a full-rank shortcut (P0)
+
+- [x] Solve `A_active * lambda ~= mu_active` with a documented SVD tolerance.
+  Publish `lambda`, numerical rank, singular-value/tolerance evidence, maximum
+  absolute residual, scaled residual, and the solver species used in the fit.
+- [x] Validate representability of accepted active chemical potentials with
+  an absolute-plus-relative residual contract. A poor fit is a typed physical
+  validation failure; it must not silently produce phase decisions.
+- [x] Do not reject `rank < element_count`. Element potentials may be
+  non-unique; stability must remain invariant to null-space-equivalent choices
+  of `lambda` for an elementally feasible candidate direction.
+- [x] Construct the active elemental range/null space once per unchanged
+  active set and cache it in the prepared phase-control state. Rebuild it only
+  after an active-set/layout change and report the rebuild/reuse decision.
+  - [x] SVD fit now records rank, tolerance, residual, and reference species,
+    accepts a rank-deficient valid fit, and the phase-control workflow no
+    longer reintroduces a `rank < element_count` veto after reconstruction.
+    A null-space-equivalence regression protects the resulting TPD value.
+  - [x] `PreparedPhaseControlRunner` now owns a runner-scoped cache of immutable
+    reference-assemblage geometry. One cache entry retains the SVD fit factors
+    and full `A_active^T A_active` null space; unchanged reference species
+    reuse it for elemental-potential fitting, feasibility, and constrained TPD
+    constraints. `TemperatureRangeSolveReport` publishes entry/build/reuse
+    counters, while a unit regression proves one build plus one reuse leaves
+    the fit unchanged. Temperature, activities, chemical potentials, and TPD
+    values remain uncached candidate-state data.
+
+### P7.3 Enforce candidate elemental-direction feasibility (P0)
+
+- [x] For candidate composition `x`, evaluate
+  `c_beta(x) = A_beta^T * x` and require it to lie in
+  `Range(A_active^T)`. Implement the check through an SVD/null-space basis with
+  explicit absolute-plus-relative tolerance, not through a full-rank guard.
+- [x] Include simplex constraints `x_i >= 0` and `sum(x_i) = 1` in the
+  candidate problem itself. Never normalize an unconstrained answer after the
+  optimizer and call it a constrained minimum.
+- [x] Return a typed infeasible-candidate result when the admissible set is
+  empty. Do not evaluate or classify a TPD value for a physically infeasible
+  trial composition.
+- [x] Report the candidate elemental composition and feasibility residual for
+  every evaluated phase so complementarity and release evidence can audit the
+  decision.
+  - [x] The canonical ideal TPD path constructs elemental null-space rows
+    `B*x = 0`, solves them as part of the candidate simplex problem, and then
+    independently verifies `A_active^T*y ~= A_candidate^T*x`. No full-rank
+    shortcut remains in the connected phase-control path.
+  - [x] `CanonicalPhaseState` is the only accepted-state ingress for the
+    connected TPD workflow and delegates activity evaluation to the shared
+    `PhaseActivityModel`. `ElementalFeasibilityReport` retains candidate
+    elemental totals, residual, and tolerance in every evaluated
+    `PhaseStabilityReport`; an empty feasible simplex returns a typed error
+    before any TPD classification or transition publication.
+
+### P7.4 Implement the general ideal TPD minimum (P0)
+
+- [x] Define the single canonical objective
+  `TPD_beta(x) = sum_i x_i * (mu_i^beta(x,T,P) - a_i*lambda)` over the
+  admissible simplex. Store the minimum and all thresholds in `J/mol`; no
+  arbitrary trace amount belongs to the TPD definition.
+- [x] Cover `IdealSolution` candidates with the convex analytical/specialized
+  structure: both the full-rank closed-form case and the rank-deficient
+  constrained case use deterministic minimization with independently checked
+  KKT/feasibility evidence.
+- [x] Return both `minimum_tpd` and normalized `incipient_composition = argmin
+  TPD` in declared phase-component order. Validate finite objective values,
+  finite/nonnegative composition, unit sum, elemental feasibility, and
+  deterministic tie handling.
+- [x] Handle boundary optima without evaluating `ln(0)`. Zero composition is
+  valid in the mathematical minimizer; a positive numerical floor is allowed
+  only when constructing log-mole restart coordinates.
+- [x] If minimization, feasibility, or validation fails, return a typed error
+  with phase/context evidence and abort the transition transaction. Do not
+  fall back to uniform composition, a random start, the old pure-phase
+  formula, or a penalty-only answer.
+- [x] Keep the TPD problem interface ready for a future non-convex activity
+  model and multi-start/global policy, but do not implement or imply a fake
+  non-ideal model in this stage.
+  - [x] Interior pass: `IdealTpdProblem` now supplies an analytical softmax
+    minimum for full-rank inputs and a deterministic dual-Newton minimizer for
+    rank-deficient interior simplexes. It validates independent elemental
+    constraints, feasibility, and KKT residuals; the connected workflow uses
+    it for both pure and multicomponent `IdealSolution` phases. Unit tests
+    cover `q = 1`, the analytic multicomponent result, rank-deficient interior
+    feasibility, and invariance to non-unique lambda representatives.
+  - [x] Boundary pass: a deterministic phase-I linear program identifies the
+    relative-interior feasible support, then dual Newton runs only on that
+    face. Exact zero components remain in `incipient_composition`; the
+    positive floor is introduced only by the separate log-mole seed builder.
+    Regression tests cover a boundary-only candidate and seed-total recovery.
+  - [ ] **Physical decision gate: separately declared `IdealGas` phases.** The
+    present lifecycle intentionally treats them as one fixed gas assemblage,
+    reported as `FixedGasAssemblage`, rather than as competing candidate
+    phases. Before implementing generic inactive-`IdealGas` TPD coverage,
+    decide whether multiple gas declarations mean one shared mixture, separate
+    compartments, or genuinely competing gas phases. The answer determines
+    activity normalization and is therefore not an engineering cleanup.
+
+### P7.5 Replace reports, hysteresis, and activation seeding (P1)
+
+- [x] Replace the old physical-model/driving-force report with a typed result
+  containing phase identity, active state, evaluation status,
+  `minimum_tpd`, `incipient_composition`, element-potential evidence,
+  feasibility evidence, minimizer diagnostics, conditions, and layout
+  identity. Excluded/not-evaluated phases carry no fabricated numeric value.
+  - [x] `PhaseStabilityReport` now has `PhaseStabilityStatus` plus
+    `minimum_tpd`; obsolete `PhaseStabilityModel` and the misleading
+    `driving_force` field are removed. Transition and complementarity evidence
+    now use the same TPD terminology. Skipped phases report an explicit status
+    and no numeric minimum.
+  - [x] Evaluated reports retain conditions, canonical ordered layout evidence,
+    elemental-feasibility residuals, and constrained-minimizer/KKT diagnostics.
+    Skipped reports retain the same identity and conditions but no fabricated
+    numerical stability evidence.
+- [x] Apply `dg_create` and `dg_keep` only after the mathematical minimum has
+  been accepted. Hysteresis is a transition policy over `minimum_tpd`; it must
+  not alter the objective or define phase stability.
+  - [x] `PhaseManager` classifies only accepted `minimum_tpd` values;
+    thresholding is downstream of TPD construction and minimization.
+- [x] Replace per-species seed semantics with a total phase-seed amount policy.
+  For an activated phase construct `n_i = n_phase_seed*x_i_star`, apply a
+  strictly positive floor only for log coordinates, and renormalize so the
+  seeded component sum equals the requested total seed.
+  - [x] `PhaseSeedPolicy` and the uniform `seed_activated_phase` helper have
+    been removed after their last production caller migrated. The monolithic
+    all-active recovery uses the same total-seed API with a documented neutral
+    numerical probe; physical phase appearance always uses the TPD minimizer.
+- [x] Preserve transactional mass handling: failed seed construction,
+  projection, reduced solve, candidate validation, or complementarity must
+  leave the last accepted composition, temperature, active set, caches, and
+  published report unchanged.
+  - [x] Phase transition records now retain the chosen `incipient_composition`
+    independently of the floored `restart_seed`; both prepared and mutable
+    orchestration paths seed an activated phase through
+    `seed_activated_phase_with_composition`.
+  - [x] A failed prepared-runner lifecycle now restores the earlier accepted
+    continuation seed and phase set. The injected-failure regression proves a
+    rejected solve cannot consume continuation intended for the next point.
+    Projection/formulation/TPD geometry caches are immutable-layout
+    memoization, never accepted-solution publication; every numerical use is
+    retargeted before solving.
+- [x] Update boundary recovery, transition records, cycle fingerprints, and
+  complementarity checks to consume `minimum_tpd` and the minimizer-derived
+  seed. Record the chosen seed composition in transition evidence.
+  - [x] Transition and complementarity paths use `minimum_tpd`; activated
+    transitions retain the exact TPD minimizer independently of the floored
+    restart seed. Cycle fingerprints deliberately remain phase-set based until
+    a composition-sensitive cycle policy has a physical contract.
+
+### P7.6 Integrate the same criterion into P,T and P,H (P1)
+
+- [x] Wire the prepared fixed-`P,T` phase-control runner to the extracted TPD
+  service without rebuilding invariant matrices or activity metadata on every
+  outer iteration when the active set is unchanged.
+- [x] Run monolithic `P,H` stability analysis at the accepted solution
+  temperature `T*`, never at the initial temperature seed. Do not create a
+  separate enthalpy-specific phase criterion.
+- [x] After a `P,H` transition, seed the phase with `x*`, retain accepted `T*`
+  as the continuation temperature, rebuild the active-set formulation, and
+  solve again against the same target enthalpy transactionally.
+- [x] Propagate typed TPD failure and transition evidence through point,
+  temperature-range, and enthalpy-range reports. A failed point must not seed
+  the next continuation point.
+  - [x] The prepared runner is the sole lifecycle owner for fixed `P,T` and
+    bounded monolithic `P,H`: it evaluates TPD from the candidate's accepted
+    conditions, seeds transitions from `x*`, and publishes the same immutable
+    acceptance report through each point/range solution. `PhRangeRequest`
+    advances composition and temperature only after a point is accepted; its
+    real water/ice release story retains transition and phase-control evidence
+    on each accepted point.
+
+### P7.7 Migrate diagnostics and public consumers (P1)
+
+- [x] Update `MultiphaseAcceptanceReport`, phase-control traces, presentation
+  rows, GUI route-specific snapshots, tables, plotting boundaries,
+  reproducibility capsules, and story-test output to use TPD terminology and
+  retain minimizer/feasibility evidence where appropriate.
+  - [x] Acceptance summary rows and the GUI phase-evidence table now retain
+    per-phase status, accepted `minimum_tpd`, elemental-feasibility residual,
+    and KKT residual when a phase was evaluated. Aggregate complementarity is
+    displayed separately, so it cannot hide a weak individual minimization.
+- [x] Update stable facade/prelude exports to expose the new immutable report
+  types while keeping minimizer implementation details crate-private.
+  - [x] `ChemEquilibrium::prelude` now exposes the immutable phase-control,
+    transition, TPD, feasibility, minimizer, validation, and typed-index
+    evidence. The canonical-state and minimizer implementation remains
+    crate-private; external consumers can inspect accepted reports but cannot
+    invoke a second mutable orchestration path.
+- [x] Add a schema/version decision for serialized reproducibility evidence;
+  reject stale old stability fields explicitly rather than interpreting them
+  under new semantics.
+  - [x] Reproducibility capsule schema v2 records `CanonicalTpdV1` explicitly.
+    Its typed JSON loader rejects every older schema and recursively rejects
+    obsolete `driving_force`/`PhaseStabilityModel` fields rather than silently
+    reinterpreting them as TPD evidence.
+- [x] Remove console-only diagnostics from minimization. Timings, iterations,
+  termination, KKT/feasibility residuals, and cache reuse belong in typed
+  reports and deterministic story tables.
+  - [x] The canonical TPD/minimizer, prepared phase-control runner, and
+    fixed-`P,T` range route contain no direct `print!`/`println!` calls.
+    Runtime evidence is carried by immutable reports and story-table formatters;
+    legacy backend debug logging is outside this minimization contract.
+
+### P7.8 Required test matrix (P0/P1)
+
+- [x] Pure `q = 1` regression: general TPD equals
+  `g_beta^0(T) - a_beta*lambda`, including sign, units, and minimizer `[1]`.
+- [x] Stable and unstable multicomponent ideal-solution fixtures: verify the
+  sign and value of `minimum_tpd`, normalized `x*`, and transition decision.
+- [x] Full-rank analytical ideal minimum: compare both `minimum_tpd` and `x*`
+  against the closed-form reference, not only the final active set.
+- [x] Seed regression: component seed ratios match `x*`, every log-mole seed is
+  positive, and physical seeded moles sum to the requested phase amount after
+  floor-and-renormalize handling.
+- [x] Boundary optimum: permit exact zero components in `x*`, avoid `ln(0)`,
+  and prove that the log-coordinate floor does not change the reported TPD
+  minimizer.
+- [x] Rank-deficient active assemblage: an elementally feasible candidate is
+  accepted, and TPD is invariant under admissible null-space changes to
+  `lambda` within tolerance.
+- [x] Elementally infeasible candidate: return explicit infeasibility with no
+  TPD classification, activation, or published partial state.
+- [x] Hysteresis story: activation below `dg_create` is retained when the next
+  accepted minimum lies between `dg_create` and `dg_keep`; test the reverse
+  direction separately.
+- [x] P,H regression: stability uses accepted `T*`; activation retains `T*` as
+  the next continuation seed and preserves the target enthalpy contract.
+- [x] Property/metamorphic tests: normalization, non-negativity, finite TPD,
+  feasibility residual, element-potential residual, permutation invariance,
+  inventory scaling, mass conservation, rollback, cycle/budget termination,
+  and cache reuse across repeated active sets. The mathematical unit matrix
+  includes direct component-permutation invariance; live reactive-gas stories
+  cover inventory scaling, while phase-control regressions cover rollback,
+  cycle/budget termination, and runner-scoped geometry-cache reuse.
+- [ ] Re-run all retained `P,T`, `P,H`, fixed-phase, phase-transition, GUI, and
+  release story matrices. Add offline real-data water/ice, water/liquid, and
+  carbon/graphite evidence without mutating JSON libraries; synthetic tests
+  remain as precise mathematical fixtures.
+  - [x] The current release ledger already records the real TPD
+    water/ice, water/liquid, hot-water, graphite, and hot-carbon transition
+    matrix in `STORY_TESTS.md`, including conservation, complementarity,
+    transition count, timing, and JSON immutability. This is retained evidence,
+    not a substitute for the final whole-suite release campaign.
+  - [x] The paired release ice T-range story records `tpd_geometry=1/1/3`:
+    one runner-scoped active-element geometry build and three reuses while the
+    real range crosses a phase transition. It simultaneously verifies the
+    projection/prepared/RST cache layout, continuation, conservation, and JSON
+    immutability.
+
+### P7.9 Cleanup and definition of done (P1)
+
+- [x] Delete obsolete `PhaseStabilityModel` variants/enum, old
+  `driving_force` data paths, the multicomponent capability veto,
+  full-element-rank rejection, uniform per-species activation seeding, and
+  tests asserting the old limitation. The remaining `ValidationNotApplicable`
+  uses are generic typed applicability errors, not a solution-model veto.
+  `PureCondensed` retains its intentional one-component semantic constraint;
+  the explicit `IdealSolution` model carries multicomponent mixtures. The
+  legacy indexed numerical API now labels an undifferentiated ideal-solution
+  activity law as `IdealSolution`, never falsely as `PureCondensed`.
+- [ ] Repair the stale/corrupted phase-stability subsection in
+  `ARCHITECTURE_RU.md`. It still describes scalar `Delta G` driving force and
+  says multicomponent solutions are unsupported; rewrite it around constrained
+  `minimum_tpd`, `incipient_composition`, and `FixedGasAssemblage` without
+  altering the executable stability kernel.
+- [x] Remove duplicated pure-phase stability helpers and any internal
+  compatibility translation. An optional `q = 1` fast path must be tested
+  against the general formulation and remain invisible to consumers.
+- [ ] Mark P7 complete only when the canonical dataflow is:
+  `accepted fixed-set state -> canonical mu -> element potentials -> feasible
+  TPD minimization -> minimum_tpd + x* -> hysteresis + seed -> rebuilt
+  active-set solve -> transactional acceptance` for both `P,T` and `P,H`.
+  The kernel and current pure-condensed production path satisfy this flow, but
+  P7 remains open until a multicomponent semantic `IdealSolution` traverses
+  the same production facade and the bounded `P,H` recovery matrix proves that
+  a neutral all-active probe cannot leak into physical activation semantics.
+- [x] Document the remaining boundary honestly: P7 completes general phase
+  stability for the currently supported ideal activity models. Non-ideal
+  excess-Gibbs/fugacity models and global multi-start policy remain in F2.
+
 ## Deferred Foundation: Local NIST Fixture and New Physics
 
 The current production path is deliberately scoped to ideal, fixed-pressure
@@ -2915,10 +3420,11 @@ must not be quietly approximated by the existing NASA-gas fixtures.
   liquid-solid, liquid-vapor, and solid-solid coexistence, phase fractions,
   and latent contributions in `P,H` solves. Existing phase-control appearance
   evidence is not a general coexistence model.
-- [ ] **General phase-stability/minimization criteria.** Extend phase creation
-  and removal beyond the current ideal active-set assumptions, using chemical
-  potentials and complementarity/stability evidence valid for each supported
-  model.
+- [ ] **Non-ideal/global TPD extension.** After P7 establishes the general TPD
+  contract for the current ideal activity models, add model-specific
+  non-convex minimization, deterministic multi-start/global policy, and
+  independently validated chemical-potential derivatives. Do not weaken P7
+  or reuse an ideal closed-form minimum for a non-ideal phase.
 - [ ] **Additional constraints and state variables.** Design separate typed
   workflows for `P,V`, `U,V`, pressure sweeps, and reactive-flash problems.
   They must not be encoded as ad-hoc switches inside the fixed-pressure
@@ -2981,6 +3487,32 @@ change accepted numerical results.
   number styles, and explicit fraction-versus-percent rendering. It only
   borrows or projects immutable presentation rows: thresholding never alters
   solver inputs, conservation checks, or raw data retained for export.
+- [x] **Opt-in structured phase-lifecycle diagnostics.**
+  `equilibrium_diagnostics` now records bounded typed events for the canonical
+  `PreparedPhaseControlRunner`: solve/outer-iteration boundaries, accepted
+  fixed-set candidates, constrained TPD evidence, hysteresis holds, accepted
+  activation/deactivation, boundary recovery, and final publication. The
+  default is disabled; enabled reports are attached immutably to the accepted
+  solution and an optional live sink can observe the same events. The separate
+  `equilibrium_diagnostics_display` adapter resolves phase/component labels and
+  can emit a human-readable tree through the existing `log` facade without
+  putting formatting or logging side effects in the physical solver.
+- [x] **Complete engine diagnostics coverage for rejected paths and long
+  ranges.** Typed rejected-candidate, boundary-probe, rollback, outer-budget,
+  cycle, and `P,H` `Auto` route-fallback events stream through the live sink.
+  Bounded P,T and P,H ranges support endpoints, every-N, every-point, and
+  `TransitionsOnly` policies. The last policy defers the sink until an
+  accepted point actually changes the phase set, then retains/replays that
+  point trace only. Accepted `P,H Auto` results retain an immutable
+  `PhRouteDecision::AutoFallback` independently of scalar trials.
+- [x] **Expose diagnostics in the equilibrium GUI.** The document now maps an
+  explicit lifecycle detail level and range retention policy to the canonical
+  engine options. Accepted point snapshots project the immutable typed report
+  into a phase-qualified collapsible decision tree; P,H also exposes its
+  route decisions independently from scalar trials. While a worker runs, the
+  same opt-in engine sink streams bounded transient events through the
+  ticket/fingerprint gate. GUI formatting remains a consumer of engine
+  evidence, never a second source of phase-control decisions.
 
 ## Recommended implementation passes
 

@@ -19,9 +19,6 @@ use std::sync::Arc;
 use tabled::settings::Style;
 use tabled::{Table, Tabled};
 
-use crate::library_manager::with_library_manager;
-use crate::Thermodynamics::phase_layout::PhaseId;
-use crate::Thermodynamics::thermo_lib_api::ThermoData;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
@@ -40,25 +37,25 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_range::{
     PhRangeSolution,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::{
-    solve_resolved_ph, FixedPressureEnthalpySolution, PhSolveMode, PhSolvePath,
+    FixedPressureEnthalpySolution, PhRouteDecision, PhSolveMode, PhSolvePath,
     PhTemperatureSolveReport, PhTrialPreparation, ResolvedPhaseEnthalpyRequest,
-    ResolvedThermochemistry,
+    ResolvedThermochemistry, solve_resolved_ph,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::PreparedEquilibriumRunner;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    prepare_baked_rst_symbolic_problem_for_test, prepare_rst_symbolic_problem_from_prepared,
-    RustedSciTheSolver,
+    RustedSciTheSolver, prepare_baked_rst_symbolic_problem_for_test,
+    prepare_rst_symbolic_problem_from_prepared,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     SolverAttemptFailureKind, SolverAttemptMetrics, SolverAttemptOutcome, SolverAttemptReport,
     SolverBackend, SolverPolicy, SolverTermination,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_postprocessing::{
-    postprocess_temperature_range_solution, TemperatureInterpolationPolicy,
-    TemperatureInterpolationSpace, TemperaturePostprocessingPolicy, TemperatureResamplingGrid,
+    TemperatureInterpolationPolicy, TemperatureInterpolationSpace, TemperaturePostprocessingPolicy,
+    TemperatureResamplingGrid, postprocess_temperature_range_solution,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_range::{
     TemperatureGrid, TemperatureRangeDirection, TemperatureRangePointPreparation,
@@ -69,17 +66,20 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimin
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::gas_solver_for_T_range;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{InitialPhaseSet, PhaseStatus};
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-    build_phase_equilibrium_problem_with_timing, PhaseEquilibriumBuildRequest,
-    SupportedPhaseModelPolicy,
+    PhaseEquilibriumBuildRequest, SupportedPhaseModelPolicy,
+    build_phase_equilibrium_problem_with_timing,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
-    solve_resolved_pt, EquilibriumSolveOptions, PhaseControlPolicy, PhaseEquilibriumPipelineError,
-    PhaseEquilibriumPipelineRequest, ResolvedPhaseEquilibriumRequest,
+    EquilibriumSolveOptions, PhaseControlPolicy, PhaseEquilibriumPipelineError,
+    PhaseEquilibriumPipelineRequest, ResolvedPhaseEquilibriumRequest, solve_resolved_pt,
 };
 use crate::Thermodynamics::User_PhaseOrSolution::{
     ResolvedPhaseSystem, SubstanceSystemFactory, SubstanceSystemSpec, SubstanceSystemSpecBuilder,
     SubstancesContainer,
 };
+use crate::Thermodynamics::phase_layout::PhaseId;
+use crate::Thermodynamics::thermo_lib_api::ThermoData;
+use crate::library_manager::with_library_manager;
 
 /// Stable FNV-1a fingerprint for a canonical JSON record.
 ///
@@ -401,10 +401,12 @@ fn live_reactive_pt_to_h_to_ph_recovers_temperature_and_composition() {
     let symbolic_monolithic_thermochemistry = thermochemistry.clone();
     let auto_thermochemistry = thermochemistry.clone();
     assert_eq!(thermochemistry.len(), 3);
-    assert!(thermochemistry
-        .provenance()
-        .iter()
-        .all(|row| row.library() == "NASA_gas"));
+    assert!(
+        thermochemistry
+            .provenance()
+            .iter()
+            .all(|row| row.library() == "NASA_gas")
+    );
     let enthalpy = thermochemistry.enthalpy_model();
     let target_enthalpy = enthalpy
         .evaluate_total(pt.component_moles(), known_temperature)
@@ -438,9 +440,11 @@ fn live_reactive_pt_to_h_to_ph_recovers_temperature_and_composition() {
         .expect("P,H result must retain thermochemistry provenance");
     assert_eq!(report_bundle.len(), 3);
     assert!(report_bundle.temperature_bounds().lower() <= 1_900.0);
-    assert!(report_bundle
-        .temperature_bounds()
-        .contains(ph.temperature()));
+    assert!(
+        report_bundle
+            .temperature_bounds()
+            .contains(ph.temperature())
+    );
 
     let max_mole_delta = pt
         .component_moles()
@@ -511,9 +515,11 @@ fn live_reactive_pt_to_h_to_ph_recovers_temperature_and_composition() {
         ph.report().trials()[0].preparation(),
         PhTrialPreparation::FixedFormulationInitial
     );
-    assert!(ph.report().trials()[1..]
-        .iter()
-        .all(|trial| trial.preparation() == PhTrialPreparation::FixedFormulationReused));
+    assert!(
+        ph.report().trials()[1..]
+            .iter()
+            .all(|trial| trial.preparation() == PhTrialPreparation::FixedFormulationReused)
+    );
     assert!(ph.report().timing().enabled());
     assert!(ph.report().timing().total() > std::time::Duration::ZERO);
     assert!(ph.report().timing().scalar_orchestration() > std::time::Duration::ZERO);
@@ -757,15 +763,16 @@ fn live_symbolic_ph_rejects_a_native_polynomial_boundary_without_mutating_json()
     assert_eq!(before, live_library_file_snapshot());
 }
 
-/// Release-only bounded monolithic P,H regression using real gas and
-/// pure-condensed records.
+/// Release-only P,H recovery regression using real gas and pure-condensed
+/// records.
 ///
-/// The initial liquid inventory is zero. The test therefore exercises the
-/// trace-seeded active-set probe and verifies that the shared lifecycle can
-/// publish the phase-aware result without mutating the local repository.
+/// The initial liquid inventory is zero. A bounded all-active monolithic probe
+/// may locate a numerical branch, but it must not publish liquid merely because
+/// the neutral probe included it: canonical TPD evidence is the only creation
+/// criterion.
 #[test]
-#[ignore = "release-oriented real-data bounded P,H water story"]
-fn live_bounded_water_pt_to_h_to_ph_preserves_phase_evidence_and_json() {
+#[ignore = "release-oriented real-data P,H probe-rejection story"]
+fn live_bounded_water_ph_rejects_probe_without_tpd_creation_evidence() {
     let before = live_library_file_snapshot();
     let resolved = live_resolved_system();
     let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())
@@ -798,7 +805,7 @@ fn live_bounded_water_pt_to_h_to_ph_preserves_phase_evidence_and_json() {
     )
     .expect("P,H constraint must validate");
 
-    let ph = solve_resolved_ph(
+    let error = solve_resolved_ph(
         ResolvedPhaseEnthalpyRequest::from_resolved_thermochemistry(
             &resolved,
             initial,
@@ -813,57 +820,23 @@ fn live_bounded_water_pt_to_h_to_ph_preserves_phase_evidence_and_json() {
             EquilibriumSolveOptions::new().with_timing_mode(EquilibriumTimingMode::Enabled),
         ),
     )
-    .expect("bounded live P,H solve must recover the reference water state");
+    .expect_err("TPD-stable probe occupancy must not be published as liquid appearance");
 
-    assert_eq!(
-        ph.report().solve_path(),
-        PhSolvePath::MonolithicPhaseControl,
-        "bounded monolithic P,H must use the shared phase-control lifecycle"
-    );
     assert!(
-        (ph.temperature() - known_temperature).abs() < 1.0e-4,
-        "bounded P,H recovered {} K instead of {known_temperature} K",
-        ph.temperature()
+        error.to_string().contains("TPD creation threshold"),
+        "strict monolithic rejection must identify the probe/TPD boundary: {error}"
     );
-    assert_eq!(ph.report().fixed_formulation_builds(), 0);
-    assert_eq!(ph.report().fixed_formulation_reuses(), 0);
-    assert!(ph.report().trials().is_empty());
-    assert!(ph
-        .report()
-        .monolithic_evidence()
-        .is_some_and(|evidence| evidence.phase_control_report().is_some()));
-    let phase_control = ph
-        .equilibrium()
-        .phase_control_report()
-        .expect("bounded monolithic P,H must retain lifecycle evidence");
-    assert!(
-        phase_control
-            .transitions
-            .iter()
-            .any(|transition| { transition.activated.iter().any(|phase| phase.index() == 1) }),
-        "zero-inventory liquid must be activated by the trace-seeded P,H probe"
-    );
-    assert!(
-        phase_control
-            .transitions
-            .iter()
-            .all(|transition| transition.transition_duration > std::time::Duration::ZERO),
-        "published P,H phase transitions must retain a measured control-pass duration"
-    );
-    let validation = ph.equilibrium().accepted_solution().validation();
-    assert!(validation.residual_l2_norm.is_finite());
-    assert!(validation.max_abs_element_balance_error <= 1e-6);
     assert_eq!(before, live_library_file_snapshot());
 }
 
-/// Release-only route-equivalence story for a real water/liquid activation.
+/// Release-only route story for a real water/liquid probe rejection.
 ///
-/// Both P,H routes receive the same immutable resolved system, inventory,
-/// enthalpy target, bounds, and phase-control policy. This distinguishes a
-/// genuine route regression from a difference caused by lookup or setup.
+/// `Auto` is a numerical-backend fallback, not an escape hatch around a
+/// physical phase-stability rejection. Both routes must preserve the TPD
+/// boundary rather than silently publishing neutral probe occupancy.
 #[test]
-#[ignore = "release real-data P,H monolithic/nested phase-control comparison"]
-fn live_bounded_water_ph_monolithic_and_nested_routes_agree_after_phase_activation() {
+#[ignore = "release real-data P,H probe-rejection and Auto fallback comparison"]
+fn live_bounded_water_ph_auto_preserves_tpd_probe_rejection() {
     let before = live_library_file_snapshot();
     let resolved = live_resolved_system();
     let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())
@@ -898,7 +871,6 @@ fn live_bounded_water_ph_monolithic_and_nested_routes_agree_after_phase_activati
     let bounds = TemperatureBounds::new(325.0, 375.0).expect("water P,H bounds must be valid");
     let options = EquilibriumSolveOptions::new().with_timing_mode(EquilibriumTimingMode::Enabled);
 
-    let monolithic_started = std::time::Instant::now();
     let monolithic = solve_resolved_ph(
         ResolvedPhaseEnthalpyRequest::from_resolved_thermochemistry(
             &resolved,
@@ -912,86 +884,31 @@ fn live_bounded_water_ph_monolithic_and_nested_routes_agree_after_phase_activati
         .with_phase_control_policy(PhaseControlPolicy::default())
         .with_solve_options(options.clone()),
     )
-    .expect("monolithic P,H phase-control solve must succeed");
+    .expect_err("strict monolithic route must reject non-physical probe occupancy");
+    assert!(monolithic.to_string().contains("TPD creation threshold"));
 
-    let nested_started = std::time::Instant::now();
-    let nested = solve_resolved_ph(
+    let auto = solve_resolved_ph(
         ResolvedPhaseEnthalpyRequest::from_resolved_thermochemistry(
             &resolved,
-            initial,
-            constraint,
-            bounds,
-            thermochemistry,
+            initial.clone(),
+            constraint.clone(),
+            bounds.clone(),
+            thermochemistry.clone(),
         )
-        .expect("nested P,H request must validate")
-        .with_ph_solve_mode(PhSolveMode::NestedTemperature)
+        .expect("Auto P,H request must validate")
+        .with_ph_solve_mode(PhSolveMode::Auto)
         .with_phase_control_policy(PhaseControlPolicy::default())
-        .with_solve_options(options),
+        .with_solve_options(options.clone()),
     )
-    .expect("nested P,H phase-control solve must succeed");
-
-    assert_eq!(
-        monolithic.report().solve_path(),
-        PhSolvePath::MonolithicPhaseControl
-    );
-    assert_eq!(nested.report().solve_path(), PhSolvePath::NestedTemperature);
-    assert!(monolithic.report().trials().is_empty());
-    assert!(!nested.report().trials().is_empty());
-    assert!(monolithic.report().monolithic_evidence().is_some());
-    assert!(nested.report().monolithic_evidence().is_none());
+    .expect_err("Auto must not bypass a physical phase-stability rejection");
     assert!(
-        (monolithic.temperature() - nested.temperature()).abs() <= 1.0e-4,
-        "P,H routes recovered different temperatures: monolithic={} K, nested={} K",
-        monolithic.temperature(),
-        nested.temperature()
+        auto.to_string().contains("TPD creation threshold"),
+        "Auto route lost the physical rejection boundary: {auto}"
     );
-
-    let liquid_index = 1usize;
-    for solution in [&monolithic, &nested] {
-        let phase_control = solution
-            .equilibrium()
-            .phase_control_report()
-            .expect("phase-controlled P,H route must retain lifecycle evidence");
-        assert!(
-            phase_control.transitions.iter().any(|transition| {
-                transition
-                    .activated
-                    .iter()
-                    .any(|phase| phase.index() == liquid_index)
-            }),
-            "zero-inventory liquid must be activated by the P,H lifecycle"
-        );
-        let validation = solution.equilibrium().accepted_solution().validation();
-        assert!(validation.residual_l2_norm.is_finite());
-        assert!(validation.max_abs_element_balance_error <= 1.0e-6);
-        assert!(solution.enthalpy_error().abs() <= solution.enthalpy_error_limit_joules());
-    }
-
-    for (component, (monolithic_moles, nested_moles)) in monolithic
-        .equilibrium()
-        .component_moles()
-        .iter()
-        .zip(nested.equilibrium().component_moles())
-        .enumerate()
-    {
-        let tolerance = 1.0e-8 + 1.0e-6 * monolithic_moles.abs().max(nested_moles.abs());
-        assert!(
-            (monolithic_moles - nested_moles).abs() <= tolerance,
-            "component {component} differs between P,H routes: monolithic={monolithic_moles:e}, nested={nested_moles:e}, tolerance={tolerance:e}"
-        );
-    }
-
-    println!(
-        "live bounded water P,H route comparison\n{}",
-        Table::new([
-            live_ph_path_row(
-                "monolithic-phase-control",
-                &monolithic,
-                monolithic_started.elapsed()
-            ),
-            live_ph_path_row("nested-phase-control", &nested, nested_started.elapsed()),
-        ])
-        .with(Style::rounded())
+    assert_eq!(
+        monolithic.to_string(),
+        auto.to_string(),
+        "Auto must retain the strict monolithic physical rejection unchanged"
     );
     assert_eq!(before, live_library_file_snapshot());
 }
@@ -1120,17 +1037,21 @@ fn live_gas_pipeline_solves_without_mutating_the_resolved_repository_view() {
         outcome.lookup_report()
     );
     assert_eq!(outcome.resolved().phase_specs().len(), 1);
-    assert!(outcome
-        .solution()
-        .component_moles()
-        .iter()
-        .all(|value| value.is_finite()));
-    assert!(outcome
-        .solution()
-        .component_moles()
-        .iter()
-        .sum::<f64>()
-        .is_finite());
+    assert!(
+        outcome
+            .solution()
+            .component_moles()
+            .iter()
+            .all(|value| value.is_finite())
+    );
+    assert!(
+        outcome
+            .solution()
+            .component_moles()
+            .iter()
+            .sum::<f64>()
+            .is_finite()
+    );
 
     assert_eq!(
         before_gas.substances(),
@@ -1167,11 +1088,13 @@ fn live_pipeline_keeps_canonical_thermochemistry_files_byte_for_byte_unchanged()
         .solve()
         .expect("read-only live pipeline must solve");
 
-    assert!(outcome
-        .solution()
-        .component_moles()
-        .iter()
-        .all(|value| value.is_finite()));
+    assert!(
+        outcome
+            .solution()
+            .component_moles()
+            .iter()
+            .all(|value| value.is_finite())
+    );
     assert_eq!(before, live_library_file_snapshot());
 }
 
@@ -1182,11 +1105,13 @@ fn live_reactive_gas_solves_with_conserved_elements_and_keq_evidence() {
         .expect("live H2/O2/H2O equilibrium must solve");
     let validation = outcome.solution().accepted_solution().validation();
 
-    assert!(outcome
-        .solution()
-        .component_moles()
-        .iter()
-        .all(|moles| moles.is_finite() && *moles >= 0.0));
+    assert!(
+        outcome
+            .solution()
+            .component_moles()
+            .iter()
+            .all(|moles| moles.is_finite() && *moles >= 0.0)
+    );
     assert!(validation.residual_l2_norm.is_finite());
     assert!(validation.max_abs_element_balance_error <= 1e-8);
     let keq_status = outcome.solution().keq_validation_status();
@@ -1303,23 +1228,29 @@ fn live_bounded_phase_control_works_on_real_local_thermochemistry() {
     );
 
     assert_eq!(outcome.resolved().phase_specs().len(), 2);
-    assert!(outcome
-        .solution()
-        .component_moles()
-        .iter()
-        .sum::<f64>()
-        .is_finite());
-    assert!(outcome
-        .solution()
-        .phase_total(&crate::Thermodynamics::phase_layout::PhaseId::new(Some(
-            "liquid".to_string()
-        )))
-        .is_some());
-    assert!(outcome
-        .solution()
-        .summary_rows()
-        .iter()
-        .any(|row| row.section == "phase_control"));
+    assert!(
+        outcome
+            .solution()
+            .component_moles()
+            .iter()
+            .sum::<f64>()
+            .is_finite()
+    );
+    assert!(
+        outcome
+            .solution()
+            .phase_total(&crate::Thermodynamics::phase_layout::PhaseId::new(Some(
+                "liquid".to_string()
+            )))
+            .is_some()
+    );
+    assert!(
+        outcome
+            .solution()
+            .summary_rows()
+            .iter()
+            .any(|row| row.section == "phase_control")
+    );
 }
 
 #[test]
@@ -1341,6 +1272,9 @@ fn live_bounded_phase_control_temperature_range_reuses_accepted_state() {
     assert!(range.report().phase_projection_cache_entries() >= 1);
     assert!(range.report().phase_prepared_cache_entries() >= 1);
     assert!(range.report().phase_rst_cache_entries() >= 1);
+    assert!(range.report().phase_stability_geometry_cache_entries() >= 1);
+    assert!(range.report().phase_stability_geometry_cache_builds() >= 1);
+    assert!(range.report().phase_stability_geometry_cache_reuses() >= 1);
     assert!(range.points()[1].report().phase_set_reused());
     assert!(range.points()[2].report().phase_set_reused());
     assert!(range.points()[1].report().symbolic_parameter_reused());
@@ -1898,7 +1832,7 @@ fn live_temperature_range_failure_rows(
                 jacobian_ms: "-".to_string(),
                 engine_ms: "-".to_string(),
                 detail: error.to_string(),
-            }]
+            }];
         }
     };
     let attempts = match cause {
@@ -2589,10 +2523,12 @@ fn live_element_limited_release_scaling_matrix() {
             .sum::<f64>();
         let balance_limit = 1e-6 + 1e-6 * inventory_scale;
         assert_eq!(solution.component_moles().len(), count);
-        assert!(solution
-            .component_moles()
-            .iter()
-            .all(|value| value.is_finite() && *value > 0.0));
+        assert!(
+            solution
+                .component_moles()
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+        );
         assert!(validation.residual_l2_norm.is_finite());
         assert!(
             validation.max_abs_element_balance_error <= balance_limit,
@@ -2682,9 +2618,12 @@ fn live_exact_element_typed_temperature_range_backend_matrix() {
                         range.points().len().saturating_sub(1),
                         "parameterized RST graph must be reused after the first accepted point"
                     );
-                    assert!(range.points().iter().all(|point| {
-                        point.report().formulation_build() == std::time::Duration::ZERO
-                    }), "changing a thermochemical coefficient interval must not rebuild the RST graph");
+                    assert!(
+                        range.points().iter().all(|point| {
+                            point.report().formulation_build() == std::time::Duration::ZERO
+                        }),
+                        "changing a thermochemical coefficient interval must not rebuild the RST graph"
+                    );
                 }
                 for point in range.points() {
                     let validation = point.solution().accepted_solution().validation();
@@ -2696,11 +2635,13 @@ fn live_exact_element_typed_temperature_range_backend_matrix() {
                         .sum::<f64>();
                     let balance_limit = 1e-6 + 1e-6 * inventory_scale;
                     assert_eq!(point.solution().component_moles().len(), selected.len());
-                    assert!(point
-                        .solution()
-                        .component_moles()
-                        .iter()
-                        .all(|value| value.is_finite() && *value > 0.0));
+                    assert!(
+                        point
+                            .solution()
+                            .component_moles()
+                            .iter()
+                            .all(|value| value.is_finite() && *value > 0.0)
+                    );
                     assert!(validation.residual_l2_norm.is_finite());
                     assert!(validation.max_abs_element_balance_error <= balance_limit);
                 }
@@ -2922,10 +2863,12 @@ fn live_100_species_50_point_temperature_range_backend_matrix() {
                         .sum::<f64>();
                     let balance_limit = 1e-6 + 1e-6 * inventory_scale;
                     assert_eq!(solution.component_moles().len(), 100);
-                    assert!(solution
-                        .component_moles()
-                        .iter()
-                        .all(|value| value.is_finite() && *value > 0.0));
+                    assert!(
+                        solution
+                            .component_moles()
+                            .iter()
+                            .all(|value| value.is_finite() && *value > 0.0)
+                    );
                     assert!(validation.residual_l2_norm.is_finite());
                     assert!(validation.max_abs_element_balance_error <= balance_limit);
                     if index > 0 {
@@ -3150,6 +3093,9 @@ fn live_bounded_phase_control_temperature_range_records_real_ice_transition() {
     assert!(range.report().phase_projection_cache_entries() >= 2);
     assert!(range.report().phase_prepared_cache_entries() >= 2);
     assert!(range.report().phase_rst_cache_entries() >= 2);
+    assert!(range.report().phase_stability_geometry_cache_entries() >= 1);
+    assert!(range.report().phase_stability_geometry_cache_builds() >= 1);
+    assert!(range.report().phase_stability_geometry_cache_reuses() >= 1);
     assert!(range.report().initial_formulation_timing().enabled());
     assert!(
         range
@@ -3159,9 +3105,11 @@ fn live_bounded_phase_control_temperature_range_records_real_ice_transition() {
         "the live ice transition must account for at least one reduced formulation build"
     );
     assert!(range.points()[1].report().phase_set_reused());
-    assert!(range.points()[1..]
-        .iter()
-        .any(|point| point.report().symbolic_parameter_reused()));
+    assert!(
+        range.points()[1..]
+            .iter()
+            .any(|point| point.report().symbolic_parameter_reused())
+    );
     let cache_timings = range
         .points()
         .last()
@@ -3187,10 +3135,12 @@ fn live_bounded_phase_control_temperature_range_records_real_ice_transition() {
             .iter()
             .map(|moles| moles.abs())
             .sum::<f64>();
-        assert!(solution
-            .component_moles()
-            .iter()
-            .all(|moles| moles.is_finite()));
+        assert!(
+            solution
+                .component_moles()
+                .iter()
+                .all(|moles| moles.is_finite())
+        );
         assert!(validation.max_abs_element_balance_error <= 1e-6 + 1e-6 * scale);
     }
     assert!(
@@ -3210,12 +3160,15 @@ fn live_bounded_phase_control_temperature_range_records_real_ice_transition() {
     assert_eq!(before, live_library_file_snapshot());
 
     println!(
-        "live bounded ice T-range: points={} transitions={} projections={} prepared={} rst_symbolic={} total={:?}",
+        "live bounded ice T-range: points={} transitions={} projections={} prepared={} rst_symbolic={} tpd_geometry={}/{}/{} total={:?}",
         range.points().len(),
         range.report().phase_control_transitions(),
         range.report().phase_projection_cache_entries(),
         range.report().phase_prepared_cache_entries(),
         range.report().phase_rst_cache_entries(),
+        range.report().phase_stability_geometry_cache_entries(),
+        range.report().phase_stability_geometry_cache_builds(),
+        range.report().phase_stability_geometry_cache_reuses(),
         range.report().total(),
     );
 }
@@ -3238,6 +3191,12 @@ struct LivePhaseTransitionMatrixRow {
     transitions: String,
     #[tabled(rename = "Max balance")]
     max_balance: String,
+    #[tabled(rename = "Min inactive TPD J/mol")]
+    min_inactive_tpd: String,
+    #[tabled(rename = "Max feasibility")]
+    max_feasibility_residual: String,
+    #[tabled(rename = "Max KKT")]
+    max_kkt_residual: String,
     #[tabled(rename = "Complementarity")]
     complementarity: String,
     #[tabled(rename = "Total ms")]
@@ -3326,6 +3285,39 @@ fn live_real_phase_transition_release_matrix() {
             acceptance.complementarity.satisfied,
             "real phase matrix case {fixture} must satisfy complementarity"
         );
+        let mut max_feasibility_residual = None::<f64>;
+        let mut max_kkt_residual = None::<f64>;
+        for report in &acceptance.phase_stability {
+            if let Some(feasibility) = &report.elemental_feasibility {
+                assert!(
+                    feasibility.max_abs_residual.is_finite()
+                        && feasibility.max_abs_residual <= feasibility.residual_tolerance,
+                    "real phase matrix case {fixture} phase {:?} violated elemental feasibility: {} > {}",
+                    report.phase,
+                    feasibility.max_abs_residual,
+                    feasibility.residual_tolerance,
+                );
+                max_feasibility_residual = Some(
+                    max_feasibility_residual
+                        .unwrap_or(0.0_f64)
+                        .max(feasibility.max_abs_residual),
+                );
+            }
+            if let Some(minimizer) = &report.minimizer {
+                assert!(
+                    minimizer.max_abs_constraint_residual.is_finite()
+                        && minimizer.max_abs_constraint_residual <= minimizer.constraint_tolerance
+                        && minimizer.max_abs_kkt_residual.is_finite(),
+                    "real phase matrix case {fixture} phase {:?} violates TPD minimizer evidence",
+                    report.phase,
+                );
+                max_kkt_residual = Some(
+                    max_kkt_residual
+                        .unwrap_or(0.0_f64)
+                        .max(minimizer.max_abs_kkt_residual),
+                );
+            }
+        }
         let active_phases = solution
             .phases()
             .iter()
@@ -3340,6 +3332,17 @@ fn live_real_phase_transition_release_matrix() {
             active_phases,
             transitions: transitions.to_string(),
             max_balance: format!("{:.3e}", validation.max_abs_element_balance_error),
+            min_inactive_tpd: acceptance
+                .complementarity
+                .min_inactive_minimum_tpd
+                .map(|value| format!("{value:.3e}"))
+                .unwrap_or_else(|| "-".to_string()),
+            max_feasibility_residual: max_feasibility_residual
+                .map(|value| format!("{value:.3e}"))
+                .unwrap_or_else(|| "-".to_string()),
+            max_kkt_residual: max_kkt_residual
+                .map(|value| format!("{value:.3e}"))
+                .unwrap_or_else(|| "-".to_string()),
             complementarity: "OK".to_string(),
             total_ms: live_duration_ms(outcome.timing_report().total()),
         });
@@ -3521,9 +3524,11 @@ fn live_large_element_limited_typed_temperature_range_story() {
             postprocessed.raw.labels().len(),
             result.points()[0].solution().component_moles().len()
         );
-        assert!(result.points()[1..]
-            .iter()
-            .all(|point| point.report().used_continuation_seed()));
+        assert!(
+            result.points()[1..]
+                .iter()
+                .all(|point| point.report().used_continuation_seed())
+        );
         let timing = result.report().point_timing();
         println!(
             "live typed T-range: backend=legacy-nr direction={expected_direction:?} \
@@ -3619,13 +3624,15 @@ fn live_low_temperature_water_activates_the_real_ice_phase() {
         "ice should contain almost all water at 250 K and 1 atm; solid={solid_moles:e}, gas={gas_moles:e}"
     );
     assert!(gas_moles >= 0.25);
-    assert!(outcome
-        .solution()
-        .phase_control_report()
-        .expect("bounded solve must retain its phase-control report")
-        .transitions
-        .iter()
-        .any(|transition| !transition.activated.is_empty()));
+    assert!(
+        outcome
+            .solution()
+            .phase_control_report()
+            .expect("bounded solve must retain its phase-control report")
+            .transitions
+            .iter()
+            .any(|transition| !transition.activated.is_empty())
+    );
     assert!(
         outcome
             .solution()
@@ -3750,14 +3757,21 @@ fn live_ice_pt_to_h_to_auto_ph_preserves_phase_transition() {
         crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::
             ReactionExtentErrorKind::AllBackendsFailed
     );
+    assert!(matches!(
+        ph.report().route_decisions(),
+        [PhRouteDecision::AutoFallback { reason, .. }]
+            if reason.error_kind() == ReactionExtentErrorKind::AllBackendsFailed
+    ));
     for solution in [&nested, &ph] {
-        assert!(solution
-            .equilibrium()
-            .phase_control_report()
-            .expect("ice P,H result must retain phase-control evidence")
-            .transitions
-            .iter()
-            .any(|transition| transition.activated.iter().any(|phase| phase.index() == 1)));
+        assert!(
+            solution
+                .equilibrium()
+                .phase_control_report()
+                .expect("ice P,H result must retain phase-control evidence")
+                .transitions
+                .iter()
+                .any(|transition| transition.activated.iter().any(|phase| phase.index() == 1))
+        );
         assert!(solution.report().trials().iter().all(|trial| {
             trial.inner_evidence().is_some_and(|evidence| {
                 evidence
@@ -3789,7 +3803,9 @@ fn live_ice_pt_to_h_to_auto_ph_preserves_phase_transition() {
     println!(
         "live real ice P,H route matrix: monolithic=FAILED({:?}) auto_fallback={:?} solid_moles={:.6e} transitions={}\n{}",
         monolithic_error.kind(),
-        ph.report().fallback_reason().map(|reason| format!("{:?}", reason.error_kind())),
+        ph.report()
+            .fallback_reason()
+            .map(|reason| format!("{:?}", reason.error_kind())),
         ph.equilibrium().phase_total(&solid).unwrap_or_default(),
         phase_control.transitions.len(),
         Table::new([
@@ -4007,23 +4023,25 @@ fn live_boudouard_system_activates_real_graphite_from_co_co2_gas() {
         graphite_moles > high_temperature_graphite,
         "graphite inventory must decrease across the 700 K -> 1400 K Boudouard shift; low={graphite_moles:e}, high={high_temperature_graphite:e}"
     );
-    assert!(low
-        .solution()
-        .phase_control_report()
-        .expect("bounded solve must retain its phase-control report")
-        .transitions
-        .iter()
-        .any(|transition| !transition.activated.is_empty()));
-    assert!(low
-        .solution()
-        .build_report()
-        .components()
-        .iter()
-        .any(|component| {
-            component.component().label() == "solid::C(gr)"
-                && component.thermo_source().library() == "NASA_cond"
-                && component.thermo_source().record_key() == "C(gr)"
-        }));
+    assert!(
+        low.solution()
+            .phase_control_report()
+            .expect("bounded solve must retain its phase-control report")
+            .transitions
+            .iter()
+            .any(|transition| !transition.activated.is_empty())
+    );
+    assert!(
+        low.solution()
+            .build_report()
+            .components()
+            .iter()
+            .any(|component| {
+                component.component().label() == "solid::C(gr)"
+                    && component.thermo_source().library() == "NASA_cond"
+                    && component.thermo_source().record_key() == "C(gr)"
+            })
+    );
 }
 
 #[test]
@@ -4076,16 +4094,18 @@ fn live_water_pair_shows_temperature_driven_phase_dominance_shift() {
         low.solution().metadata().components().len(),
         high.solution().metadata().components().len()
     );
-    assert!(low
-        .solution()
-        .summary_rows()
-        .iter()
-        .any(|row| row.section == "phase_control"));
-    assert!(high
-        .solution()
-        .summary_rows()
-        .iter()
-        .any(|row| row.section == "phase_control"));
+    assert!(
+        low.solution()
+            .summary_rows()
+            .iter()
+            .any(|row| row.section == "phase_control")
+    );
+    assert!(
+        high.solution()
+            .summary_rows()
+            .iter()
+            .any(|row| row.section == "phase_control")
+    );
 }
 
 #[test]
@@ -4734,11 +4754,13 @@ fn live_reactive_and_water_ph_target_range_route_matrix() {
     .expect("nested reactive range must solve");
     assert_eq!(reactive_range.report().formulation_builds(), 1);
     assert!(reactive_range.report().formulation_reuses() > 0);
-    assert!(reactive_range
-        .points()
-        .iter()
-        .all(|point| point.solution().enthalpy_error().abs()
-            <= point.solution().enthalpy_error_limit_joules()));
+    assert!(
+        reactive_range
+            .points()
+            .iter()
+            .all(|point| point.solution().enthalpy_error().abs()
+                <= point.solution().enthalpy_error_limit_joules())
+    );
     assert!(reactive_range.points().iter().all(|point| {
         let equilibrium = point.solution().equilibrium();
         let validation = equilibrium.accepted_solution().validation();
@@ -5266,6 +5288,29 @@ fn live_water_ice_auto_ph_target_range_story() {
                 <= point.solution().enthalpy_error_limit_joules(),
             "water/ice P,H point {index} violated the enthalpy contract"
         );
+        if point.report().phase_control_transitions() > 0 {
+            let acceptance = equilibrium.acceptance_report().expect(
+                "a P,H point with a published phase transition must retain acceptance evidence",
+            );
+            assert!(
+                acceptance
+                    .phase_stability
+                    .iter()
+                    .any(|report| report.minimum_tpd.is_some()),
+                "transition point {index} must retain at least one evaluated TPD report"
+            );
+            for stability in acceptance
+                .phase_stability
+                .iter()
+                .filter(|report| report.minimum_tpd.is_some())
+            {
+                assert_eq!(
+                    stability.conditions.temperature,
+                    point.solution().temperature(),
+                    "P,H point {index} retained TPD evidence from a temperature other than its accepted solution"
+                );
+            }
+        }
     }
     let fallback_points = range
         .points()

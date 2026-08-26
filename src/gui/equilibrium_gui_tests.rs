@@ -7,11 +7,6 @@ use super::equilibrium_gui_model::{
     GuiSolverBackend, GuiTraceSeedPolicyDraft,
 };
 use super::equilibrium_gui_request::{EquilibriumGuiSolveRequest, build_equilibrium_request};
-use crate::Thermodynamics::ChemEquilibrium::prelude::{
-    MultiphaseEquilibriumLayout, MultiphaseInitialComposition, PhaseComponentId, PhaseId,
-    PhaseModel, PhaseSpec, PhysicalState, ResolvedThermochemistry, SubstanceSystemFactory,
-    SubstanceSystemSpec, ThermoRepository,
-};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumConditions;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
@@ -19,6 +14,11 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
     PhaseControlPolicy, ResolvedPhaseEquilibriumRequest, solve_resolved_pt,
+};
+use crate::Thermodynamics::ChemEquilibrium::prelude::{
+    MultiphaseEquilibriumLayout, MultiphaseInitialComposition, PhaseComponentId, PhaseId,
+    PhaseModel, PhaseSpec, PhysicalState, ResolvedThermochemistry, SubstanceSystemFactory,
+    SubstanceSystemSpec, ThermoRepository,
 };
 use crate::Thermodynamics::thermo_lib_api::ThermoData;
 use crate::library_manager::with_library_manager;
@@ -409,6 +409,27 @@ fn assert_result_diagnostics_are_rendered(app: EquilibriumApp, first_point_label
     harness.get_by_label("Lookup provenance");
 }
 
+fn assert_phase_lifecycle_trace_is_rendered(app: EquilibriumApp, first_point_label: &str) {
+    let app = Rc::new(RefCell::new(app));
+    let app_for_ui = Rc::clone(&app);
+    let mut open = true;
+    let mut harness = Harness::new_ui(move |ui| {
+        app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+    });
+
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, first_point_label)
+        .click_accesskit();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Phase lifecycle")
+        .click_accesskit();
+    harness.run();
+    harness.get_by_label("Decision");
+    harness.get_by_label("Evidence");
+}
+
 fn assert_ph_result_diagnostics_are_rendered(app: EquilibriumApp) {
     let app = Rc::new(RefCell::new(app));
     let app_for_ui = Rc::clone(&app);
@@ -502,7 +523,17 @@ fn lookup_and_diagnostics_controls_render_typed_policies() {
     harness.get_by_label("Retain backend attempts");
     harness.get_by_label("Retain conservation report");
     harness.get_by_label("Retain phase transitions");
+    harness.get_by_label("Phase lifecycle trace");
+    harness.get_by_label("Range lifecycle trace");
     assert!(!app.borrow().document.config.diagnostics.collect_timing);
+    assert_eq!(
+        app.borrow()
+            .document
+            .config
+            .diagnostics
+            .phase_lifecycle_trace,
+        super::equilibrium_gui_model::GuiPhaseLifecycleTrace::Off
+    );
 }
 
 #[test]
@@ -1296,11 +1327,9 @@ fn fixed_ph_cancellation_discards_late_worker_completion() {
 fn offline_local_water_ph_story_publishes_phase_transition() {
     let before = local_gui_library_snapshot();
     let target = local_water_ph_target();
-    let mut app = local_water_phase_app(
-        super::equilibrium_gui_model::TemperatureDraft::Point {
-            temperature_k: "250".into(),
-        },
-    );
+    let mut app = local_water_phase_app(super::equilibrium_gui_model::TemperatureDraft::Point {
+        temperature_k: "250".into(),
+    });
     // The mixed gas/condensed fixture intentionally exercises the legacy
     // numeric route: the symbolic monolithic P,H payload requires one native
     // coefficient interval for every component, while the GUI must still
@@ -1348,11 +1377,9 @@ fn offline_local_water_ph_story_publishes_phase_transition() {
 #[ignore = "requires the local NASA gas/condensed catalogs and runs an unreachable P,H worker"]
 fn offline_local_unreachable_ph_target_is_transactional() {
     let before = local_gui_library_snapshot();
-    let mut app = local_water_phase_app(
-        super::equilibrium_gui_model::TemperatureDraft::Point {
-            temperature_k: "350".into(),
-        },
-    );
+    let mut app = local_water_phase_app(super::equilibrium_gui_model::TemperatureDraft::Point {
+        temperature_k: "350".into(),
+    });
     app.document.config.problem = EquilibriumProblemDraft::FixedPh {
         pressure_pa: "101325".into(),
         reference_pressure_pa: "101325".into(),
@@ -1456,6 +1483,8 @@ fn offline_local_water_ice_story_publishes_phase_totals_and_status() {
     let mut app = local_water_phase_app(super::equilibrium_gui_model::TemperatureDraft::Point {
         temperature_k: "250".into(),
     });
+    app.document.config.diagnostics.phase_lifecycle_trace =
+        super::equilibrium_gui_model::GuiPhaseLifecycleTrace::PhaseLifecycle;
     app.prepare_request()
         .expect("the real water/ice GUI request prepares");
     assert!(app.start_prepared_run());
@@ -1482,7 +1511,17 @@ fn offline_local_water_ice_story_publishes_phase_totals_and_status() {
             .any(|status| status == "Active" || status == "Appeared")
     );
     assert!(snapshot.points()[0].source().solve_report().attempt_count() >= 1);
-    assert_result_diagnostics_are_rendered(app, "Point 1: 250.000000 K");
+    let trace = snapshot.points()[0]
+        .lifecycle_trace()
+        .expect("enabled GUI trace is retained on the accepted point");
+    assert!(
+        trace
+            .events()
+            .iter()
+            .any(|event| event.title().contains("TPD") || event.title().contains("transition")),
+        "phase fixture must retain a physical stability or transition decision: {trace:?}"
+    );
+    assert_phase_lifecycle_trace_is_rendered(app, "Point 1: 250.000000 K");
 }
 
 #[test]

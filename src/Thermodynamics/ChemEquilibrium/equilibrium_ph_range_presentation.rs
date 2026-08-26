@@ -254,7 +254,7 @@ mod tests {
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::ResolvedThermochemistry;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumConditions;
     use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
-        solve_resolved_pt, EquilibriumSolveOptions, ResolvedPhaseEquilibriumRequest,
+        EquilibriumSolveOptions, ResolvedPhaseEquilibriumRequest, solve_resolved_pt,
     };
     use crate::Thermodynamics::User_PhaseOrSolution::{
         SubstanceSystemFactory, SubstanceSystemSpecBuilder, SubstancesContainer,
@@ -269,11 +269,13 @@ mod tests {
         .unwrap();
         assert_eq!(series.target_enthalpies_joules(), &[-2.0, 3.0]);
         assert_eq!(series.rows(), &[vec![300.0], vec![500.0]]);
-        assert!(EnthalpySweepSeries::from_rows(
-            vec!["T".to_string()],
-            &[(2.0, vec![300.0]), (2.0, vec![500.0])],
-        )
-        .is_err());
+        assert!(
+            EnthalpySweepSeries::from_rows(
+                vec!["T".to_string()],
+                &[(2.0, vec![300.0]), (2.0, vec![500.0])],
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -336,18 +338,22 @@ mod tests {
         assert_eq!(presentation.phase_totals.labels(), &["single::total_moles"]);
         assert_eq!(presentation.points[0].point_index, 0);
         assert!(presentation.points[1].used_continuation);
-        assert!(presentation
-            .solved_temperature
-            .target_enthalpies_joules()
-            .windows(2)
-            .all(|pair| pair[0] < pair[1]));
+        assert!(
+            presentation
+                .solved_temperature
+                .target_enthalpies_joules()
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
         assert_eq!(presentation.component_moles.rows().len(), 3);
         assert_eq!(presentation.component_mole_fractions.rows().len(), 3);
-        assert!(presentation
-            .component_mole_fractions
-            .rows()
-            .iter()
-            .all(|row| (row.iter().sum::<f64>() - 1.0).abs() < 1e-10));
+        assert!(
+            presentation
+                .component_mole_fractions
+                .rows()
+                .iter()
+                .all(|row| (row.iter().sum::<f64>() - 1.0).abs() < 1e-10)
+        );
         assert_eq!(presentation.phase_totals.rows().len(), 3);
         assert_eq!(presentation.solver_metrics.rows().len(), 3);
         assert_eq!(

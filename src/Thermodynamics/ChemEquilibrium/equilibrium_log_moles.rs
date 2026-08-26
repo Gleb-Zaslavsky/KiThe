@@ -187,12 +187,12 @@
 //! - [`equilibrium_temperature_postprocessing`](super::equilibrium_temperature_postprocessing) — postprocessing
 //!
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::{
-    phase_activity_models, PhaseActivityModel,
+    PhaseActivityModel, phase_activity_models,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::EquilibriumNonlinearBackend;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::{
-    classify_equilibrium_constant_cross_validation, EquilibriumConstantCrossValidationStatus,
-    EquilibriumConstantCrossValidationTolerances,
+    EquilibriumConstantCrossValidationStatus, EquilibriumConstantCrossValidationTolerances,
+    classify_equilibrium_constant_cross_validation,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_problem::EquilibriumConstantProblem;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_solver::{
@@ -203,32 +203,34 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::{
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::EquilibriumExecutionControl;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
-    compute_reaction_basis, ReactionBasis, ReactionExtentError,
+    ReactionBasis, ReactionExtentError, compute_reaction_basis,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
-    EquilibriumConditions, EquilibriumProblem, EquilibriumSolution, LogMolesInitialGuess,
-    PreparedEquilibriumProblem, TraceSpeciesSeedPolicy, DEFAULT_TRACE_MOLE_FLOOR,
+    DEFAULT_TRACE_MOLE_FLOOR, EquilibriumConditions, EquilibriumProblem, EquilibriumSolution,
+    LogMolesInitialGuess, PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    prepare_rst_symbolic_problem, RstPreparedProblem,
+    RstPreparedProblem, prepare_rst_symbolic_problem,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, SolverAttemptFailureKind, SolverAttemptReport, SolverBackend,
     SolverCascadeBudget, SolverPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_postprocessing::{
-    postprocess_temperature_series, TemperaturePostprocessingPolicy,
-    TemperaturePostprocessingResult,
+    TemperaturePostprocessingPolicy, TemperaturePostprocessingResult,
+    postprocess_temperature_series,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::{
-    validate_equilibrium_candidate, EquilibriumAcceptanceCriteria, EquilibriumCandidateReport,
-    EquilibriumCandidateResiduals,
+    EquilibriumAcceptanceCriteria, EquilibriumCandidateReport, EquilibriumCandidateResiduals,
+    validate_equilibrium_candidate,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
-    multiphase_equilibrium_residual_generator_sym, PhaseControlledSolveReport, PhaseManager,
+    PhaseControlledSolveReport, PhaseManager, multiphase_equilibrium_residual_generator_sym,
 };
 use crate::Thermodynamics::User_substances::{SubsData, WhatIsFound};
 use crate::Thermodynamics::User_substances_error::SubsDataError;
+use RustedSciThe::symbolic::symbolic_engine::Expr;
+use RustedSciThe::symbolic::symbolic_functions::Jacobian;
 use log::{debug, error, info, warn};
 use nalgebra::{DMatrix, DVector};
 use prettytable::{Cell, Row, Table};
@@ -237,8 +239,6 @@ use std::default::Default;
 use std::f64;
 use std::rc::Rc;
 use std::time::Instant;
-use RustedSciThe::symbolic::symbolic_engine::Expr;
-use RustedSciThe::symbolic::symbolic_functions::Jacobian;
 /// Universal gas constant in J/(mol·K)
 /// CODATA 2018 molar gas constant in J/(mol K).
 ///
@@ -3005,11 +3005,13 @@ mod retry_policy_tests {
         assert!(!is_recoverable_backend_failure(
             &ReactionExtentError::DimensionMismatch("species count".to_string()),
         ));
-        assert!(ReactionExtentError::InvalidProblem {
-            field: "solver_options",
-            message: "invalid settings".to_string(),
-        }
-        .is_non_retryable_input_error());
+        assert!(
+            ReactionExtentError::InvalidProblem {
+                field: "solver_options",
+                message: "invalid settings".to_string(),
+            }
+            .is_non_retryable_input_error()
+        );
         assert_eq!(
             recoverable_backend_failure_kind(&ReactionExtentError::ResidualEvaluation(
                 "temporary residual failure".to_string(),
@@ -3021,7 +3023,7 @@ mod retry_policy_tests {
 
 #[cfg(test)]
 mod solver_budget_tests {
-    use super::{temperature_failure, EquilibriumLogMoles};
+    use super::{EquilibriumLogMoles, temperature_failure};
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RustedSciTheSolver;
@@ -3541,10 +3543,10 @@ mod solver_cascade_story_tests {
 #[cfg(test)]
 mod continuation_seed_policy_tests {
     use super::{
-        continuation_seed_for_point, ContinuationSeedPolicy, EquilibriumLogMoles, Solvers,
+        ContinuationSeedPolicy, EquilibriumLogMoles, Solvers, continuation_seed_for_point,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
-        TraceSpeciesSeedPolicy, DEFAULT_TRACE_MOLE_FLOOR,
+        DEFAULT_TRACE_MOLE_FLOOR, TraceSpeciesSeedPolicy,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::gas_solver;
 
@@ -3643,8 +3645,8 @@ mod continuation_seed_policy_tests {
 mod activity_contract_regression_tests {
     #![allow(deprecated)]
     use super::{
-        equilibrium_logmole_residual2, evaluate_equilibrium_logmole_residual,
-        reaction_phase_stoichiometry, GibbsFn, Phase, PhaseKind,
+        GibbsFn, Phase, PhaseKind, equilibrium_logmole_residual2,
+        evaluate_equilibrium_logmole_residual, reaction_phase_stoichiometry,
     };
     use nalgebra::DMatrix;
     use std::rc::Rc;

@@ -7,15 +7,52 @@
 //! label is optional until the repository owns a versioned payload manifest.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
-use crate::Thermodynamics::thermo_lib_api::ThermoCatalogConsistencyReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::EquilibriumCandidateSelectionReport;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
     EquilibriumSolveOptions, EquilibriumSolveOptionsSnapshot, ResolvedPhaseEquilibriumOutcome,
 };
+use crate::Thermodynamics::thermo_lib_api::ThermoCatalogConsistencyReport;
 
 /// Current JSON-compatible capsule schema.
-pub const EQUILIBRIUM_REPRODUCIBILITY_SCHEMA_VERSION: u32 = 1;
+pub const EQUILIBRIUM_REPRODUCIBILITY_SCHEMA_VERSION: u32 = 2;
+
+/// Phase-stability mathematics represented by a reproducibility capsule.
+///
+/// The tag prevents a historical `driving_force` artifact from being read as
+/// evidence for the canonical constrained TPD workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PhaseStabilitySemantics {
+    CanonicalTpdV1,
+}
+
+/// Typed failure while loading a reproducibility artifact.
+#[derive(Debug)]
+pub enum ReproducibilityCapsuleError {
+    Json(serde_json::Error),
+    UnsupportedSchema { found: Option<u64>, expected: u32 },
+    ObsoleteStabilityField { field: String },
+}
+
+impl fmt::Display for ReproducibilityCapsuleError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Json(error) => write!(formatter, "invalid reproducibility JSON: {error}"),
+            Self::UnsupportedSchema { found, expected } => write!(
+                formatter,
+                "unsupported equilibrium reproducibility schema {:?}; expected {expected}",
+                found
+            ),
+            Self::ObsoleteStabilityField { field } => write!(
+                formatter,
+                "reproducibility capsule contains obsolete phase-stability field '{field}'"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReproducibilityCapsuleError {}
 
 /// Immutable component-level identity of one selected thermochemistry record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +124,7 @@ pub struct EquilibriumCandidateRecordSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EquilibriumReproducibilityCapsule {
     pub schema_version: u32,
+    pub phase_stability_semantics: PhaseStabilitySemantics,
     pub temperature_kelvin: f64,
     pub pressure_pa: f64,
     pub reference_pressure_pa: f64,
@@ -148,6 +186,7 @@ impl EquilibriumReproducibilityCapsule {
         let conditions = solution.conditions();
         Self {
             schema_version: EQUILIBRIUM_REPRODUCIBILITY_SCHEMA_VERSION,
+            phase_stability_semantics: PhaseStabilitySemantics::CanonicalTpdV1,
             temperature_kelvin: conditions.temperature(),
             pressure_pa: conditions.pressure(),
             reference_pressure_pa: conditions.reference_pressure(),
@@ -194,6 +233,47 @@ impl EquilibriumReproducibilityCapsule {
     /// Produces stable, human-readable JSON for a sidecar result artifact.
     pub fn to_pretty_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
+    }
+
+    /// Loads only the current capsule contract.
+    ///
+    /// Replaying an old physical score under the new TPD name is worse than a
+    /// hard error: it would create a plausible but physically ambiguous audit
+    /// trail. Migrations must therefore be explicit application-level work.
+    pub fn from_json(json: &str) -> Result<Self, ReproducibilityCapsuleError> {
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(ReproducibilityCapsuleError::Json)?;
+        let found = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64);
+        if found != Some(u64::from(EQUILIBRIUM_REPRODUCIBILITY_SCHEMA_VERSION)) {
+            return Err(ReproducibilityCapsuleError::UnsupportedSchema {
+                found,
+                expected: EQUILIBRIUM_REPRODUCIBILITY_SCHEMA_VERSION,
+            });
+        }
+        if let Some(field) = find_obsolete_stability_field(&value) {
+            return Err(ReproducibilityCapsuleError::ObsoleteStabilityField { field });
+        }
+        serde_json::from_value(value).map_err(ReproducibilityCapsuleError::Json)
+    }
+}
+
+fn find_obsolete_stability_field(value: &serde_json::Value) -> Option<String> {
+    const OBSOLETE: &[&str] = &[
+        "driving_force",
+        "phase_stability_model",
+        "PhaseStabilityModel",
+    ];
+    match value {
+        serde_json::Value::Object(map) => map.iter().find_map(|(key, value)| {
+            OBSOLETE
+                .contains(&key.as_str())
+                .then(|| key.clone())
+                .or_else(|| find_obsolete_stability_field(value))
+        }),
+        serde_json::Value::Array(values) => values.iter().find_map(find_obsolete_stability_field),
+        _ => None,
     }
 }
 
@@ -291,7 +371,6 @@ fn stable_fingerprint<'a>(parts: impl IntoIterator<Item = &'a str>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Thermodynamics::thermo_lib_api::ThermoData;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumConditions;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
@@ -301,6 +380,7 @@ mod tests {
     use crate::Thermodynamics::User_PhaseOrSolution::{
         SubstanceSystemSpecBuilder, SubstancesContainer,
     };
+    use crate::Thermodynamics::thermo_lib_api::ThermoData;
 
     #[test]
     fn local_outcome_exports_stable_policy_provenance_and_catalog_evidence() {
@@ -347,19 +427,61 @@ mod tests {
         let json = capsule.to_pretty_json().unwrap();
         assert!(json.contains("NASA_gas"));
         assert!(json.contains("bundled-local-test-data"));
+        assert_eq!(
+            EquilibriumReproducibilityCapsule::from_json(&json).unwrap(),
+            capsule
+        );
+
+        // Phase models are stored by their explicit symbolic names, not by a
+        // fragile enum ordinal. Adding `IdealSolution` therefore does not
+        // reinterpret existing `IdealGas`/`PureCondensed` artifacts or force
+        // a schema bump by itself.
+        let mut ideal_solution_named = capsule;
+        ideal_solution_named.phases[0].model = "IdealSolution".to_string();
+        let round_trip = EquilibriumReproducibilityCapsule::from_json(
+            &ideal_solution_named.to_pretty_json().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(round_trip.phases[0].model, "IdealSolution");
+        assert_eq!(
+            round_trip.phase_stability_semantics,
+            PhaseStabilitySemantics::CanonicalTpdV1
+        );
+    }
+
+    #[test]
+    fn reproducibility_loader_rejects_old_schema_and_obsolete_stability_fields() {
+        let old_schema = serde_json::json!({ "schema_version": 1 });
+        assert!(matches!(
+            EquilibriumReproducibilityCapsule::from_json(&old_schema.to_string()),
+            Err(ReproducibilityCapsuleError::UnsupportedSchema { found: Some(1), .. })
+        ));
+
+        let obsolete_field = serde_json::json!({
+            "schema_version": EQUILIBRIUM_REPRODUCIBILITY_SCHEMA_VERSION,
+            "phase_stability": { "driving_force": -1.0 }
+        });
+        assert!(matches!(
+            EquilibriumReproducibilityCapsule::from_json(&obsolete_field.to_string()),
+            Err(ReproducibilityCapsuleError::ObsoleteStabilityField { field }) if field == "driving_force"
+        ));
     }
 
     #[test]
     fn options_snapshot_expands_the_implicit_production_cascade() {
         let snapshot = EquilibriumSolveOptions::new().reproducibility_snapshot();
-        assert!(snapshot
-            .effective_backend_order
-            .iter()
-            .any(|backend| backend.contains("RustedSciThe")));
-        assert!(snapshot
-            .effective_backend_order
-            .iter()
-            .any(|backend| backend.contains("Legacy")));
+        assert!(
+            snapshot
+                .effective_backend_order
+                .iter()
+                .any(|backend| backend.contains("RustedSciThe"))
+        );
+        assert!(
+            snapshot
+                .effective_backend_order
+                .iter()
+                .any(|backend| backend.contains("Legacy"))
+        );
         assert_eq!(snapshot.timing_mode, "Disabled");
         assert!(!snapshot.execution_control_attached);
     }

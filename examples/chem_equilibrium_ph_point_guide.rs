@@ -7,10 +7,9 @@
 use KiThe::Thermodynamics::ChemEquilibrium::prelude::{
     EquilibriumConditions, EquilibriumConstraint, EquilibriumSolveOptions,
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition, PhSolveMode,
-    ResolvedPhaseEnthalpyRequest, ResolvedPhaseEquilibriumRequest,
-    ResolvedThermochemistry, SubstanceSystemFactory, SubstanceSystemSpecBuilder,
-    SubstancesContainer, TemperatureBounds, TotalEnthalpyJoules, solve_resolved_ph,
-    solve_resolved_pt,
+    ResolvedPhaseEnthalpyRequest, ResolvedPhaseEquilibriumRequest, ResolvedThermochemistry,
+    SubstanceSystemFactory, SubstanceSystemSpecBuilder, SubstancesContainer, TemperatureBounds,
+    TotalEnthalpyJoules, solve_resolved_ph, solve_resolved_pt,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -60,7 +59,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     println!("P,H temperature = {:.6} K", solution.temperature());
-    println!("P,H equilibrium moles = {:?}", solution.equilibrium().component_moles());
+    println!(
+        "P,H equilibrium moles = {:?}",
+        solution.equilibrium().component_moles()
+    );
     println!(
         "P,H path = {:?}, enthalpy error = {:.3e} J",
         solution.report().solve_path(),

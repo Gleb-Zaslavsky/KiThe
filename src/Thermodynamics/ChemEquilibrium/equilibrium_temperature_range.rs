@@ -8,19 +8,20 @@
 
 use std::time::{Duration, Instant};
 
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumRangeDiagnosticsPolicy;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
     EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::MultiphaseInitialComposition;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
-    EquilibriumConditions, LogMolesInitialGuess, TraceSpeciesSeedPolicy, DEFAULT_TRACE_MOLE_FLOOR,
+    DEFAULT_TRACE_MOLE_FLOOR, EquilibriumConditions, LogMolesInitialGuess, TraceSpeciesSeedPolicy,
 };
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingReport;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-    build_phase_equilibrium_problem_with_timing, PhaseEquilibriumBuildRequest,
-    SupportedPhaseModelPolicy,
+    PhaseEquilibriumBuildRequest, SupportedPhaseModelPolicy,
+    build_phase_equilibrium_problem_with_timing,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::MultiphaseEquilibriumSolution;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::EquilibriumSolveOptions;
@@ -253,6 +254,9 @@ pub struct TemperatureRangeSolveReport {
     phase_projection_cache_entries: usize,
     phase_prepared_cache_entries: usize,
     phase_rst_cache_entries: usize,
+    phase_stability_geometry_cache_entries: usize,
+    phase_stability_geometry_cache_builds: usize,
+    phase_stability_geometry_cache_reuses: usize,
     phase_control_transitions: usize,
     initial_formulation_timing: EquilibriumTimingReport,
     point_timing: TemperatureRangeDurationSummary,
@@ -310,6 +314,23 @@ impl TemperatureRangeSolveReport {
     /// construction is the expensive part of the default RST path.
     pub fn phase_rst_cache_entries(&self) -> usize {
         self.phase_rst_cache_entries
+    }
+
+    /// Number of retained immutable SVD/range/null-space geometries used by
+    /// TPD phase-stability probes during the sweep.
+    pub fn phase_stability_geometry_cache_entries(&self) -> usize {
+        self.phase_stability_geometry_cache_entries
+    }
+
+    /// Number of times a TPD elemental geometry was constructed.
+    pub fn phase_stability_geometry_cache_builds(&self) -> usize {
+        self.phase_stability_geometry_cache_builds
+    }
+
+    /// Number of TPD probes that reused a previously constructed elemental
+    /// geometry. This is diagnostic evidence, not a numerical iteration count.
+    pub fn phase_stability_geometry_cache_reuses(&self) -> usize {
+        self.phase_stability_geometry_cache_reuses
     }
 
     /// Total number of accepted phase transitions across all points.
@@ -561,6 +582,9 @@ impl<'a> TemperatureRangeRequest<'a> {
                 phase_projection_cache_entries: 0,
                 phase_prepared_cache_entries: 0,
                 phase_rst_cache_entries: 0,
+                phase_stability_geometry_cache_entries: 0,
+                phase_stability_geometry_cache_builds: 0,
+                phase_stability_geometry_cache_reuses: 0,
                 phase_control_transitions: 0,
                 initial_formulation_timing,
                 point_timing,
@@ -586,9 +610,10 @@ impl<'a> TemperatureRangeRequest<'a> {
         trace_policy: TraceSpeciesSeedPolicy,
         execution_control: Option<EquilibriumExecutionControl>,
     ) -> Result<TemperatureRangeSolution, ReactionExtentError> {
-        let mut template = bundle.into_phase_control_template(|configured| {
-            *configured = phase_control_policy.into_phase_manager()
-        })?;
+        let mut template = bundle.into_phase_control_template_with_diagnostics(
+            |configured| *configured = phase_control_policy.into_phase_manager(),
+            self.solve_options.diagnostics_options().clone(),
+        )?;
         let initial_formulation_timing = template.build_timing();
         let mut seed = LogMolesInitialGuess::from_moles_with_policy(
             self.initial_composition.moles(),
@@ -609,6 +634,11 @@ impl<'a> TemperatureRangeRequest<'a> {
             }
             let conditions =
                 EquilibriumConditions::new(temperature, self.pressure, self.reference_pressure)?;
+            let point_diagnostics = self
+                .solve_options
+                .diagnostics_options()
+                .for_range_point(index, self.temperatures.values().len());
+            template.set_diagnostics_options(point_diagnostics.clone());
             let continuation = index > 0;
             let phase_set = points.last().and_then(|point: &TemperatureRangePoint| {
                 point
@@ -616,7 +646,7 @@ impl<'a> TemperatureRangeRequest<'a> {
                     .phase_control_report()
                     .map(|report| report.final_phase_set.clone())
             });
-            let solution = template
+            let mut solution = template
                 .solve_at(
                     conditions,
                     seed.clone(),
@@ -625,14 +655,25 @@ impl<'a> TemperatureRangeRequest<'a> {
                     phase_set,
                 )
                 .map_err(|error| range_point_error(index, temperature, error))?;
-            let phase_report = solution.phase_control_report().ok_or_else(|| {
-                ReactionExtentError::InvalidProblem {
+            let (point_transitions, phase_control_iterations) = solution
+                .phase_control_report()
+                .map(|report| (report.transitions.len(), report.iterations))
+                .ok_or_else(|| ReactionExtentError::InvalidProblem {
                     field: "temperature_range_phase_control",
                     message: "bounded range point did not publish phase-control evidence"
                         .to_string(),
+                })?;
+            if self.solve_options.diagnostics_options().range_policy()
+                == EquilibriumRangeDiagnosticsPolicy::TransitionsOnly
+            {
+                if point_transitions > 0 {
+                    if let Some(report) = solution.diagnostics_report() {
+                        point_diagnostics.replay_retained_events(report);
+                    }
+                } else {
+                    solution = solution.without_diagnostics();
                 }
-            })?;
-            let point_transitions = phase_report.transitions.len();
+            }
             transitions += point_transitions;
             let formulation_cache_timings = template
                 .formulation_cache_timings()
@@ -654,7 +695,7 @@ impl<'a> TemperatureRangeRequest<'a> {
                     thermochemistry_refreshed: true,
                     symbolic_parameter_reused: template.last_rst_symbolic_reused(),
                     phase_control_transitions: point_transitions,
-                    phase_control_iterations: phase_report.iterations,
+                    phase_control_iterations,
                     phase_set_reused: continuation,
                     formulation_build: template.last_formulation_build(),
                     formulation_cache_timings,
@@ -672,6 +713,7 @@ impl<'a> TemperatureRangeRequest<'a> {
             }
         }
 
+        let phase_stability_geometry_cache = template.phase_stability_geometry_cache_statistics();
         Ok(TemperatureRangeSolution {
             report: TemperatureRangeSolveReport {
                 direction: self.temperatures.direction(),
@@ -687,6 +729,9 @@ impl<'a> TemperatureRangeRequest<'a> {
                 phase_projection_cache_entries: template.projection_cache_size(),
                 phase_prepared_cache_entries: template.prepared_cache_size(),
                 phase_rst_cache_entries: template.rst_cache_size(),
+                phase_stability_geometry_cache_entries: phase_stability_geometry_cache.entries,
+                phase_stability_geometry_cache_builds: phase_stability_geometry_cache.builds,
+                phase_stability_geometry_cache_reuses: phase_stability_geometry_cache.reuses,
                 phase_control_transitions: transitions,
                 initial_formulation_timing,
                 point_timing: summarize_point_timing(&points),

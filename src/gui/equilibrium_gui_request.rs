@@ -4,25 +4,26 @@
 //! only place that knows how GUI enums map to `PhaseSpec`, `PhaseComponentId`,
 //! solver policies, and the fixed-pressure equilibrium workflow.
 
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumDiagnosticEvent;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::EquilibriumExecutionControl;
 use crate::Thermodynamics::ChemEquilibrium::prelude::{
     CandidateSelectionError, ElementSearchMode, EquilibriumCandidatePolicy,
     EquilibriumCandidateSelectionReport, EquilibriumCandidateSelector, EquilibriumConditions,
-    EquilibriumConstantValidationMode, EquilibriumConstraint, EquilibriumSolveOptions,
+    EquilibriumConstantValidationMode, EquilibriumConstraint, EquilibriumDiagnosticsMode,
+    EquilibriumDiagnosticsOptions, EquilibriumRangeDiagnosticsPolicy, EquilibriumSolveOptions,
     EquilibriumTimingMode, FixedPressureEnthalpySolution, LegacyEquilibriumSolver,
-    MultiphaseEquilibriumLayout, MultiphaseInitialComposition, PhaseComponentId,
+    MultiphaseEquilibriumLayout, MultiphaseInitialComposition, PhSolveMode, PhaseComponentId,
     PhaseControlPolicy, PhaseEquilibriumPipelineError, PhaseEquilibriumPipelineRequest, PhaseId,
     PhaseModel, PhaseSpec, ResolvedPhaseEnthalpyRequest, ResolvedPhaseEquilibriumOutcome,
     ResolvedThermochemistry, RustedSciTheSolver, SolverBackend, SolverCascadeBudget, SolverPolicy,
     SubstanceSystemFactory, SubstanceSystemFactoryError, SubstanceSystemSpec, TemperatureBounds,
     TemperatureGrid, TemperatureRangeSolution, ThermoRepository, TraceSpeciesSeedPolicy,
-    PhSolveMode,
 };
 use crate::gui::equilibrium_gui_model::{
-    EquilibriumSolverDraft, GuiKeqValidationMode, GuiPhaseModel, GuiPhysicalState,
-    GuiSolverBackend, ValidatedCandidatePolicy, ValidatedEquilibriumGuiConfig, ValidatedInventory,
-    ValidatedLookup, ValidatedPhaseMode, ValidatedProblem, ValidatedSolver, ValidatedTemperature,
-    ValidatedTraceSeedPolicy,
+    EquilibriumSolverDraft, GuiKeqValidationMode, GuiPhaseLifecycleTrace, GuiPhaseModel,
+    GuiPhysicalState, GuiRangeLifecycleTrace, GuiSolverBackend, ValidatedCandidatePolicy,
+    ValidatedEquilibriumGuiConfig, ValidatedInventory, ValidatedLookup, ValidatedPhaseMode,
+    ValidatedProblem, ValidatedSolver, ValidatedTemperature, ValidatedTraceSeedPolicy,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -63,6 +64,15 @@ pub struct EquilibriumGuiPhRequest {
 impl EquilibriumGuiPhRequest {
     fn with_execution_control(mut self, control: EquilibriumExecutionControl) -> Self {
         self.options = self.options.with_execution_control(control);
+        self
+    }
+
+    fn with_diagnostic_sink<F>(mut self, sink: F) -> Self
+    where
+        F: Fn(EquilibriumDiagnosticEvent) + Send + Sync + 'static,
+    {
+        let diagnostics = self.options.diagnostics_options().clone().with_sink(sink);
+        self.options = self.options.with_diagnostics(diagnostics);
         self
     }
 
@@ -150,6 +160,57 @@ impl EquilibriumGuiSolveRequest {
                 }
             }
             Self::Ph(request) => Self::Ph(request.with_execution_control(control)),
+        }
+    }
+
+    /// Attaches an observational lifecycle stream owned by the GUI worker.
+    ///
+    /// The engine still decides whether diagnostics are enabled from the
+    /// validated document. Supplying a sink alone cannot turn tracing on or
+    /// alter the numerical transaction.
+    pub fn with_diagnostic_sink<F>(self, sink: F) -> Self
+    where
+        F: Fn(EquilibriumDiagnosticEvent) + Send + Sync + 'static,
+    {
+        let sink: Arc<dyn Fn(EquilibriumDiagnosticEvent) + Send + Sync> = Arc::new(sink);
+        match self {
+            Self::Point(request) => {
+                let diagnostics = request
+                    .solve_options()
+                    .diagnostics_options()
+                    .clone()
+                    .with_sink({
+                        let sink = Arc::clone(&sink);
+                        move |event| sink(event)
+                    });
+                let options = request
+                    .solve_options()
+                    .clone()
+                    .with_diagnostics(diagnostics);
+                Self::Point(request.with_solve_options(options))
+            }
+            Self::Range {
+                request,
+                temperatures,
+            } => {
+                let diagnostics = request
+                    .solve_options()
+                    .diagnostics_options()
+                    .clone()
+                    .with_sink({
+                        let sink = Arc::clone(&sink);
+                        move |event| sink(event)
+                    });
+                let options = request
+                    .solve_options()
+                    .clone()
+                    .with_diagnostics(diagnostics);
+                Self::Range {
+                    request: request.with_solve_options(options),
+                    temperatures,
+                }
+            }
+            Self::Ph(request) => Self::Ph(request.with_diagnostic_sink(move |event| sink(event))),
         }
     }
 
@@ -558,6 +619,22 @@ fn build_solve_options(
     } else {
         EquilibriumTimingMode::Disabled
     });
+    let diagnostics_mode = match diagnostics.phase_lifecycle_trace {
+        GuiPhaseLifecycleTrace::Off => EquilibriumDiagnosticsMode::Disabled,
+        GuiPhaseLifecycleTrace::Summary => EquilibriumDiagnosticsMode::Summary,
+        GuiPhaseLifecycleTrace::PhaseLifecycle => EquilibriumDiagnosticsMode::PhaseLifecycle,
+        GuiPhaseLifecycleTrace::Detailed => EquilibriumDiagnosticsMode::Detailed,
+    };
+    let range_policy = match diagnostics.range_lifecycle_trace {
+        GuiRangeLifecycleTrace::Endpoints => EquilibriumRangeDiagnosticsPolicy::Endpoints,
+        GuiRangeLifecycleTrace::TransitionsOnly => {
+            EquilibriumRangeDiagnosticsPolicy::TransitionsOnly
+        }
+        GuiRangeLifecycleTrace::EveryPoint => EquilibriumRangeDiagnosticsPolicy::EveryPoint,
+    };
+    options = options.with_diagnostics(
+        EquilibriumDiagnosticsOptions::enabled(diagnostics_mode).with_range_policy(range_policy),
+    );
     options = options.with_keq_validation_mode(match diagnostics.keq_validation {
         GuiKeqValidationMode::Off => EquilibriumConstantValidationMode::Off,
         GuiKeqValidationMode::WhenApplicable => EquilibriumConstantValidationMode::WhenApplicable,
@@ -602,6 +679,7 @@ fn map_physical_state(
 fn map_phase_model(model: GuiPhaseModel) -> PhaseModel {
     match model {
         GuiPhaseModel::IdealGas => PhaseModel::IdealGas,
+        GuiPhaseModel::IdealSolution => PhaseModel::IdealSolution,
         GuiPhaseModel::PureCondensed => PhaseModel::PureCondensed,
     }
 }
@@ -698,6 +776,26 @@ mod tests {
             map_solver_backend(GuiSolverBackend::LegacyNr),
             SolverBackend::Legacy(LegacyEquilibriumSolver::NR)
         ));
+    }
+
+    #[test]
+    fn lifecycle_diagnostics_map_to_the_canonical_engine_policy() {
+        let mut document = EquilibriumGuiDocument::new();
+        document.config.diagnostics.phase_lifecycle_trace =
+            crate::gui::equilibrium_gui_model::GuiPhaseLifecycleTrace::Detailed;
+        document.config.diagnostics.range_lifecycle_trace =
+            crate::gui::equilibrium_gui_model::GuiRangeLifecycleTrace::TransitionsOnly;
+        let validated = document.validate_for_run().expect("document validates");
+        let options = build_solve_options(&validated.solver, &validated.diagnostics)
+            .expect("diagnostic policy maps");
+        assert_eq!(
+            options.diagnostics_options().mode(),
+            EquilibriumDiagnosticsMode::Detailed
+        );
+        assert_eq!(
+            options.diagnostics_options().range_policy(),
+            EquilibriumRangeDiagnosticsPolicy::TransitionsOnly
+        );
     }
 
     #[test]

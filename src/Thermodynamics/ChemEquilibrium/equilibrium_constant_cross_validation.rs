@@ -401,7 +401,7 @@ mod tests {
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_solver::EquilibriumConstantSolver;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::{
-        validate_equilibrium_constants, EquilibriumConstantValidationTolerances,
+        EquilibriumConstantValidationTolerances, validate_equilibrium_constants,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::GibbsFn;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Phase;
@@ -651,12 +651,14 @@ mod tests {
         .unwrap();
 
         let rows = report.summary_rows();
-        assert!(rows
-            .iter()
-            .any(|row| row.section == "comparison" && row.label == "accepted"));
-        assert!(rows
-            .iter()
-            .any(|row| row.section == "species" && row.label == "A2"));
+        assert!(
+            rows.iter()
+                .any(|row| row.section == "comparison" && row.label == "accepted")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.section == "species" && row.label == "A2")
+        );
         let rendered = format!("{report}");
         assert!(rendered.contains("[comparison] accepted = true"));
         assert!(rendered.contains("[species] A2 = A2:"));

@@ -18,11 +18,11 @@ use nalgebra::DMatrix;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::phase_activity_models;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::TemperatureBounds;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
-    additive_total_enthalpy, EnthalpyScale,
+    EnthalpyScale, additive_total_enthalpy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-    compute_species_moles, evaluate_equilibrium_logmole_residual_with_standard_gibbs,
-    scale_jacobian_rows, scale_residual_rows, R,
+    R, compute_species_moles, evaluate_equilibrium_logmole_residual_with_standard_gibbs,
+    scale_jacobian_rows, scale_residual_rows,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_thermochemistry::ResolvedThermochemistry;
@@ -654,7 +654,6 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
         GibbsFn, Phase, PhaseKind,
     };
@@ -664,6 +663,7 @@ mod tests {
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
         EquilibriumConditions, EquilibriumProblem, LogMolesInitialGuess,
     };
+    use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 
     #[test]
     fn ph_layout_appends_one_temperature_column_and_one_enthalpy_row() {

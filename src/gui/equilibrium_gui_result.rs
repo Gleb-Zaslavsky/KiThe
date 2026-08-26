@@ -4,8 +4,13 @@
 //! module adds one compact, phase-qualified, aligned projection for tables and
 //! plotting while retaining the source solutions through `Arc`.
 
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::{
+    EquilibriumDiagnosticEvent, PhaseStabilityDiagnostic,
+};
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::{
+    FixedPressureEnthalpySolution, PhRouteDecision,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_range::TemperatureRangeSolveReport;
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::FixedPressureEnthalpySolution;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseStatus;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::MultiphaseEquilibriumSolution;
 use crate::gui::equilibrium_gui_request::EquilibriumGuiSolveOutcome;
@@ -21,7 +26,67 @@ pub struct EquilibriumGuiPointSnapshot {
     phase_statuses: Vec<String>,
     component_active: Vec<bool>,
     phase_active: Vec<bool>,
+    lifecycle_trace: Option<EquilibriumGuiLifecycleTraceSnapshot>,
     source: Arc<MultiphaseEquilibriumSolution>,
+}
+
+/// One readable fact in the accepted phase-control decision tree.
+///
+/// The source event remains owned by the engine report. This small immutable
+/// projection resolves phase indices into the labels already displayed by the
+/// result table, so the GUI never has to reproduce lifecycle semantics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EquilibriumGuiLifecycleEventSnapshot {
+    title: String,
+    detail: String,
+}
+
+impl EquilibriumGuiLifecycleEventSnapshot {
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+/// Bounded diagnostics attached to one accepted point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EquilibriumGuiLifecycleTraceSnapshot {
+    mode: String,
+    events: Vec<EquilibriumGuiLifecycleEventSnapshot>,
+    dropped_events: usize,
+}
+
+impl EquilibriumGuiLifecycleTraceSnapshot {
+    fn from_solution(solution: &MultiphaseEquilibriumSolution) -> Option<Self> {
+        let report = solution.diagnostics_report()?;
+        if !report.enabled() {
+            return None;
+        }
+        Some(Self {
+            mode: format!("{:?}", report.mode()),
+            events: report
+                .events()
+                .iter()
+                .map(|event| lifecycle_event_snapshot(event, solution))
+                .collect(),
+            dropped_events: report.dropped_events(),
+        })
+    }
+
+    pub fn mode(&self) -> &str {
+        &self.mode
+    }
+
+    pub fn events(&self) -> &[EquilibriumGuiLifecycleEventSnapshot] {
+        &self.events
+    }
+
+    pub fn dropped_events(&self) -> usize {
+        self.dropped_events
+    }
 }
 
 /// Scalar energy evidence attached to a fixed-`P,H` result.
@@ -73,8 +138,31 @@ pub struct EquilibriumGuiPhDiagnosticsSnapshot {
     accepted_enthalpy_error_limit_j: f64,
     timing_enabled: bool,
     timing_total_ms: f64,
+    route_decisions: Vec<EquilibriumGuiPhRouteDecisionSnapshot>,
     trials: Vec<EquilibriumGuiPhTrialSnapshot>,
     monolithic: Option<EquilibriumGuiPhMonolithicSnapshot>,
+}
+
+/// One immutable high-level P,H routing decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EquilibriumGuiPhRouteDecisionSnapshot {
+    from_route: String,
+    to_route: String,
+    reason: String,
+}
+
+impl EquilibriumGuiPhRouteDecisionSnapshot {
+    pub fn from_route(&self) -> &str {
+        &self.from_route
+    }
+
+    pub fn to_route(&self) -> &str {
+        &self.to_route
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
 }
 
 /// Immutable GUI projection of the coupled monolithic P,H evidence.
@@ -222,13 +310,14 @@ impl EquilibriumGuiPhDiagnosticsSnapshot {
                 phase_control_rows,
                 residual_evaluations: evidence.residual_evaluations(),
                 jacobian_evaluations: evidence.jacobian_evaluations(),
-                inner_timing_ms: evidence
-                    .inner_timing()
-                    .total()
-                    .as_secs_f64()
-                    * 1_000.0,
+                inner_timing_ms: evidence.inner_timing().total().as_secs_f64() * 1_000.0,
             }
         });
+        let route_decisions = report
+            .route_decisions()
+            .iter()
+            .map(EquilibriumGuiPhRouteDecisionSnapshot::from_engine)
+            .collect();
         Self {
             solved_temperature_k: solution.temperature(),
             solve_path: format!("{:?}", report.solve_path()),
@@ -245,6 +334,7 @@ impl EquilibriumGuiPhDiagnosticsSnapshot {
             accepted_enthalpy_error_limit_j: solution.enthalpy_error_limit_joules(),
             timing_enabled: timing.enabled(),
             timing_total_ms: timing.total().as_secs_f64() * 1_000.0,
+            route_decisions,
             trials,
             monolithic,
         }
@@ -306,10 +396,273 @@ impl EquilibriumGuiPhDiagnosticsSnapshot {
         &self.trials
     }
 
+    /// High-level route evidence is independent from scalar temperature trials.
+    pub fn route_decisions(&self) -> &[EquilibriumGuiPhRouteDecisionSnapshot] {
+        &self.route_decisions
+    }
+
     /// Coupled evidence, present only for monolithic P,H routes.
     pub fn monolithic(&self) -> Option<&EquilibriumGuiPhMonolithicSnapshot> {
         self.monolithic.as_ref()
     }
+}
+
+impl EquilibriumGuiPhRouteDecisionSnapshot {
+    fn from_engine(decision: &PhRouteDecision) -> Self {
+        Self {
+            from_route: format!("{:?}", decision.from_route()),
+            to_route: format!("{:?}", decision.to_route()),
+            reason: format!(
+                "{:?}: {}",
+                decision.reason().error_kind(),
+                decision.reason().message()
+            ),
+        }
+    }
+}
+
+fn lifecycle_event_snapshot(
+    event: &EquilibriumDiagnosticEvent,
+    solution: &MultiphaseEquilibriumSolution,
+) -> EquilibriumGuiLifecycleEventSnapshot {
+    use EquilibriumDiagnosticEvent as Event;
+
+    let (title, detail) = match event {
+        Event::SolveStarted {
+            conditions,
+            initial_phase_set,
+        } => (
+            "Solve started".to_string(),
+            format!(
+                "T={:.6} K, P={:.6} Pa, active=[{}]",
+                conditions.temperature(),
+                conditions.pressure(),
+                lifecycle_phase_set(initial_phase_set.active_mask(), solution),
+            ),
+        ),
+        Event::OuterIterationStarted {
+            iteration,
+            active_phase_set,
+        } => (
+            format!("Outer iteration {iteration}"),
+            format!(
+                "active=[{}]",
+                lifecycle_phase_set(active_phase_set.active_mask(), solution)
+            ),
+        ),
+        Event::ActiveSetCandidateAccepted {
+            iteration,
+            validation,
+            backend_summary,
+            ..
+        } => (
+            format!("Candidate accepted at iteration {iteration}"),
+            format!(
+                "residual={:.3e}, balance={:.3e}; {backend_summary}",
+                validation.residual_l2_norm, validation.max_abs_element_balance_error
+            ),
+        ),
+        Event::ActiveSetCandidateRejected {
+            iteration,
+            active_phase_set,
+            message,
+        } => (
+            format!("Candidate rejected at iteration {iteration}"),
+            format!(
+                "active=[{}]; {message}",
+                lifecycle_phase_set(active_phase_set.active_mask(), solution)
+            ),
+        ),
+        Event::StabilityEvaluated {
+            iteration,
+            dg_create_j_per_mol,
+            dg_keep_j_per_mol,
+            phases,
+        } => (
+            format!("TPD stability at iteration {iteration}"),
+            format!(
+                "dg_create={dg_create_j_per_mol:.3e} J/mol, dg_keep={dg_keep_j_per_mol:.3e} J/mol; {}",
+                lifecycle_stability_summary(phases, solution)
+            ),
+        ),
+        Event::TransitionAccepted {
+            iteration,
+            activated_phase_indices,
+            deactivated_phase_indices,
+            reason,
+            previous_phase_set,
+            new_phase_set,
+            ..
+        } => (
+            format!("Phase transition accepted at iteration {iteration}"),
+            format!(
+                "[{}] -> [{}]; activated=[{}], deactivated=[{}], reason={reason:?}",
+                lifecycle_phase_set(previous_phase_set.active_mask(), solution),
+                lifecycle_phase_set(new_phase_set.active_mask(), solution),
+                lifecycle_phase_indices(activated_phase_indices, solution),
+                lifecycle_phase_indices(deactivated_phase_indices, solution),
+            ),
+        ),
+        Event::TransitionHeldByHysteresis {
+            iteration,
+            phase_index,
+        } => (
+            format!("Hysteresis hold at iteration {iteration}"),
+            format!("retained {}", lifecycle_phase_label(*phase_index, solution)),
+        ),
+        Event::RecoveryProbeStarted {
+            iteration,
+            removed_phase_index,
+            attempted_phase_set,
+        } => (
+            format!("Boundary recovery started at iteration {iteration}"),
+            format!(
+                "remove {}; active=[{}]",
+                lifecycle_phase_label(*removed_phase_index, solution),
+                lifecycle_phase_set(attempted_phase_set.active_mask(), solution),
+            ),
+        ),
+        Event::RecoveryProbeAccepted {
+            iteration,
+            phase_index,
+            previous_phase_set,
+            new_phase_set,
+        } => (
+            format!("Boundary recovery accepted at iteration {iteration}"),
+            format!(
+                "removed {}; [{}] -> [{}]",
+                lifecycle_phase_label(*phase_index, solution),
+                lifecycle_phase_set(previous_phase_set.active_mask(), solution),
+                lifecycle_phase_set(new_phase_set.active_mask(), solution),
+            ),
+        ),
+        Event::RecoveryProbeRejected {
+            iteration,
+            removed_phase_index,
+            message,
+        } => (
+            format!("Boundary recovery rejected at iteration {iteration}"),
+            format!(
+                "remove {}; {message}",
+                lifecycle_phase_label(*removed_phase_index, solution)
+            ),
+        ),
+        Event::ContinuationRestored {
+            retained_phase_set,
+            retained_seed,
+        } => (
+            "Continuation restored".to_string(),
+            format!(
+                "seed_retained={retained_seed}, active=[{}]",
+                retained_phase_set
+                    .as_ref()
+                    .map(|set| lifecycle_phase_set(set.active_mask(), solution))
+                    .unwrap_or_else(|| "none".into())
+            ),
+        ),
+        Event::PhaseControlBudgetExhausted {
+            max_outer_iterations,
+        } => (
+            "Phase-control budget exhausted".to_string(),
+            format!("max_outer_iterations={max_outer_iterations}"),
+        ),
+        Event::PhaseControlCycleDetected {
+            iteration,
+            repeated_phase_set,
+        } => (
+            format!("Phase-control cycle at iteration {iteration}"),
+            format!(
+                "repeated active=[{}]",
+                lifecycle_phase_set(repeated_phase_set.active_mask(), solution)
+            ),
+        ),
+        Event::PhRouteFallback {
+            from_route,
+            to_route,
+            error_kind,
+            message,
+        } => (
+            "P,H route fallback".to_string(),
+            format!("{from_route:?} -> {to_route:?}; {error_kind:?}: {message}"),
+        ),
+        Event::PhRouteFailed {
+            route,
+            error_kind,
+            message,
+        } => (
+            "P,H route failed".to_string(),
+            format!("{route:?}; {error_kind:?}: {message}"),
+        ),
+        Event::SolveFailed {
+            message,
+            continuation_restored,
+        } => (
+            "Solve failed".to_string(),
+            format!("continuation_restored={continuation_restored}; {message}"),
+        ),
+        Event::SolveAccepted {
+            final_phase_set,
+            outer_iterations,
+            transition_count,
+        } => (
+            "Solve accepted".to_string(),
+            format!(
+                "active=[{}], outer_iterations={outer_iterations}, transitions={transition_count}",
+                lifecycle_phase_set(final_phase_set.active_mask(), solution)
+            ),
+        ),
+    };
+    EquilibriumGuiLifecycleEventSnapshot { title, detail }
+}
+
+fn lifecycle_stability_summary(
+    phases: &[PhaseStabilityDiagnostic],
+    solution: &MultiphaseEquilibriumSolution,
+) -> String {
+    phases
+        .iter()
+        .map(|phase| {
+            let tpd = phase
+                .minimum_tpd_j_per_mol
+                .map(|value| format!("{value:.3e} J/mol"))
+                .unwrap_or_else(|| "not evaluated".into());
+            format!(
+                "{}: {}, total={:.3e} mol, minimum_tpd={tpd}",
+                lifecycle_phase_label(phase.phase_index, solution),
+                if phase.active { "active" } else { "inactive" },
+                phase.phase_total_moles,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn lifecycle_phase_set(active_mask: Vec<bool>, solution: &MultiphaseEquilibriumSolution) -> String {
+    active_mask
+        .iter()
+        .enumerate()
+        .filter_map(|(index, active)| active.then(|| lifecycle_phase_label(index, solution)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn lifecycle_phase_indices(
+    phase_indices: &[usize],
+    solution: &MultiphaseEquilibriumSolution,
+) -> String {
+    phase_indices
+        .iter()
+        .map(|&index| lifecycle_phase_label(index, solution))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn lifecycle_phase_label(index: usize, solution: &MultiphaseEquilibriumSolution) -> String {
+    solution
+        .phases()
+        .get(index)
+        .and_then(|phase| phase.id().as_option().clone())
+        .unwrap_or_else(|| format!("phase_{index}"))
 }
 
 impl EquilibriumGuiPointSnapshot {
@@ -342,6 +695,11 @@ impl EquilibriumGuiPointSnapshot {
     /// Active mask aligned with the phase order.
     pub fn phase_active(&self) -> &[bool] {
         &self.phase_active
+    }
+
+    /// Optional bounded lifecycle trace requested by the GUI document.
+    pub fn lifecycle_trace(&self) -> Option<&EquilibriumGuiLifecycleTraceSnapshot> {
+        self.lifecycle_trace.as_ref()
     }
 
     /// Authoritative solver reports and lookup provenance for this point.
@@ -384,8 +742,7 @@ impl EquilibriumGuiResultSnapshot {
             }
             EquilibriumGuiSolveOutcome::Ph(solution) => {
                 let source = Arc::new(solution.equilibrium().clone());
-                let ph_diagnostics =
-                    EquilibriumGuiPhDiagnosticsSnapshot::from_solution(&solution);
+                let ph_diagnostics = EquilibriumGuiPhDiagnosticsSnapshot::from_solution(&solution);
                 let enthalpy = EquilibriumGuiEnthalpySnapshot {
                     target_enthalpy_j: solution.target_enthalpy(),
                     calculated_enthalpy_j: solution.calculated_enthalpy(),
@@ -393,12 +750,7 @@ impl EquilibriumGuiResultSnapshot {
                     relative_enthalpy_error: solution.enthalpy_error().abs()
                         / solution.target_enthalpy().abs().max(1.0),
                 };
-                Self::from_sources(
-                    vec![source],
-                    None,
-                    Some(enthalpy),
-                    Some(ph_diagnostics),
-                )
+                Self::from_sources(vec![source], None, Some(enthalpy), Some(ph_diagnostics))
             }
         }
     }
@@ -519,6 +871,7 @@ impl EquilibriumGuiResultSnapshot {
                     .iter()
                     .map(|phase| source.phase_total(phase).unwrap_or(0.0))
                     .collect();
+                let lifecycle_trace = EquilibriumGuiLifecycleTraceSnapshot::from_solution(&source);
                 EquilibriumGuiPointSnapshot {
                     temperature_k: source.conditions().temperature(),
                     component_moles,
@@ -527,6 +880,7 @@ impl EquilibriumGuiResultSnapshot {
                     phase_statuses,
                     component_active,
                     phase_active,
+                    lifecycle_trace,
                     source,
                 }
             })
@@ -644,7 +998,10 @@ fn validate_accepted_candidate(
         validation.max_abs_reaction_affinity,
         validation.min_moles,
     ];
-    if metrics.iter().any(|value| !value.is_finite() || *value < 0.0) {
+    if metrics
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
         return Err(format!(
             "accepted result point {point_index} has non-finite or negative validation evidence"
         ));
@@ -678,7 +1035,10 @@ mod tests {
     };
     use crate::Thermodynamics::thermo_lib_api::ThermoData;
 
-    fn accepted_real_solution(names: &[&str], initial_moles: Vec<f64>) -> Arc<MultiphaseEquilibriumSolution> {
+    fn accepted_real_solution(
+        names: &[&str],
+        initial_moles: Vec<f64>,
+    ) -> Arc<MultiphaseEquilibriumSolution> {
         let repository = ThermoData::try_default_repository()
             .expect("the bundled thermochemistry repository must be available");
         let spec = SubstanceSystemSpecBuilder::new(SubstancesContainer::SinglePhase(
@@ -719,13 +1079,9 @@ mod tests {
         let first = accepted_real_solution(&["H2", "O2", "H2O"], vec![0.1, 0.05, 1.9]);
         let second = accepted_real_solution(&["H2", "O2"], vec![0.1, 0.05]);
 
-        let error = EquilibriumGuiResultSnapshot::from_sources(
-            vec![first, second],
-            None,
-            None,
-            None,
-        )
-        .expect_err("a range with incompatible accepted layouts must be rejected");
+        let error =
+            EquilibriumGuiResultSnapshot::from_sources(vec![first, second], None, None, None)
+                .expect_err("a range with incompatible accepted layouts must be rejected");
         assert!(
             error.contains("different layout fingerprint"),
             "unexpected mismatch error: {error}"
@@ -740,13 +1096,8 @@ mod tests {
         validation.min_moles *= 2.0;
         let malformed = Arc::new(source.as_ref().clone().with_validation_for_test(validation));
 
-        let error = EquilibriumGuiResultSnapshot::from_sources(
-            vec![malformed],
-            None,
-            None,
-            None,
-        )
-        .expect_err("a candidate with mismatched validation must not publish");
+        let error = EquilibriumGuiResultSnapshot::from_sources(vec![malformed], None, None, None)
+            .expect_err("a candidate with mismatched validation must not publish");
         assert!(
             error.contains("validation evidence inconsistent with physical moles"),
             "unexpected validation mismatch error: {error}"

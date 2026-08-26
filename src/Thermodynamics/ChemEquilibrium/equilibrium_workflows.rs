@@ -87,7 +87,7 @@
 //! |----------|---------|
 //! | [`compute_phase_stability_reports`] | Evaluates tangent-plane stability for all inactive phases |
 //! | [`build_multiphase_acceptance_report`] | Assembles final acceptance report from stability data |
-//! | [`seed_activated_phase`] | Seeds a newly activated phase with trace moles |
+//! | [`seed_activated_phase_with_composition`] | Seeds a newly activated phase from its TPD minimizer |
 //! | [`deactivate_phases_seed_only`] | Sets deactivated phase species to trace floor |
 //! | [`compute_phase_totals`] | Sums moles by phase from log-mole data |
 //! | [`initial_phase_activity`] | Computes initial activity for all phases |
@@ -142,16 +142,19 @@
 //!
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_active_set::ActiveSetProjection;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::{
-    phase_activity_models, PhaseActivityModel,
+    PhaseActivityModel, phase_activity_models,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
+    EquilibriumLogMoles, EquilibriumSolveCandidate, GibbsFn, Phase, R, Solvers,
     compute_element_totals, reaction_phase_stoichiometry, species_to_phase_map,
-    EquilibriumLogMoles, EquilibriumSolveCandidate, GibbsFn, Phase, Solvers, R,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_phase_stability::{
+    CanonicalPhaseState, IdealTpdProblem, PhaseStabilityGeometryCache,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::PreparedEquilibriumRunner;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, EquilibriumProblem, LogMolesInitialGuess, PreparedEquilibriumProblem,
@@ -161,14 +164,14 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
 use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData};
+use RustedSciThe::symbolic::symbolic_engine::Expr;
 use log::info;
-use nalgebra::{linalg::SVD, DMatrix, DVector};
+use nalgebra::{DMatrix, DVector};
 use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::fmt;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
-use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 /// Lower bound used when phase-control helpers reconstruct log-mole values.
 ///
@@ -223,77 +226,63 @@ fn required_element_composition(user_subs: &SubsData) -> Result<DMatrix<f64>, Re
         })
 }
 
-/// How a phase seed should be initialized during a phase-control restart.
+/// Total-mole policy for a TPD-derived activated phase.
 ///
-/// The seed is intentionally small and positive. It exists only to restart the
-/// nonlinear solve after a phase transition, not to preserve elemental mass by
-/// itself.
+/// The total is distributed by the accepted TPD minimizer, making the
+/// physical amount and the phase composition explicit and inseparable.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PhaseSeedPolicy {
-    /// Seed every species in the phase with the trace floor.
-    TraceFloor,
-    /// Seed every species in the phase with a fixed positive mole number.
-    AbsolutePerSpecies {
-        /// Positive mole number assigned to each species in the phase.
+pub enum PhaseTotalSeedPolicy {
+    /// Assign this positive total mole amount to the new phase.
+    AbsoluteMoles {
+        /// Total mole number shared among all components of the phase.
         moles: f64,
     },
-    /// Seed every species in the phase with a fraction of the total system
-    /// inventory, bounded below by `minimum`.
+    /// Use a fraction of the current total system inventory, bounded below by
+    /// `minimum` total phase moles.
     RelativeToSystemTotal {
-        /// Fraction of the total system moles used for the seed.
+        /// Fraction of the current total system inventory.
         fraction: f64,
-        /// Minimum per-species mole number used when the fraction would be too
-        /// small.
+        /// Minimum total phase amount.
         minimum: f64,
     },
 }
 
-impl PhaseSeedPolicy {
-    /// Determines the seed mole number for a newly activated phase.
-    ///
-    /// The seed value depends on the policy variant:
-    /// - [`TraceFloor`](PhaseSeedPolicy::TraceFloor): returns the global
-    ///   phase-control trace floor constant.
-    /// - [`AbsolutePerSpecies`](PhaseSeedPolicy::AbsolutePerSpecies): returns
-    ///   the configured absolute value (clamped to the trace floor).
-    /// - [`RelativeToSystemTotal`](PhaseSeedPolicy::RelativeToSystemTotal):
-    ///   computes a fraction of the current system total inventory, subject
-    ///   to a configured minimum and the global trace floor.
-    fn seed_moles(self, log_moles: &[f64]) -> Result<f64, ReactionExtentError> {
+impl PhaseTotalSeedPolicy {
+    fn total_moles(self, log_moles: &[f64]) -> Result<f64, ReactionExtentError> {
         match self {
-            Self::TraceFloor => Ok(PHASE_CONTROL_TRACE_MOLE_FLOOR),
-            Self::AbsolutePerSpecies { moles } => {
+            Self::AbsoluteMoles { moles } => {
                 if !moles.is_finite() || moles <= 0.0 {
                     return Err(ReactionExtentError::InvalidProblem {
-                        field: "phase_seed",
-                        message: "absolute phase seed must be finite and strictly positive"
+                        field: "phase_total_seed",
+                        message: "absolute total phase seed must be finite and strictly positive"
                             .to_string(),
                     });
                 }
-                Ok(moles.max(PHASE_CONTROL_TRACE_MOLE_FLOOR))
+                Ok(moles)
             }
             Self::RelativeToSystemTotal { fraction, minimum } => {
                 if !fraction.is_finite() || fraction <= 0.0 || fraction > 1.0 {
                     return Err(ReactionExtentError::InvalidProblem {
-                        field: "phase_seed_fraction",
-                        message: "phase seed fraction must lie in the interval (0, 1]".to_string(),
+                        field: "phase_total_seed_fraction",
+                        message: "total phase seed fraction must lie in the interval (0, 1]"
+                            .to_string(),
                     });
                 }
                 if !minimum.is_finite() || minimum <= 0.0 {
                     return Err(ReactionExtentError::InvalidProblem {
-                        field: "phase_seed_minimum",
-                        message: "phase seed minimum must be finite and strictly positive"
+                        field: "phase_total_seed_minimum",
+                        message: "total phase seed minimum must be finite and strictly positive"
                             .to_string(),
                     });
                 }
-                let total: f64 =
+                let total =
                     log_moles
                         .iter()
                         .map(|value| value.exp())
                         .try_fold(0.0, |sum, value| {
                             if !value.is_finite() {
                                 Err(ReactionExtentError::InvalidProblem {
-                                    field: "phase_seed",
+                                    field: "phase_total_seed",
                                     message: "system inventory contains non-finite mole numbers"
                                         .to_string(),
                                 })
@@ -302,55 +291,17 @@ impl PhaseSeedPolicy {
                             }
                         })?;
                 if !total.is_finite() || total <= 0.0 {
-                    return Ok(minimum.max(PHASE_CONTROL_TRACE_MOLE_FLOOR));
+                    return Ok(minimum);
                 }
-                Ok((total * fraction)
-                    .max(minimum)
-                    .max(PHASE_CONTROL_TRACE_MOLE_FLOOR))
+                Ok((total * fraction).max(minimum))
             }
         }
     }
 }
-//////////////////////////////////////////NEW PHASES/////////////////////////////////////////////////////////////
-
-/// Phase model used by the active-set stability boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PhaseStabilityModel {
-    /// The gas phase supplies reference chemical potentials but is fixed by
-    /// the current condensed-phase controller.
-    FixedIdealGas,
-    /// A one-species condensed phase with unit activity.
-    PureCondensedSpecies,
-    /// A model outside the currently supported production slice.
-    Unsupported,
-}
-
-/// Checked least-squares reconstruction of elemental chemical potentials.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ElementPotentialReport {
-    /// Reconstructed elemental chemical potentials `λ_j` (in J/mol).
-    pub potentials: Vec<f64>,
-    /// Largest residual in the reference equations `A · λ = μ`.
-    pub max_abs_residual: f64,
-    /// Numerical rank of the element composition submatrix used for reconstruction.
-    pub rank: usize,
-}
-
-/// Stability evidence for one declared phase.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PhaseStabilityReport {
-    /// Index of the phase in the declared phase order.
-    pub phase: PhaseIndex,
-    /// Stability model used for this phase (tangent-plane or fixed).
-    pub model: PhaseStabilityModel,
-    /// Whether this phase is currently active in the active set.
-    pub active: bool,
-    /// Driving force `μ_candidate - A_candidate · λ`; a negative value favors
-    /// appearance. `None` means the phase is fixed or lacks a reference state.
-    pub driving_force: Option<f64>,
-    /// Reconstructed elemental chemical potentials used for the stability check.
-    pub element_potentials: Option<ElementPotentialReport>,
-}
+pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_phase_stability::{
+    ElementPotentialReport, ElementalFeasibilityReport, PhaseStabilityConditions,
+    PhaseStabilityLayout, PhaseStabilityReport, PhaseStabilityStatus, TpdMinimizerReport,
+};
 
 /// Policy used to construct the first active set of a phase-controlled solve.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -517,10 +468,10 @@ impl PhaseSet {
     /// Removes inventory-free phases before a positive log-moles solve.
     ///
     /// This is a policy normalization, not a thermodynamic decision. The
-    /// removed phases remain candidates and can be activated later when their
-    /// stability driving force crosses the creation threshold. Returning the
-    /// normalized phase indices keeps this boundary auditable for callers and
-    /// tests without pretending that a solver restart already occurred.
+    /// removed phases remain candidates and can be activated later only after
+    /// their accepted minimum TPD crosses the creation threshold. Returning
+    /// the normalized phase indices keeps this boundary auditable for callers
+    /// and tests without pretending that a solver restart already occurred.
     pub(crate) fn normalize_for_positive_solver(
         &mut self,
         physical_activity: &[bool],
@@ -584,11 +535,11 @@ impl PhaseSet {
     }
 }
 
-/// Computes phase-stability evidence for the supported physical subset.
+/// Computes typed phase-stability evidence from the canonical TPD foundation.
 ///
-/// Pure one-component condensed phases are compared with elemental chemical
-/// potentials reconstructed from the other active phases. Multicomponent
-/// inactive solutions are rejected until tangent-plane minimization exists.
+/// A numeric result is emitted only after constrained TPD minimization. The
+/// outer workflow may subsequently apply hysteresis to `minimum_tpd`, but it
+/// must never reinterpret a skipped evaluation as a zero-valued criterion.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_phase_stability_reports(
     log_moles: &[f64],
@@ -600,6 +551,40 @@ pub fn compute_phase_stability_reports(
     pressure: f64,
     p0: f64,
     phase_set: &PhaseSet,
+) -> Result<Vec<PhaseStabilityReport>, ReactionExtentError> {
+    let mut geometry_cache = PhaseStabilityGeometryCache::default();
+    compute_phase_stability_reports_with_geometry_cache(
+        log_moles,
+        gibbs,
+        phases,
+        species_phase,
+        element_composition,
+        temperature,
+        pressure,
+        p0,
+        phase_set,
+        &mut geometry_cache,
+    )
+}
+
+/// Cache-aware internal form of [`compute_phase_stability_reports`].
+///
+/// The cache is deliberately an orchestration concern: it retains only
+/// immutable element-matrix geometry keyed by reference species. All current
+/// chemical potentials, activities, and TPD values are reconstructed for the
+/// accepted candidate state passed to this call.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_phase_stability_reports_with_geometry_cache(
+    log_moles: &[f64],
+    gibbs: &[GibbsFn],
+    phases: &[Phase],
+    species_phase: &[usize],
+    element_composition: &DMatrix<f64>,
+    temperature: f64,
+    pressure: f64,
+    p0: f64,
+    phase_set: &PhaseSet,
+    geometry_cache: &mut PhaseStabilityGeometryCache,
 ) -> Result<Vec<PhaseStabilityReport>, ReactionExtentError> {
     let active = phase_set.active_mask();
     let species_count = log_moles.len();
@@ -626,88 +611,73 @@ pub fn compute_phase_stability_reports(
             return Err(ReactionExtentError::InvalidConditions { parameter, value });
         }
     }
-
-    let moles: Vec<f64> = log_moles.iter().map(|value| value.exp()).collect();
-    if moles.iter().any(|value| !value.is_finite() || *value < 0.0) {
-        return Err(ReactionExtentError::InvalidCandidate {
-            field: "phase_stability_moles",
-            message: "phase-stability input reconstructs invalid mole numbers".to_string(),
-        });
-    }
-    let mut phase_totals = vec![0.0; phases.len()];
-    for (species, &phase) in species_phase.iter().enumerate() {
-        let total = phase_totals.get_mut(phase).ok_or_else(|| {
-            ReactionExtentError::DimensionMismatch(format!(
-                "species {species} refers to missing phase {phase}"
-            ))
-        })?;
-        *total += moles[species];
-    }
-
-    let rt = R * temperature;
-    let mut chemical_potentials = vec![0.0; species_count];
-    for species in 0..species_count {
-        let phase = species_phase[species];
-        let phase_total = phase_totals[phase];
-        if !phase_total.is_finite() || phase_total <= 0.0 {
-            return Err(ReactionExtentError::InvalidNPhase {
-                index: phase,
-                value: phase_total,
-            });
-        }
-        let g0 = gibbs[species](temperature);
-        if !g0.is_finite() {
-            return Err(ReactionExtentError::InvalidDG0 {
-                species_index: species,
-                dg0: g0,
-                temperature,
-            });
-        }
-        let log_activity =
-            phases[phase]
-                .kind
-                .log_activity(moles[species], phase_total, pressure, p0)?;
-        chemical_potentials[species] = g0 + rt * log_activity;
-    }
+    let candidate_mask = (0..phases.len())
+        .map(|phase| phase_set.is_candidate(phase))
+        .collect::<Vec<_>>();
+    let state = CanonicalPhaseState::from_log_moles(
+        log_moles,
+        gibbs,
+        phases,
+        species_phase,
+        element_composition,
+        temperature,
+        pressure,
+        p0,
+        &active,
+        &candidate_mask,
+    )?;
+    let active = state.active();
+    let conditions = PhaseStabilityConditions {
+        temperature,
+        pressure,
+        reference_pressure: p0,
+    };
 
     let mut reports = Vec::with_capacity(phases.len());
     for (phase_index, phase) in phases.iter().enumerate() {
         let phase_id = PhaseIndex::new(phase_index, phases.len())?;
-        if !phase_set.is_candidate(phase_index) {
+        let layout = PhaseStabilityLayout {
+            system_species_count: species_count,
+            system_phase_count: phases.len(),
+            element_count: state.element_composition().ncols(),
+            phase_component_indices: phase.species.clone(),
+        };
+        if !state.candidates()[phase_index] {
             reports.push(PhaseStabilityReport {
                 phase: phase_id,
-                model: PhaseStabilityModel::Unsupported,
                 active: false,
-                driving_force: None,
+                status: PhaseStabilityStatus::ExcludedByPolicy,
+                conditions,
+                layout,
+                minimum_tpd: None,
+                incipient_composition: None,
                 element_potentials: None,
+                elemental_feasibility: None,
+                minimizer: None,
             });
             continue;
         }
         if matches!(phase.kind, PhaseActivityModel::IdealGas) {
             reports.push(PhaseStabilityReport {
                 phase: phase_id,
-                model: PhaseStabilityModel::FixedIdealGas,
                 active: active[phase_index],
-                driving_force: None,
+                status: PhaseStabilityStatus::FixedGasAssemblage,
+                conditions,
+                layout,
+                minimum_tpd: None,
+                incipient_composition: None,
                 element_potentials: None,
+                elemental_feasibility: None,
+                minimizer: None,
             });
             continue;
         }
-        if phase.species.len() != 1 {
-            return Err(ReactionExtentError::ValidationNotApplicable {
-                path: "phase_stability",
-                message: format!(
-                    "multicomponent ideal-solution phase {phase_index} requires tangent-plane minimization"
-                ),
-            });
-        }
-
         let reference_species: Vec<usize> = (0..species_count)
             .filter(|&species| {
-                let reference_phase = species_phase[species];
+                let reference_phase = state.species_phase()[species];
                 active[reference_phase]
                     && reference_phase != phase_index
-                    && moles[species] > PHASE_CONTROL_TRACE_MOLE_FLOOR
+                    && state.moles()[species] > PHASE_CONTROL_TRACE_MOLE_FLOOR
             })
             .collect();
         if reference_species.is_empty() {
@@ -715,86 +685,63 @@ pub fn compute_phase_stability_reports(
                 return Err(ReactionExtentError::ValidationNotApplicable {
                     path: "phase_stability",
                     message: format!(
-                        "inactive pure phase {phase_index} has no active reference assemblage for an elemental-potential stability test"
+                        "inactive candidate phase {phase_index} has no active reference assemblage for a TPD stability test"
                     ),
                 });
             }
             reports.push(PhaseStabilityReport {
                 phase: phase_id,
-                model: PhaseStabilityModel::PureCondensedSpecies,
                 active: active[phase_index],
-                driving_force: None,
+                status: PhaseStabilityStatus::ActiveWithoutReferenceAssemblage,
+                conditions,
+                layout,
+                minimum_tpd: None,
+                incipient_composition: None,
                 element_potentials: None,
+                elemental_feasibility: None,
+                minimizer: None,
             });
             continue;
         }
 
-        let element_count = element_composition.ncols();
-        let reference_matrix =
-            DMatrix::from_fn(reference_species.len(), element_count, |row, col| {
-                element_composition[(reference_species[row], col)]
+        let element_count = state.element_composition().ncols();
+        let candidate_elements =
+            DMatrix::from_fn(phase.species.len(), element_count, |row, element| {
+                state.element_composition()[(phase.species[row], element)]
             });
         let reference_mu = DVector::from_iterator(
             reference_species.len(),
             reference_species
                 .iter()
-                .map(|&species| chemical_potentials[species]),
+                .map(|&species| state.chemical_potentials()[species]),
         );
-        let svd = SVD::new(reference_matrix.clone(), true, true);
-        let singular_scale = svd.singular_values.iter().copied().fold(0.0_f64, f64::max);
-        let tolerance = (singular_scale * 1e-12).max(1e-12);
-        let rank = svd
-            .singular_values
-            .iter()
-            .filter(|&&value| value > tolerance)
-            .count();
-        if rank < element_count {
-            return Err(ReactionExtentError::ValidationNotApplicable {
-                path: "phase_stability",
-                message: format!(
-                    "active reference assemblage has elemental rank {rank}, expected {element_count}"
-                ),
-            });
-        }
-        let lambda = svd.solve(&reference_mu, tolerance).map_err(|message| {
-            ReactionExtentError::InvalidProblem {
-                field: "element_potentials",
-                message: message.to_string(),
-            }
-        })?;
-        let residual = &reference_matrix * &lambda - reference_mu;
-        let max_abs_residual = residual
-            .iter()
-            .fold(0.0_f64, |max, value| max.max(value.abs()));
-        let chemical_potential_scale = chemical_potentials
-            .iter()
-            .copied()
-            .filter(|value| value.is_finite())
-            .fold(1.0_f64, |scale, value| scale.max(value.abs()));
-        let residual_tolerance = (chemical_potential_scale * 1e-8).max(1e-6);
-        if max_abs_residual > residual_tolerance {
-            return Err(ReactionExtentError::InvalidCandidate {
-                field: "element_potentials",
-                message: format!(
-                    "phase {phase_index} reference chemical potentials cannot be represented by elemental potentials: residual {max_abs_residual} exceeds {residual_tolerance}"
-                ),
-            });
-        }
-        let candidate_species = phase.species[0];
-        let reduced_mu = (0..element_count)
-            .map(|element| element_composition[(candidate_species, element)] * lambda[element])
-            .sum::<f64>();
-        let candidate_mu = gibbs[candidate_species](temperature);
+        let geometry = geometry_cache.geometry_for(&state, &reference_species)?;
+        let fit = geometry.fit_potentials(&reference_mu, &reference_species)?;
+        let tpd = IdealTpdProblem::new(
+            phase.kind,
+            phase
+                .species
+                .iter()
+                .map(|&species| state.standard_gibbs()[species])
+                .collect(),
+            candidate_elements,
+            fit.potentials().to_vec(),
+            temperature,
+            pressure,
+            p0,
+        )?
+        .constrained_minimum_with_geometry(geometry)?;
         reports.push(PhaseStabilityReport {
             phase: phase_id,
-            model: PhaseStabilityModel::PureCondensedSpecies,
             active: active[phase_index],
-            driving_force: Some(candidate_mu - reduced_mu),
-            element_potentials: Some(ElementPotentialReport {
-                potentials: lambda.iter().copied().collect(),
-                max_abs_residual,
-                rank,
-            }),
+            status: PhaseStabilityStatus::Evaluated,
+            conditions,
+            layout,
+            minimum_tpd: Some(tpd.minimum().minimum_tpd()),
+            incipient_composition: Some(tpd.minimum().incipient_composition().to_vec()),
+            element_potentials: Some(fit.into()),
+            elemental_feasibility: Some(ElementalFeasibilityReport::from(tpd.feasibility())),
+            minimizer: Some(TpdMinimizerReport::from(&tpd)),
         });
     }
 
@@ -833,41 +780,83 @@ pub fn build_multiphase_acceptance_report(
     })
 }
 
-/// Sets log-mole coordinates for all species in a newly activated phase.
+/// Seeds a newly activated phase from its TPD minimizer composition.
 ///
-/// The seed value is determined by the supplied [`PhaseSeedPolicy`] and
-/// replaces the previous trace-level coordinates. This is called during
-/// phase activation before the next nonlinear solve.
-pub fn seed_activated_phase(
+/// This canonical path interprets the policy result as one total phase amount.
+/// It distributes that total according to
+/// `incipient_composition`, applies the trace floor only to produce valid
+/// log-mole coordinates, and renormalizes the positive values to preserve the
+/// effective requested phase total exactly.
+pub fn seed_activated_phase_with_composition(
     log_moles: &mut [f64],
     phase_id: PhaseIndex,
     species_phase: &[usize],
-    seed_policy: PhaseSeedPolicy,
+    incipient_composition: &[f64],
+    seed_policy: PhaseTotalSeedPolicy,
 ) -> Result<(), ReactionExtentError> {
     if log_moles.len() != species_phase.len() {
         return Err(ReactionExtentError::DimensionMismatch(format!(
-            "seed_activated_phase has {} log-moles and {} phase labels",
+            "TPD phase seed has {} log-moles and {} phase labels",
             log_moles.len(),
             species_phase.len()
         )));
     }
-
-    let species: Vec<usize> = species_phase
+    let species = species_phase
         .iter()
         .enumerate()
         .filter_map(|(index, &phase)| (phase == phase_id.index()).then_some(index))
-        .collect();
-    if species.is_empty() {
-        return Err(ReactionExtentError::InvalidProblem {
-            field: "phase_id",
-            message: format!("phase {} has no species to seed", phase_id.index()),
+        .collect::<Vec<_>>();
+    if species.is_empty() || species.len() != incipient_composition.len() {
+        return Err(ReactionExtentError::DimensionMismatch(format!(
+            "TPD phase seed has {} phase species and {} composition entries",
+            species.len(),
+            incipient_composition.len(),
+        )));
+    }
+    if incipient_composition
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return Err(ReactionExtentError::InvalidCandidate {
+            field: "phase_seed_composition",
+            message: "TPD incipient composition must be finite and non-negative".to_string(),
+        });
+    }
+    let composition_sum = incipient_composition.iter().sum::<f64>();
+    if (composition_sum - 1.0).abs() > 1e-10 {
+        return Err(ReactionExtentError::InvalidCandidate {
+            field: "phase_seed_composition",
+            message: format!("TPD incipient composition must sum to one, got {composition_sum}"),
         });
     }
 
-    let seed = seed_policy.seed_moles(log_moles)?;
-    let seed_ln = seed.max(PHASE_CONTROL_TRACE_MOLE_FLOOR).ln();
-    for index in species {
-        log_moles[index] = seed_ln;
+    let requested_total = seed_policy.total_moles(log_moles)?;
+    let effective_total =
+        requested_total.max(species.len() as f64 * PHASE_CONTROL_TRACE_MOLE_FLOOR);
+    let floor_fraction = PHASE_CONTROL_TRACE_MOLE_FLOOR / effective_total;
+    let mut weights = incipient_composition
+        .iter()
+        .map(|&value| value.max(floor_fraction))
+        .collect::<Vec<_>>();
+    let weight_sum = weights.iter().sum::<f64>();
+    if !weight_sum.is_finite() || weight_sum <= 0.0 {
+        return Err(ReactionExtentError::InvalidCandidate {
+            field: "phase_seed_composition",
+            message: "TPD seed composition normalization is invalid".to_string(),
+        });
+    }
+    for weight in &mut weights {
+        *weight /= weight_sum;
+    }
+    for (species_index, weight) in species.into_iter().zip(weights) {
+        let moles = effective_total * weight;
+        if !moles.is_finite() || moles < PHASE_CONTROL_TRACE_MOLE_FLOOR {
+            return Err(ReactionExtentError::InvalidCandidate {
+                field: "phase_seed_moles",
+                message: "TPD phase seed produced an invalid positive mole amount".to_string(),
+            });
+        }
+        log_moles[species_index] = moles.ln();
     }
     Ok(())
 }
@@ -930,17 +919,17 @@ pub enum PhaseTransitionPlan {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PhaseTransitionReason {
     UnstableInactivePhase {
-        driving_force: f64,
+        minimum_tpd: f64,
     },
     VanishingUnstableActivePhase {
         phase_moles: f64,
-        driving_force: f64,
+        minimum_tpd: f64,
     },
     /// The positive interior problem failed at a phase boundary, and a
     /// validated solve without that phase proved it thermodynamically absent.
     BoundaryUnstableActivePhase {
         initial_phase_moles: f64,
-        driving_force: f64,
+        minimum_tpd: f64,
     },
 }
 
@@ -955,7 +944,14 @@ pub struct PhaseTransitionRecord {
     pub activated: Vec<PhaseIndex>,
     pub deactivated: Vec<PhaseIndex>,
     pub phase_totals: Vec<f64>,
-    pub driving_forces: Vec<Option<f64>>,
+    /// Per-phase constrained TPD minima in phase-index order. `None` means
+    /// the phase was not a TPD candidate under the declared workflow policy.
+    pub minimum_tpds: Vec<Option<f64>>,
+    /// TPD minimizer used to seed an activated phase. Deactivation records do
+    /// not carry one. Retaining this independently of `restart_seed` makes
+    /// the physical transition auditable without reverse-engineering floored
+    /// log coordinates.
+    pub incipient_composition: Option<Vec<f64>>,
     pub reason: PhaseTransitionReason,
     pub previous_phase_set: PhaseSet,
     pub new_phase_set: PhaseSet,
@@ -987,9 +983,9 @@ pub struct MultiphaseComplementarityReport {
     pub supported_phase_count: usize,
     pub active_supported_phase_count: usize,
     pub inactive_supported_phase_count: usize,
-    pub max_active_driving_force: Option<f64>,
-    pub min_inactive_driving_force: Option<f64>,
-    pub max_inactive_driving_force: Option<f64>,
+    pub max_active_minimum_tpd: Option<f64>,
+    pub min_inactive_minimum_tpd: Option<f64>,
+    pub max_inactive_minimum_tpd: Option<f64>,
     pub dg_create: Option<f64>,
     pub dg_keep: Option<f64>,
     pub satisfied: bool,
@@ -1127,18 +1123,18 @@ impl MultiphaseComplementarityReport {
         let mut supported_phase_count = 0;
         let mut active_supported_phase_count = 0;
         let mut inactive_supported_phase_count = 0;
-        let mut max_active_driving_force = None;
-        let mut min_inactive_driving_force = None;
-        let mut max_inactive_driving_force = None;
+        let mut max_active_minimum_tpd = None;
+        let mut min_inactive_minimum_tpd = None;
+        let mut max_inactive_minimum_tpd = None;
         let mut satisfied = true;
 
         for report in stability {
-            if let Some(force) = report.driving_force {
+            if let Some(force) = report.minimum_tpd {
                 supported_phase_count += 1;
                 if report.active {
                     active_supported_phase_count += 1;
-                    max_active_driving_force =
-                        Some(max_active_driving_force.map_or(force, |value: f64| value.max(force)));
+                    max_active_minimum_tpd =
+                        Some(max_active_minimum_tpd.map_or(force, |value: f64| value.max(force)));
                     if let Some(dg_keep) = dg_keep {
                         if force > dg_keep {
                             satisfied = false;
@@ -1146,12 +1142,10 @@ impl MultiphaseComplementarityReport {
                     }
                 } else {
                     inactive_supported_phase_count += 1;
-                    min_inactive_driving_force = Some(
-                        min_inactive_driving_force.map_or(force, |value: f64| value.min(force)),
-                    );
-                    max_inactive_driving_force = Some(
-                        max_inactive_driving_force.map_or(force, |value: f64| value.max(force)),
-                    );
+                    min_inactive_minimum_tpd =
+                        Some(min_inactive_minimum_tpd.map_or(force, |value: f64| value.min(force)));
+                    max_inactive_minimum_tpd =
+                        Some(max_inactive_minimum_tpd.map_or(force, |value: f64| value.max(force)));
                     if let Some(dg_create) = dg_create {
                         if force < dg_create {
                             satisfied = false;
@@ -1165,9 +1159,9 @@ impl MultiphaseComplementarityReport {
             supported_phase_count,
             active_supported_phase_count,
             inactive_supported_phase_count,
-            max_active_driving_force,
-            min_inactive_driving_force,
-            max_inactive_driving_force,
+            max_active_minimum_tpd,
+            min_inactive_minimum_tpd,
+            max_inactive_minimum_tpd,
             dg_create,
             dg_keep,
             satisfied,
@@ -1235,26 +1229,62 @@ impl MultiphaseAcceptanceReport {
             },
         ];
 
-        if let Some(value) = self.complementarity.max_active_driving_force {
+        if let Some(value) = self.complementarity.max_active_minimum_tpd {
             rows.push(MultiphaseAcceptanceRow {
                 section: "complementarity",
-                label: "max_active_driving_force".to_string(),
+                label: "max_active_minimum_tpd_j_per_mol".to_string(),
                 value: format!("{:.6e}", value),
             });
         }
-        if let Some(value) = self.complementarity.min_inactive_driving_force {
+        if let Some(value) = self.complementarity.min_inactive_minimum_tpd {
             rows.push(MultiphaseAcceptanceRow {
                 section: "complementarity",
-                label: "min_inactive_driving_force".to_string(),
+                label: "min_inactive_minimum_tpd_j_per_mol".to_string(),
                 value: format!("{:.6e}", value),
             });
         }
-        if let Some(value) = self.complementarity.max_inactive_driving_force {
+        if let Some(value) = self.complementarity.max_inactive_minimum_tpd {
             rows.push(MultiphaseAcceptanceRow {
                 section: "complementarity",
-                label: "max_inactive_driving_force".to_string(),
+                label: "max_inactive_minimum_tpd_j_per_mol".to_string(),
                 value: format!("{:.6e}", value),
             });
+        }
+
+        // Keep per-phase TPD evidence separate from aggregate
+        // complementarity. A small aggregate can otherwise hide a rejected
+        // minimizer or a poor elemental/KKT residual in one candidate phase.
+        for stability in &self.phase_stability {
+            let phase = stability.phase.index();
+            rows.push(MultiphaseAcceptanceRow {
+                section: "phase_stability",
+                label: format!("phase_{phase}_status"),
+                value: format!("{:?}", stability.status),
+            });
+            if let Some(value) = stability.minimum_tpd {
+                rows.push(MultiphaseAcceptanceRow {
+                    section: "phase_stability",
+                    label: format!("phase_{phase}_minimum_tpd_j_per_mol"),
+                    value: format!("{value:.6e}"),
+                });
+            }
+            if let Some(feasibility) = &stability.elemental_feasibility {
+                rows.push(MultiphaseAcceptanceRow {
+                    section: "phase_stability",
+                    label: format!("phase_{phase}_elemental_feasibility_residual"),
+                    value: format!(
+                        "{:.6e} <= {:.6e}",
+                        feasibility.max_abs_residual, feasibility.residual_tolerance
+                    ),
+                });
+            }
+            if let Some(minimizer) = &stability.minimizer {
+                rows.push(MultiphaseAcceptanceRow {
+                    section: "phase_stability",
+                    label: format!("phase_{phase}_kkt_residual"),
+                    value: format!("{:.6e}", minimizer.max_abs_kkt_residual),
+                });
+            }
         }
         rows
     }
@@ -1480,7 +1510,7 @@ impl PhaseManager {
             }
         }
     }
-    /// Detect phases that must be created (ΔG < 0)
+    /// Detect candidate phases whose accepted minimum TPD requests creation.
     /// Detect phases that must be removed (n_phase < eps)
     pub fn detect_phase_destruction(&self, n_phase: &[f64], active: &[bool]) -> Vec<usize> {
         n_phase
@@ -1551,13 +1581,13 @@ impl PhaseManager {
                     active[phase]
                         && total < self.phase_eps
                         && stability[phase]
-                            .driving_force
+                            .minimum_tpd
                             .is_some_and(|force| force > dg_keep)
                 })
                 .max_by(|(phase_a, _), (phase_b, _)| {
                     stability[*phase_a]
-                        .driving_force
-                        .partial_cmp(&stability[*phase_b].driving_force)
+                        .minimum_tpd
+                        .partial_cmp(&stability[*phase_b].minimum_tpd)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
             {
@@ -1573,11 +1603,11 @@ impl PhaseManager {
             .filter(|&(phase, report)| {
                 !active[phase]
                     && phase_set.is_candidate(phase)
-                    && report.driving_force.is_some_and(|force| force < dg_create)
+                    && report.minimum_tpd.is_some_and(|force| force < dg_create)
             })
             .min_by(|(_, a), (_, b)| {
-                a.driving_force
-                    .partial_cmp(&b.driving_force)
+                a.minimum_tpd
+                    .partial_cmp(&b.minimum_tpd)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
         {
@@ -1989,20 +2019,20 @@ impl EquilibriumLogMoles {
             )?;
             let transition_plan = phase_manager
                 .classify_phases_at_temperature(self.T, &n_phase, &stability, &phase_set)?;
-            let driving_forces = stability
+            let minimum_tpds = stability
                 .iter()
-                .map(|report| report.driving_force)
+                .map(|report| report.minimum_tpd)
                 .collect::<Vec<_>>();
 
             match transition_plan {
                 PhaseTransitionPlan::Deactivate { phase } => {
                     let phase_index = phase.index();
                     let previous_phase_set = phase_set.clone();
-                    let driving_force = stability[phase_index].driving_force.ok_or_else(|| {
+                    let minimum_tpd = stability[phase_index].minimum_tpd.ok_or_else(|| {
                         ReactionExtentError::InvalidCandidate {
                             field: "phase_stability",
                             message: format!(
-                                "phase {phase_index} was selected for deactivation without a driving force"
+                                "phase {phase_index} was selected for deactivation without a TPD minimum"
                             ),
                         }
                     })?;
@@ -2022,10 +2052,11 @@ impl EquilibriumLogMoles {
                         activated: Vec::new(),
                         deactivated: vec![phase],
                         phase_totals: n_phase,
-                        driving_forces,
+                        minimum_tpds,
+                        incipient_composition: None,
                         reason: PhaseTransitionReason::VanishingUnstableActivePhase {
                             phase_moles,
-                            driving_force,
+                            minimum_tpd,
                         },
                         previous_phase_set,
                         new_phase_set,
@@ -2040,20 +2071,30 @@ impl EquilibriumLogMoles {
                 PhaseTransitionPlan::Activate { phase } => {
                     let phase_index = phase.index();
                     let previous_phase_set = phase_set.clone();
-                    let driving_force = stability[phase_index].driving_force.ok_or_else(|| {
+                    let minimum_tpd = stability[phase_index].minimum_tpd.ok_or_else(|| {
                         ReactionExtentError::InvalidCandidate {
                             field: "phase_stability",
                             message: format!(
-                                "phase {phase_index} was selected for activation without a driving force"
+                                "phase {phase_index} was selected for activation without a TPD minimum"
                             ),
                         }
                     })?;
+                    let composition = stability[phase_index]
+                        .incipient_composition
+                        .as_deref()
+                        .ok_or_else(|| ReactionExtentError::InvalidCandidate {
+                            field: "phase_stability",
+                            message: format!(
+                                "phase {phase_index} was selected for activation without a TPD minimizer composition"
+                            ),
+                        })?;
                     info!("phase {phase_index} created");
-                    seed_activated_phase(
+                    seed_activated_phase_with_composition(
                         y.as_mut_slice(),
                         phase,
                         &species_phase,
-                        PhaseSeedPolicy::RelativeToSystemTotal {
+                        composition,
+                        PhaseTotalSeedPolicy::RelativeToSystemTotal {
                             fraction: 1e-8,
                             minimum: PHASE_CONTROL_TRACE_MOLE_FLOOR,
                         },
@@ -2066,8 +2107,9 @@ impl EquilibriumLogMoles {
                         activated: vec![phase],
                         deactivated: Vec::new(),
                         phase_totals: n_phase,
-                        driving_forces,
-                        reason: PhaseTransitionReason::UnstableInactivePhase { driving_force },
+                        minimum_tpds,
+                        incipient_composition: Some(composition.to_vec()),
+                        reason: PhaseTransitionReason::UnstableInactivePhase { minimum_tpd },
                         previous_phase_set,
                         new_phase_set,
                         restart_seed: y.clone(),

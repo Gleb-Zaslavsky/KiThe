@@ -9,13 +9,13 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use crate::Thermodynamics::phase_layout::PhaseComponentId;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::TemperatureBounds;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::GibbsFn;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::DBhandlers::thermo_api::ThermoCalculator;
 use crate::Thermodynamics::User_PhaseOrSolution::ResolvedPhaseSystem;
 use crate::Thermodynamics::User_substances::{CalculatorType, DataType, SubsData, WhatIsFound};
+use crate::Thermodynamics::phase_layout::PhaseComponentId;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 /// One temperature-dependent molar enthalpy capability in J/mol.

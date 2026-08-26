@@ -7,8 +7,8 @@
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_problem::EquilibriumConstantProblem;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::{
-    validate_equilibrium_constants, EquilibriumConstantValidationReport,
-    EquilibriumConstantValidationTolerances,
+    EquilibriumConstantValidationReport, EquilibriumConstantValidationTolerances,
+    validate_equilibrium_constants,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use std::fmt;

@@ -34,8 +34,8 @@ use crate::Thermodynamics::User_substances::{
 
 use crate::Thermodynamics::DBhandlers::Diffusion::MultiSubstanceDiffusion;
 use crate::Thermodynamics::User_substances_error::{SubsDataError, SubsDataResult};
-use crate::Thermodynamics::thermo_lib_api::{LibraryCapability, ThermoData};
 use crate::Thermodynamics::physical_state::NistFallbackPolicy;
+use crate::Thermodynamics::thermo_lib_api::{LibraryCapability, ThermoData};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 use nalgebra::DMatrix;
@@ -897,10 +897,7 @@ impl SubsData {
     /// error; it is never converted into a successful lookup in another
     /// physical state.
     ///
-    pub fn if_not_found_go_nist(
-        &mut self,
-        policy: NistFallbackPolicy,
-    ) -> SubsDataResult<()> {
+    pub fn if_not_found_go_nist(&mut self, policy: NistFallbackPolicy) -> SubsDataResult<()> {
         use crate::Thermodynamics::DBhandlers::NIST_parser::{Phase, SearchType};
         if matches!(policy, NistFallbackPolicy::Disabled) {
             return Ok(());
@@ -916,9 +913,10 @@ impl SubsData {
                 ThermoData::library_capability(library),
                 Some(LibraryCapability::Thermo)
             )
-        }) || self.explicit_search_instructions.values().any(|library| {
-            ThermoData::canonical_library_name(library) == "NIST"
-        });
+        }) || self
+            .explicit_search_instructions
+            .values()
+            .any(|library| ThermoData::canonical_library_name(library) == "NIST");
         if !has_thermo_lookup {
             let reason = "no thermodynamic libraries are enabled for NIST fallback".to_string();
             let substance = not_found_substances
@@ -958,9 +956,7 @@ impl SubsData {
                     (_, Some(Phases::Solid)) => Phase::Solid,
                     (_, Some(Phases::Liquid)) => Phase::Liquid,
                     (NistFallbackPolicy::LegacyGasDefault, None)
-                    | (NistFallbackPolicy::LegacyGasDefault, Some(Phases::Condensed)) => {
-                        Phase::Gas
-                    }
+                    | (NistFallbackPolicy::LegacyGasDefault, Some(Phases::Condensed)) => Phase::Gas,
                     (NistFallbackPolicy::ExactRequestedState, None)
                     | (NistFallbackPolicy::ExactRequestedState, Some(Phases::Condensed)) => {
                         let error = SubsDataError::nist_retrieval_failed(
@@ -972,7 +968,9 @@ impl SubsData {
                         }
                         continue;
                     }
-                    (NistFallbackPolicy::Disabled, _) => unreachable!("disabled policy returned early"),
+                    (NistFallbackPolicy::Disabled, _) => {
+                        unreachable!("disabled policy returned early")
+                    }
                 };
 
                 match thermo.renew_base(substance.clone(), SearchType::All, phase) {

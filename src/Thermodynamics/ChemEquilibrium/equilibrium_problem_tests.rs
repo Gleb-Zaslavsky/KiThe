@@ -5,8 +5,6 @@
 //! log-mole nonlinear iterate, and ensure malformed input is rejected before
 //! residual/Jacobian construction can panic.
 
-use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
-use crate::Thermodynamics::physical_state::PhysicalState;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_component::{
     EquilibriumComponentDescriptor, EquilibriumPhaseDescriptor,
@@ -15,8 +13,8 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validatio
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-    compute_species_moles, equilibrium_logmole_jacobian, equilibrium_logmole_residual,
     ContinuationSeedPolicy, EquilibriumLogMoles, GibbsFn, Phase, PhaseKind, Solvers,
+    compute_species_moles, equilibrium_logmole_jacobian, equilibrium_logmole_residual,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
@@ -27,13 +25,15 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     SolverBackend, SolverCascadeBudget, SolverPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::{
-    validate_equilibrium_candidate, EquilibriumAcceptanceCriteria, EquilibriumCandidateResiduals,
+    EquilibriumAcceptanceCriteria, EquilibriumCandidateResiduals, validate_equilibrium_candidate,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::multiphase_equilibrium_residual_generator_sym;
 use crate::Thermodynamics::User_PhaseOrSolution::PhaseModel;
+use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
+use crate::Thermodynamics::physical_state::PhysicalState;
+use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::DMatrix;
 use std::rc::Rc;
-use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 fn assert_jacobian_matches_central_difference(
     prepared: &PreparedEquilibriumProblem,
@@ -320,15 +320,19 @@ fn equilibrium_problem_preview_summary_rows_are_stable_and_human_readable() {
     let preview = prepared.preview_with_diagnostics(1e-12).unwrap();
     let rows = preview.summary_rows();
 
-    assert!(rows
-        .iter()
-        .any(|row| row.section == "problem" && row.label == "species_count" && row.value == "2"));
-    assert!(rows
-        .iter()
-        .any(|row| row.section == "species_capacity" && row.label == "O2"));
-    assert!(rows
-        .iter()
-        .any(|row| row.section == "diagnostics" && row.label == "element_rank"));
+    assert!(
+        rows.iter().any(|row| row.section == "problem"
+            && row.label == "species_count"
+            && row.value == "2")
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.section == "species_capacity" && row.label == "O2")
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.section == "diagnostics" && row.label == "element_rank")
+    );
 
     let rendered = format!("{preview}");
     assert!(rendered.contains("[problem] temperature = 1000.000000"));
@@ -862,10 +866,12 @@ fn solve_problem_returns_the_immutable_accepted_snapshot() {
     assert_eq!(solution.moles().len(), 2);
     assert!(solution.moles().iter().all(|value| *value > 0.0));
     assert!(solution.validation().residual_l2_norm.is_finite());
-    assert!(solution
-        .validation()
-        .max_abs_element_balance_error
-        .is_finite());
+    assert!(
+        solution
+            .validation()
+            .max_abs_element_balance_error
+            .is_finite()
+    );
 }
 
 #[test]
@@ -993,6 +999,36 @@ fn phase_qualified_components_allow_same_substance_in_distinct_phases() {
             ..
         })
     ));
+}
+
+#[test]
+fn legacy_indexed_ideal_solution_is_not_mislabeled_as_pure_condensed() {
+    // The legacy `Phase` type carries only an activity law. It cannot prove a
+    // one-component pure-phase semantic, so its synthetic descriptor must
+    // retain the broader ideal-solution label until a typed PhaseSpec bridge
+    // supplies the missing physical provenance.
+    let problem = EquilibriumProblem::new(
+        vec!["A".to_string(), "B".to_string()],
+        vec![0.5, 0.5],
+        LogMolesInitialGuess::new(vec![0.5_f64.ln(), 0.5_f64.ln()]).unwrap(),
+        DMatrix::from_row_slice(2, 1, &[1.0, 1.0]),
+        vec![Rc::new(|_| 0.0) as GibbsFn, Rc::new(|_| 0.0) as GibbsFn],
+        vec![Phase {
+            kind: PhaseKind::IdealSolution,
+            species: vec![0, 1],
+        }],
+        EquilibriumConditions::new(900.0, 101_325.0, 101_325.0).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        problem.phase_descriptors()[0].phase_model(),
+        PhaseModel::IdealSolution
+    );
+    assert_eq!(
+        problem.phase_descriptors()[0].physical_state(),
+        PhysicalState::Condensed
+    );
 }
 
 #[test]

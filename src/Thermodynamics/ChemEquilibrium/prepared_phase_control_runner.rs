@@ -14,28 +14,36 @@ use std::time::{Duration, Instant};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_active_set::ActiveSetProjection;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::{
+    EquilibriumDiagnosticEvent, EquilibriumDiagnosticsCollector, EquilibriumDiagnosticsMode,
+    EquilibriumDiagnosticsOptions, EquilibriumDiagnosticsReport, PhaseStabilityDiagnostic,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     EquilibriumSolverSettings, GibbsFn,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_phase_stability::{
+    PhaseStabilityGeometryCache, PhaseStabilityGeometryCacheStats, PhaseStabilityReport,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::PreparedEquilibriumRunner;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumProblem, LogMolesInitialGuess, PreparedEquilibriumProblem,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    prepare_rst_symbolic_problem_from_prepared, RstPreparedProblem,
+    RstPreparedProblem, prepare_rst_symbolic_problem_from_prepared,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, SolverBackend,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
-    build_multiphase_acceptance_report, compute_phase_stability_reports, compute_phase_totals,
-    initial_phase_activity_from_moles, reject_repeated_phase_set, seed_activated_phase,
-    validate_phase_set_candidate, MultiphaseAcceptanceReport, PhaseControlledSolveReport,
-    PhaseManager, PhaseSeedPolicy, PhaseSet, PhaseStatus, PhaseTransitionPlan,
-    PhaseTransitionReason, PhaseTransitionRecord, PHASE_CONTROL_TRACE_MOLE_FLOOR,
+    MultiphaseAcceptanceReport, PHASE_CONTROL_TRACE_MOLE_FLOOR, PhaseControlledSolveReport,
+    PhaseManager, PhaseSet, PhaseStatus, PhaseTotalSeedPolicy, PhaseTransitionPlan,
+    PhaseTransitionReason, PhaseTransitionRecord, build_multiphase_acceptance_report,
+    compute_phase_stability_reports_with_geometry_cache, compute_phase_totals,
+    initial_phase_activity_from_moles, reject_repeated_phase_set,
+    seed_activated_phase_with_composition, validate_phase_set_candidate,
 };
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
@@ -55,6 +63,7 @@ pub(crate) struct PreparedPhaseControlOutcome {
     pub(crate) formulation_build: Duration,
     pub(crate) validation_duration: Duration,
     pub(crate) rst_symbolic_reused: bool,
+    pub(crate) diagnostics: EquilibriumDiagnosticsReport,
 }
 
 pub(crate) struct PreparedActiveSetCandidate {
@@ -77,6 +86,19 @@ pub(crate) struct PreparedActiveSetCandidate {
     pub(crate) formulation_build: Duration,
     pub(crate) validation_duration: Duration,
     pub(crate) rst_symbolic_reused: bool,
+}
+
+/// State consumed by one phase-control attempt that must survive an error.
+///
+/// Prepared projections and symbolic graphs are internal structural
+/// memoization: they never publish a solution and are always retargeted before
+/// use. Continuation, however, is a physical seed selected from an earlier
+/// accepted point. Consuming it on an unsuccessful attempt would propagate a
+/// failed lifecycle transition into the next request.
+#[derive(Debug, Clone)]
+struct ContinuationCheckpoint {
+    seed: Option<Vec<f64>>,
+    phase_set: Option<PhaseSet>,
 }
 
 struct PreparedBoundaryRecovery {
@@ -115,14 +137,37 @@ pub(crate) struct PreparedPhaseControlRunner {
     continuation_phase_set: Option<PhaseSet>,
     projection_cache: HashMap<Vec<bool>, ActiveSetProjection>,
     prepared_active_set_cache: HashMap<Vec<bool>, PreparedActiveSetCacheEntry>,
+    /// Reuses only active elemental geometry for TPD; all state-dependent
+    /// chemical potentials and minimizers remain recomputed per candidate.
+    phase_stability_geometry_cache: PhaseStabilityGeometryCache,
+    diagnostics: EquilibriumDiagnosticsCollector,
 }
 
 impl PreparedPhaseControlRunner {
-    /// Creates the runner from one validated fixed-`P,T` problem.
+    /// Test-only convenience constructor with diagnostics disabled.
+    #[cfg(test)]
     pub(crate) fn new(
         problem: EquilibriumProblem,
         symbolic_standard_gibbs: Vec<Expr>,
         timing_enabled: bool,
+    ) -> Result<Self, ReactionExtentError> {
+        Self::new_with_diagnostics(
+            problem,
+            symbolic_standard_gibbs,
+            timing_enabled,
+            EquilibriumDiagnosticsOptions::disabled(),
+        )
+    }
+
+    /// Creates the runner with one explicitly configured observational trace.
+    ///
+    /// This keeps diagnostics at the orchestration boundary; numerical
+    /// residual and TPD primitives remain pure functions.
+    pub(crate) fn new_with_diagnostics(
+        problem: EquilibriumProblem,
+        symbolic_standard_gibbs: Vec<Expr>,
+        timing_enabled: bool,
+        diagnostics: EquilibriumDiagnosticsOptions,
     ) -> Result<Self, ReactionExtentError> {
         problem.validate()?;
         if !symbolic_standard_gibbs.is_empty()
@@ -144,6 +189,8 @@ impl PreparedPhaseControlRunner {
             continuation_phase_set: None,
             projection_cache: HashMap::new(),
             prepared_active_set_cache: HashMap::new(),
+            phase_stability_geometry_cache: PhaseStabilityGeometryCache::default(),
+            diagnostics: EquilibriumDiagnosticsCollector::new(diagnostics),
         })
     }
 
@@ -200,6 +247,20 @@ impl PreparedPhaseControlRunner {
             .values()
             .filter(|entry| entry.rst_problem.is_some())
             .count()
+    }
+
+    /// Rebuild/reuse evidence for cached SVD/range/null-space geometries used
+    /// by the canonical TPD phase-stability service.
+    pub(crate) fn phase_stability_geometry_cache_statistics(
+        &self,
+    ) -> PhaseStabilityGeometryCacheStats {
+        self.phase_stability_geometry_cache.statistics()
+    }
+
+    /// Replaces diagnostics for the next solve transaction. Range templates
+    /// call this only after the preceding point has been published.
+    pub(crate) fn set_diagnostics_options(&mut self, options: EquilibriumDiagnosticsOptions) {
+        self.diagnostics.set_options(options);
     }
 
     /// Returns deterministic per-entry build timing for release reports.
@@ -289,6 +350,48 @@ impl PreparedPhaseControlRunner {
             &[f64],
         ) -> Result<PreparedActiveSetCandidate, ReactionExtentError>,
     {
+        let checkpoint = ContinuationCheckpoint {
+            seed: self.continuation_seed.clone(),
+            phase_set: self.continuation_phase_set.clone(),
+        };
+        let result = self.solve_with_fixed_active_solver_inner(&mut solve_active_set);
+        if let Err(error) = &result {
+            // Only an accepted result may advance continuation. Structural
+            // cache entries are not solution publication and remain valid
+            // memoization for the same immutable layout.
+            self.continuation_seed = checkpoint.seed;
+            self.continuation_phase_set = checkpoint.phase_set;
+            self.diagnostics.record(
+                EquilibriumDiagnosticsMode::PhaseLifecycle,
+                EquilibriumDiagnosticEvent::ContinuationRestored {
+                    retained_phase_set: self.continuation_phase_set.clone(),
+                    retained_seed: self.continuation_seed.is_some(),
+                },
+            );
+            self.diagnostics.record(
+                EquilibriumDiagnosticsMode::Summary,
+                EquilibriumDiagnosticEvent::SolveFailed {
+                    message: error.to_string(),
+                    continuation_restored: true,
+                },
+            );
+        }
+        result
+    }
+
+    fn solve_with_fixed_active_solver_inner<F>(
+        &mut self,
+        mut solve_active_set: &mut F,
+    ) -> Result<PreparedPhaseControlOutcome, ReactionExtentError>
+    where
+        F: FnMut(
+            &mut Self,
+            &[bool],
+            &[f64],
+            &[usize],
+            &[f64],
+        ) -> Result<PreparedActiveSetCandidate, ReactionExtentError>,
+    {
         self.solver_settings.validate()?;
         self.phase_manager
             .validate_for_phase_count(self.prepared.problem().phases().len())?;
@@ -337,6 +440,13 @@ impl PreparedPhaseControlRunner {
         phase_set.settle_transitions();
         let initial_phase_set = phase_set.clone();
         let initial_active_phases = phase_set.active_phases()?;
+        self.diagnostics.record(
+            EquilibriumDiagnosticsMode::Summary,
+            EquilibriumDiagnosticEvent::SolveStarted {
+                conditions: self.prepared.problem().conditions(),
+                initial_phase_set: initial_phase_set.clone(),
+            },
+        );
         let mut visited = HashSet::new();
         visited.insert(phase_set.clone());
         let mut transitions = Vec::new();
@@ -351,6 +461,13 @@ impl PreparedPhaseControlRunner {
             let transition_started = Instant::now();
             phase_set.settle_transitions();
             let phase_active = phase_set.active_mask();
+            self.diagnostics.record(
+                EquilibriumDiagnosticsMode::PhaseLifecycle,
+                EquilibriumDiagnosticEvent::OuterIterationStarted {
+                    iteration,
+                    active_phase_set: phase_set.clone(),
+                },
+            );
             let mut candidate = match solve_active_set(
                 self,
                 &phase_active,
@@ -366,7 +483,16 @@ impl PreparedPhaseControlRunner {
                     candidate
                 }
                 Err(primary_error) => {
+                    self.diagnostics.record(
+                        EquilibriumDiagnosticsMode::Detailed,
+                        EquilibriumDiagnosticEvent::ActiveSetCandidateRejected {
+                            iteration,
+                            active_phase_set: phase_set.clone(),
+                            message: primary_error.to_string(),
+                        },
+                    );
                     let Some(recovery) = self.recover_active_boundary(
+                        iteration,
                         &phase_set,
                         &seed,
                         &species_phase,
@@ -399,20 +525,19 @@ impl PreparedPhaseControlRunner {
                     }
                     nonlinear_reports.push(candidate.solve_report.clone());
                     let phase_totals = compute_phase_totals(&candidate.log_moles, &species_phase);
-                    let driving_forces = stability
+                    let minimum_tpds = stability
                         .iter()
-                        .map(|report| report.driving_force)
+                        .map(|report| report.minimum_tpd)
                         .collect::<Vec<_>>();
-                    let driving_force =
-                        stability[phase.index()].driving_force.ok_or_else(|| {
-                            ReactionExtentError::InvalidCandidate {
-                                field: "phase_stability",
-                                message: format!(
-                                    "boundary recovery selected phase {} without a driving force",
-                                    phase.index()
-                                ),
-                            }
-                        })?;
+                    let minimum_tpd = stability[phase.index()].minimum_tpd.ok_or_else(|| {
+                        ReactionExtentError::InvalidCandidate {
+                            field: "phase_stability",
+                            message: format!(
+                                "boundary recovery selected phase {} without a TPD minimum",
+                                phase.index()
+                            ),
+                        }
+                    })?;
                     let initial_phase_moles = self
                         .prepared
                         .problem()
@@ -424,24 +549,44 @@ impl PreparedPhaseControlRunner {
                         .sum::<f64>();
                     let previous_phase_set = phase_set.clone();
                     phase_set = recovered_phase_set;
+                    let (dg_create, dg_keep) = self
+                        .phase_manager
+                        .thresholds_at(candidate.conditions.temperature())?;
+                    self.record_stability_diagnostics(
+                        iteration,
+                        dg_create,
+                        dg_keep,
+                        &phase_totals,
+                        &stability,
+                    );
                     transitions.push(PhaseTransitionRecord {
                         iteration,
                         transition_duration: transition_started.elapsed(),
                         activated: Vec::new(),
                         deactivated: vec![phase],
                         phase_totals,
-                        driving_forces,
+                        minimum_tpds,
+                        incipient_composition: None,
                         reason: PhaseTransitionReason::BoundaryUnstableActivePhase {
                             initial_phase_moles,
-                            driving_force,
+                            minimum_tpd,
                         },
-                        previous_phase_set,
+                        previous_phase_set: previous_phase_set.clone(),
                         new_phase_set: phase_set.clone(),
                         restart_seed: candidate.log_moles.clone(),
                         nonlinear_report: candidate.solve_report.clone(),
                         candidate_validation: candidate.validation_report.clone(),
                     });
-                    reject_repeated_phase_set(&mut visited, &phase_set, iteration + 1)?;
+                    self.diagnostics.record(
+                        EquilibriumDiagnosticsMode::Detailed,
+                        EquilibriumDiagnosticEvent::RecoveryProbeAccepted {
+                            iteration,
+                            phase_index: phase.index(),
+                            previous_phase_set,
+                            new_phase_set: phase_set.clone(),
+                        },
+                    );
+                    self.reject_repeated_phase_set(&mut visited, &phase_set, iteration + 1)?;
                     seed = candidate.log_moles.clone();
                     continue;
                 }
@@ -460,7 +605,16 @@ impl PreparedPhaseControlRunner {
             let mut y = candidate.log_moles.clone();
             let phase_totals = compute_phase_totals(&y, &species_phase);
             let mut phase_active = phase_set.active_mask();
-            let probe_stability = compute_phase_stability_reports(
+            self.diagnostics.record(
+                EquilibriumDiagnosticsMode::Detailed,
+                EquilibriumDiagnosticEvent::ActiveSetCandidateAccepted {
+                    iteration,
+                    active_phase_set: phase_set.clone(),
+                    validation: candidate.validation_report.clone(),
+                    backend_summary: candidate.solve_report.summary(),
+                },
+            );
+            let probe_stability = compute_phase_stability_reports_with_geometry_cache(
                 &y,
                 &candidate.stability_gibbs,
                 self.prepared.problem().phases(),
@@ -470,6 +624,7 @@ impl PreparedPhaseControlRunner {
                 candidate.conditions.pressure(),
                 candidate.conditions.reference_pressure(),
                 &phase_set,
+                &mut self.phase_stability_geometry_cache,
             )?;
             if candidate.solved_active_mask.len() != phase_active.len() {
                 return Err(ReactionExtentError::DimensionMismatch(format!(
@@ -490,23 +645,83 @@ impl PreparedPhaseControlRunner {
                             .to_string(),
                 });
             }
+            // An all-active monolithic P,H result is a bounded numerical probe,
+            // not an activation decision. Keep only a phase whose canonical
+            // TPD is below the creation threshold, restore every other probed
+            // phase to trace, and restart from the TPD minimizer composition.
             let mut probe_expanded = false;
+            let (dg_create, _) = self
+                .phase_manager
+                .thresholds_at(candidate.conditions.temperature())?;
+            let (_, dg_keep) = self
+                .phase_manager
+                .thresholds_at(candidate.conditions.temperature())?;
+            self.record_stability_diagnostics(
+                iteration,
+                dg_create,
+                dg_keep,
+                &phase_totals,
+                &probe_stability,
+            );
+            let initially_inactive = phase_active
+                .iter()
+                .enumerate()
+                .filter(|(_, is_active)| !**is_active)
+                .map(|(phase_index, _)| PhaseIndex::new(phase_index, phase_active.len()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut tpd_activation = None;
             for phase_index in 0..phase_active.len() {
                 if phase_active[phase_index] || !candidate.solved_active_mask[phase_index] {
                     continue;
                 }
                 let phase = PhaseIndex::new(phase_index, phase_active.len())?;
-                let driving_force =
-                    probe_stability[phase_index].driving_force.ok_or_else(|| {
-                        ReactionExtentError::InvalidCandidate {
-                            field: "phase_stability",
-                            message: format!(
-                            "monolithic active-set probe expanded phase {} without a driving force",
+                let minimum_tpd = probe_stability[phase_index].minimum_tpd.ok_or_else(|| {
+                    ReactionExtentError::InvalidCandidate {
+                        field: "phase_stability",
+                        message: format!(
+                            "monolithic active-set probe expanded phase {} without a TPD minimum",
                             phase.index()
                         ),
-                        }
+                    }
+                })?;
+                if minimum_tpd >= dg_create {
+                    continue;
+                }
+                let composition = probe_stability[phase_index]
+                    .incipient_composition
+                    .as_deref()
+                    .ok_or_else(|| ReactionExtentError::InvalidCandidate {
+                        field: "phase_stability",
+                        message: format!(
+                            "monolithic active-set probe expanded phase {} without a TPD minimizer composition",
+                            phase.index()
+                        ),
                     })?;
+                // One lifecycle transition per outer pass keeps the phase-set
+                // fingerprint, hysteresis, and rollback semantics deterministic.
+                tpd_activation = Some((phase, minimum_tpd, composition.to_vec()));
+                break;
+            }
+            if !initially_inactive.is_empty() {
+                crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::deactivate_phases_seed_only(
+                    &mut y,
+                    &initially_inactive,
+                    &species_phase,
+                    PHASE_CONTROL_TRACE_MOLE_FLOOR,
+                )?;
+            }
+            if let Some((phase, minimum_tpd, composition)) = tpd_activation {
                 let previous_phase_set = phase_set.clone();
+                seed_activated_phase_with_composition(
+                    &mut y,
+                    phase,
+                    &species_phase,
+                    &composition,
+                    PhaseTotalSeedPolicy::RelativeToSystemTotal {
+                        fraction: 1e-8,
+                        minimum: PHASE_CONTROL_TRACE_MOLE_FLOOR,
+                    },
+                )?;
                 phase_set.activate(phase);
                 phase_active = phase_set.active_mask();
                 probe_expanded = true;
@@ -515,55 +730,70 @@ impl PreparedPhaseControlRunner {
                     transition_duration: transition_started.elapsed(),
                     activated: vec![phase],
                     deactivated: Vec::new(),
-                    phase_totals: phase_totals.clone(),
-                    driving_forces: probe_stability
+                    phase_totals: compute_phase_totals(&y, &species_phase),
+                    minimum_tpds: probe_stability
                         .iter()
-                        .map(|report| report.driving_force)
+                        .map(|report| report.minimum_tpd)
                         .collect(),
-                    reason: PhaseTransitionReason::UnstableInactivePhase { driving_force },
-                    previous_phase_set,
+                    incipient_composition: Some(composition.clone()),
+                    reason: PhaseTransitionReason::UnstableInactivePhase { minimum_tpd },
+                    previous_phase_set: previous_phase_set.clone(),
                     new_phase_set: phase_set.clone(),
                     restart_seed: y.clone(),
                     nonlinear_report: candidate.solve_report.clone(),
                     candidate_validation: candidate.validation_report.clone(),
                 });
-                reject_repeated_phase_set(&mut visited, &phase_set, iteration + 1)?;
+                self.record_transition_diagnostics(
+                    iteration,
+                    &[phase],
+                    &[],
+                    PhaseTransitionReason::UnstableInactivePhase { minimum_tpd },
+                    previous_phase_set,
+                    phase_set.clone(),
+                    Some(composition),
+                );
+                self.reject_repeated_phase_set(&mut visited, &phase_set, iteration + 1)?;
+            } else if candidate.solved_active_mask != phase_active {
+                // The probe located a numerical branch but supplied no TPD
+                // evidence for publishing a wider physical phase set. It is
+                // deliberately rejected: a caller may select the independent
+                // nested P,H route, but monolithic phase control must never
+                // turn neutral probe occupancy into an accepted phase.
+                return Err(ReactionExtentError::InvalidCandidate {
+                    field: "phase_stability",
+                    message: format!(
+                        "a monolithic all-active recovery probe found no inactive phase below the TPD creation threshold {dg_create:e}; the probe cannot be published as an accepted phase set"
+                    ),
+                });
             }
-            let stability = if probe_expanded {
-                compute_phase_stability_reports(
-                    &y,
-                    &candidate.stability_gibbs,
-                    self.prepared.problem().phases(),
-                    &species_phase,
-                    self.prepared.problem().element_composition(),
-                    candidate.conditions.temperature(),
-                    candidate.conditions.pressure(),
-                    candidate.conditions.reference_pressure(),
-                    &phase_set,
-                )?
-            } else {
-                probe_stability
-            };
+            if probe_expanded {
+                // The probe only selected the physical restart state. Solve
+                // the newly activated fixed set before it can be accepted or
+                // contribute final stability evidence.
+                seed = y;
+                continue;
+            }
+            let stability = probe_stability;
             let transition_plan = self.phase_manager.classify_phases_at_temperature(
                 candidate.conditions.temperature(),
                 &phase_totals,
                 &stability,
                 &phase_set,
             )?;
-            let driving_forces = stability
+            let minimum_tpds = stability
                 .iter()
-                .map(|report| report.driving_force)
+                .map(|report| report.minimum_tpd)
                 .collect::<Vec<_>>();
 
             match transition_plan {
                 PhaseTransitionPlan::Deactivate { phase } => {
                     let phase_index = phase.index();
                     let previous_phase_set = phase_set.clone();
-                    let driving_force = stability[phase_index].driving_force.ok_or_else(|| {
+                    let minimum_tpd = stability[phase_index].minimum_tpd.ok_or_else(|| {
                         ReactionExtentError::InvalidCandidate {
                             field: "phase_stability",
                             message: format!(
-                                "phase {phase_index} was selected for deactivation without a driving force"
+                                "phase {phase_index} was selected for deactivation without a TPD minimum"
                             ),
                         }
                     })?;
@@ -582,37 +812,60 @@ impl PreparedPhaseControlRunner {
                         activated: Vec::new(),
                         deactivated: vec![phase],
                         phase_totals,
-                        driving_forces,
+                        minimum_tpds,
+                        incipient_composition: None,
                         reason: PhaseTransitionReason::VanishingUnstableActivePhase {
                             phase_moles,
-                            driving_force,
+                            minimum_tpd,
                         },
-                        previous_phase_set,
-                        new_phase_set,
+                        previous_phase_set: previous_phase_set.clone(),
+                        new_phase_set: new_phase_set.clone(),
                         restart_seed: y.clone(),
                         nonlinear_report: candidate.solve_report.clone(),
                         candidate_validation: candidate.validation_report.clone(),
                     });
-                    reject_repeated_phase_set(&mut visited, &phase_set, iteration + 1)?;
+                    self.record_transition_diagnostics(
+                        iteration,
+                        &[],
+                        &[phase],
+                        PhaseTransitionReason::VanishingUnstableActivePhase {
+                            phase_moles,
+                            minimum_tpd,
+                        },
+                        previous_phase_set.clone(),
+                        new_phase_set.clone(),
+                        None,
+                    );
+                    self.reject_repeated_phase_set(&mut visited, &phase_set, iteration + 1)?;
                     seed = y;
                 }
                 PhaseTransitionPlan::Activate { phase } => {
                     let previous_phase_set = phase_set.clone();
-                    let driving_force =
-                        stability[phase.index()].driving_force.ok_or_else(|| {
-                            ReactionExtentError::InvalidCandidate {
-                                field: "phase_stability",
-                                message: format!(
-                                    "phase {} was selected for activation without a driving force",
-                                    phase.index()
-                                ),
-                            }
+                    let minimum_tpd = stability[phase.index()].minimum_tpd.ok_or_else(|| {
+                        ReactionExtentError::InvalidCandidate {
+                            field: "phase_stability",
+                            message: format!(
+                                "phase {} was selected for activation without a TPD minimum",
+                                phase.index()
+                            ),
+                        }
+                    })?;
+                    let composition = stability[phase.index()]
+                        .incipient_composition
+                        .as_deref()
+                        .ok_or_else(|| ReactionExtentError::InvalidCandidate {
+                            field: "phase_stability",
+                            message: format!(
+                                "phase {} was selected for activation without a TPD minimizer composition",
+                                phase.index()
+                            ),
                         })?;
-                    seed_activated_phase(
+                    seed_activated_phase_with_composition(
                         &mut y,
                         phase,
                         &species_phase,
-                        PhaseSeedPolicy::RelativeToSystemTotal {
+                        composition,
+                        PhaseTotalSeedPolicy::RelativeToSystemTotal {
                             fraction: 1e-8,
                             minimum: PHASE_CONTROL_TRACE_MOLE_FLOOR,
                         },
@@ -625,18 +878,35 @@ impl PreparedPhaseControlRunner {
                         activated: vec![phase],
                         deactivated: Vec::new(),
                         phase_totals,
-                        driving_forces,
-                        reason: PhaseTransitionReason::UnstableInactivePhase { driving_force },
-                        previous_phase_set,
-                        new_phase_set,
+                        minimum_tpds,
+                        incipient_composition: Some(composition.to_vec()),
+                        reason: PhaseTransitionReason::UnstableInactivePhase { minimum_tpd },
+                        previous_phase_set: previous_phase_set.clone(),
+                        new_phase_set: new_phase_set.clone(),
                         restart_seed: y.clone(),
                         nonlinear_report: candidate.solve_report.clone(),
                         candidate_validation: candidate.validation_report.clone(),
                     });
-                    reject_repeated_phase_set(&mut visited, &phase_set, iteration + 1)?;
+                    self.record_transition_diagnostics(
+                        iteration,
+                        &[phase],
+                        &[],
+                        PhaseTransitionReason::UnstableInactivePhase { minimum_tpd },
+                        previous_phase_set,
+                        new_phase_set,
+                        Some(composition.to_vec()),
+                    );
+                    self.reject_repeated_phase_set(&mut visited, &phase_set, iteration + 1)?;
                     seed = y;
                 }
-                PhaseTransitionPlan::Hold { phase: _ } => {
+                PhaseTransitionPlan::Hold { phase } => {
+                    self.diagnostics.record(
+                        EquilibriumDiagnosticsMode::PhaseLifecycle,
+                        EquilibriumDiagnosticEvent::TransitionHeldByHysteresis {
+                            iteration,
+                            phase_index: phase.index(),
+                        },
+                    );
                     validate_phase_set_candidate(
                         &phase_totals,
                         &phase_active,
@@ -681,6 +951,12 @@ impl PreparedPhaseControlRunner {
             }
         }
 
+        self.diagnostics.record(
+            EquilibriumDiagnosticsMode::PhaseLifecycle,
+            EquilibriumDiagnosticEvent::PhaseControlBudgetExhausted {
+                max_outer_iterations: max_phase_iterations,
+            },
+        );
         Err(ReactionExtentError::PhaseControlDidNotConverge {
             iterations: max_phase_iterations,
         })
@@ -699,10 +975,11 @@ impl PreparedPhaseControlRunner {
     /// Iterates over active phases that had positive input inventory, removes
     /// each one in turn, and re-solves the reduced active set. Recovery is
     /// accepted only when the reduced solve succeeds and the removed phase's
-    /// stability driving force exceeds the keep threshold. Returns `None` when
-    /// no phase satisfies all recovery preconditions.
+    /// accepted minimum TPD exceeds the keep threshold. Returns `None` when no
+    /// phase satisfies all recovery preconditions.
     fn recover_active_boundary<F>(
         &mut self,
+        iteration: usize,
         phase_set: &PhaseSet,
         seed: &[f64],
         species_phase: &[usize],
@@ -744,16 +1021,28 @@ impl PreparedPhaseControlRunner {
             reduced_phase_set.deactivate(phase);
             reduced_phase_set.settle_transitions();
             let reduced_active = reduced_phase_set.active_mask();
-            let Ok(candidate) = solve_active_set(
+            self.diagnostics.record(
+                EquilibriumDiagnosticsMode::Detailed,
+                EquilibriumDiagnosticEvent::RecoveryProbeStarted {
+                    iteration,
+                    removed_phase_index: phase_index,
+                    attempted_phase_set: reduced_phase_set.clone(),
+                },
+            );
+            let candidate = match solve_active_set(
                 self,
                 &reduced_active,
                 seed,
                 species_phase,
                 full_element_totals,
-            ) else {
-                continue;
+            ) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    self.record_recovery_probe_rejected(iteration, phase_index, error.to_string());
+                    continue;
+                }
             };
-            let Ok(stability) = compute_phase_stability_reports(
+            let stability = match compute_phase_stability_reports_with_geometry_cache(
                 &candidate.log_moles,
                 &candidate.stability_gibbs,
                 self.prepared.problem().phases(),
@@ -763,18 +1052,28 @@ impl PreparedPhaseControlRunner {
                 candidate.conditions.pressure(),
                 candidate.conditions.reference_pressure(),
                 &reduced_phase_set,
-            ) else {
-                continue;
+                &mut self.phase_stability_geometry_cache,
+            ) {
+                Ok(stability) => stability,
+                Err(error) => {
+                    self.record_recovery_probe_rejected(iteration, phase_index, error.to_string());
+                    continue;
+                }
             };
             let phase_total =
                 compute_phase_totals(&candidate.log_moles, species_phase)[phase_index];
-            let Some(driving_force) = stability[phase_index].driving_force else {
+            let Some(minimum_tpd) = stability[phase_index].minimum_tpd else {
+                self.record_recovery_probe_rejected(
+                    iteration,
+                    phase_index,
+                    "the removed phase has no finite TPD minimum".to_string(),
+                );
                 continue;
             };
             let (_, dg_keep) = self
                 .phase_manager
                 .thresholds_at(candidate.conditions.temperature())?;
-            if phase_total < self.phase_manager.phase_eps && driving_force > dg_keep {
+            if phase_total < self.phase_manager.phase_eps && minimum_tpd > dg_keep {
                 return Ok(Some(PreparedBoundaryRecovery {
                     phase,
                     candidate,
@@ -782,6 +1081,13 @@ impl PreparedPhaseControlRunner {
                     stability,
                 }));
             }
+            self.record_recovery_probe_rejected(
+                iteration,
+                phase_index,
+                format!(
+                    "boundary contract failed: total={phase_total:.3e} mol, minimum_tpd={minimum_tpd:.3e} J/mol, keep_threshold={dg_keep:.3e} J/mol"
+                ),
+            );
         }
         Ok(None)
     }
@@ -968,7 +1274,7 @@ impl PreparedPhaseControlRunner {
     /// so the caller can inspect the complete transition sequence without
     /// re-running the outer loop.
     fn finish(
-        &self,
+        &mut self,
         candidate: PreparedActiveSetCandidate,
         phase_set: PhaseSet,
         initial_phase_set: PhaseSet,
@@ -1020,6 +1326,14 @@ impl PreparedPhaseControlRunner {
                 candidate.conditions,
                 candidate.validation_report,
             )?;
+        self.diagnostics.record(
+            EquilibriumDiagnosticsMode::Summary,
+            EquilibriumDiagnosticEvent::SolveAccepted {
+                final_phase_set: phase_set.clone(),
+                outer_iterations: iterations,
+                transition_count: phase_control_report.transitions.len(),
+            },
+        );
         Ok(PreparedPhaseControlOutcome {
             solution,
             solve_report,
@@ -1031,6 +1345,521 @@ impl PreparedPhaseControlRunner {
             formulation_build,
             validation_duration,
             rst_symbolic_reused,
+            diagnostics: self.diagnostics.finish(),
         })
+    }
+
+    fn record_stability_diagnostics(
+        &mut self,
+        iteration: usize,
+        dg_create: f64,
+        dg_keep: f64,
+        phase_totals: &[f64],
+        stability: &[PhaseStabilityReport],
+    ) {
+        if !self.diagnostics.mode().captures_lifecycle() {
+            return;
+        }
+        let phases = stability
+            .iter()
+            .map(|report| PhaseStabilityDiagnostic {
+                phase_index: report.phase.index(),
+                active: report.active,
+                phase_total_moles: phase_totals[report.phase.index()],
+                minimum_tpd_j_per_mol: report.minimum_tpd,
+                incipient_composition: report.incipient_composition.clone(),
+            })
+            .collect();
+        self.diagnostics.record(
+            EquilibriumDiagnosticsMode::PhaseLifecycle,
+            EquilibriumDiagnosticEvent::StabilityEvaluated {
+                iteration,
+                dg_create_j_per_mol: dg_create,
+                dg_keep_j_per_mol: dg_keep,
+                phases,
+            },
+        );
+    }
+
+    fn record_transition_diagnostics(
+        &mut self,
+        iteration: usize,
+        activated: &[PhaseIndex],
+        deactivated: &[PhaseIndex],
+        reason: PhaseTransitionReason,
+        previous_phase_set: PhaseSet,
+        new_phase_set: PhaseSet,
+        incipient_composition: Option<Vec<f64>>,
+    ) {
+        self.diagnostics.record(
+            EquilibriumDiagnosticsMode::PhaseLifecycle,
+            EquilibriumDiagnosticEvent::TransitionAccepted {
+                iteration,
+                activated_phase_indices: activated.iter().map(|phase| phase.index()).collect(),
+                deactivated_phase_indices: deactivated.iter().map(|phase| phase.index()).collect(),
+                reason,
+                previous_phase_set,
+                new_phase_set,
+                incipient_composition,
+            },
+        );
+    }
+
+    fn record_recovery_probe_rejected(
+        &mut self,
+        iteration: usize,
+        phase_index: usize,
+        message: String,
+    ) {
+        self.diagnostics.record(
+            EquilibriumDiagnosticsMode::Detailed,
+            EquilibriumDiagnosticEvent::RecoveryProbeRejected {
+                iteration,
+                removed_phase_index: phase_index,
+                message,
+            },
+        );
+    }
+
+    fn reject_repeated_phase_set(
+        &mut self,
+        visited: &mut HashSet<PhaseSet>,
+        phase_set: &PhaseSet,
+        iteration: usize,
+    ) -> Result<(), ReactionExtentError> {
+        match reject_repeated_phase_set(visited, phase_set, iteration) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.diagnostics.record(
+                    EquilibriumDiagnosticsMode::PhaseLifecycle,
+                    EquilibriumDiagnosticEvent::PhaseControlCycleDetected {
+                        iteration,
+                        repeated_phase_set: phase_set.clone(),
+                    },
+                );
+                Err(error)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::{
+        EquilibriumDiagnosticEvent, EquilibriumDiagnosticsMode, EquilibriumDiagnosticsOptions,
+    };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
+        Phase, PhaseKind, Solvers,
+    };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumConditions;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
+        SolverAttemptOutcome, SolverAttemptReport, SolverBackend, SolverPolicy,
+    };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::InitialPhaseSet;
+    use nalgebra::DMatrix;
+    use std::collections::HashSet;
+    use std::rc::Rc;
+    use std::sync::mpsc;
+
+    fn runner_with_accepted_continuation() -> PreparedPhaseControlRunner {
+        let initial_moles = vec![1.0, 1e-20];
+        let problem = EquilibriumProblem::new(
+            vec!["O2".to_string(), "O".to_string()],
+            initial_moles.clone(),
+            LogMolesInitialGuess::from_moles(&initial_moles, 1e-30).unwrap(),
+            DMatrix::from_row_slice(2, 1, &[2.0, 1.0]),
+            vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0)],
+            vec![Phase {
+                kind: PhaseKind::IdealGas,
+                species: vec![0, 1],
+            }],
+            EquilibriumConditions::new(1000.0, 101_325.0, 101_325.0).unwrap(),
+        )
+        .unwrap();
+        let mut runner = PreparedPhaseControlRunner::new(problem, Vec::new(), false).unwrap();
+        let seed = LogMolesInitialGuess::from_moles(&[0.75, 0.25], 1e-30).unwrap();
+        runner
+            .retarget_numeric(
+                EquilibriumConditions::new(1100.0, 101_325.0, 101_325.0).unwrap(),
+                seed,
+                vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0)],
+            )
+            .unwrap();
+        let phase_set =
+            PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &[true]).unwrap();
+        runner.set_continuation_phase_set(phase_set).unwrap();
+        runner
+    }
+
+    #[test]
+    fn failed_lifecycle_attempt_restores_accepted_continuation_state() {
+        let mut runner = runner_with_accepted_continuation();
+        let expected_seed = runner.continuation_seed.clone();
+        let expected_phase_set = runner.continuation_phase_set.clone();
+
+        let result = runner.solve_with_fixed_active_solver(|_, _, _, _, _| {
+            Err(ReactionExtentError::InvalidProblem {
+                field: "injected_phase_control_failure",
+                message: "test failure after continuation was consumed".to_string(),
+            })
+        });
+
+        assert!(result.is_err());
+        assert_eq!(runner.continuation_seed, expected_seed);
+        assert_eq!(runner.continuation_phase_set, expected_phase_set);
+    }
+
+    #[test]
+    fn failed_lifecycle_attempt_streams_rejection_and_rollback_evidence() {
+        let (sender, receiver) = mpsc::channel();
+        let mut runner = runner_with_accepted_continuation();
+        runner.set_diagnostics_options(
+            EquilibriumDiagnosticsOptions::enabled(EquilibriumDiagnosticsMode::Detailed)
+                .with_sink(move |event| sender.send(event).unwrap()),
+        );
+
+        let result = runner.solve_with_fixed_active_solver(|_, _, _, _, _| {
+            Err(ReactionExtentError::InvalidProblem {
+                field: "injected_phase_control_failure",
+                message: "test lifecycle failure".to_string(),
+            })
+        });
+
+        assert!(result.is_err());
+        let events = receiver.try_iter().collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EquilibriumDiagnosticEvent::ActiveSetCandidateRejected { .. }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EquilibriumDiagnosticEvent::ContinuationRestored {
+                retained_seed: true,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EquilibriumDiagnosticEvent::SolveFailed {
+                continuation_restored: true,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn repeated_phase_set_streams_typed_cycle_evidence() {
+        let (sender, receiver) = mpsc::channel();
+        let mut runner = runner_with_accepted_continuation();
+        runner.set_diagnostics_options(
+            EquilibriumDiagnosticsOptions::enabled(EquilibriumDiagnosticsMode::PhaseLifecycle)
+                .with_sink(move |event| sender.send(event).unwrap()),
+        );
+        let phase_set = runner
+            .continuation_phase_set
+            .clone()
+            .expect("fixture must retain one accepted phase set");
+        let mut visited = HashSet::from([phase_set.clone()]);
+
+        let error = runner
+            .reject_repeated_phase_set(&mut visited, &phase_set, 3)
+            .expect_err("a repeated settled phase set must stop the outer loop");
+
+        assert!(matches!(
+            error,
+            ReactionExtentError::PhaseControlCycleDetected { iteration: 3, .. }
+        ));
+        assert!(receiver.try_iter().any(|event| matches!(
+            event,
+            EquilibriumDiagnosticEvent::PhaseControlCycleDetected { iteration: 3, .. }
+        )));
+    }
+
+    fn accepted_validation(min_moles: f64) -> EquilibriumCandidateReport {
+        EquilibriumCandidateReport {
+            residual_l2_norm: 0.0,
+            residual_rms: 0.0,
+            max_abs_residual: 0.0,
+            raw_residual_l2_norm: 0.0,
+            raw_residual_rms: 0.0,
+            raw_max_abs_residual: 0.0,
+            max_abs_element_balance_error: 0.0,
+            reaction_affinity_l2_norm: 0.0,
+            max_abs_reaction_affinity: 0.0,
+            min_moles,
+        }
+    }
+
+    fn accepted_report() -> EquilibriumSolveReport {
+        let backend = SolverBackend::Legacy(Solvers::NR);
+        EquilibriumSolveReport {
+            policy: SolverPolicy::Single(backend),
+            attempts: vec![SolverAttemptReport {
+                backend,
+                outcome: SolverAttemptOutcome::Accepted,
+                metrics: None,
+            }],
+            accepted_backend: backend,
+        }
+    }
+
+    fn candidate(
+        log_moles: Vec<f64>,
+        solved_active_mask: Vec<bool>,
+        gibbs: &[GibbsFn],
+        temperature: f64,
+    ) -> PreparedActiveSetCandidate {
+        PreparedActiveSetCandidate {
+            log_moles,
+            solved_active_mask,
+            validation_report: accepted_validation(1.0e-12),
+            solve_report: accepted_report(),
+            keq_validation_status: None,
+            stability_gibbs: gibbs.to_vec(),
+            conditions: EquilibriumConditions::new(temperature, 101_325.0, 101_325.0)
+                .expect("synthetic P,H candidate conditions must be valid"),
+            projection_build: Duration::ZERO,
+            formulation_build: Duration::ZERO,
+            validation_duration: Duration::ZERO,
+            rst_symbolic_reused: false,
+        }
+    }
+
+    /// A minimal phase topology for deterministic P,H lifecycle tests.
+    ///
+    /// The gas `A` fixes a one-element reference assemblage. `B` and `C`
+    /// form an initially absent ideal solution with the same elemental
+    /// direction. The caller controls only their standard Gibbs values, which
+    /// gives a wide separation between stable and unstable TPD fixtures.
+    fn runner_with_inactive_ideal_solution(gibbs: Vec<GibbsFn>) -> PreparedPhaseControlRunner {
+        let physical_initial_moles = vec![1.0, 0.0, 0.0];
+        let numerical_seed = LogMolesInitialGuess::from_moles(&[1.0, 1.0e-30, 1.0e-30], 1.0e-30)
+            .expect("trace numerical coordinates must be valid");
+        let problem = EquilibriumProblem::new(
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+            physical_initial_moles,
+            numerical_seed,
+            DMatrix::from_row_slice(3, 1, &[1.0, 1.0, 1.0]),
+            gibbs,
+            vec![
+                Phase {
+                    kind: PhaseKind::IdealGas,
+                    species: vec![0],
+                },
+                Phase {
+                    kind: PhaseKind::IdealSolution,
+                    species: vec![1, 2],
+                },
+            ],
+            EquilibriumConditions::new(300.0, 101_325.0, 101_325.0)
+                .expect("synthetic P,H conditions must be valid"),
+        )
+        .expect("synthetic P,H lifecycle topology must be valid");
+        PreparedPhaseControlRunner::new(problem, Vec::new(), false)
+            .expect("synthetic P,H lifecycle runner must prepare")
+    }
+
+    fn stable_solution_gibbs() -> Vec<GibbsFn> {
+        vec![
+            Rc::new(|_| 0.0),
+            Rc::new(|_| 10_000.0),
+            Rc::new(|_| 10_000.0),
+        ]
+    }
+
+    fn unstable_solution_gibbs() -> Vec<GibbsFn> {
+        // At 450 K this produces an interior minimizer close to [0.79, 0.21],
+        // far enough from a neutral [0.5, 0.5] probe seed to catch leakage.
+        vec![Rc::new(|_| 0.0), Rc::new(|_| -5_000.0), Rc::new(|_| 0.0)]
+    }
+
+    #[test]
+    fn reduced_lifecycle_candidate_is_accepted_without_probe_or_transition() {
+        let gibbs = stable_solution_gibbs();
+        let mut runner = runner_with_inactive_ideal_solution(gibbs.clone());
+        let mut calls = Vec::new();
+
+        let outcome = runner
+            .solve_with_fixed_active_solver(|_, active, seed, _, _| {
+                calls.push((active.to_vec(), seed.to_vec()));
+                Ok(candidate(
+                    vec![0.0, 1.0e-40_f64.ln(), 1.0e-40_f64.ln()],
+                    active.to_vec(),
+                    &gibbs,
+                    450.0,
+                ))
+            })
+            .expect("a valid reduced candidate must not require a recovery probe");
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, vec![true, false]);
+        assert!(outcome.phase_control_report.transitions.is_empty());
+        assert_eq!(
+            outcome.phase_control_report.final_phase_set.active_mask(),
+            vec![true, false]
+        );
+        assert_eq!(outcome.solution.conditions().temperature(), 450.0);
+        assert_eq!(
+            outcome.solution.validation().max_abs_element_balance_error,
+            0.0
+        );
+    }
+
+    #[test]
+    fn wider_probe_with_stable_tpd_is_rejected_without_leaking_a_phase_transition() {
+        let gibbs = stable_solution_gibbs();
+        let mut runner = runner_with_inactive_ideal_solution(gibbs.clone());
+        let mut calls = Vec::new();
+
+        let error = runner
+            .solve_with_fixed_active_solver(|_, active, seed, _, _| {
+                calls.push((active.to_vec(), seed.to_vec()));
+                Ok(candidate(
+                    vec![0.0, 0.5_f64.ln(), 0.5_f64.ln()],
+                    vec![true, true],
+                    &gibbs,
+                    450.0,
+                ))
+            })
+            .expect_err("a wider numerical probe without negative TPD must not publish");
+
+        assert_eq!(
+            calls.len(),
+            1,
+            "the rejected probe must not restart a solve"
+        );
+        assert_eq!(calls[0].0, vec![true, false]);
+        assert!(
+            error.to_string().contains("TPD creation threshold"),
+            "the physical rejection must name the TPD boundary: {error}"
+        );
+        assert_eq!(
+            runner.continuation_phase_set, None,
+            "a rejected wider probe must not publish its phase set as continuation"
+        );
+    }
+
+    #[test]
+    fn wider_probe_activation_uses_tpd_minimizer_not_neutral_probe_seed() {
+        let gibbs = unstable_solution_gibbs();
+        let mut runner = runner_with_inactive_ideal_solution(gibbs.clone());
+        let mut calls = Vec::new();
+
+        let outcome = runner
+            .solve_with_fixed_active_solver(|_, active, seed, _, _| {
+                calls.push((active.to_vec(), seed.to_vec()));
+                match calls.len() {
+                    1 => Ok(candidate(
+                        // The wider numerical branch deliberately uses the
+                        // neutral probe composition [0.5, 0.5].
+                        vec![0.0, 0.5_f64.ln(), 0.5_f64.ln()],
+                        vec![true, true],
+                        &gibbs,
+                        450.0,
+                    )),
+                    2 => Ok(candidate(
+                        vec![0.0, 0.79_f64.ln(), 0.21_f64.ln()],
+                        active.to_vec(),
+                        &gibbs,
+                        450.0,
+                    )),
+                    _ => panic!("one TPD activation must require exactly one fixed-set restart"),
+                }
+            })
+            .expect("negative TPD must activate the ideal solution through a restart");
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, vec![true, false]);
+        assert_eq!(calls[1].0, vec![true, true]);
+        let restart_solution_total = calls[1].1[1].exp() + calls[1].1[2].exp();
+        let restart_fraction_b = calls[1].1[1].exp() / restart_solution_total;
+        assert!(
+            (restart_fraction_b - 0.5).abs() > 0.1,
+            "the physical restart must not retain the neutral probe composition"
+        );
+
+        let transition = outcome
+            .phase_control_report
+            .transitions
+            .first()
+            .expect("TPD activation must retain transition evidence");
+        let incipient = transition
+            .incipient_composition
+            .as_ref()
+            .expect("TPD activation must retain its minimizer composition");
+        assert_eq!(transition.activated.len(), 1);
+        assert!(matches!(
+            transition.reason,
+            PhaseTransitionReason::UnstableInactivePhase { minimum_tpd } if minimum_tpd < 0.0
+        ));
+        assert!((incipient.iter().sum::<f64>() - 1.0).abs() < 1.0e-12);
+        assert!(incipient[0] > 0.7 && incipient[1] < 0.3);
+        assert!(
+            (restart_fraction_b - incipient[0]).abs() < 1.0e-10,
+            "restart seed ratios must be the TPD minimizer, not the probe composition"
+        );
+        assert_eq!(
+            outcome.phase_control_report.final_phase_set.active_mask(),
+            vec![true, true]
+        );
+    }
+
+    #[test]
+    fn failed_restart_after_tpd_probe_restores_the_previous_continuation() {
+        let gibbs = unstable_solution_gibbs();
+        let mut runner = runner_with_inactive_ideal_solution(gibbs.clone());
+        let accepted_seed = LogMolesInitialGuess::from_moles(&[0.7, 1.0e-30, 1.0e-30], 1.0e-30)
+            .expect("accepted continuation seed must be valid");
+        runner
+            .retarget_numeric(
+                EquilibriumConditions::new(425.0, 101_325.0, 101_325.0)
+                    .expect("accepted continuation conditions must be valid"),
+                accepted_seed,
+                gibbs.clone(),
+            )
+            .expect("accepted continuation must retarget");
+        runner
+            .set_continuation_phase_set(
+                PhaseSet::from_policy(
+                    &InitialPhaseSet::Explicit {
+                        active: vec![PhaseIndex::new(0, 2).unwrap()],
+                        excluded: Vec::new(),
+                    },
+                    &[true, false],
+                )
+                .expect("accepted continuation phase set must be valid"),
+            )
+            .expect("accepted continuation phase set must install");
+        let expected_seed = runner.continuation_seed.clone();
+        let expected_phase_set = runner.continuation_phase_set.clone();
+        let mut calls = 0usize;
+
+        let error = runner
+            .solve_with_fixed_active_solver(|_, _active, _, _, _| {
+                calls += 1;
+                if calls == 1 {
+                    Ok(candidate(
+                        vec![0.0, 0.5_f64.ln(), 0.5_f64.ln()],
+                        vec![true, true],
+                        &gibbs,
+                        450.0,
+                    ))
+                } else {
+                    Err(ReactionExtentError::InvalidProblem {
+                        field: "injected_restart_failure",
+                        message: "the TPD-selected fixed set failed before acceptance".to_string(),
+                    })
+                }
+            })
+            .expect_err("a failed restart after a probe must not publish a phase transition");
+
+        assert!(
+            calls >= 2,
+            "the TPD-selected fixed set must be attempted before bounded boundary recovery"
+        );
+        assert!(error.to_string().contains("injected_restart_failure"));
+        assert_eq!(runner.continuation_seed, expected_seed);
+        assert_eq!(runner.continuation_phase_set, expected_phase_set);
     }
 }

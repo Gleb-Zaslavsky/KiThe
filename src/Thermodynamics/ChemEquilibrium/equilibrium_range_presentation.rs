@@ -394,11 +394,13 @@ mod tests {
             presentation.component_mole_fractions.labels(),
             &["N2", "O2"]
         );
-        assert!(presentation
-            .component_mole_fractions
-            .rows()
-            .iter()
-            .all(|row| (row.iter().sum::<f64>() - 1.0).abs() < 1e-12));
+        assert!(
+            presentation
+                .component_mole_fractions
+                .rows()
+                .iter()
+                .all(|row| (row.iter().sum::<f64>() - 1.0).abs() < 1e-12)
+        );
         assert_eq!(presentation.phase_totals.labels(), &["single::total_moles"]);
         assert_eq!(
             presentation.solver_metrics.labels(),

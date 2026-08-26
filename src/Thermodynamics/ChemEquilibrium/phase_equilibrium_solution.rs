@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumDiagnosticsReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, EquilibriumSolution,
@@ -30,6 +30,7 @@ use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
     EquilibriumPhaseDescriptor, PhaseEquilibriumBuildReport, PhaseEquilibriumMetadata,
     PhaseEquilibriumSolutionBundle,
 };
+use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 
 /// One stable row in a multiphase result summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +89,8 @@ pub struct MultiphaseEquilibriumSolution {
     acceptance_report: Option<MultiphaseAcceptanceReport>,
     /// Optional stage timing collected while this immutable result was built.
     timing: EquilibriumTimingReport,
+    /// Optional chronological phase-control evidence requested by the caller.
+    diagnostics: Option<EquilibriumDiagnosticsReport>,
 }
 
 impl MultiphaseEquilibriumSolution {
@@ -119,6 +122,7 @@ impl MultiphaseEquilibriumSolution {
             None,
             None,
             timing,
+            None,
         )
     }
 
@@ -145,6 +149,7 @@ impl MultiphaseEquilibriumSolution {
             None,
             None,
             timing,
+            None,
         )
     }
 
@@ -183,6 +188,7 @@ impl MultiphaseEquilibriumSolution {
             Some(acceptance_report),
             Some(phase_statuses),
             timing,
+            None,
         )
     }
 
@@ -197,6 +203,7 @@ impl MultiphaseEquilibriumSolution {
         acceptance_report: Option<MultiphaseAcceptanceReport>,
         phase_statuses: Option<Vec<PhaseStatus>>,
         timing: EquilibriumTimingReport,
+        diagnostics: Option<EquilibriumDiagnosticsReport>,
     ) -> Result<Self, ReactionExtentError> {
         if metadata.layout_fingerprint() != build_report.layout_fingerprint() {
             return Err(ReactionExtentError::InvalidCandidate {
@@ -281,6 +288,7 @@ impl MultiphaseEquilibriumSolution {
             phase_control_report,
             acceptance_report,
             timing,
+            diagnostics,
         })
     }
 
@@ -307,6 +315,27 @@ impl MultiphaseEquilibriumSolution {
     /// Optional stage timing collected while this immutable result was built.
     pub fn timing_report(&self) -> &EquilibriumTimingReport {
         &self.timing
+    }
+
+    /// Optional chronological diagnostic evidence for this accepted solve.
+    pub fn diagnostics_report(&self) -> Option<&EquilibriumDiagnosticsReport> {
+        self.diagnostics.as_ref()
+    }
+
+    /// Attaches diagnostic evidence assembled by the canonical outer loop.
+    pub(crate) fn with_diagnostics(mut self, diagnostics: EquilibriumDiagnosticsReport) -> Self {
+        if diagnostics.enabled() {
+            self.diagnostics = Some(diagnostics);
+        }
+        self
+    }
+
+    /// Removes retained diagnostic evidence when a range policy elects not to
+    /// publish an otherwise accepted quiet point. Numerical evidence and the
+    /// immutable physical solution remain untouched.
+    pub(crate) fn without_diagnostics(mut self) -> Self {
+        self.diagnostics = None;
+        self
     }
 
     /// Updates only the wall-clock total after an enclosing public operation
@@ -629,7 +658,6 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use crate::Thermodynamics::phase_layout::PhaseId;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
         MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
     };
@@ -637,10 +665,11 @@ mod tests {
         EquilibriumConditions, TraceSpeciesSeedPolicy,
     };
     use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-        build_phase_equilibrium_problem, PhaseEquilibriumBuildRequest,
+        PhaseEquilibriumBuildRequest, build_phase_equilibrium_problem,
     };
     use crate::Thermodynamics::User_PhaseOrSolution::{PhaseSpec, ResolvedPhaseSystem};
     use crate::Thermodynamics::User_substances::{LibraryPriority, SubsData};
+    use crate::Thermodynamics::phase_layout::PhaseId;
 
     use super::MultiphaseEquilibriumSolution;
 
@@ -704,6 +733,7 @@ mod tests {
             None,
             crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::
                 EquilibriumTimingReport::default(),
+            None,
         )
         .unwrap_err();
 

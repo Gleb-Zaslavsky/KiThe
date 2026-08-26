@@ -13,14 +13,15 @@ use std::time::{Duration, Instant};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
     EquilibriumConstraint, TemperatureBounds, TotalEnthalpyJoules,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumRangeDiagnosticsPolicy;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::{
-    solve_resolved_ph, FixedPressureEnthalpySolution, PhFallbackReason, PhSolveMode, PhSolvePath,
+    FixedPressureEnthalpySolution, PhFallbackReason, PhSolveMode, PhSolvePath,
     PhTemperatureSolveOptions, PreparedNestedPhContinuationState, PreparedPhContinuationState,
-    ResolvedPhaseEnthalpyRequest, ResolvedThermochemistry,
+    ResolvedPhaseEnthalpyRequest, ResolvedThermochemistry, solve_resolved_ph,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
     EquilibriumSolveOptions, PhaseControlPolicy,
@@ -512,6 +513,20 @@ impl<'a> PhRangeRequest<'a> {
                 .clone()
                 .with_target_enthalpy_and_seed(target, seed_temperature)
                 .map_err(PhRangeError::InvalidProblem)?;
+            // Diagnostics are intentionally sampled per target just like the
+            // P,T range workflow. A live sink for a long P,H continuation
+            // therefore observes only the caller-selected points instead of
+            // receiving hundreds of otherwise identical lifecycle traces.
+            let point_diagnostics = self
+                .prototype
+                .solve_options()
+                .diagnostics_options()
+                .for_range_point(index, self.targets.values().len());
+            let point_options = request
+                .solve_options()
+                .clone()
+                .with_diagnostics(point_diagnostics.clone());
+            request = request.with_solve_options(point_options);
             if index > 0 {
                 request = request
                     .with_initial_composition(previous_composition.clone())
@@ -519,7 +534,7 @@ impl<'a> PhRangeRequest<'a> {
             }
             let point_started = Instant::now();
             let formulation_reused = prepared_monolithic.is_some() && index > 0;
-            let solution = if let Some(state) = prepared_monolithic.as_mut() {
+            let mut solution = if let Some(state) = prepared_monolithic.as_mut() {
                 state.solve(&request, formulation_reused)
             } else if let Some(state) = prepared_nested.as_ref() {
                 state.solve(request)
@@ -534,13 +549,29 @@ impl<'a> PhRangeRequest<'a> {
                 })
             })?;
             let elapsed = point_started.elapsed();
+            let point_transitions = solution.report().phase_control_transitions();
+            if self
+                .prototype
+                .solve_options()
+                .diagnostics_options()
+                .range_policy()
+                == EquilibriumRangeDiagnosticsPolicy::TransitionsOnly
+            {
+                if point_transitions > 0 {
+                    if let Some(report) = solution.equilibrium().diagnostics_report() {
+                        point_diagnostics.replay_retained_events(report);
+                    }
+                } else {
+                    solution = solution.without_equilibrium_diagnostics();
+                }
+            }
             previous_temperature = solution.temperature();
             previous_composition = MultiphaseInitialComposition::from_dense(
                 &layout,
                 solution.equilibrium().component_moles().to_vec(),
             )
             .map_err(PhRangeError::InvalidProblem)?;
-            transitions += solution.report().phase_control_transitions();
+            transitions += point_transitions;
             formulation_builds += solution.report().fixed_formulation_builds();
             formulation_reuses += solution.report().fixed_formulation_reuses();
             durations.push(elapsed);
@@ -552,7 +583,7 @@ impl<'a> PhRangeRequest<'a> {
                     solved_temperature_bits: solution.temperature().to_bits(),
                     preparation,
                     elapsed,
-                    phase_control_transitions: solution.report().phase_control_transitions(),
+                    phase_control_transitions: point_transitions,
                     formulation_builds: solution.report().fixed_formulation_builds(),
                     formulation_reuses: solution.report().fixed_formulation_reuses(),
                     solve_path: solution.report().solve_path(),

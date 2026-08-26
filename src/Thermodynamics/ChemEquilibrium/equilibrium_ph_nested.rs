@@ -10,7 +10,6 @@
 
 use std::time::{Duration, Instant};
 
-use crate::Thermodynamics::phase_layout::PhaseId;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
     EnthalpyScale, TemperatureBounds,
 };
@@ -22,6 +21,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimin
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     MultiphaseAcceptanceReport, PhaseControlledSolveReport, PhaseStatus,
 };
+use crate::Thermodynamics::phase_layout::PhaseId;
 
 /// Final lifecycle state of one semantic phase at an accepted temperature
 /// trial. The phase id remains explicit because the same substance can occur

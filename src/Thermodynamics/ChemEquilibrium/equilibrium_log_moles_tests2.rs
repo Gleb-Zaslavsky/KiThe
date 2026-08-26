@@ -6,14 +6,14 @@ mod tests {
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::SolverParams;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
+        ContinuationSeedPolicy, EquilibriumLogMoles, EquilibriumSolveCandidate, GibbsFn, Phase,
+        PhaseKind, R, Solvers, TemperatureSolveFailure, TemperatureSolveSnapshot,
         continuation_seed_for_point, equilibrium_logmole_jacobian2, equilibrium_logmole_residual2,
         evaluate_equilibrium_logmole_jacobian, evaluate_equilibrium_logmole_residual,
         evaluate_equilibrium_logmole_residual_with_standard_gibbs,
         recoverable_backend_failure_kind, scale_jacobian_rows, scale_residual_rows,
         scaled_jacobian, scaled_residual, temperature_failure, validate_logmole_system_dimensions,
-        validate_residual_conditions, ContinuationSeedPolicy, EquilibriumLogMoles,
-        EquilibriumSolveCandidate, GibbsFn, Phase, PhaseKind, Solvers, TemperatureSolveFailure,
-        TemperatureSolveSnapshot, R,
+        validate_residual_conditions,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
         ReactionExtentError, SolveError,
@@ -25,13 +25,43 @@ mod tests {
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseControlledSolveReport;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
-        build_multiphase_acceptance_report, deactivate_phases_seed_only, gas_solver,
-        seed_activated_phase, InitialPhaseSet, PhaseManager, PhaseSeedPolicy, PhaseSet,
-        PhaseStabilityReport, PhaseTransitionPlan, PHASE_CONTROL_TRACE_MOLE_FLOOR,
+        InitialPhaseSet, PHASE_CONTROL_TRACE_MOLE_FLOOR, PhaseManager, PhaseSet,
+        PhaseStabilityConditions, PhaseStabilityLayout, PhaseStabilityReport, PhaseStabilityStatus,
+        PhaseTotalSeedPolicy, PhaseTransitionPlan, build_multiphase_acceptance_report,
+        deactivate_phases_seed_only, gas_solver, seed_activated_phase_with_composition,
     };
     use nalgebra::DMatrix;
     use std::collections::HashMap;
     use std::rc::Rc;
+
+    fn skipped_stability_report(
+        phase: usize,
+        phase_count: usize,
+        active: bool,
+        status: PhaseStabilityStatus,
+    ) -> PhaseStabilityReport {
+        PhaseStabilityReport {
+            phase: PhaseIndex::new(phase, phase_count).unwrap(),
+            active,
+            status,
+            conditions: PhaseStabilityConditions {
+                temperature: 298.15,
+                pressure: 101_325.0,
+                reference_pressure: 101_325.0,
+            },
+            layout: PhaseStabilityLayout {
+                system_species_count: 0,
+                system_phase_count: phase_count,
+                element_count: 0,
+                phase_component_indices: Vec::new(),
+            },
+            minimum_tpd: None,
+            incipient_composition: None,
+            element_potentials: None,
+            elemental_feasibility: None,
+            minimizer: None,
+        }
+    }
 
     // -----------------------------------------------------------------------
     // D.4 — accepted_solution() after solve_with_phase_control()
@@ -178,20 +208,8 @@ mod tests {
         };
         // 1 phase in control report, but 2 stability reports → mismatch
         let stability = vec![
-            PhaseStabilityReport {
-                phase: PhaseIndex::new(0, 2).unwrap(),
-                model: crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseStabilityModel::FixedIdealGas,
-                active: true,
-                driving_force: None,
-                element_potentials: None,
-            },
-            PhaseStabilityReport {
-                phase: PhaseIndex::new(1, 2).unwrap(),
-                model: crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseStabilityModel::Unsupported,
-                active: false,
-                driving_force: None,
-                element_potentials: None,
-            },
+            skipped_stability_report(0, 2, true, PhaseStabilityStatus::FixedGasAssemblage),
+            skipped_stability_report(1, 2, false, PhaseStabilityStatus::ExcludedByPolicy),
         ];
         let result = build_multiphase_acceptance_report(report, stability, None, None);
         assert!(result.is_err());
@@ -201,15 +219,12 @@ mod tests {
     fn build_multiphase_acceptance_report_accepts_matching_dimensions() {
         let phase_set =
             PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &[true]).unwrap();
-        let stability = vec![
-            PhaseStabilityReport {
-                phase: PhaseIndex::new(0, 1).unwrap(),
-                model: crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseStabilityModel::FixedIdealGas,
-                active: true,
-                driving_force: None,
-                element_potentials: None,
-            },
-        ];
+        let stability = vec![skipped_stability_report(
+            0,
+            1,
+            true,
+            PhaseStabilityStatus::FixedGasAssemblage,
+        )];
         let report = PhaseControlledSolveReport {
             iterations: 1,
             initial_active_phases: vec![PhaseIndex::new(0, 1).unwrap()],
@@ -284,13 +299,12 @@ mod tests {
         let phase_set =
             PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &[true]).unwrap();
         let phase_totals = vec![1.0];
-        let stability = vec![PhaseStabilityReport {
-            phase: PhaseIndex::new(0, 1).unwrap(),
-            model: crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseStabilityModel::FixedIdealGas,
-            active: true,
-            driving_force: None,
-            element_potentials: None,
-        }];
+        let stability = vec![skipped_stability_report(
+            0,
+            1,
+            true,
+            PhaseStabilityStatus::FixedGasAssemblage,
+        )];
         let plan = manager
             .classify_phases(&phase_totals, &stability, &phase_set)
             .unwrap();
@@ -311,13 +325,12 @@ mod tests {
         let phase_set =
             PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &[true]).unwrap();
         let phase_totals = vec![1.0];
-        let stability = vec![PhaseStabilityReport {
-            phase: PhaseIndex::new(0, 1).unwrap(),
-            model: crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseStabilityModel::FixedIdealGas,
-            active: true,
-            driving_force: None,
-            element_potentials: None,
-        }];
+        let stability = vec![skipped_stability_report(
+            0,
+            1,
+            true,
+            PhaseStabilityStatus::FixedGasAssemblage,
+        )];
         let result = manager.classify_phases(&phase_totals, &stability, &phase_set);
         assert!(result.is_err());
     }
@@ -329,29 +342,31 @@ mod tests {
             PhaseSet::from_policy(&InitialPhaseSet::AllCandidatePhases, &[true, false]).unwrap();
         // 2 phases in set, but only 1 total and 1 stability report
         let phase_totals = vec![1.0];
-        let stability = vec![PhaseStabilityReport {
-            phase: PhaseIndex::new(0, 1).unwrap(),
-            model: crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseStabilityModel::FixedIdealGas,
-            active: true,
-            driving_force: None,
-            element_potentials: None,
-        }];
+        let stability = vec![skipped_stability_report(
+            0,
+            1,
+            true,
+            PhaseStabilityStatus::FixedGasAssemblage,
+        )];
         let result = manager.classify_phases(&phase_totals, &stability, &phase_set);
         assert!(result.is_err());
     }
 
     // -----------------------------------------------------------------------
-    // D.15 — seed_activated_phase() с разными PhaseSeedPolicy
+    // D.15 - TPD-derived total-phase seed validation
     // -----------------------------------------------------------------------
     #[test]
-    fn seed_activated_phase_trace_floor_sets_log_moles_to_floor() {
+    fn tpd_phase_seed_trace_total_sets_log_moles_to_floor() {
         let mut log_moles = vec![1.0_f64.ln(), 2.0_f64.ln(), 3.0_f64.ln()];
         let species_phase = vec![0, 0, 1];
-        seed_activated_phase(
+        seed_activated_phase_with_composition(
             &mut log_moles,
             PhaseIndex::new(1, 2).unwrap(),
             &species_phase,
-            PhaseSeedPolicy::TraceFloor,
+            &[1.0],
+            PhaseTotalSeedPolicy::AbsoluteMoles {
+                moles: PHASE_CONTROL_TRACE_MOLE_FLOOR,
+            },
         )
         .unwrap();
         // species 2 (phase 1) should be set to trace floor
@@ -365,14 +380,15 @@ mod tests {
     }
 
     #[test]
-    fn seed_activated_phase_absolute_per_species_sets_positive_moles() {
+    fn tpd_phase_seed_absolute_total_preserves_composition() {
         let mut log_moles = vec![1.0_f64.ln(), 2.0_f64.ln()];
         let species_phase = vec![0, 0];
-        seed_activated_phase(
+        seed_activated_phase_with_composition(
             &mut log_moles,
             PhaseIndex::new(0, 1).unwrap(),
             &species_phase,
-            PhaseSeedPolicy::AbsolutePerSpecies { moles: 0.1 },
+            &[0.5, 0.5],
+            PhaseTotalSeedPolicy::AbsoluteMoles { moles: 0.2 },
         )
         .unwrap();
         let expected_ln = 0.1_f64.ln();
@@ -381,15 +397,16 @@ mod tests {
     }
 
     #[test]
-    fn seed_activated_phase_relative_to_system_total_scales_with_inventory() {
+    fn tpd_phase_seed_relative_total_scales_with_inventory() {
         let mut log_moles = vec![1.0_f64.ln(), 0.0_f64.ln()];
         let species_phase = vec![0, 1];
         // total = 1.0 + 0.0 = 1.0, fraction = 0.1 → seed = 0.1
-        seed_activated_phase(
+        seed_activated_phase_with_composition(
             &mut log_moles,
             PhaseIndex::new(1, 2).unwrap(),
             &species_phase,
-            PhaseSeedPolicy::RelativeToSystemTotal {
+            &[1.0],
+            PhaseTotalSeedPolicy::RelativeToSystemTotal {
                 fraction: 0.1,
                 minimum: 1e-10,
             },
@@ -400,54 +417,58 @@ mod tests {
     }
 
     #[test]
-    fn seed_activated_phase_rejects_phase_with_no_species() {
+    fn tpd_phase_seed_rejects_phase_with_no_species() {
         let mut log_moles = vec![0.0_f64.ln()];
         let species_phase = vec![0];
         // phase 1 has no species in species_phase
-        let result = seed_activated_phase(
+        let result = seed_activated_phase_with_composition(
             &mut log_moles,
             PhaseIndex::new(1, 2).unwrap(),
             &species_phase,
-            PhaseSeedPolicy::TraceFloor,
+            &[1.0],
+            PhaseTotalSeedPolicy::AbsoluteMoles { moles: 1e-12 },
         );
         assert!(result.is_err());
     }
 
     #[test]
-    fn seed_activated_phase_rejects_dimension_mismatch() {
+    fn tpd_phase_seed_rejects_dimension_mismatch() {
         let mut log_moles = vec![0.0_f64.ln()];
         let species_phase = vec![0, 1]; // longer than log_moles
-        let result = seed_activated_phase(
+        let result = seed_activated_phase_with_composition(
             &mut log_moles,
             PhaseIndex::new(0, 2).unwrap(),
             &species_phase,
-            PhaseSeedPolicy::TraceFloor,
+            &[1.0],
+            PhaseTotalSeedPolicy::AbsoluteMoles { moles: 1e-12 },
         );
         assert!(result.is_err());
     }
 
     #[test]
-    fn seed_activated_phase_absolute_rejects_non_positive_moles() {
+    fn tpd_phase_seed_absolute_rejects_non_positive_total() {
         let mut log_moles = vec![0.0_f64.ln()];
         let species_phase = vec![0];
-        let result = seed_activated_phase(
+        let result = seed_activated_phase_with_composition(
             &mut log_moles,
             PhaseIndex::new(0, 1).unwrap(),
             &species_phase,
-            PhaseSeedPolicy::AbsolutePerSpecies { moles: -1.0 },
+            &[1.0],
+            PhaseTotalSeedPolicy::AbsoluteMoles { moles: -1.0 },
         );
         assert!(result.is_err());
     }
 
     #[test]
-    fn seed_activated_phase_relative_rejects_invalid_fraction() {
+    fn tpd_phase_seed_relative_rejects_invalid_fraction() {
         let mut log_moles = vec![0.0_f64.ln()];
         let species_phase = vec![0];
-        let result = seed_activated_phase(
+        let result = seed_activated_phase_with_composition(
             &mut log_moles,
             PhaseIndex::new(0, 1).unwrap(),
             &species_phase,
-            PhaseSeedPolicy::RelativeToSystemTotal {
+            &[1.0],
+            PhaseTotalSeedPolicy::RelativeToSystemTotal {
                 fraction: 1.5, // > 1.0
                 minimum: 1e-10,
             },

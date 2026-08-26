@@ -351,12 +351,14 @@ mod tests {
         assert_eq!(policy.format_moles(0.00125), "1.250 mmol");
         assert_eq!(policy.format_mole_fraction(0.0025), "0.250 %");
         assert_eq!(policy.format_standard_gibbs(-12_500.0), "-12.500 kJ/mol");
-        assert!(EquilibriumDisplayPolicy::new(
-            -1.0,
-            EquilibriumNumberStyle::Fixed { decimals: 2 },
-            MoleFractionDisplay::Fraction,
-        )
-        .is_err());
+        assert!(
+            EquilibriumDisplayPolicy::new(
+                -1.0,
+                EquilibriumNumberStyle::Fixed { decimals: 2 },
+                MoleFractionDisplay::Fraction,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -374,8 +376,10 @@ mod tests {
             vec![0]
         );
         assert_eq!(rows[0][1], 1e-12);
-        assert!(policy
-            .visible_amount_columns(&labels, &[vec![1.0]])
-            .is_err());
+        assert!(
+            policy
+                .visible_amount_columns(&labels, &[vec![1.0]])
+                .is_err()
+        );
     }
 }

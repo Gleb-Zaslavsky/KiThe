@@ -10,7 +10,7 @@
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::EquilibriumNonlinearBackend;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::{
-    classify_equilibrium_constant_cross_validation, EquilibriumConstantCrossValidationStatus,
+    EquilibriumConstantCrossValidationStatus, classify_equilibrium_constant_cross_validation,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_problem::EquilibriumConstantProblem;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_solver::{
@@ -20,26 +20,26 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::{
     EquilibriumConstantValidationMode, EquilibriumConstantValidationTolerances,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-    compute_species_moles, EquilibriumLogMoles, EquilibriumSolverSettings,
-    LEGACY_MOLE_FEASIBILITY_TOLERANCE,
+    EquilibriumLogMoles, EquilibriumSolverSettings, LEGACY_MOLE_FEASIBILITY_TOLERANCE,
+    compute_species_moles,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumSolution, LogMolesInitialGuess, PreparedEquilibriumProblem,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    prepare_rst_symbolic_problem_from_prepared, RstPreparedProblem,
+    RstPreparedProblem, prepare_rst_symbolic_problem_from_prepared,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, MultiStartAttemptReport, MultiStartSolveReport, SolverBackend,
     SolverCascadeBudget, SolverPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::{
-    validate_equilibrium_candidate, EquilibriumAcceptanceCriteria, EquilibriumCandidateResiduals,
+    EquilibriumAcceptanceCriteria, EquilibriumCandidateResiduals, validate_equilibrium_candidate,
 };
+use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::DMatrix;
 use std::time::{Duration, Instant};
-use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 /// Accepted output of one immutable prepared-problem solve.
 #[derive(Debug)]

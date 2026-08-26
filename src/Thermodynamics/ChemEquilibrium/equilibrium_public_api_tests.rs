@@ -76,11 +76,13 @@ mod tests {
             .moles_for(&nitrogen)
             .expect("phase-qualified public lookup must find N2");
         assert!(nitrogen_moles.is_finite() && nitrogen_moles > 0.0);
-        assert!(fixed_solution
-            .accepted_solution()
-            .validation()
-            .residual_l2_norm
-            .is_finite());
+        assert!(
+            fixed_solution
+                .accepted_solution()
+                .validation()
+                .residual_l2_norm
+                .is_finite()
+        );
         assert!(
             fixed_solution
                 .accepted_solution()
@@ -134,5 +136,60 @@ mod tests {
         );
         assert_eq!(solid.physical_state(), PhysicalState::Solid);
         assert_eq!(solid.model(), PhaseModel::PureCondensed);
+    }
+
+    #[test]
+    fn production_prelude_names_immutable_phase_stability_evidence() {
+        // This is a compile-time facade contract. The report builders remain
+        // crate-private; external callers receive these values only through
+        // accepted solutions and can nevertheless name every nested evidence
+        // type when storing, matching, or rendering it.
+        fn stability_status(report: &PhaseStabilityReport) -> PhaseStabilityStatus {
+            report.status
+        }
+        fn transition_reason(record: &PhaseTransitionRecord) -> PhaseTransitionReason {
+            record.reason
+        }
+        fn acceptance_summary(report: &MultiphaseAcceptanceReport) -> usize {
+            report.phase_stability.len()
+        }
+
+        let conditions = PhaseStabilityConditions {
+            temperature: TEMPERATURE_K,
+            pressure: PRESSURE_PA,
+            reference_pressure: PRESSURE_PA,
+        };
+        let layout = PhaseStabilityLayout {
+            system_species_count: 2,
+            system_phase_count: 1,
+            element_count: 2,
+            phase_component_indices: vec![0, 1],
+        };
+        let feasibility = ElementalFeasibilityReport {
+            candidate_element_totals: vec![1.0, 1.0],
+            max_abs_residual: 0.0,
+            residual_tolerance: 1.0e-12,
+        };
+        let minimizer = TpdMinimizerReport {
+            independent_constraint_count: 1,
+            active_component_count: 2,
+            iterations: 1,
+            max_abs_constraint_residual: 0.0,
+            constraint_tolerance: 1.0e-12,
+            max_abs_kkt_residual: 0.0,
+        };
+
+        assert_eq!(conditions.temperature, TEMPERATURE_K);
+        assert_eq!(layout.phase_component_indices, vec![0, 1]);
+        assert!(feasibility.max_abs_residual <= feasibility.residual_tolerance);
+        assert_eq!(minimizer.active_component_count, 2);
+
+        let _: fn(&PhaseStabilityReport) -> PhaseStabilityStatus = stability_status;
+        let _: fn(&PhaseTransitionRecord) -> PhaseTransitionReason = transition_reason;
+        let _: fn(&MultiphaseAcceptanceReport) -> usize = acceptance_summary;
+        assert_eq!(
+            PhaseStabilityStatus::Evaluated,
+            PhaseStabilityStatus::Evaluated
+        );
     }
 }

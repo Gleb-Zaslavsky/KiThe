@@ -552,16 +552,22 @@ mod tests {
         assert_eq!(presentation.components.len(), 2);
         assert_eq!(presentation.components[0].component, "N2");
         assert_eq!(presentation.components[1].component, "O2");
-        assert!(presentation
-            .components
-            .iter()
-            .all(|component| component.library == "NASA_gas"));
-        assert!(presentation
-            .components
-            .iter()
-            .all(|component| component.physical_moles.is_finite()));
-        assert!(presentation
-            .render_compact()
-            .contains("components: component | mol | x | library | record"));
+        assert!(
+            presentation
+                .components
+                .iter()
+                .all(|component| component.library == "NASA_gas")
+        );
+        assert!(
+            presentation
+                .components
+                .iter()
+                .all(|component| component.physical_moles.is_finite())
+        );
+        assert!(
+            presentation
+                .render_compact()
+                .contains("components: component | mol | x | library | record")
+        );
     }
 }

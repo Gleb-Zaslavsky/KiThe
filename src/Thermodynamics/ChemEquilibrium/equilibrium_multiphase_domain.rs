@@ -13,27 +13,20 @@
 //!                                  +--> physical element totals
 //! ```
 
-use crate::Thermodynamics::phase_layout::{PhaseComponentId, SystemLayout};
-use crate::Thermodynamics::physical_state::PhysicalState;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::User_PhaseOrSolution::{PhaseModel, PhaseSpec};
+use crate::Thermodynamics::phase_layout::{PhaseComponentId, SystemLayout};
+use crate::Thermodynamics::physical_state::PhysicalState;
 use nalgebra::DMatrix;
 use std::collections::HashSet;
 
 /// Validated phase/component order for a closed fixed-pressure, fixed-temperature
 /// equilibrium problem.
 ///
-/// Currently implemented activity models are one ideal gas phase and any
-/// number of one-component pure condensed phases.  A liquid or solid solution
-/// needs its own standard-state and activity-coefficient contract and is
-/// rejected here rather than silently treated as ideal.
-/// Validated phase/component order for a closed fixed-pressure, fixed-temperature
-/// equilibrium problem.
-///
-/// Currently implemented activity models are one ideal gas phase and any
-/// number of one-component pure condensed phases. A liquid or solid solution
-/// needs its own standard-state and activity-coefficient contract and is
-/// rejected here rather than silently treated as ideal.
+/// Currently implemented activity models are one ideal-gas assemblage,
+/// one-component pure condensed phases, and multicomponent ideal condensed
+/// solutions. More elaborate activity-coefficient models remain explicitly
+/// unsupported rather than being inferred from a liquid or solid label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultiphaseEquilibriumLayout {
     /// Phase specifications in canonical semantic solver order.
@@ -73,16 +66,10 @@ impl MultiphaseEquilibriumLayout {
 
             match (phase.physical_state(), phase.model()) {
                 (PhysicalState::Gas, PhaseModel::IdealGas) => gas_phase_count += 1,
-                (_, PhaseModel::PureCondensed) if phase.components().len() == 1 => {}
-                (_, PhaseModel::PureCondensed) => {
-                    return Err(ReactionExtentError::ValidationNotApplicable {
-                        path: "multiphase equilibrium layout",
-                        message: format!(
-                            "pure condensed phase {:?} must contain exactly one component",
-                            phase_id.as_option()
-                        ),
-                    });
-                }
+                (
+                    PhysicalState::Liquid | PhysicalState::Solid | PhysicalState::Condensed,
+                    PhaseModel::IdealSolution | PhaseModel::PureCondensed,
+                ) => {}
                 (state, model) => {
                     return Err(ReactionExtentError::ValidationNotApplicable {
                         path: "multiphase equilibrium layout",
@@ -316,7 +303,8 @@ fn fingerprint_specs(specs: &[PhaseSpec]) -> u64 {
         }]);
         write(&[match spec.model() {
             PhaseModel::IdealGas => 1,
-            PhaseModel::PureCondensed => 2,
+            PhaseModel::IdealSolution => 2,
+            PhaseModel::PureCondensed => 3,
         }]);
         for component in spec.components() {
             write(component.as_bytes());

@@ -262,14 +262,18 @@ mod tests {
         assert_eq!(report.summary.temperature_delta_kelvin, 200.0);
         assert_eq!(report.components.len(), 2);
         assert_eq!(report.components[0].component, "N2");
-        assert!(report
-            .components
-            .iter()
-            .all(|component| component.left_library == "NASA_gas"));
-        assert!(report
-            .components
-            .iter()
-            .all(|component| !component.provenance_changed));
+        assert!(
+            report
+                .components
+                .iter()
+                .all(|component| component.left_library == "NASA_gas")
+        );
+        assert!(
+            report
+                .components
+                .iter()
+                .all(|component| !component.provenance_changed)
+        );
         assert_eq!(report.phases.len(), 1);
         assert_eq!(report.phases[0].phase, "single");
     }

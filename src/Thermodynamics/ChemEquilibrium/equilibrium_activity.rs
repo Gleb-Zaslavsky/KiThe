@@ -244,8 +244,10 @@ mod tests {
                 0.0
             );
         }
-        assert!(PhaseActivityModel::IdealGas
-            .d_log_activity_d_temperature(0.0, 101_325.0)
-            .is_err());
+        assert!(
+            PhaseActivityModel::IdealGas
+                .d_log_activity_d_temperature(0.0, 101_325.0)
+                .is_err()
+        );
     }
 }

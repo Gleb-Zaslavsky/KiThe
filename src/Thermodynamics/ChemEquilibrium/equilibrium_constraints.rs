@@ -409,9 +409,11 @@ mod tests {
         );
         assert!(intersection.contains(300.0));
         assert!(!intersection.contains(1_500.1));
-        assert!(first
-            .intersect(TemperatureBounds::new(2_100.0, 3_000.0).unwrap())
-            .is_err());
+        assert!(
+            first
+                .intersect(TemperatureBounds::new(2_100.0, 3_000.0).unwrap())
+                .is_err()
+        );
     }
 
     #[test]

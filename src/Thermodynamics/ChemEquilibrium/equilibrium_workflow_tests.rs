@@ -3,18 +3,17 @@ mod tests {
     // This module is the explicit characterization layer for the deprecated
     // mutable workflows retained as numerical fallback coverage.
     #![allow(deprecated)]
-    use crate::Thermodynamics::thermo_lib_api::LibraryId;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_active_set::ActiveSetProjection;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::*;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentErrorKind;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverPolicy;
-    use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseSeedPolicy;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PHASE_CONTROL_TRACE_MOLE_FLOOR;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::*;
     use crate::Thermodynamics::ChemEquilibrium::legacy::gas_solver as legacy_gas_solver;
     use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData, WhatIsFound};
+    use crate::Thermodynamics::thermo_lib_api::LibraryId;
     use nalgebra::DMatrix;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -24,12 +23,26 @@ mod tests {
         forces
             .iter()
             .enumerate()
-            .map(|(phase, &driving_force)| PhaseStabilityReport {
+            .map(|(phase, &minimum_tpd)| PhaseStabilityReport {
                 phase: PhaseIndex::new(phase, forces.len()).unwrap(),
-                model: PhaseStabilityModel::PureCondensedSpecies,
                 active: active[phase],
-                driving_force,
+                status: PhaseStabilityStatus::Evaluated,
+                conditions: PhaseStabilityConditions {
+                    temperature: 298.15,
+                    pressure: 101_325.0,
+                    reference_pressure: 101_325.0,
+                },
+                layout: PhaseStabilityLayout {
+                    system_species_count: 0,
+                    system_phase_count: forces.len(),
+                    element_count: 0,
+                    phase_component_indices: Vec::new(),
+                },
+                minimum_tpd,
+                incipient_composition: None,
                 element_potentials: None,
+                elemental_feasibility: None,
+                minimizer: None,
             })
             .collect()
     }
@@ -457,15 +470,16 @@ mod tests {
     }
 
     #[test]
-    fn seed_activated_phase_sets_every_species_in_the_phase() {
+    fn tpd_phase_seed_distributes_the_requested_total_across_its_components() {
         let species_phase = vec![0, 0, 1, 1];
         let mut y = vec![0.0, 0.1, -20.0, -21.0];
 
-        seed_activated_phase(
+        seed_activated_phase_with_composition(
             y.as_mut_slice(),
             PhaseIndex::new(1, 2).unwrap(),
             &species_phase,
-            PhaseSeedPolicy::AbsolutePerSpecies { moles: 1e-12 },
+            &[0.5, 0.5],
+            PhaseTotalSeedPolicy::AbsoluteMoles { moles: 2e-12 },
         )
         .unwrap();
 
@@ -641,7 +655,52 @@ mod tests {
     }
 
     #[test]
-    fn multicomponent_ideal_solution_phase_rejects_phase_control_stability_guard() {
+    fn multicomponent_phase_deactivation_uses_total_phase_amount_not_one_component() {
+        let active = [true, true];
+        let species_phase = [0, 1, 1];
+        let mut manager = PhaseManager::new(1.0e-2, -1.0, 0.0);
+        manager.max_phase_iterations = 4;
+        let stability = stability_reports(&[Some(0.0), Some(1.0)], &active);
+
+        // The first solution component is at trace, but the second component
+        // carries a substantial phase amount. Deactivation must see their sum.
+        let retained = compute_phase_totals(
+            &[
+                1.0_f64.ln(),
+                PHASE_CONTROL_TRACE_MOLE_FLOOR.ln(),
+                0.25_f64.ln(),
+            ],
+            &species_phase,
+        );
+        assert!(retained[1] > manager.phase_eps);
+        assert!(matches!(
+            manager
+                .classify_phases(&retained, &stability, &phase_set(&active))
+                .unwrap(),
+            PhaseTransitionPlan::NoTransition { .. }
+        ));
+
+        let vanishing = compute_phase_totals(
+            &[
+                1.0_f64.ln(),
+                PHASE_CONTROL_TRACE_MOLE_FLOOR.ln(),
+                PHASE_CONTROL_TRACE_MOLE_FLOOR.ln(),
+            ],
+            &species_phase,
+        );
+        assert!(vanishing[1] < manager.phase_eps);
+        assert_eq!(
+            manager
+                .classify_phases(&vanishing, &stability, &phase_set(&active))
+                .unwrap(),
+            PhaseTransitionPlan::Deactivate {
+                phase: PhaseIndex::new(1, 2).unwrap()
+            }
+        );
+    }
+
+    #[test]
+    fn multicomponent_ideal_solution_phase_uses_constrained_tpd_stability() {
         let y = vec![
             0.0,
             PHASE_CONTROL_TRACE_MOLE_FLOOR.ln(),
@@ -660,7 +719,7 @@ mod tests {
         ];
         let species_phase = vec![0, 1, 1];
 
-        let result = compute_phase_stability_reports(
+        let reports = compute_phase_stability_reports(
             &y,
             &gibbs,
             &phases,
@@ -670,15 +729,135 @@ mod tests {
             101325.0,
             101325.0,
             &phase_set(&[true, false]),
-        );
+        )
+        .unwrap();
 
-        assert!(matches!(
-            result,
-            Err(ReactionExtentError::ValidationNotApplicable {
-                path: "phase_stability",
-                ..
-            })
-        ));
+        assert_eq!(reports[1].status, PhaseStabilityStatus::Evaluated);
+        assert!(reports[1].minimum_tpd.unwrap().is_finite());
+        assert_eq!(reports[1].conditions.temperature, 300.0);
+        assert_eq!(reports[1].conditions.pressure, 101_325.0);
+        assert_eq!(reports[1].layout.system_species_count, 3);
+        assert_eq!(reports[1].layout.system_phase_count, 2);
+        assert_eq!(reports[1].layout.element_count, 1);
+        assert_eq!(reports[1].layout.phase_component_indices, vec![1, 2]);
+
+        let feasibility = reports[1]
+            .elemental_feasibility
+            .as_ref()
+            .expect("an evaluated TPD report must retain elemental feasibility evidence");
+        assert!(feasibility.max_abs_residual <= feasibility.residual_tolerance);
+
+        let minimizer = reports[1]
+            .minimizer
+            .as_ref()
+            .expect("an evaluated TPD report must retain minimizer diagnostics");
+        assert_eq!(minimizer.active_component_count, 2);
+        assert!(minimizer.max_abs_constraint_residual <= minimizer.constraint_tolerance);
+        assert!(minimizer.max_abs_kkt_residual.is_finite());
+    }
+
+    #[test]
+    fn phase_stability_reports_distinguish_policy_exclusion_and_single_active_reference_gap() {
+        let trace = PHASE_CONTROL_TRACE_MOLE_FLOOR.ln();
+        let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0), Rc::new(|_| 0.0)];
+        let phases = vec![
+            Phase {
+                kind: PhaseKind::IdealGas,
+                species: vec![0],
+            },
+            Phase {
+                kind: PhaseKind::IdealSolution,
+                species: vec![1],
+            },
+            Phase {
+                kind: PhaseKind::IdealSolution,
+                species: vec![2],
+            },
+        ];
+        let declared = InitialPhaseSet::Explicit {
+            active: vec![PhaseIndex::new(0, 3).unwrap()],
+            excluded: vec![PhaseIndex::new(2, 3).unwrap()],
+        };
+        let reports = compute_phase_stability_reports(
+            &[0.0, trace, trace],
+            &gibbs,
+            &phases,
+            &[0, 1, 2],
+            &DMatrix::from_row_slice(3, 1, &[1.0, 1.0, 1.0]),
+            900.0,
+            101_325.0,
+            101_325.0,
+            &PhaseSet::from_policy(&declared, &[true, false, false]).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(reports[0].status, PhaseStabilityStatus::FixedGasAssemblage);
+        assert_eq!(reports[1].status, PhaseStabilityStatus::Evaluated);
+        assert_eq!(reports[2].status, PhaseStabilityStatus::ExcludedByPolicy);
+        assert!(reports[2].minimum_tpd.is_none());
+
+        // An already-active condensed phase cannot be compared to itself. The
+        // missing reference is explicit evidence, not a fabricated zero TPD.
+        let single_condensed = vec![Phase {
+            kind: PhaseKind::IdealSolution,
+            species: vec![0],
+        }];
+        let report = compute_phase_stability_reports(
+            &[0.0],
+            &[Rc::new(|_| 0.0)],
+            &single_condensed,
+            &[0],
+            &DMatrix::from_row_slice(1, 1, &[1.0]),
+            900.0,
+            101_325.0,
+            101_325.0,
+            &phase_set(&[true]),
+        )
+        .unwrap();
+        assert_eq!(
+            report[0].status,
+            PhaseStabilityStatus::ActiveWithoutReferenceAssemblage
+        );
+        assert!(report[0].minimum_tpd.is_none());
+    }
+
+    #[test]
+    fn phase_stability_supports_multiple_active_condensed_phases_and_rank_deficient_reference() {
+        let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0)];
+        // These low-level numerical phases intentionally use the ideal-solution
+        // activity law with one component. The semantic bridge represents this
+        // physical case as `PureCondensed`; the test here isolates reference
+        // assemblage selection rather than phase-spec validation.
+        let condensed = vec![
+            Phase {
+                kind: PhaseKind::IdealSolution,
+                species: vec![0],
+            },
+            Phase {
+                kind: PhaseKind::IdealSolution,
+                species: vec![1],
+            },
+        ];
+        let reports = compute_phase_stability_reports(
+            &[0.0, 0.0],
+            &gibbs,
+            &condensed,
+            &[0, 1],
+            // Both species have the same H/O direction. The active reference
+            // is deliberately rank deficient in the full two-element space.
+            &DMatrix::from_row_slice(2, 2, &[2.0, 1.0, 2.0, 1.0]),
+            700.0,
+            101_325.0,
+            101_325.0,
+            &phase_set(&[true, true]),
+        )
+        .unwrap();
+
+        for report in reports {
+            assert_eq!(report.status, PhaseStabilityStatus::Evaluated);
+            assert_eq!(report.element_potentials.unwrap().rank, 1);
+            assert!(report.minimum_tpd.unwrap().is_finite());
+        }
     }
 
     #[test]
@@ -709,8 +888,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(reports[1].model, PhaseStabilityModel::FixedIdealGas);
-        assert_eq!(reports[1].driving_force, None);
+        assert_eq!(reports[1].status, PhaseStabilityStatus::FixedGasAssemblage);
+        assert_eq!(reports[1].minimum_tpd, None);
+        assert!(reports[1].elemental_feasibility.is_none());
+        assert!(reports[1].minimizer.is_none());
         let plan = PhaseManager::default()
             .classify_phases_at_temperature(
                 1_000.0,
@@ -748,15 +929,15 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(reports[1].model, PhaseStabilityModel::PureCondensedSpecies);
-        assert_eq!(reports[1].driving_force, Some(-1000.0));
+        assert_eq!(reports[1].status, PhaseStabilityStatus::Evaluated);
+        assert_eq!(reports[1].minimum_tpd, Some(-1000.0));
         let potentials = reports[1].element_potentials.as_ref().unwrap();
         assert_eq!(potentials.rank, 1);
         assert!(potentials.max_abs_residual < 1e-12);
     }
 
     #[test]
-    fn pure_condensed_driving_force_uses_chemical_potential_not_raw_sum() {
+    fn pure_condensed_minimum_tpd_uses_chemical_potential_not_raw_sum() {
         let temperature = 500.0;
         let pressure = 2.0 * 101_325.0;
         let reference_pressure = 101_325.0;
@@ -786,10 +967,10 @@ mod tests {
         .unwrap();
 
         let expected_gas_mu = -1_000.0 + rt * (pressure / reference_pressure).ln();
-        let expected_driving_force = 0.0 - expected_gas_mu;
-        assert_eq!(reports[0].model, PhaseStabilityModel::FixedIdealGas);
-        assert_eq!(reports[1].model, PhaseStabilityModel::PureCondensedSpecies);
-        assert_eq!(reports[1].driving_force.unwrap(), expected_driving_force);
+        let expected_minimum_tpd = 0.0 - expected_gas_mu;
+        assert_eq!(reports[0].status, PhaseStabilityStatus::FixedGasAssemblage);
+        assert_eq!(reports[1].status, PhaseStabilityStatus::Evaluated);
+        assert_eq!(reports[1].minimum_tpd.unwrap(), expected_minimum_tpd);
     }
 
     #[test]
@@ -863,12 +1044,14 @@ mod tests {
 
         assert!(solver.moles[2] <= PHASE_CONTROL_TRACE_MOLE_FLOOR * 1.01);
         assert_eq!(solver.phase_active_mask, vec![true, false]);
-        assert!(solver
-            .last_phase_control_report
-            .as_ref()
-            .unwrap()
-            .transitions
-            .is_empty());
+        assert!(
+            solver
+                .last_phase_control_report
+                .as_ref()
+                .unwrap()
+                .transitions
+                .is_empty()
+        );
     }
 
     #[test]
@@ -901,12 +1084,17 @@ mod tests {
                 .status(PhaseIndex::new(1, 2).unwrap()),
             PhaseStatus::Appeared
         );
+        assert_eq!(
+            transitions[0].incipient_composition.as_deref(),
+            Some(&[1.0][..]),
+            "the transition record must preserve the TPD minimizer rather than only its floored log seed"
+        );
         assert!(transitions[0].restart_seed[2].exp() > PHASE_CONTROL_TRACE_MOLE_FLOOR);
         let (dg_create, _) = solver.phase_manager.thresholds_at(solver.T).unwrap();
         assert!(matches!(
             transitions[0].reason,
-            PhaseTransitionReason::UnstableInactivePhase { driving_force }
-                if driving_force < dg_create
+            PhaseTransitionReason::UnstableInactivePhase { minimum_tpd }
+                if minimum_tpd < dg_create
         ));
         assert!(
             transitions[0]
@@ -936,12 +1124,14 @@ mod tests {
 
         assert_eq!(solver.phase_active_mask, vec![true, false]);
         assert!(solver.moles[2] <= PHASE_CONTROL_TRACE_MOLE_FLOOR * 1.01);
-        assert!(solver
-            .last_phase_control_report
-            .as_ref()
-            .unwrap()
-            .transitions
-            .is_empty());
+        assert!(
+            solver
+                .last_phase_control_report
+                .as_ref()
+                .unwrap()
+                .transitions
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1149,7 +1339,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_control_remains_finite_across_trace_and_extreme_driving_forces() {
+    fn phase_control_remains_finite_across_trace_and_extreme_tpd_minima() {
         let temperatures = [250.0_f64, 1000.0, 5000.0];
         let candidate_gibbs_values = [-100_000.0_f64, 0.0, 100_000.0];
 
@@ -1174,16 +1364,20 @@ mod tests {
                         "element {element} drifted at T={temperature}, candidate_gibbs={candidate_gibbs}"
                     );
                 }
-                assert!(solver
-                    .moles
-                    .iter()
-                    .all(|value| value.is_finite() && *value >= 0.0));
-                assert!(solver
-                    .last_phase_control_report
-                    .as_ref()
-                    .is_some_and(
-                        |report| report.iterations <= solver.phase_manager.max_phase_iterations
-                    ));
+                assert!(
+                    solver
+                        .moles
+                        .iter()
+                        .all(|value| value.is_finite() && *value >= 0.0)
+                );
+                assert!(
+                    solver
+                        .last_phase_control_report
+                        .as_ref()
+                        .is_some_and(
+                            |report| report.iterations <= solver.phase_manager.max_phase_iterations
+                        )
+                );
             }
         }
     }
@@ -1208,10 +1402,12 @@ mod tests {
             let observed = compute_element_totals(&solver.elem_composition, &solver.moles)
                 .expect("accepted moles must remain element-representable");
 
-            assert!(solver
-                .moles
-                .iter()
-                .all(|value| value.is_finite() && *value >= 0.0));
+            assert!(
+                solver
+                    .moles
+                    .iter()
+                    .all(|value| value.is_finite() && *value >= 0.0)
+            );
             assert_eq!(solver.phase_active_mask.len(), 3);
             assert!(solver.phase_active_mask[0]);
             for element in 0..expected.len() {
@@ -1274,9 +1470,11 @@ mod tests {
 
         assert_eq!(solver.phase_active_mask, vec![true, true]);
         assert_eq!(first_report.transitions.len(), 1);
-        assert!(first_report
-            .final_active_phases
-            .contains(&PhaseIndex::new(1, 2).unwrap()));
+        assert!(
+            first_report
+                .final_active_phases
+                .contains(&PhaseIndex::new(1, 2).unwrap())
+        );
 
         *candidate_gibbs.borrow_mut() = 1_000.0;
         let second_result = solver.solve_with_phase_control();
@@ -1420,15 +1618,18 @@ mod tests {
         let rows = report.summary_rows();
         let rendered = report.to_string();
 
-        assert!(rows
-            .iter()
-            .any(|row| row.section == "phase_control" && row.label == "iterations"));
-        assert!(rows
-            .iter()
-            .any(|row| row.section == "validation" && row.label == "residual_l2_norm"));
-        assert!(rows
-            .iter()
-            .any(|row| row.section == "nonlinear" && row.label == "accepted_reports"));
+        assert!(
+            rows.iter()
+                .any(|row| row.section == "phase_control" && row.label == "iterations")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.section == "validation" && row.label == "residual_l2_norm")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.section == "nonlinear" && row.label == "accepted_reports")
+        );
         assert!(rendered.contains("[phase_control] iterations = "));
         assert!(rendered.contains("[validation] residual_l2_norm = "));
     }
@@ -1462,14 +1663,35 @@ mod tests {
         let rendered = report.to_string();
 
         assert!(report.complementarity.satisfied);
-        assert!(rows
+        assert!(
+            rows.iter()
+                .any(|row| row.section == "acceptance" && row.label == "phase_iterations")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.section == "complementarity" && row.label == "satisfied")
+        );
+        let evaluated_phase = report
+            .phase_stability
             .iter()
-            .any(|row| row.section == "acceptance" && row.label == "phase_iterations"));
-        assert!(rows
-            .iter()
-            .any(|row| row.section == "complementarity" && row.label == "satisfied"));
+            .find(|stability| stability.status == PhaseStabilityStatus::Evaluated)
+            .expect("the pure condensed candidate must have one evaluated TPD report")
+            .phase
+            .index();
+        assert!(rows.iter().any(|row| {
+            row.section == "phase_stability"
+                && row.label == format!("phase_{evaluated_phase}_status")
+                && row.value == "Evaluated"
+        }));
+        assert!(rows.iter().any(|row| {
+            row.section == "phase_stability"
+                && row.label == format!("phase_{evaluated_phase}_minimum_tpd_j_per_mol")
+        }));
         assert!(rendered.contains("[acceptance] phase_iterations = "));
         assert!(rendered.contains("[complementarity] satisfied = true"));
+        assert!(rendered.contains(&format!(
+            "[phase_stability] phase_{evaluated_phase}_status = Evaluated"
+        )));
     }
 
     #[test]
@@ -1482,11 +1704,12 @@ mod tests {
             PHASE_CONTROL_TRACE_MOLE_FLOOR.ln(),
         ];
 
-        seed_activated_phase(
+        seed_activated_phase_with_composition(
             y.as_mut_slice(),
             phase,
             &species_phase,
-            PhaseSeedPolicy::RelativeToSystemTotal {
+            &[1.0],
+            PhaseTotalSeedPolicy::RelativeToSystemTotal {
                 fraction: 1e-8,
                 minimum: PHASE_CONTROL_TRACE_MOLE_FLOOR,
             },
@@ -1505,11 +1728,12 @@ mod tests {
         let disappeared = y[2].exp();
         assert!(disappeared <= PHASE_CONTROL_TRACE_MOLE_FLOOR * 1.01);
 
-        seed_activated_phase(
+        seed_activated_phase_with_composition(
             y.as_mut_slice(),
             phase,
             &species_phase,
-            PhaseSeedPolicy::RelativeToSystemTotal {
+            &[1.0],
+            PhaseTotalSeedPolicy::RelativeToSystemTotal {
                 fraction: 1e-8,
                 minimum: PHASE_CONTROL_TRACE_MOLE_FLOOR,
             },
@@ -1518,6 +1742,58 @@ mod tests {
         let reappeared = y[2].exp();
         assert!(reappeared > PHASE_CONTROL_TRACE_MOLE_FLOOR);
         assert!(reappeared >= appeared * 0.99);
+    }
+
+    #[test]
+    fn tpd_phase_seed_preserves_the_minimizer_composition_and_total() {
+        let phase = PhaseIndex::new(1, 2).unwrap();
+        let species_phase = vec![0, 1, 1];
+        let mut y = vec![
+            1.0_f64.ln(),
+            PHASE_CONTROL_TRACE_MOLE_FLOOR.ln(),
+            PHASE_CONTROL_TRACE_MOLE_FLOOR.ln(),
+        ];
+
+        seed_activated_phase_with_composition(
+            &mut y,
+            phase,
+            &species_phase,
+            &[0.8, 0.2],
+            PhaseTotalSeedPolicy::AbsoluteMoles { moles: 0.1 },
+        )
+        .unwrap();
+
+        let first = y[1].exp();
+        let second = y[2].exp();
+        assert!((first + second - 0.1).abs() < 1e-14);
+        assert!((first / (first + second) - 0.8).abs() < 1e-12);
+        assert!((second / (first + second) - 0.2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn boundary_tpd_seed_uses_a_floor_only_for_log_coordinates() {
+        let phase = PhaseIndex::new(1, 2).unwrap();
+        let species_phase = vec![0, 1, 1];
+        let mut y = vec![
+            1.0_f64.ln(),
+            PHASE_CONTROL_TRACE_MOLE_FLOOR.ln(),
+            PHASE_CONTROL_TRACE_MOLE_FLOOR.ln(),
+        ];
+
+        seed_activated_phase_with_composition(
+            &mut y,
+            phase,
+            &species_phase,
+            &[1.0, 0.0],
+            PhaseTotalSeedPolicy::AbsoluteMoles { moles: 0.1 },
+        )
+        .unwrap();
+
+        let dominant = y[1].exp();
+        let floored = y[2].exp();
+        assert!((dominant + floored - 0.1).abs() < 1e-14);
+        assert!(floored >= PHASE_CONTROL_TRACE_MOLE_FLOOR);
+        assert!(dominant > 0.1 - 1e-12);
     }
 
     #[test]
@@ -1722,12 +1998,16 @@ mod tests {
                 .map(|result| result.library()),
             Some("nuig_thermo")
         );
-        assert!(subs_data
-            .get_search_result("CO2", WhatIsFound::Thermo)
-            .is_some());
-        assert!(subs_data
-            .get_search_result("CH4", WhatIsFound::Thermo)
-            .is_some());
+        assert!(
+            subs_data
+                .get_search_result("CO2", WhatIsFound::Thermo)
+                .is_some()
+        );
+        assert!(
+            subs_data
+                .get_search_result("CH4", WhatIsFound::Thermo)
+                .is_some()
+        );
     }
 
     #[test]

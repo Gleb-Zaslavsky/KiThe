@@ -12,7 +12,6 @@
 
 use std::collections::HashMap;
 
-use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
@@ -33,13 +32,14 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     InitialPhaseSet, PhaseManager, PhaseStatus,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-    build_phase_equilibrium_problem, PhaseEquilibriumBuildRequest,
+    PhaseEquilibriumBuildRequest, build_phase_equilibrium_problem,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
-    solve_resolved_pt, EquilibriumSolveOptions, PhaseControlPolicy, ResolvedPhaseEquilibriumRequest,
+    EquilibriumSolveOptions, PhaseControlPolicy, ResolvedPhaseEquilibriumRequest, solve_resolved_pt,
 };
 use crate::Thermodynamics::User_PhaseOrSolution::{PhaseSpec, ResolvedPhaseSystem};
 use crate::Thermodynamics::User_substances::{LibraryPriority, SubsData};
+use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 
 fn resolved_local_nasa_gas() -> ResolvedPhaseSystem {
     let phase = PhaseSpec::ideal_gas(
@@ -209,10 +209,12 @@ fn accepted_fixed_phase_solution_exposes_qualified_amounts_totals_and_summary() 
     );
     assert!(result.aggregate_moles_by_substance().contains_key("H2O"));
     assert!(result.to_string().contains("[component] gas::H2"));
-    assert!(result
-        .summary_rows()
-        .iter()
-        .any(|row| row.section == "backend" && row.label == "accepted"));
+    assert!(
+        result
+            .summary_rows()
+            .iter()
+            .any(|row| row.section == "backend" && row.label == "accepted")
+    );
 }
 
 #[test]
@@ -311,21 +313,14 @@ fn two_independent_pure_condensed_candidates_stay_distinct_in_the_bridge() {
 }
 
 #[test]
-fn unsupported_multi_component_condensed_solution_is_rejected_before_bridge_building() {
-    let phase = PhaseSpec::new(
+fn pure_condensed_multicomponent_phase_is_rejected_at_specification_boundary() {
+    let error = PhaseSpec::new(
         PhaseId::new(Some("bad_condensed".to_string())),
         vec!["A".to_string(), "B".to_string()],
         crate::Thermodynamics::physical_state::PhysicalState::Solid,
         crate::Thermodynamics::User_PhaseOrSolution::PhaseModel::PureCondensed,
     )
-    .unwrap();
-    let gas = PhaseSpec::ideal_gas(
-        PhaseId::new(Some("gas".to_string())),
-        vec!["A".to_string(), "B".to_string()],
-    )
-    .unwrap();
-
-    let error = MultiphaseEquilibriumLayout::new(vec![gas, phase]).unwrap_err();
+    .expect_err("a pure condensed phase cannot declare multiple components");
     assert!(error.to_string().contains("exactly one component"));
 }
 
@@ -373,10 +368,12 @@ fn default_resolved_solve_does_not_run_limited_keq_validator() {
     .unwrap();
 
     assert!(result.keq_validation_status().is_none());
-    assert!(!result
-        .summary_rows()
-        .iter()
-        .any(|row| row.section == "keq_validation"));
+    assert!(
+        !result
+            .summary_rows()
+            .iter()
+            .any(|row| row.section == "keq_validation")
+    );
 }
 
 #[test]
@@ -396,10 +393,12 @@ fn bounded_phase_control_publishes_its_acceptance_evidence_in_the_same_result() 
         .expect("bounded solve must retain its complementarity gate");
     assert_eq!(phase_control.final_phase_set.active_mask(), vec![true]);
     assert!(acceptance.complementarity.satisfied);
-    assert!(result
-        .summary_rows()
-        .iter()
-        .any(|row| row.section == "acceptance" && row.label == "complementarity_satisfied"));
+    assert!(
+        result
+            .summary_rows()
+            .iter()
+            .any(|row| row.section == "acceptance" && row.label == "complementarity_satisfied")
+    );
 }
 
 #[test]
@@ -439,10 +438,12 @@ fn bounded_mixed_phase_control_publishes_keq_not_applicable_status() {
         result.keq_validation_status(),
         Some(EquilibriumConstantCrossValidationStatus::ValidatorNotApplicable { .. })
     ));
-    assert!(result
-        .summary_rows()
-        .iter()
-        .any(|row| row.section == "keq_validation" && row.value == "not_applicable"));
+    assert!(
+        result
+            .summary_rows()
+            .iter()
+            .any(|row| row.section == "keq_validation" && row.value == "not_applicable")
+    );
 
     let liquid = PhaseId::new(Some("liquid".to_string()));
     let solid = PhaseId::new(Some("solid".to_string()));
@@ -513,10 +514,12 @@ fn facade_retains_independent_keq_status_in_the_immutable_result_summary() {
         }
         other => panic!("expected a compared keq validation status, got {other:?}"),
     }
-    assert!(result
-        .summary_rows()
-        .iter()
-        .any(|row| row.section == "keq_validation" && row.label == "status"));
+    assert!(
+        result
+            .summary_rows()
+            .iter()
+            .any(|row| row.section == "keq_validation" && row.label == "status")
+    );
 }
 
 #[test]

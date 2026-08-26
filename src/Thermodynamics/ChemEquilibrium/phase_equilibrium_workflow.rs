@@ -9,12 +9,11 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 
-use crate::Thermodynamics::phase_layout::PhaseComponentId;
-use crate::Thermodynamics::thermo_lib_api::ThermoRepository;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::{
     EquilibriumCandidatePhasePlan, EquilibriumCandidateSelectionReport,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumDiagnosticsOptions;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
     EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
 };
@@ -46,6 +45,8 @@ use crate::Thermodynamics::User_PhaseOrSolution::{
     ResolvedPhaseSystem, ResolvedPhaseSystemReport, SubstanceSystemFactory,
     SubstanceSystemFactoryError, SubstanceSystemSpec,
 };
+use crate::Thermodynamics::phase_layout::PhaseComponentId;
+use crate::Thermodynamics::thermo_lib_api::ThermoRepository;
 
 /// Current solve mode exposed by the typed public facade.
 ///
@@ -90,6 +91,7 @@ impl PhaseEquilibriumSolveMode {
 pub struct EquilibriumSolveOptions {
     settings: EquilibriumSolverSettings,
     timing_mode: EquilibriumTimingMode,
+    diagnostics: EquilibriumDiagnosticsOptions,
     execution_control: Option<EquilibriumExecutionControl>,
 }
 
@@ -111,6 +113,9 @@ pub struct EquilibriumSolveOptionsSnapshot {
     pub continuation_seed_policy: String,
     pub equilibrium_constant_validation_mode: String,
     pub timing_mode: String,
+    pub diagnostics_mode: String,
+    pub diagnostics_max_events: usize,
+    pub diagnostics_range_policy: String,
     pub solver_budget: Option<EquilibriumSolverBudgetSnapshot>,
     pub execution_control_attached: bool,
 }
@@ -135,6 +140,7 @@ impl Default for EquilibriumSolveOptions {
         Self {
             settings: EquilibriumSolverSettings::default(),
             timing_mode: EquilibriumTimingMode::default(),
+            diagnostics: EquilibriumDiagnosticsOptions::default(),
             execution_control: None,
         }
     }
@@ -155,6 +161,7 @@ impl EquilibriumSolveOptions {
         Ok(Self {
             settings,
             timing_mode: EquilibriumTimingMode::default(),
+            diagnostics: EquilibriumDiagnosticsOptions::default(),
             execution_control: None,
         })
     }
@@ -268,6 +275,20 @@ impl EquilibriumSolveOptions {
         self
     }
 
+    /// Enables bounded typed diagnostics for this solve transaction.
+    ///
+    /// Diagnostics remain observational: they never change the numerical
+    /// formulation, phase-control policy, or acceptance contract.
+    pub fn with_diagnostics(mut self, diagnostics: EquilibriumDiagnosticsOptions) -> Self {
+        self.diagnostics = diagnostics;
+        self
+    }
+
+    /// Returns the explicit diagnostics policy for this request.
+    pub fn diagnostics_options(&self) -> &EquilibriumDiagnosticsOptions {
+        &self.diagnostics
+    }
+
     /// Returns the timing policy carried by this solve request.
     pub fn timing_mode(&self) -> EquilibriumTimingMode {
         self.timing_mode
@@ -299,6 +320,9 @@ impl EquilibriumSolveOptions {
                 self.settings.keq_validation_mode
             ),
             timing_mode: format!("{:?}", self.timing_mode),
+            diagnostics_mode: format!("{:?}", self.diagnostics.mode()),
+            diagnostics_max_events: self.diagnostics.max_events(),
+            diagnostics_range_policy: format!("{:?}", self.diagnostics.range_policy()),
             solver_budget: self.settings.solver_budget.map(|budget| {
                 EquilibriumSolverBudgetSnapshot {
                     max_attempts: budget.max_attempts,
@@ -902,6 +926,7 @@ pub fn solve_resolved_pt(
     request: ResolvedPhaseEquilibriumRequest<'_>,
 ) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
     let timing_mode = request.solve_options.timing_mode();
+    let diagnostics = request.solve_options.diagnostics_options().clone();
     let started = std::time::Instant::now();
     let execution_control = request.solve_options.execution_control().cloned();
     if let Some(control) = &execution_control {
@@ -955,9 +980,10 @@ pub fn solve_resolved_pt(
             )?, timing_mode)?;
             let settings = request.solve_options.into_settings();
             bundle
-                .solve_with_bounded_phase_control(
+                .solve_with_bounded_phase_control_with_diagnostics(
                     |configured| *configured = settings,
                     |configured| *configured = phase_control_policy.into_phase_manager(),
+                    diagnostics,
                 )
                 .map(|solution| solution.with_timing_total(started.elapsed()))
         }
@@ -977,14 +1003,20 @@ pub fn solve_resolved_pt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::{
+        EquilibriumDiagnosticEvent, EquilibriumDiagnosticsMode, EquilibriumDiagnosticsOptions,
+    };
     use crate::Thermodynamics::ChemEquilibrium::prelude::{
         LegacyEquilibriumSolver, LogMolesInitialGuess, RustedSciTheSolver, SolverBackend,
         SolverPolicy,
     };
     use crate::Thermodynamics::User_PhaseOrSolution::{
+        PhaseModel, PhaseSpec, SubstanceSystemFactory, SubstanceSystemSpec,
         SubstanceSystemSpecBuilder, SubstancesContainer,
     };
+    use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
+    use crate::Thermodynamics::physical_state::PhysicalState;
+    use crate::Thermodynamics::thermo_lib_api::ThermoData;
 
     #[test]
     fn solve_options_round_trip_explicit_cascade_budget() {
@@ -1009,7 +1041,7 @@ mod tests {
     #[test]
     fn cancelled_pipeline_stops_before_repository_resolution_for_point_and_range() {
         let spec = SubstanceSystemSpecBuilder::new(SubstancesContainer::SinglePhase(vec![
-            "N2".to_string()
+            "N2".to_string(),
         ]))
         .with_library_priorities(vec!["NASA_gas".to_string()])
         .with_search_in_nist(false)
@@ -1056,6 +1088,45 @@ mod tests {
     }
 
     #[test]
+    fn typed_ideal_solution_spec_resolves_through_the_repository_boundary() {
+        // This intentionally bypasses the compatibility `MultiPhase` builder:
+        // its historical phase-nature enum cannot express a mixing model.
+        // Production callers and the GUI use `from_phases`, which must retain
+        // the explicit semantic model through ordinary local lookup.
+        let phase = PhaseSpec::ideal_solution(
+            PhaseId::new(Some("oxide_solution".to_string())),
+            vec!["AL(cr)".to_string(), "AL2O3(a)".to_string()],
+            PhysicalState::Solid,
+        )
+        .expect("the typed ideal-solution declaration must be valid");
+        let spec = SubstanceSystemSpec::from_phases(vec![phase])
+            .expect("typed phase specification must validate")
+            .with_lookup_policy(vec!["NASA_cond".to_string()], Vec::new(), None, false);
+        let resolved = SubstanceSystemFactory::resolve_phase_system_with_repository(
+            spec,
+            ThermoData::try_default_repository().expect("bundled repository must load"),
+        )
+        .expect("bundled condensed records must resolve through the typed specification");
+
+        assert_eq!(resolved.phase_specs().len(), 1);
+        assert_eq!(resolved.phase_specs()[0].model(), PhaseModel::IdealSolution);
+        assert_eq!(
+            resolved.phase_specs()[0].components(),
+            ["AL(cr)", "AL2O3(a)"]
+        );
+        let data = resolved
+            .phase_data()
+            .get(&Some("oxide_solution".to_string()))
+            .expect("resolved phase payload must retain its declared identity");
+        assert_eq!(data.substances, vec!["AL(cr)", "AL2O3(a)"]);
+        assert_eq!(
+            resolved.report().nist_fallback_enabled(),
+            false,
+            "the contract fixture must remain fully local and deterministic"
+        );
+    }
+
+    #[test]
     fn enabled_timing_is_published_on_pipeline_solution() {
         let spec = SubstanceSystemSpecBuilder::new(SubstancesContainer::SinglePhase(vec![
             "N2".to_string(),
@@ -1086,6 +1157,81 @@ mod tests {
         assert!(timing.nonlinear_solve() > std::time::Duration::ZERO);
         assert!(timing.validation() >= std::time::Duration::ZERO);
         assert!(timing.postprocessing() > std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn bounded_phase_control_publishes_opt_in_lifecycle_diagnostics() {
+        let spec = SubstanceSystemSpecBuilder::new(SubstancesContainer::SinglePhase(vec![
+            "N2".to_string(),
+            "O2".to_string(),
+        ]))
+        .with_library_priorities(vec!["NASA_gas".to_string()])
+        .with_search_in_nist(false)
+        .build()
+        .unwrap();
+        let options = EquilibriumSolveOptions::new()
+            .with_timing_mode(EquilibriumTimingMode::Enabled)
+            .with_diagnostics(EquilibriumDiagnosticsOptions::enabled(
+                EquilibriumDiagnosticsMode::PhaseLifecycle,
+            ));
+        let solution = PhaseEquilibriumPipelineRequest::new(
+            spec,
+            vec![0.79, 0.21],
+            EquilibriumConditions::new(500.0, 101_325.0, 101_325.0).unwrap(),
+        )
+        .with_solve_options(options)
+        .with_phase_control_policy(PhaseControlPolicy::default())
+        .solve()
+        .unwrap()
+        .into_solution();
+
+        let diagnostics = solution
+            .diagnostics_report()
+            .expect("enabled diagnostics must be attached to the accepted solution");
+        assert!(matches!(
+            diagnostics.events().first(),
+            Some(EquilibriumDiagnosticEvent::SolveStarted { .. })
+        ));
+        assert!(
+            diagnostics.events().iter().any(|event| matches!(
+                event,
+                EquilibriumDiagnosticEvent::StabilityEvaluated { .. }
+            ))
+        );
+        assert!(matches!(
+            diagnostics.events().last(),
+            Some(EquilibriumDiagnosticEvent::SolveAccepted { .. })
+        ));
+        let rendered = crate::Thermodynamics::ChemEquilibrium::
+            equilibrium_diagnostics_display::format_solution_diagnostics(&solution)
+            .expect("enabled diagnostics must render through the presentation adapter");
+        assert!(rendered.contains("solve started"));
+        assert!(rendered.contains("stability iteration"));
+        assert!(rendered.contains("solve accepted"));
+        assert!(rendered.contains("timing ms: total="));
+    }
+
+    #[test]
+    fn diagnostics_remain_absent_when_the_default_options_are_used() {
+        let spec = SubstanceSystemSpecBuilder::new(SubstancesContainer::SinglePhase(vec![
+            "N2".to_string(),
+            "O2".to_string(),
+        ]))
+        .with_library_priorities(vec!["NASA_gas".to_string()])
+        .with_search_in_nist(false)
+        .build()
+        .unwrap();
+        let solution = PhaseEquilibriumPipelineRequest::new(
+            spec,
+            vec![0.79, 0.21],
+            EquilibriumConditions::new(500.0, 101_325.0, 101_325.0).unwrap(),
+        )
+        .with_phase_control_policy(PhaseControlPolicy::default())
+        .solve()
+        .unwrap()
+        .into_solution();
+
+        assert!(solution.diagnostics_report().is_none());
     }
 
     #[test]
@@ -1349,18 +1495,26 @@ mod tests {
 
     #[test]
     fn typed_policy_builders_reject_invalid_limits_before_solving() {
-        assert!(EquilibriumSolveOptions::default()
-            .with_max_iterations(0)
-            .is_err());
-        assert!(EquilibriumSolveOptions::default()
-            .with_tolerance(0.0)
-            .is_err());
-        assert!(PhaseControlPolicy::default()
-            .with_phase_epsilon(0.0)
-            .is_err());
-        assert!(PhaseControlPolicy::default()
-            .with_max_phase_iterations(0)
-            .is_err());
+        assert!(
+            EquilibriumSolveOptions::default()
+                .with_max_iterations(0)
+                .is_err()
+        );
+        assert!(
+            EquilibriumSolveOptions::default()
+                .with_tolerance(0.0)
+                .is_err()
+        );
+        assert!(
+            PhaseControlPolicy::default()
+                .with_phase_epsilon(0.0)
+                .is_err()
+        );
+        assert!(
+            PhaseControlPolicy::default()
+                .with_max_phase_iterations(0)
+                .is_err()
+        );
     }
 
     #[test]

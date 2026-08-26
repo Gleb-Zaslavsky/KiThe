@@ -139,15 +139,15 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::{
     ElementId, PhaseIndex, ReactionId, SpeciesId,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-    compute_species_moles, equilibrium_scaling, evaluate_equilibrium_logmole_jacobian,
-    evaluate_equilibrium_logmole_residual, reaction_phase_stoichiometry, scale_jacobian_rows,
-    scale_residual_rows, species_to_phase_map, GibbsFn, Phase,
+    GibbsFn, Phase, compute_species_moles, equilibrium_scaling,
+    evaluate_equilibrium_logmole_jacobian, evaluate_equilibrium_logmole_residual,
+    reaction_phase_stoichiometry, scale_jacobian_rows, scale_residual_rows, species_to_phase_map,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
-    compute_reaction_basis, ReactionBasis, ReactionExtentError,
+    ReactionBasis, ReactionExtentError, compute_reaction_basis,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
-use nalgebra::{linalg::SVD, DMatrix};
+use nalgebra::{DMatrix, linalg::SVD};
 use std::collections::HashSet;
 use std::fmt;
 use std::ops::Range;
@@ -1632,8 +1632,12 @@ fn numeric_phase_projection(descriptors: &[EquilibriumPhaseDescriptor]) -> Vec<P
 
 /// Lifts the historical indexed `Phase` API into synthetic descriptors.
 ///
-/// This compatibility path has no physical-state provenance; bridge callers
-/// must use `new_with_phase_descriptors` so their semantic phase ids survive.
+/// This compatibility path has no physical-state provenance. Its
+/// `PhaseActivityModel::IdealSolution` value may describe either a pure
+/// condensed phase or a mixture, so it is conservatively labelled with the
+/// broader semantic `PhaseModel::IdealSolution`. Bridge callers must use
+/// `new_with_phase_descriptors` so precise physical state and phase-model
+/// identity survive.
 fn legacy_phase_descriptors(
     phases: &[Phase],
     component_count: usize,
@@ -1650,7 +1654,7 @@ fn legacy_phase_descriptors(
             ),
             crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel::IdealSolution => (
                 crate::Thermodynamics::physical_state::PhysicalState::Condensed,
-                crate::Thermodynamics::User_PhaseOrSolution::PhaseModel::PureCondensed,
+                crate::Thermodynamics::User_PhaseOrSolution::PhaseModel::IdealSolution,
             ),
         };
         let id = if phase_count == 1 {

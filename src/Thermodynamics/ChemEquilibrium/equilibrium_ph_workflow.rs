@@ -42,7 +42,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
-    additive_total_enthalpy, EnthalpyScale, EquilibriumConstraint, TemperatureBounds,
+    EnthalpyScale, EquilibriumConstraint, TemperatureBounds, additive_total_enthalpy,
+};
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::{
+    EquilibriumDiagnosticEvent, EquilibriumDiagnosticsMode, PhDiagnosticRoute,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
     EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
@@ -56,12 +59,12 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_formulation::PreparedPhFormulation;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_monolithic::{
-    solve_monolithic_active_set_candidate, PreparedMonolithicPhRunner,
+    PreparedMonolithicPhRunner, solve_monolithic_active_set_candidate,
 };
 #[cfg(test)]
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_nested::safeguarded_interpolation_step;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_nested::{
-    solve_bracketed_temperature as solve_nested_bracketed_temperature, NestedBracketOptions,
+    NestedBracketOptions, solve_bracketed_temperature as solve_nested_bracketed_temperature,
 };
 pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_nested::{
     PhTemperatureStepKind, PhTemperatureTrial, PhTrialInnerEvidence, PhTrialPhaseState,
@@ -75,7 +78,7 @@ pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_thermochemistry::
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::LogMolesInitialGuess;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    prepare_rst_symbolic_ph_problem, RstPreparedProblem,
+    RstPreparedProblem, prepare_rst_symbolic_ph_problem,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, MultiStartSolveReport,
@@ -87,13 +90,13 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     MultiphaseAcceptanceReport, PhaseControlledSolveReport,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-    build_phase_equilibrium_problem_with_timing, PhaseEquilibriumBuildRequest,
-    PreparedPhaseEquilibriumTemplate, SupportedPhaseModelPolicy,
+    PhaseEquilibriumBuildRequest, PreparedPhaseEquilibriumTemplate, SupportedPhaseModelPolicy,
+    build_phase_equilibrium_problem_with_timing,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::MultiphaseEquilibriumSolution;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
-    solve_resolved_pt, EquilibriumSolveOptions, PhaseControlPolicy, PhaseEquilibriumSolveMode,
-    ResolvedPhaseEquilibriumRequest,
+    EquilibriumSolveOptions, PhaseControlPolicy, PhaseEquilibriumSolveMode,
+    ResolvedPhaseEquilibriumRequest, solve_resolved_pt,
 };
 use crate::Thermodynamics::User_PhaseOrSolution::ResolvedPhaseSystem;
 
@@ -210,6 +213,45 @@ impl PhFallbackReason {
     /// Human-readable typed error rendered at the fallback boundary.
     pub fn message(&self) -> &str {
         &self.message
+    }
+}
+
+/// Immutable decision made by the outer P,H route selector.
+///
+/// This is intentionally separate from scalar temperature trials and coupled
+/// solver attempts. It answers one architectural question: which high-level
+/// formulation was selected, or abandoned, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhRouteDecision {
+    /// `Auto` rejected the monolithic formulation and accepted the independent
+    /// nested-temperature route instead.
+    AutoFallback {
+        from_route: PhDiagnosticRoute,
+        to_route: PhDiagnosticRoute,
+        reason: PhFallbackReason,
+    },
+}
+
+impl PhRouteDecision {
+    /// Route that was abandoned before the accepted result was published.
+    pub fn from_route(&self) -> PhDiagnosticRoute {
+        match self {
+            Self::AutoFallback { from_route, .. } => *from_route,
+        }
+    }
+
+    /// Route that produced the accepted result.
+    pub fn to_route(&self) -> PhDiagnosticRoute {
+        match self {
+            Self::AutoFallback { to_route, .. } => *to_route,
+        }
+    }
+
+    /// Classified numerical reason for the route decision.
+    pub fn reason(&self) -> &PhFallbackReason {
+        match self {
+            Self::AutoFallback { reason, .. } => reason,
+        }
     }
 }
 
@@ -734,6 +776,7 @@ impl PhMonolithicEvidence {
 pub struct PhTemperatureSolveReport {
     solve_path: PhSolvePath,
     fallback_reason: Option<PhFallbackReason>,
+    route_decisions: Vec<PhRouteDecision>,
     target_enthalpy: f64,
     enthalpy_scale_joules: f64,
     absolute_enthalpy_tolerance_joules: f64,
@@ -767,6 +810,15 @@ impl PhTemperatureSolveReport {
     /// formulation, if recovery occurred.
     pub fn fallback_reason(&self) -> Option<&PhFallbackReason> {
         self.fallback_reason.as_ref()
+    }
+
+    /// High-level P,H route decisions retained with the accepted result.
+    ///
+    /// An explicit `Monolithic` or `NestedTemperature` request normally has
+    /// no decisions. An `Auto` fallback retains exactly one decision rather
+    /// than manufacturing a scalar temperature trial for the failed route.
+    pub fn route_decisions(&self) -> &[PhRouteDecision] {
+        &self.route_decisions
     }
 
     /// Target total enthalpy in J.
@@ -904,6 +956,13 @@ impl FixedPressureEnthalpySolution {
     /// Accepted fixed-`P,T` inner solution.
     pub fn equilibrium(&self) -> &MultiphaseEquilibriumSolution {
         &self.solution
+    }
+
+    /// Removes inner phase-lifecycle diagnostics when a containing P,H range
+    /// elects not to publish a quiet point under `TransitionsOnly` sampling.
+    pub(crate) fn without_equilibrium_diagnostics(mut self) -> Self {
+        self.solution = self.solution.without_diagnostics();
+        self
     }
 
     /// Solved equilibrium temperature in K.
@@ -1441,6 +1500,7 @@ impl PreparedPhContinuationState {
         let report = PhTemperatureSolveReport {
             solve_path: PhSolvePath::MonolithicFixedActiveSet,
             fallback_reason: None,
+            route_decisions: Vec::new(),
             target_enthalpy: target,
             enthalpy_scale_joules: scale.joules(),
             absolute_enthalpy_tolerance_joules: options.absolute_enthalpy_tolerance_joules,
@@ -1498,6 +1558,7 @@ impl PreparedPhContinuationState {
 pub fn solve_resolved_ph(
     request: ResolvedPhaseEnthalpyRequest<'_>,
 ) -> Result<FixedPressureEnthalpySolution, ReactionExtentError> {
+    let diagnostics = request.solve_options.diagnostics_options().clone();
     match request.ph_solve_mode {
         PhSolveMode::NestedTemperature => solve_resolved_ph_nested(request),
         PhSolveMode::Monolithic => match request.solve_mode {
@@ -1512,20 +1573,57 @@ pub fn solve_resolved_ph(
                 Ok(solution) => Ok(solution),
                 Err(error) if error.is_retryable_formulation_failure() => {
                     let fallback_reason = PhFallbackReason::from_error(&error);
+                    diagnostics.emit(
+                        EquilibriumDiagnosticsMode::Summary,
+                        EquilibriumDiagnosticEvent::PhRouteFallback {
+                            from_route: PhDiagnosticRoute::Monolithic,
+                            to_route: PhDiagnosticRoute::NestedTemperature,
+                            error_kind: error.kind(),
+                            message: error.to_string(),
+                        },
+                    );
                     match solve_resolved_ph(
                         request.cloned_with_ph_solve_mode(PhSolveMode::NestedTemperature),
                     ) {
                         Ok(mut nested) => {
-                            nested.report.fallback_reason = Some(fallback_reason);
+                            nested.report.fallback_reason = Some(fallback_reason.clone());
+                            nested
+                                .report
+                                .route_decisions
+                                .push(PhRouteDecision::AutoFallback {
+                                    from_route: PhDiagnosticRoute::Monolithic,
+                                    to_route: PhDiagnosticRoute::NestedTemperature,
+                                    reason: fallback_reason,
+                                });
                             Ok(nested)
                         }
-                        Err(nested) => Err(ReactionExtentError::PhAutoFallbackFailed {
-                            monolithic: Box::new(error),
-                            nested: Box::new(nested),
-                        }),
+                        Err(nested) => {
+                            diagnostics.emit(
+                                EquilibriumDiagnosticsMode::Summary,
+                                EquilibriumDiagnosticEvent::PhRouteFailed {
+                                    route: PhDiagnosticRoute::NestedTemperature,
+                                    error_kind: nested.kind(),
+                                    message: nested.to_string(),
+                                },
+                            );
+                            Err(ReactionExtentError::PhAutoFallbackFailed {
+                                monolithic: Box::new(error),
+                                nested: Box::new(nested),
+                            })
+                        }
                     }
                 }
-                Err(error) => Err(error),
+                Err(error) => {
+                    diagnostics.emit(
+                        EquilibriumDiagnosticsMode::Summary,
+                        EquilibriumDiagnosticEvent::PhRouteFailed {
+                            route: PhDiagnosticRoute::Monolithic,
+                            error_kind: error.kind(),
+                            message: error.to_string(),
+                        },
+                    );
+                    Err(error)
+                }
             }
         }
     }
@@ -1578,9 +1676,10 @@ fn solve_resolved_ph_monolithic_phase_control(
             });
         }
     };
-    let template = bundle.into_phase_control_template(|manager| {
-        *manager = policy.into_phase_manager();
-    })?;
+    let template = bundle.into_phase_control_template_with_diagnostics(
+        |manager| *manager = policy.into_phase_manager(),
+        request.solve_options.diagnostics_options().clone(),
+    )?;
     let settings = request.solve_options.clone().into_settings();
     let temperature_options = request.temperature_options.clone();
     let acceptance_options = temperature_options.monolithic_options()?.acceptance();
@@ -1629,6 +1728,7 @@ fn solve_resolved_ph_monolithic_phase_control(
     let report = PhTemperatureSolveReport {
         solve_path: PhSolvePath::MonolithicPhaseControl,
         fallback_reason: None,
+        route_decisions: Vec::new(),
         target_enthalpy: target,
         enthalpy_scale_joules: scale.joules(),
         absolute_enthalpy_tolerance_joules: temperature_options.absolute_enthalpy_tolerance_joules,
@@ -1775,6 +1875,7 @@ fn solve_resolved_ph_monolithic(
     let report = PhTemperatureSolveReport {
         solve_path: PhSolvePath::MonolithicFixedActiveSet,
         fallback_reason: None,
+        route_decisions: Vec::new(),
         target_enthalpy: target,
         enthalpy_scale_joules: scale.joules(),
         absolute_enthalpy_tolerance_joules: options.absolute_enthalpy_tolerance_joules,
@@ -2094,6 +2195,7 @@ fn solve_resolved_ph_nested_with_template(
     let report = PhTemperatureSolveReport {
         solve_path: PhSolvePath::NestedTemperature,
         fallback_reason: None,
+        route_decisions: Vec::new(),
         target_enthalpy: target,
         enthalpy_scale_joules: scale.joules(),
         absolute_enthalpy_tolerance_joules: report_options.absolute_enthalpy_tolerance_joules,
@@ -2473,15 +2575,19 @@ fn validated_ph_parameters(
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
 
-    use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::{
+        EquilibriumDiagnosticEvent, EquilibriumDiagnosticsMode, EquilibriumDiagnosticsOptions,
+        PhDiagnosticRoute,
+    };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::MultiphaseEquilibriumLayout;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumConditions;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::EquilibriumSolveReport;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseStatus;
     use crate::Thermodynamics::User_PhaseOrSolution::PhaseSpec;
     use crate::Thermodynamics::User_substances::{DataType, SubsData};
+    use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 
     fn linear_enthalpy_model() -> EnthalpyModel<'static> {
         EnthalpyModel::from_functions(vec![Arc::new(|temperature| Ok(temperature * 10.0))]).unwrap()
@@ -2537,8 +2643,13 @@ mod tests {
         let control = EquilibriumExecutionControl::new().with_progress_sink(move |event| {
             stages_for_sink.lock().unwrap().push(event.stage());
         });
+        let (sender, receiver) = mpsc::channel();
+        let diagnostics =
+            EquilibriumDiagnosticsOptions::enabled(EquilibriumDiagnosticsMode::Summary)
+                .with_sink(move |event| sender.send(event).unwrap());
         let auto_request = request
             .cloned_with_ph_solve_mode(PhSolveMode::Auto)
+            .with_solve_options(EquilibriumSolveOptions::new().with_diagnostics(diagnostics))
             .with_temperature_options(
                 PhTemperatureSolveOptions::default().with_execution_control(control),
             )
@@ -2557,10 +2668,19 @@ mod tests {
                 ..
             })
         ));
-        assert!(!stages
-            .lock()
-            .unwrap()
-            .contains(&EquilibriumProgressStage::TemperatureTrialStarted));
+        assert!(
+            !stages
+                .lock()
+                .unwrap()
+                .contains(&EquilibriumProgressStage::TemperatureTrialStarted)
+        );
+        assert!(receiver.try_iter().any(|event| matches!(
+            event,
+            EquilibriumDiagnosticEvent::PhRouteFailed {
+                route: PhDiagnosticRoute::Monolithic,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -2969,9 +3089,11 @@ mod tests {
                 .max_inner_nonlinear_iterations,
             None
         );
-        assert!(iteration_limited
-            .with_max_inner_nonlinear_iterations(0)
-            .is_err());
+        assert!(
+            iteration_limited
+                .with_max_inner_nonlinear_iterations(0)
+                .is_err()
+        );
 
         let transition_limited = PhTemperatureSolveOptions::default()
             .with_max_phase_control_transitions(4)
@@ -2984,9 +3106,11 @@ mod tests {
                 .max_phase_control_transitions,
             None
         );
-        assert!(transition_limited
-            .with_max_phase_control_transitions(0)
-            .is_err());
+        assert!(
+            transition_limited
+                .with_max_phase_control_transitions(0)
+                .is_err()
+        );
     }
 
     #[test]
@@ -3291,11 +3415,9 @@ mod tests {
         let phase = PhaseSpec::ideal_gas(PhaseId::new(None), vec!["A".to_string()]).unwrap();
         let resolved =
             ResolvedPhaseSystem::new(vec![phase], HashMap::from([(None, data)])).unwrap();
-        let layout = MultiphaseEquilibriumLayout::new(vec![PhaseSpec::ideal_gas(
-            PhaseId::new(None),
-            vec!["A".to_string()],
-        )
-        .unwrap()])
+        let layout = MultiphaseEquilibriumLayout::new(vec![
+            PhaseSpec::ideal_gas(PhaseId::new(None), vec!["A".to_string()]).unwrap(),
+        ])
         .unwrap();
         let composition = MultiphaseInitialComposition::from_dense(&layout, vec![1.0]).unwrap();
         let constraint = EquilibriumConstraint::ph(101_325.0, 101_325.0, 0.0, 700.0).unwrap();
@@ -3329,11 +3451,9 @@ mod tests {
         let phase = PhaseSpec::ideal_gas(PhaseId::new(None), vec!["A".to_string()]).unwrap();
         let resolved =
             ResolvedPhaseSystem::new(vec![phase], HashMap::from([(None, data)])).unwrap();
-        let layout = MultiphaseEquilibriumLayout::new(vec![PhaseSpec::ideal_gas(
-            PhaseId::new(None),
-            vec!["A".to_string()],
-        )
-        .unwrap()])
+        let layout = MultiphaseEquilibriumLayout::new(vec![
+            PhaseSpec::ideal_gas(PhaseId::new(None), vec!["A".to_string()]).unwrap(),
+        ])
         .unwrap();
         let composition = MultiphaseInitialComposition::from_dense(&layout, vec![1.0]).unwrap();
         let constraint = EquilibriumConstraint::ph(101_325.0, 101_325.0, 0.0, 700.0).unwrap();
@@ -3435,12 +3555,14 @@ mod tests {
                 ..
             }
         ));
-        assert!(resolved
-            .phase_data()
-            .get(&None)
-            .unwrap()
-            .get_thermo_function("A", DataType::dH_fun)
-            .is_some());
+        assert!(
+            resolved
+                .phase_data()
+                .get(&None)
+                .unwrap()
+                .get_thermo_function("A", DataType::dH_fun)
+                .is_some()
+        );
     }
 
     fn bundle_provenance(label: &str) -> ThermochemistryProvenance {

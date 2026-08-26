@@ -15,6 +15,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 /// Current on-disk schema version for an equilibrium GUI document.
+///
+/// Phase-model variants use serde's explicit names. Adding `IdealSolution`
+/// therefore preserves the meaning of older `IdealGas` and `PureCondensed`
+/// documents and does not itself require a document-schema migration.
 pub const EQUILIBRIUM_GUI_SCHEMA_VERSION: u32 = 1;
 
 /// A complete editable equilibrium document.
@@ -541,6 +545,15 @@ pub struct EquilibriumDiagnosticsDraft {
     pub retain_backend_attempts: bool,
     pub retain_conservation_report: bool,
     pub retain_phase_transitions: bool,
+    /// Optional bounded, immutable phase-control trace for accepted results.
+    /// This remains opt-in because a detailed trace for a long range can be
+    /// much larger than the numerical result itself.
+    #[serde(default)]
+    pub phase_lifecycle_trace: GuiPhaseLifecycleTrace,
+    /// Selects which range points retain lifecycle evidence when tracing is
+    /// enabled. Point solves always keep their one trace.
+    #[serde(default)]
+    pub range_lifecycle_trace: GuiRangeLifecycleTrace,
     pub keq_validation: GuiKeqValidationMode,
 }
 
@@ -551,8 +564,42 @@ impl Default for EquilibriumDiagnosticsDraft {
             retain_backend_attempts: true,
             retain_conservation_report: true,
             retain_phase_transitions: true,
+            phase_lifecycle_trace: GuiPhaseLifecycleTrace::Off,
+            range_lifecycle_trace: GuiRangeLifecycleTrace::Endpoints,
             keq_validation: GuiKeqValidationMode::WhenApplicable,
         }
+    }
+}
+
+/// Detail level for the optional immutable phase-control decision trace.
+///
+/// The GUI maps this finite choice to the engine diagnostics policy; it never
+/// decides phase transitions or interprets stability values itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuiPhaseLifecycleTrace {
+    Off,
+    Summary,
+    PhaseLifecycle,
+    Detailed,
+}
+
+impl Default for GuiPhaseLifecycleTrace {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+/// Retention policy for lifecycle diagnostics across a temperature range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuiRangeLifecycleTrace {
+    Endpoints,
+    TransitionsOnly,
+    EveryPoint,
+}
+
+impl Default for GuiRangeLifecycleTrace {
+    fn default() -> Self {
+        Self::Endpoints
     }
 }
 
@@ -659,10 +706,15 @@ pub enum GuiPhysicalState {
     Condensed,
 }
 
-/// Activity model currently supported by the phase engine.
+/// Semantic phase model supported by the phase engine.
+///
+/// `IdealSolution` is explicit so a multicomponent condensed phase is never
+/// serialized or sent to the engine under the misleading `PureCondensed`
+/// label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GuiPhaseModel {
     IdealGas,
+    IdealSolution,
     PureCondensed,
 }
 
@@ -795,6 +847,8 @@ pub struct ValidatedDiagnostics {
     pub retain_backend_attempts: bool,
     pub retain_conservation_report: bool,
     pub retain_phase_transitions: bool,
+    pub phase_lifecycle_trace: GuiPhaseLifecycleTrace,
+    pub range_lifecycle_trace: GuiRangeLifecycleTrace,
     pub keq_validation: GuiKeqValidationMode,
 }
 
@@ -1131,6 +1185,13 @@ fn validate_phases(
                 format!("inventory.phases[{phase_index}].components"),
                 ValidationIssueKind::MissingValue,
                 "each phase needs at least one component",
+            );
+        }
+        if phase.model == GuiPhaseModel::PureCondensed && phase.components.len() != 1 {
+            report.push(
+                format!("inventory.phases[{phase_index}].components"),
+                ValidationIssueKind::Incompatible,
+                "a pure condensed phase must contain exactly one component",
             );
         }
         let mut components = Vec::with_capacity(phase.components.len());
@@ -1513,6 +1574,8 @@ impl EquilibriumDiagnosticsDraft {
             retain_backend_attempts: self.retain_backend_attempts,
             retain_conservation_report: self.retain_conservation_report,
             retain_phase_transitions: self.retain_phase_transitions,
+            phase_lifecycle_trace: self.phase_lifecycle_trace,
+            range_lifecycle_trace: self.range_lifecycle_trace,
             keq_validation: self.keq_validation,
         })
     }
@@ -1545,6 +1608,9 @@ fn phase_model_matches_state(state: GuiPhysicalState, model: GuiPhaseModel) -> b
     matches!(
         (state, model),
         (GuiPhysicalState::Gas, GuiPhaseModel::IdealGas)
+            | (GuiPhysicalState::Liquid, GuiPhaseModel::IdealSolution)
+            | (GuiPhysicalState::Solid, GuiPhaseModel::IdealSolution)
+            | (GuiPhysicalState::Condensed, GuiPhaseModel::IdealSolution)
             | (GuiPhysicalState::Liquid, GuiPhaseModel::PureCondensed)
             | (GuiPhysicalState::Solid, GuiPhaseModel::PureCondensed)
             | (GuiPhysicalState::Condensed, GuiPhaseModel::PureCondensed)
@@ -1886,6 +1952,13 @@ mod tests {
             ],
         };
         assert!(document.validate_for_run().is_ok());
+        let restored = EquilibriumGuiDocument::from_json(
+            &document
+                .to_json()
+                .expect("ideal-solution document serializes"),
+        )
+        .expect("ideal-solution document restores");
+        assert_eq!(restored, document);
 
         if let EquilibriumInventoryDraft::ExplicitPhases { phases } = &mut document.config.inventory
         {
@@ -1896,6 +1969,40 @@ mod tests {
             .validate_for_run()
             .expect_err("duplicate must fail");
         assert!(report.contains_kind(ValidationIssueKind::Duplicate));
+    }
+
+    #[test]
+    fn ideal_solution_is_explicit_and_pure_condensed_requires_one_component() {
+        let mut document = EquilibriumGuiDocument::new();
+        document.config.inventory = EquilibriumInventoryDraft::ExplicitPhases {
+            phases: vec![PhaseDraft {
+                id: "solution".into(),
+                physical_state: GuiPhysicalState::Liquid,
+                model: GuiPhaseModel::IdealSolution,
+                components: vec![
+                    ComponentDraft {
+                        substance: "A".into(),
+                        initial_moles: "0.75".into(),
+                        source_library: None,
+                    },
+                    ComponentDraft {
+                        substance: "B".into(),
+                        initial_moles: "0.25".into(),
+                        source_library: None,
+                    },
+                ],
+            }],
+        };
+        assert!(document.validate_for_run().is_ok());
+
+        if let EquilibriumInventoryDraft::ExplicitPhases { phases } = &mut document.config.inventory
+        {
+            phases[0].model = GuiPhaseModel::PureCondensed;
+        }
+        let report = document
+            .validate_for_run()
+            .expect_err("multicomponent pure condensed phase must be rejected");
+        assert!(report.contains_kind(ValidationIssueKind::Incompatible));
     }
 
     /*

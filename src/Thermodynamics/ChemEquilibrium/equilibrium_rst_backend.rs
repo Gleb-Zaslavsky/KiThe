@@ -21,9 +21,6 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     multiphase_equilibrium_residual_generator_sym_at_temperature,
 };
 use crate::Thermodynamics::User_substances_error::SubsDataError;
-use nalgebra::{DMatrix, DVector};
-use std::cell::Cell;
-use std::time::{Duration, Instant};
 use RustedSciThe::numerical::Nonlinear_systems::error::SolveError as RstSolveError;
 use RustedSciThe::numerical::Nonlinear_systems::prelude::{
     DampedNewtonMethod, LevenbergMarquardtMethod, LevenbergMarquardtMinpack,
@@ -34,6 +31,9 @@ use RustedSciThe::numerical::Nonlinear_systems::problem::{
     Bounds, JacobianProvider, NonlinearProblem,
 };
 use RustedSciThe::symbolic::symbolic_engine::Expr;
+use nalgebra::{DMatrix, DVector};
+use std::cell::Cell;
+use std::time::{Duration, Instant};
 
 /// Immutable symbolic thermochemistry snapshot prepared for the RST adapter.
 ///
@@ -836,10 +836,9 @@ pub(crate) fn prepare_baked_rst_symbolic_problem_for_test(
     let options = SymbolicProblemOptions::new()
         .with_variables(variables)
         .with_equation_parameters(vec!["T".to_string()])
-        .with_equation_parameter_values(DVector::from_vec(vec![prepared
-            .problem()
-            .conditions()
-            .temperature()]))
+        .with_equation_parameter_values(DVector::from_vec(vec![
+            prepared.problem().conditions().temperature(),
+        ]))
         .with_lambdify_backend();
     let log_mole_bounds = prepared.finite_log_mole_bounds()?;
     SymbolicNonlinearProblem::from_expressions_with_options(equations, options)

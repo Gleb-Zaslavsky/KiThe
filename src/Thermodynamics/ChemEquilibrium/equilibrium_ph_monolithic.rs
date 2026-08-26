@@ -17,7 +17,7 @@ use nalgebra::DMatrix;
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_active_set::ActiveSetProjection;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::{
-    solve_backend_cascade_with_control, EquilibriumNonlinearBackend,
+    EquilibriumNonlinearBackend, solve_backend_cascade_with_control,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
     EnthalpyScale, TemperatureBounds,
@@ -38,11 +38,11 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, SolverBackend, SolverCascadeBudget, SolverPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::{
-    validate_equilibrium_candidate, EquilibriumAcceptanceCriteria, EquilibriumCandidateReport,
-    EquilibriumCandidateResiduals,
+    EquilibriumAcceptanceCriteria, EquilibriumCandidateReport, EquilibriumCandidateResiduals,
+    validate_equilibrium_candidate,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
-    seed_activated_phase, PhaseSeedPolicy,
+    PhaseTotalSeedPolicy, seed_activated_phase_with_composition,
 };
 use crate::Thermodynamics::ChemEquilibrium::prepared_phase_control_runner::{
     PreparedActiveSetCandidate, PreparedPhaseControlRunner,
@@ -287,11 +287,30 @@ pub(crate) fn solve_monolithic_active_set_candidate(
                     let mut probe_seed = full_seed.to_vec();
                     for phase_index in 0..all_active.len() {
                         if !active[phase_index] {
-                            seed_activated_phase(
+                            let component_count = species_phase
+                                .iter()
+                                .filter(|&&phase| phase == phase_index)
+                                .count();
+                            if component_count == 0 {
+                                return Err(ReactionExtentError::InvalidProblem {
+                                    field: "monolithic_ph_probe_seed",
+                                    message: format!(
+                                        "inactive phase {phase_index} has no declared components"
+                                    ),
+                                });
+                            }
+                            // This is a numerical all-active recovery probe,
+                            // not a physical phase-appearance decision. The
+                            // later TPD lifecycle replaces this neutral seed
+                            // with its accepted minimizer composition.
+                            let neutral_composition =
+                                vec![1.0 / component_count as f64; component_count];
+                            seed_activated_phase_with_composition(
                                 &mut probe_seed,
                                 PhaseIndex::new(phase_index, all_active.len())?,
                                 species_phase,
-                                PhaseSeedPolicy::RelativeToSystemTotal {
+                                &neutral_composition,
+                                PhaseTotalSeedPolicy::RelativeToSystemTotal {
                                     fraction,
                                     minimum: 1.0e-12,
                                 },
@@ -445,11 +464,10 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    use nalgebra::DMatrix;
     use RustedSciThe::symbolic::symbolic_engine::Expr;
+    use nalgebra::DMatrix;
 
     use super::*;
-    use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
         EnthalpyScale, TemperatureBounds,
     };
@@ -462,6 +480,7 @@ mod tests {
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
         EquilibriumConditions, EquilibriumProblem, LogMolesInitialGuess, PreparedEquilibriumProblem,
     };
+    use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 
     fn one_species_formulation(with_symbolic_capability: bool) -> PreparedPhFormulation {
         let initial_moles = vec![1.0];

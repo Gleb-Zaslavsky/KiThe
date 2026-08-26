@@ -29,6 +29,8 @@ cargo test --release --lib <TEST_FILTER> --no-default-features -- --ignored --no
 - finite non-negative component amounts;
 - scale-aware elemental conservation;
 - final complementarity;
+- minimum inactive-phase TPD in `J/mol` when an evaluated phase remains absent;
+- maximum elemental-feasibility and constrained-minimizer KKT residuals;
 - transition evidence and timing;
 - byte-for-byte immutability of canonical JSON libraries.
 
@@ -40,7 +42,11 @@ cargo test --release --lib `
   --no-default-features -- --ignored --nocapture
 ```
 
-### Recorded release output
+### Historical release output before expanded P7 evidence
+
+The table below predates explicit `minimum_tpd`, feasibility, and KKT columns.
+It is retained only as an earlier timing reference; the current P7 evidence is
+recorded immediately after it. Do not compare timings across machines.
 
 ```text
 live real phase-transition matrix (water/ice, water/liquid, graphite)
@@ -54,7 +60,22 @@ live real phase-transition matrix (water/ice, water/liquid, graphite)
 │ carbon-hot       │ 1400.0 │ PhaseId(Some("gas"))                          │ 0           │ 0.000e0     │ OK              │ 0.905    │
 ╰──────────────────┴────────┴───────────────────────────────────────────────┴─────────────┴─────────────┴─────────────────┴──────────╯
 test Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_real_phase_transition_release_matrix ... ok
+```
 
+### Recorded release output AFTER expanded P7 evidence
+
+```text
+live real phase-transition matrix (water/ice, water/liquid, graphite)
+╭──────────────────┬────────┬───────────────────────────────────────────────┬─────────────┬─────────────┬────────────────────────┬─────────────────┬─────────┬─────────────────┬──────────╮
+│ Fixture          │ T K    │ Active phases                                 │ Transitions │ Max balance │ Min inactive TPD J/mol │ Max feasibility │ Max KKT │ Complementarity │ Total ms │
+├──────────────────┼────────┼───────────────────────────────────────────────┼─────────────┼─────────────┼────────────────────────┼─────────────────┼─────────┼─────────────────┼──────────┤
+│ water-gas-ice    │ 250.0  │ PhaseId(Some("gas")), PhaseId(Some("solid"))  │ 1           │ 5.819e-9    │ -                      │ 2.220e-16       │ 0.000e0 │ OK              │ 3.360    │
+│ water-gas-liquid │ 350.0  │ PhaseId(Some("gas")), PhaseId(Some("liquid")) │ 1           │ 6.632e-11   │ -                      │ 2.220e-16       │ 0.000e0 │ OK              │ 2.221    │
+│ water-gas-hot    │ 550.0  │ PhaseId(Some("gas"))                          │ 0           │ 0.000e0     │ 1.961e4                │ 2.220e-16       │ 0.000e0 │ OK              │ 0.950    │
+│ carbon-graphite  │ 700.0  │ PhaseId(Some("gas")), PhaseId(Some("solid"))  │ 1           │ 1.013e-11   │ -                      │ 1.776e-15       │ 0.000e0 │ OK              │ 2.274    │
+│ carbon-hot       │ 1400.0 │ PhaseId(Some("gas"))                          │ 0           │ 0.000e0     │ 4.842e4                │ 1.776e-15       │ 0.000e0 │ OK              │ 0.914    │
+╰──────────────────┴────────┴───────────────────────────────────────────────┴─────────────┴─────────────┴────────────────────────┴─────────────────┴─────────┴─────────────────┴──────────╯
+test Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_real_phase_transition_release_matrix ... ok
 ```
 
 Result: **passed, 5/5 cases**.
@@ -74,6 +95,7 @@ the release phase matrix above is the compact single-point transition table.
 - real gas/ice temperature continuation at `250`, `260`, and `270 K`;
 - phase transition and continuation reuse;
 - distinct projection, prepared, and RST symbolic cache entries;
+- runner-scoped active-element TPD geometry entries/builds/reuses;
 - one deterministic build-duration snapshot per prepared active-set entry;
 - conservation, finite amounts, transition timing, and JSON immutability.
 
@@ -85,14 +107,25 @@ cargo test --release --lib `
   --no-default-features -- --ignored --nocapture
 ```
 
-### Recorded output
+### Historical output before TPD-geometry cache evidence
+
+The historical line below predates the `tpd_geometry=entries/builds/reuses`
+suffix. It is retained only as an earlier timing reference; current release
+evidence follows immediately after it.
 
 ```text
 live bounded ice T-range: points=3 transitions=1 projections=2 prepared=2 rst_symbolic=2 total=14.2398ms
 ```
+### Recorded release output after TPD-geometry cache evidence
 
-The cache snapshot assertion passed in debug mode. Repeat the command above to
-record the release duration; the cache counts are the behavioral evidence and
+```text
+live bounded ice T-range: points=3 transitions=1 projections=2 prepared=2 rst_symbolic=2 tpd_geometry=1/1/3 total=4.3895ms
+test Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_bounded_phase_control_temperature_range_records_real_ice_transition ... ok
+```
+
+
+
+Result: **passed in release**. The cache counts are behavioral evidence and
 must remain stable for this fixture.
 
 ## 2. Real P,H Jacobian Boundary and Scaling Matrix

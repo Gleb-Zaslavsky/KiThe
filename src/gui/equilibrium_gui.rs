@@ -3,6 +3,7 @@
 //! This view prepares and validates requests, then owns a background worker
 //! channel so repository lookup and nonlinear solving never block egui.
 
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumDiagnosticEvent;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
     EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
 };
@@ -16,10 +17,11 @@ use crate::gui::equilibrium_gui_execution::{
 use crate::gui::equilibrium_gui_model::{
     ComponentDraft, EquilibriumGuiDocument, EquilibriumGuiDocumentError, EquilibriumInventoryDraft,
     EquilibriumLookupDraft, EquilibriumPhaseModeDraft, EquilibriumProblemDraft,
-    EquilibriumSolverDraft, GuiInterpolationSpace, GuiKeqValidationMode, GuiPhaseModel,
-    GuiPhysicalState, GuiPlotScale, GuiPlotTarget, GuiResamplingDraft, GuiResultBasis,
-    GuiSolverBackend, GuiSolverCascadeBudgetDraft, GuiTraceSeedPolicyDraft,
-    PhTemperatureBoundsDraft, TemperatureDraft, ValidatedEquilibriumGuiConfig, ValidationIssue,
+    EquilibriumSolverDraft, GuiInterpolationSpace, GuiKeqValidationMode, GuiPhaseLifecycleTrace,
+    GuiPhaseModel, GuiPhysicalState, GuiPlotScale, GuiPlotTarget, GuiRangeLifecycleTrace,
+    GuiResamplingDraft, GuiResultBasis, GuiSolverBackend, GuiSolverCascadeBudgetDraft,
+    GuiTraceSeedPolicyDraft, PhTemperatureBoundsDraft, TemperatureDraft,
+    ValidatedEquilibriumGuiConfig, ValidationIssue,
 };
 use crate::gui::equilibrium_gui_plot::{EquilibriumGuiKiThePlotWindow, EquilibriumGuiPlotData};
 use crate::gui::equilibrium_gui_request::{
@@ -37,6 +39,10 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 enum EquilibriumGuiWorkerEvent {
+    Diagnostic {
+        ticket: EquilibriumGuiRunTicket,
+        event: EquilibriumDiagnosticEvent,
+    },
     Completed {
         ticket: EquilibriumGuiRunTicket,
         outcome: EquilibriumGuiSolveOutcome,
@@ -83,6 +89,9 @@ pub struct EquilibriumApp {
     execution_control: Option<EquilibriumExecutionControl>,
     progress_receiver: Option<Receiver<EquilibriumProgressEvent>>,
     last_progress: Option<EquilibriumProgressEvent>,
+    /// Bounded transient worker observations. Accepted results replace this
+    /// generic live view with their phase-qualified immutable trace.
+    live_diagnostic_events: Vec<String>,
     status: String,
     prepared_fingerprint: Option<u64>,
     /// Display-only series selection. It is intentionally outside the
@@ -117,6 +126,7 @@ impl EquilibriumApp {
             execution_control: None,
             progress_receiver: None,
             last_progress: None,
+            live_diagnostic_events: Vec::new(),
             status: "Ready for a canonical P,T request".into(),
             prepared_fingerprint: None,
             hidden_plot_series: BTreeSet::new(),
@@ -153,6 +163,7 @@ impl EquilibriumApp {
         self.execution_control = None;
         self.progress_receiver = None;
         self.last_progress = None;
+        self.live_diagnostic_events.clear();
         self.hidden_plot_series.clear();
         self.status = "Document loaded; runtime state reset to Idle".into();
         Ok(())
@@ -621,8 +632,13 @@ impl EquilibriumApp {
         self.execution_control = Some(control);
         self.progress_receiver = Some(progress_receiver);
         self.last_progress = None;
+        self.live_diagnostic_events.clear();
         let (sender, receiver) = mpsc::channel();
         self.worker_receiver = Some(receiver);
+        let diagnostic_sender = sender.clone();
+        let request = request.with_diagnostic_sink(move |event| {
+            let _ = diagnostic_sender.send(EquilibriumGuiWorkerEvent::Diagnostic { ticket, event });
+        });
         thread::spawn(move || {
             let event = match request.solve() {
                 Ok(outcome) => EquilibriumGuiWorkerEvent::Completed { ticket, outcome },
@@ -641,28 +657,57 @@ impl EquilibriumApp {
         let Some(receiver) = self.worker_receiver.take() else {
             return;
         };
-        match receiver.try_recv() {
-            Ok(EquilibriumGuiWorkerEvent::Completed { ticket, outcome }) => {
-                self.publish_outcome(ticket, outcome);
-                self.execution_control = None;
-                self.progress_receiver = None;
+        let mut terminal = false;
+        let mut disconnected = false;
+        loop {
+            match receiver.try_recv() {
+                Ok(EquilibriumGuiWorkerEvent::Diagnostic { ticket, event })
+                    if self.execution.active_ticket() == Some(ticket) =>
+                {
+                    self.push_live_diagnostic(event);
+                }
+                Ok(EquilibriumGuiWorkerEvent::Diagnostic { .. }) => {}
+                Ok(EquilibriumGuiWorkerEvent::Completed { ticket, outcome }) => {
+                    self.publish_outcome(ticket, outcome);
+                    self.execution_control = None;
+                    self.progress_receiver = None;
+                    terminal = true;
+                    break;
+                }
+                Ok(EquilibriumGuiWorkerEvent::Failed { ticket, error }) => {
+                    self.publish_failure(ticket, error);
+                    self.execution_control = None;
+                    self.progress_receiver = None;
+                    terminal = true;
+                    break;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
             }
-            Ok(EquilibriumGuiWorkerEvent::Failed { ticket, error }) => {
-                self.publish_failure(ticket, error);
-                self.execution_control = None;
-                self.progress_receiver = None;
-            }
-            Err(mpsc::TryRecvError::Empty) => {
-                self.worker_receiver = Some(receiver);
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
+        }
+        if !terminal {
+            if disconnected {
                 if let Some(ticket) = self.execution.active_ticket() {
                     self.publish_failure(ticket, "equilibrium worker disconnected");
                 }
                 self.execution_control = None;
                 self.progress_receiver = None;
+            } else {
+                self.worker_receiver = Some(receiver);
             }
         }
+    }
+
+    fn push_live_diagnostic(&mut self, event: EquilibriumDiagnosticEvent) {
+        const MAX_LIVE_EVENTS: usize = 64;
+        if self.live_diagnostic_events.len() == MAX_LIVE_EVENTS {
+            self.live_diagnostic_events.remove(0);
+        }
+        self.live_diagnostic_events
+            .push(format_live_diagnostic_event(&event));
     }
 
     /// Drains non-terminal progress without blocking the egui thread.
@@ -785,14 +830,16 @@ impl EquilibriumApp {
             .default_size([760.0, 720.0])
             .show(ctx, |ui| {
                 ui.heading("Chemical equilibrium");
-                ui.label(if matches!(
-                    self.document.config.problem,
-                    EquilibriumProblemDraft::FixedPh { .. }
-                ) {
-                    "Production P,H workflow"
-                } else {
-                    "Production P,T workflow"
-                });
+                ui.label(
+                    if matches!(
+                        self.document.config.problem,
+                        EquilibriumProblemDraft::FixedPh { .. }
+                    ) {
+                        "Production P,H workflow"
+                    } else {
+                        "Production P,T workflow"
+                    },
+                );
                 ui.separator();
 
                 self.render_problem(ui);
@@ -852,6 +899,19 @@ impl EquilibriumApp {
                 ui.label(format!("Run state: {:?}", self.run_state()));
                 if let Some(progress) = self.last_progress {
                     ui.label(format_progress(progress));
+                }
+                if self.execution.active_ticket().is_some()
+                    && !self.live_diagnostic_events.is_empty()
+                {
+                    ui.collapsing("Live phase lifecycle", |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(180.0)
+                            .show(ui, |ui| {
+                                for event in &self.live_diagnostic_events {
+                                    ui.label(event);
+                                }
+                            });
+                    });
                 }
                 if self.execution.active_ticket().is_some() && ui.button("Cancel run").clicked() {
                     self.cancel_run();
@@ -1029,6 +1089,11 @@ impl EquilibriumApp {
                                         &mut phase.model,
                                         GuiPhaseModel::IdealGas,
                                         "Ideal gas",
+                                    );
+                                    ui.selectable_value(
+                                        &mut phase.model,
+                                        GuiPhaseModel::IdealSolution,
+                                        "Ideal solution",
                                     );
                                     ui.selectable_value(
                                         &mut phase.model,
@@ -1753,6 +1818,58 @@ impl EquilibriumApp {
                 &mut diagnostics.retain_phase_transitions,
                 "Retain phase transitions",
             );
+            egui::ComboBox::from_label("Phase lifecycle trace")
+                .selected_text(match diagnostics.phase_lifecycle_trace {
+                    GuiPhaseLifecycleTrace::Off => "Off",
+                    GuiPhaseLifecycleTrace::Summary => "Summary",
+                    GuiPhaseLifecycleTrace::PhaseLifecycle => "Lifecycle",
+                    GuiPhaseLifecycleTrace::Detailed => "Detailed",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut diagnostics.phase_lifecycle_trace,
+                        GuiPhaseLifecycleTrace::Off,
+                        "Off",
+                    );
+                    ui.selectable_value(
+                        &mut diagnostics.phase_lifecycle_trace,
+                        GuiPhaseLifecycleTrace::Summary,
+                        "Summary",
+                    );
+                    ui.selectable_value(
+                        &mut diagnostics.phase_lifecycle_trace,
+                        GuiPhaseLifecycleTrace::PhaseLifecycle,
+                        "Lifecycle",
+                    );
+                    ui.selectable_value(
+                        &mut diagnostics.phase_lifecycle_trace,
+                        GuiPhaseLifecycleTrace::Detailed,
+                        "Detailed",
+                    );
+                });
+            egui::ComboBox::from_label("Range lifecycle trace")
+                .selected_text(match diagnostics.range_lifecycle_trace {
+                    GuiRangeLifecycleTrace::Endpoints => "Endpoints",
+                    GuiRangeLifecycleTrace::TransitionsOnly => "Transitions only",
+                    GuiRangeLifecycleTrace::EveryPoint => "Every point",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut diagnostics.range_lifecycle_trace,
+                        GuiRangeLifecycleTrace::Endpoints,
+                        "Endpoints",
+                    );
+                    ui.selectable_value(
+                        &mut diagnostics.range_lifecycle_trace,
+                        GuiRangeLifecycleTrace::TransitionsOnly,
+                        "Transitions only",
+                    );
+                    ui.selectable_value(
+                        &mut diagnostics.range_lifecycle_trace,
+                        GuiRangeLifecycleTrace::EveryPoint,
+                        "Every point",
+                    );
+                });
             egui::ComboBox::from_label("Equilibrium-constant validation")
                 .selected_text(match diagnostics.keq_validation {
                     GuiKeqValidationMode::Off => "Off",
@@ -1969,7 +2086,7 @@ impl EquilibriumApp {
                                     ui.label(format!("{:.3}", diagnostics.timing_total_ms()));
                                     ui.end_row();
                                 }
-                        if let Some(reason) = diagnostics.fallback_reason() {
+                                if let Some(reason) = diagnostics.fallback_reason() {
                                     ui.label("Fallback reason");
                                     ui.label(reason);
                                     ui.end_row();
@@ -2020,7 +2137,9 @@ impl EquilibriumApp {
                                         egui::Grid::new("equilibrium-ph-monolithic-phases")
                                             .striped(true)
                                             .show(ui, |ui| {
-                                                for (label, value) in monolithic.phase_control_rows() {
+                                                for (label, value) in
+                                                    monolithic.phase_control_rows()
+                                                {
                                                     ui.label(label);
                                                     ui.label(value);
                                                     ui.end_row();
@@ -2029,9 +2148,28 @@ impl EquilibriumApp {
                                     });
                                 }
                             });
-                        } else if !diagnostics.trials().is_empty() {
+                        }
+                        if !diagnostics.route_decisions().is_empty() {
+                            ui.collapsing("P,H route decisions", |ui| {
+                                egui::Grid::new("equilibrium-ph-route-decisions")
+                                    .striped(true)
+                                    .show(ui, |ui| {
+                                        ui.label("From");
+                                        ui.label("To");
+                                        ui.label("Reason");
+                                        ui.end_row();
+                                        for decision in diagnostics.route_decisions() {
+                                            ui.label(decision.from_route());
+                                            ui.label(decision.to_route());
+                                            ui.label(decision.reason());
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
+                        }
+                        if diagnostics.monolithic().is_none() && !diagnostics.trials().is_empty() {
                             ui.collapsing("P,H temperature trials", |ui| {
-                            ui.label(format!("{} trial(s)", diagnostics.trials().len()));
+                                ui.label(format!("{} trial(s)", diagnostics.trials().len()));
                                 egui::ScrollArea::vertical()
                                     .max_height(240.0)
                                     .show(ui, |ui| {
@@ -2077,14 +2215,16 @@ impl EquilibriumApp {
                                                         trial.inner_backend_attempts().to_string(),
                                                     );
                                                     ui.label(
-                                                        trial.phase_control_transitions().to_string(),
+                                                        trial
+                                                            .phase_control_transitions()
+                                                            .to_string(),
                                                     );
                                                     ui.label(format!("{:.3}", trial.total_ms()));
                                                     ui.end_row();
                                                 }
                                             });
                                     });
-                        });
+                            });
                         }
                     });
                 }
@@ -2152,7 +2292,10 @@ impl EquilibriumApp {
                                         .striped(true)
                                         .show(ui, |ui| {
                                             ui.label("Scaled residual L2 norm");
-                                            ui.label(format!("{:.6e}", validation.residual_l2_norm));
+                                            ui.label(format!(
+                                                "{:.6e}",
+                                                validation.residual_l2_norm
+                                            ));
                                             ui.end_row();
                                             ui.label("Raw residual L2 norm");
                                             ui.label(format!(
@@ -2161,7 +2304,10 @@ impl EquilibriumApp {
                                             ));
                                             ui.end_row();
                                             ui.label("Maximum residual");
-                                            ui.label(format!("{:.6e}", validation.max_abs_residual));
+                                            ui.label(format!(
+                                                "{:.6e}",
+                                                validation.max_abs_residual
+                                            ));
                                             ui.end_row();
                                         });
                                 });
@@ -2201,17 +2347,21 @@ impl EquilibriumApp {
                                     egui::Grid::new(("equilibrium-phase-evidence", point_index))
                                         .striped(true)
                                         .show(ui, |ui| {
-                                            for row in point.source().summary_rows().into_iter().filter(
-                                                |row| {
-                                                    matches!(
-                                                        row.section,
-                                                        "backend"
-                                                            | "phase"
-                                                            | "phase_control"
-                                                            | "acceptance"
-                                                    )
-                                                },
-                                            ) {
+                                            for row in
+                                                point.source().summary_rows().into_iter().filter(
+                                                    |row| {
+                                                        matches!(
+                                                            row.section,
+                                                            "backend"
+                                                                | "phase"
+                                                                | "phase_control"
+                                                                | "acceptance"
+                                                                | "complementarity"
+                                                                | "phase_stability"
+                                                        )
+                                                    },
+                                                )
+                                            {
                                                 ui.label(row.section);
                                                 ui.label(row.label);
                                                 ui.label(row.value);
@@ -2220,6 +2370,40 @@ impl EquilibriumApp {
                                         });
                                 });
                             });
+                            if let Some(trace) = point.lifecycle_trace() {
+                                ui.collapsing("Phase lifecycle", |ui| {
+                                    ui.label(format!(
+                                        "{} trace: {} retained event(s)",
+                                        trace.mode(),
+                                        trace.events().len()
+                                    ));
+                                    egui::ScrollArea::vertical()
+                                        .max_height(260.0)
+                                        .show(ui, |ui| {
+                                            egui::Grid::new((
+                                                "equilibrium-lifecycle-trace",
+                                                point_index,
+                                            ))
+                                            .striped(true)
+                                            .show(ui, |ui| {
+                                                ui.label("Decision");
+                                                ui.label("Evidence");
+                                                ui.end_row();
+                                                for event in trace.events() {
+                                                    ui.label(event.title());
+                                                    ui.label(event.detail());
+                                                    ui.end_row();
+                                                }
+                                            });
+                                        });
+                                    if trace.dropped_events() > 0 {
+                                        ui.label(format!(
+                                            "{} additional event(s) were omitted by the retention limit",
+                                            trace.dropped_events()
+                                        ));
+                                    }
+                                });
+                            }
                             ui.collapsing("Lookup provenance", |ui| {
                                 egui::Grid::new(("equilibrium-provenance", point_index))
                                     .striped(true)
@@ -2299,6 +2483,87 @@ fn format_progress(event: EquilibriumProgressEvent) -> String {
         EquilibriumProgressStage::InnerBackendAttemptFinished => {
             "Progress: nonlinear backend attempt finished".into()
         }
+    }
+}
+
+/// Produces a short transient worker message without duplicating the
+/// phase-qualified renderer used by accepted snapshots. During a solve the
+/// worker may not yet have an accepted layout; after publication the GUI uses
+/// `EquilibriumGuiLifecycleTraceSnapshot` instead.
+fn format_live_diagnostic_event(event: &EquilibriumDiagnosticEvent) -> String {
+    match event {
+        EquilibriumDiagnosticEvent::SolveStarted { .. } => "Solve started".into(),
+        EquilibriumDiagnosticEvent::OuterIterationStarted { iteration, .. } => {
+            format!("Outer iteration {iteration} started")
+        }
+        EquilibriumDiagnosticEvent::ActiveSetCandidateAccepted { iteration, .. } => {
+            format!("Fixed active-set candidate accepted at iteration {iteration}")
+        }
+        EquilibriumDiagnosticEvent::ActiveSetCandidateRejected {
+            iteration, message, ..
+        } => format!("Candidate rejected at iteration {iteration}: {message}"),
+        EquilibriumDiagnosticEvent::StabilityEvaluated { iteration, .. } => {
+            format!("TPD stability evaluated at iteration {iteration}")
+        }
+        EquilibriumDiagnosticEvent::TransitionAccepted {
+            iteration, reason, ..
+        } => {
+            format!("Phase transition accepted at iteration {iteration}: {reason:?}")
+        }
+        EquilibriumDiagnosticEvent::TransitionHeldByHysteresis {
+            iteration,
+            phase_index,
+        } => format!("Hysteresis retained phase {phase_index} at iteration {iteration}"),
+        EquilibriumDiagnosticEvent::RecoveryProbeStarted {
+            iteration,
+            removed_phase_index,
+            ..
+        } => format!(
+            "Boundary recovery started at iteration {iteration}: remove phase {removed_phase_index}"
+        ),
+        EquilibriumDiagnosticEvent::RecoveryProbeAccepted {
+            iteration,
+            phase_index,
+            ..
+        } => format!(
+            "Boundary recovery accepted at iteration {iteration}: removed phase {phase_index}"
+        ),
+        EquilibriumDiagnosticEvent::RecoveryProbeRejected {
+            iteration,
+            removed_phase_index,
+            message,
+        } => format!(
+            "Boundary recovery rejected at iteration {iteration}: remove phase {removed_phase_index}; {message}"
+        ),
+        EquilibriumDiagnosticEvent::ContinuationRestored { retained_seed, .. } => {
+            format!("Continuation restored; seed_retained={retained_seed}")
+        }
+        EquilibriumDiagnosticEvent::PhaseControlBudgetExhausted {
+            max_outer_iterations,
+        } => format!("Phase-control budget exhausted after {max_outer_iterations} iteration(s)"),
+        EquilibriumDiagnosticEvent::PhaseControlCycleDetected { iteration, .. } => {
+            format!("Phase-control cycle detected at iteration {iteration}")
+        }
+        EquilibriumDiagnosticEvent::PhRouteFallback {
+            from_route,
+            to_route,
+            error_kind,
+            ..
+        } => format!("P,H route fallback: {from_route:?} -> {to_route:?} ({error_kind:?})"),
+        EquilibriumDiagnosticEvent::PhRouteFailed {
+            route, error_kind, ..
+        } => format!("P,H route failed: {route:?} ({error_kind:?})"),
+        EquilibriumDiagnosticEvent::SolveFailed {
+            continuation_restored,
+            message,
+        } => format!("Solve failed; continuation_restored={continuation_restored}; {message}"),
+        EquilibriumDiagnosticEvent::SolveAccepted {
+            outer_iterations,
+            transition_count,
+            ..
+        } => format!(
+            "Solve accepted: outer_iterations={outer_iterations}, transitions={transition_count}"
+        ),
     }
 }
 

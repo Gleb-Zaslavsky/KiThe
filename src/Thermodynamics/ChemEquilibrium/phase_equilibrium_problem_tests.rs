@@ -7,8 +7,6 @@
 
 use std::collections::HashMap;
 
-use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
-use crate::Thermodynamics::physical_state::PhysicalState;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     equilibrium_logmole_jacobian, equilibrium_logmole_residual,
@@ -21,7 +19,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    prepare_rst_symbolic_problem_from_prepared, RustedSciTheSolver,
+    RustedSciTheSolver, prepare_rst_symbolic_problem_from_prepared,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     SolverBackend, SolverPolicy,
@@ -29,12 +27,14 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::multiphase_equilibrium_residual_generator_sym;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-    build_phase_equilibrium_problem, build_phase_equilibrium_problem_with_timing,
     PhaseEquilibriumBuildRequest, PhaseEquilibriumMetadata, PhaseEquilibriumProblemBundle,
-    SupportedPhaseModelPolicy,
+    SupportedPhaseModelPolicy, build_phase_equilibrium_problem,
+    build_phase_equilibrium_problem_with_timing,
 };
 use crate::Thermodynamics::User_PhaseOrSolution::{PhaseModel, PhaseSpec, ResolvedPhaseSystem};
 use crate::Thermodynamics::User_substances::{LibraryPriority, SubsData};
+use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
+use crate::Thermodynamics::physical_state::PhysicalState;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 fn gas_spec() -> PhaseSpec {
@@ -75,6 +75,33 @@ fn resolved_local_nasa_gas() -> ResolvedPhaseSystem {
     data.parse_all_thermal_coeffs().unwrap();
 
     ResolvedPhaseSystem::new(vec![spec], HashMap::from([(Some("gas".to_string()), data)])).unwrap()
+}
+
+/// Real local thermochemistry fixture for the semantic ideal-solution bridge.
+///
+/// `AL(cr)` and `AL2O3(a)` are deliberately used only to prove that a
+/// multicomponent condensed phase preserves every selected local record
+/// through the production bridge. This is a boundary-contract fixture, not a
+/// claim that the pair forms a physically calibrated solution model.
+fn resolved_local_nasa_condensed_ideal_solution() -> ResolvedPhaseSystem {
+    let spec = PhaseSpec::ideal_solution(
+        PhaseId::new(Some("oxide_solution".to_string())),
+        vec!["AL(cr)".to_string(), "AL2O3(a)".to_string()],
+        PhysicalState::Solid,
+    )
+    .unwrap();
+    let mut data = phase_data(&["AL(cr)", "AL2O3(a)"]);
+    data.set_multiple_library_priorities(vec!["NASA_cond".to_string()], LibraryPriority::Priority);
+    data.set_substance_physical_state("AL(cr)".to_string(), PhysicalState::Solid);
+    data.set_substance_physical_state("AL2O3(a)".to_string(), PhysicalState::Solid);
+    data.search_substances().unwrap();
+    data.parse_all_thermal_coeffs().unwrap();
+
+    ResolvedPhaseSystem::new(
+        vec![spec],
+        HashMap::from([(Some("oxide_solution".to_string()), data)]),
+    )
+    .unwrap()
 }
 
 fn prepared_local_nasa_gas() -> PhaseEquilibriumProblemBundle {
@@ -264,7 +291,7 @@ fn metadata_retains_qualified_identity_and_maps_activity_models() {
     let resolved = resolved_system(vec![liquid_spec(), gas_spec()], true);
     let metadata = PhaseEquilibriumMetadata::from_resolved(
         &resolved,
-        SupportedPhaseModelPolicy::FixedPressureTemperatureV1,
+        SupportedPhaseModelPolicy::IdealPhaseModelsV1,
     )
     .unwrap();
 
@@ -296,6 +323,53 @@ fn metadata_retains_qualified_identity_and_maps_activity_models() {
     let liquid_h2o = PhaseComponentId::new(PhaseId::new(Some("liquid".to_string())), "H2O");
     assert_eq!(metadata.component_index(&gas_h2o), Some(0));
     assert_eq!(metadata.component_index(&liquid_h2o), Some(2));
+}
+
+#[test]
+fn production_bridge_preserves_all_multicomponent_ideal_solution_data() {
+    let resolved = resolved_local_nasa_condensed_ideal_solution();
+    let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
+    let composition = MultiphaseInitialComposition::from_dense(&layout, vec![0.75, 0.25]).unwrap();
+    let bundle = build_phase_equilibrium_problem(
+        PhaseEquilibriumBuildRequest::new(
+            &resolved,
+            EquilibriumConditions::new(900.0, 101_325.0, 101_325.0).unwrap(),
+            composition,
+            TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 },
+            SupportedPhaseModelPolicy::IdealPhaseModelsV1,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let metadata = bundle.metadata();
+
+    assert_eq!(metadata.components().len(), 2);
+    assert_eq!(metadata.phases().len(), 1);
+    assert_eq!(metadata.phases()[0].component_range(), 0..2);
+    assert_eq!(
+        metadata.phases()[0].phase_model(),
+        PhaseModel::IdealSolution
+    );
+    assert_eq!(
+        metadata.phases()[0].activity_model(),
+        PhaseActivityModel::IdealSolution
+    );
+    assert!(
+        metadata
+            .components()
+            .iter()
+            .all(|component| component.phase_model() == PhaseModel::IdealSolution)
+    );
+    assert!(
+        metadata
+            .components()
+            .iter()
+            .all(|component| component.activity_model() == PhaseActivityModel::IdealSolution)
+    );
+    assert_eq!(bundle.problem().gibbs().len(), 2);
+    assert_eq!(bundle.problem().element_composition().nrows(), 2);
+    assert!(bundle.problem().element_composition().ncols() >= 2);
+    assert_eq!(bundle.report().components().len(), 2);
 }
 
 #[test]
@@ -341,11 +415,13 @@ fn metadata_retains_the_resolution_report_in_canonical_phase_order() {
 #[test]
 fn build_request_rejects_composition_from_a_different_layout() {
     let resolved = resolved_system(vec![gas_spec(), liquid_spec()], false);
-    let foreign_layout = MultiphaseEquilibriumLayout::new(vec![PhaseSpec::ideal_gas(
-        PhaseId::new(Some("other".to_string())),
-        vec!["H2O".to_string(), "O2".to_string()],
-    )
-    .unwrap()])
+    let foreign_layout = MultiphaseEquilibriumLayout::new(vec![
+        PhaseSpec::ideal_gas(
+            PhaseId::new(Some("other".to_string())),
+            vec!["H2O".to_string(), "O2".to_string()],
+        )
+        .unwrap(),
+    ])
     .unwrap();
     let foreign_composition =
         MultiphaseInitialComposition::from_dense(&foreign_layout, vec![1.0, 1.0]).unwrap();
@@ -360,9 +436,11 @@ fn build_request_rejects_composition_from_a_different_layout() {
     )
     .unwrap_err();
 
-    assert!(error
-        .to_string()
-        .contains("composition belongs to a different multiphase layout"));
+    assert!(
+        error
+            .to_string()
+            .contains("composition belongs to a different multiphase layout")
+    );
 }
 
 #[test]
@@ -426,14 +504,18 @@ fn local_nasa_gas_builds_a_complete_problem_and_retains_provenance() {
     let report = bundle.report();
     assert_eq!(report.conditions(), conditions);
     assert_eq!(report.components().len(), 3);
-    assert!(report
-        .components()
-        .iter()
-        .all(|row| row.standard_gibbs_at_conditions().is_finite()));
-    assert!(report
-        .components()
-        .iter()
-        .all(|row| row.thermo_source().library() == "NASA_gas"));
+    assert!(
+        report
+            .components()
+            .iter()
+            .all(|row| row.standard_gibbs_at_conditions().is_finite())
+    );
+    assert!(
+        report
+            .components()
+            .iter()
+            .all(|row| row.thermo_source().library() == "NASA_gas")
+    );
 
     let totals = report
         .element_labels()
@@ -472,11 +554,13 @@ fn local_phase_data_solves_through_one_accepted_bridge_bundle() {
     assert_eq!(accepted.solution().moles().len(), 3);
     assert!(accepted.solution().moles().iter().all(|moles| *moles > 0.0));
     assert!(accepted.solution().validation().min_moles > 0.0);
-    assert!(accepted
-        .solution()
-        .validation()
-        .max_abs_element_balance_error
-        .is_finite());
+    assert!(
+        accepted
+            .solution()
+            .validation()
+            .max_abs_element_balance_error
+            .is_finite()
+    );
     assert!(accepted.solve_report().accepted_attempt().is_some());
     assert!(matches!(
         accepted.solve_report().accepted_backend,
@@ -1018,9 +1102,11 @@ fn missing_last_phase_data_returns_no_bundle_and_does_not_mutate_resolved_input(
         Err(error) => error,
     };
 
-    assert!(error
-        .to_string()
-        .contains("equilibrium data preparation failed"));
+    assert!(
+        error
+            .to_string()
+            .contains("equilibrium data preparation failed")
+    );
     let gas_after = resolved
         .phase_data()
         .get(&Some("gas".to_string()))

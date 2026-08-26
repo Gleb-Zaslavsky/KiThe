@@ -345,7 +345,10 @@ impl ThermoRepository {
         let mut indexed_counts: std::collections::BTreeMap<(String, String), usize> =
             std::collections::BTreeMap::new();
         for (library, substance) in self.VecOfSubsAdresses.iter() {
-            let pair = (ThermoData::canonical_library_name(library), substance.clone());
+            let pair = (
+                ThermoData::canonical_library_name(library),
+                substance.clone(),
+            );
             *indexed_counts.entry(pair).or_default() += 1;
         }
 

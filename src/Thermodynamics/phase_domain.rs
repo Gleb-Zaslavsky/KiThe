@@ -18,8 +18,8 @@ use std::fmt;
 use crate::Thermodynamics::User_substances::{Phases, SubsData};
 use crate::Thermodynamics::User_substances2::SearchSummaryReport;
 use crate::Thermodynamics::phase_layout::{PhaseId, SystemLayout};
-use crate::Thermodynamics::physical_state::PhysicalState;
 use crate::Thermodynamics::physical_state::NistFallbackPolicy;
+use crate::Thermodynamics::physical_state::PhysicalState;
 
 use super::SubstanceSystemFactoryError;
 
@@ -33,7 +33,15 @@ pub type PhasePhysicalState = PhysicalState;
 /// activity-coefficient contracts; they must not be implied by a phase name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhaseModel {
+    /// One shared ideal-gas assemblage with pressure-normalized activities.
     IdealGas,
+    /// Multicomponent ideal mixture in a condensed physical state.
+    ///
+    /// The numerical law uses component mole fractions. This is intentionally
+    /// distinct from `PureCondensed`: the two share the `q = 1` limit only
+    /// when an ideal solution contains exactly one component.
+    IdealSolution,
+    /// A one-component condensed phase with unit activity.
     PureCondensed,
 }
 
@@ -83,6 +91,18 @@ impl PhaseSpec {
         physical_state: PhasePhysicalState,
     ) -> Result<Self, SubstanceSystemFactoryError> {
         Self::new(id, components, physical_state, PhaseModel::PureCondensed)
+    }
+
+    /// Builds a multicomponent ideal condensed solution.
+    ///
+    /// Physical state and mixing semantics remain explicit: callers must not
+    /// infer ideal mixing from a liquid or solid label alone.
+    pub fn ideal_solution(
+        id: PhaseId,
+        components: Vec<String>,
+        physical_state: PhasePhysicalState,
+    ) -> Result<Self, SubstanceSystemFactoryError> {
+        Self::new(id, components, physical_state, PhaseModel::IdealSolution)
     }
 
     pub fn id(&self) -> &PhaseId {
@@ -143,10 +163,25 @@ impl PhaseSpec {
             }
         }
         match (self.physical_state, self.model) {
-            (PhasePhysicalState::Gas, PhaseModel::IdealGas)
-            | (PhasePhysicalState::Liquid, PhaseModel::PureCondensed)
-            | (PhasePhysicalState::Solid, PhaseModel::PureCondensed)
-            | (PhasePhysicalState::Condensed, PhaseModel::PureCondensed) => Ok(()),
+            (PhasePhysicalState::Gas, PhaseModel::IdealGas) => Ok(()),
+            (
+                PhasePhysicalState::Liquid
+                | PhasePhysicalState::Solid
+                | PhasePhysicalState::Condensed,
+                PhaseModel::IdealSolution,
+            ) => Ok(()),
+            (
+                PhasePhysicalState::Liquid
+                | PhasePhysicalState::Solid
+                | PhasePhysicalState::Condensed,
+                PhaseModel::PureCondensed,
+            ) if self.components.len() == 1 => Ok(()),
+            (_, PhaseModel::PureCondensed) => {
+                Err(SubstanceSystemFactoryError::InvalidSpecification {
+                    field: "phase components".to_string(),
+                    reason: "a pure condensed phase must contain exactly one component".to_string(),
+                })
+            }
             (state, model) => Err(SubstanceSystemFactoryError::InvalidSpecification {
                 field: "phase model".to_string(),
                 reason: format!(
@@ -226,11 +261,7 @@ impl ResolvedPhaseSystem {
         phase_specs: Vec<PhaseSpec>,
         phase_data: HashMap<Option<String>, SubsData>,
     ) -> Result<Self, SubstanceSystemFactoryError> {
-        Self::new_with_nist_fallback_policy(
-            phase_specs,
-            phase_data,
-            NistFallbackPolicy::Disabled,
-        )
+        Self::new_with_nist_fallback_policy(phase_specs, phase_data, NistFallbackPolicy::Disabled)
     }
 
     /// Creates a resolved system while retaining the lookup policy that

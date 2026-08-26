@@ -11,7 +11,7 @@ mod tests {
         EquilibriumConstantActivityModel, EquilibriumConstantProblem, MOLAR_GAS_CONSTANT,
     };
     use super::super::equilibrium_constant_validation::{
-        validate_equilibrium_constants, EquilibriumConstantValidationTolerances,
+        EquilibriumConstantValidationTolerances, validate_equilibrium_constants,
     };
     use super::super::equilibrium_log_moles::GibbsFn;
     use super::super::equilibrium_log_moles::{Phase, PhaseKind};
@@ -289,15 +289,18 @@ mod tests {
         .unwrap();
         let rows = report.summary_rows();
 
-        assert!(rows
-            .iter()
-            .any(|row| row.section == "validation" && row.label == "temperature"));
-        assert!(rows
-            .iter()
-            .any(|row| row.section == "validation" && row.label == "accepted"));
-        assert!(rows
-            .iter()
-            .any(|row| row.section == "reaction" && row.label == "0"));
+        assert!(
+            rows.iter()
+                .any(|row| row.section == "validation" && row.label == "temperature")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.section == "validation" && row.label == "accepted")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.section == "reaction" && row.label == "0")
+        );
         let rendered = format!("{report}");
         assert!(rendered.contains("[validation] temperature = 2000.000000"));
         assert!(rendered.contains("[reaction] 0 = lnQ="));
