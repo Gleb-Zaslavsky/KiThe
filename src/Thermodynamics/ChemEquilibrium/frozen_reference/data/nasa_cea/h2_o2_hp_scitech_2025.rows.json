@@ -1,0 +1,26 @@
+{
+  "dataset_id": "nasa_cea.h2_o2.hp.scitech_2025.v1",
+  "rows": [
+    {
+      "problem_type": "HP",
+      "reactant_temperature_k": 2000.0,
+      "oxidizer_fuel_mass_ratio": 15.87336,
+      "pressure_pa": 101325.0,
+      "equilibrium_temperature_k": 3181.23,
+      "total_amount_kgmol_per_kg": 0.0531,
+      "species_amounts": [
+        {"species": "H", "amount_kgmol_per_kg": 0.0035},
+        {"species": "H2", "amount_kgmol_per_kg": 0.0032},
+        {"species": "H2O", "amount_kgmol_per_kg": 0.0200},
+        {"species": "H2O2", "amount_kgmol_per_kg": 2.2e-7},
+        {"species": "HO2", "amount_kgmol_per_kg": 6.64e-6},
+        {"species": "O", "amount_kgmol_per_kg": 0.0052},
+        {"species": "O2", "amount_kgmol_per_kg": 0.0124},
+        {"species": "O3", "amount_kgmol_per_kg": 1.21e-8},
+        {"species": "OH", "amount_kgmol_per_kg": 0.00875},
+        {"species": "H2O(L)", "amount_kgmol_per_kg": 0.0},
+        {"species": "H2O(cr)", "amount_kgmol_per_kg": 0.0}
+      ]
+    }
+  ]
+}

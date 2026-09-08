@@ -1,0 +1,44 @@
+{
+  "dataset_id": "nist.webbook.ternary_vle_antoine_gauge.v1",
+  "rows": [
+    {
+      "compound": "toluene",
+      "formula": "C7H8",
+      "cas_registry_number": "108-88-3",
+      "elemental_composition": { "C": 7.0, "H": 8.0 },
+      "a": 4.07827,
+      "b_k": 1343.943,
+      "c_k": -53.773,
+      "lower_temperature_k": 308.52,
+      "upper_temperature_k": 384.66,
+      "pressure_unit": "bar",
+      "source_route": "NIST Chemistry WebBook / Williamham, Taylor, Pignocco and Rossini (1945)"
+    },
+    {
+      "compound": "ethylbenzene",
+      "formula": "C8H10",
+      "cas_registry_number": "100-41-4",
+      "elemental_composition": { "C": 8.0, "H": 10.0 },
+      "a": 4.07488,
+      "b_k": 1419.315,
+      "c_k": -60.539,
+      "lower_temperature_k": 329.74,
+      "upper_temperature_k": 410.27,
+      "pressure_unit": "bar",
+      "source_route": "NIST Chemistry WebBook reviewed Antoine entry"
+    },
+    {
+      "compound": "chlorobenzene",
+      "formula": "C6H5Cl",
+      "cas_registry_number": "108-90-7",
+      "elemental_composition": { "C": 6.0, "H": 5.0, "Cl": 1.0 },
+      "a": 4.11083,
+      "b_k": 1435.675,
+      "c_k": -55.124,
+      "lower_temperature_k": 335.19,
+      "upper_temperature_k": 404.88,
+      "pressure_unit": "bar",
+      "source_route": "NIST Chemistry WebBook / Brown (1952)"
+    }
+  ]
+}

@@ -741,6 +741,26 @@ mod tests {
         for (i, s) in scale.iter().enumerate() {
             assert!(*s > 0.0 && s.is_finite(), "Invalid scale[{}] = {}", i, s);
         }
+        assert!((scale[0] - 5.0_f64.sqrt()).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn equilibrium_reaction_scaling_is_dimensionless_and_gibbs_invariant() {
+        let stoich = DMatrix::from_row_slice(2, 1, &[-1.0, 2.0]);
+        let elements = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
+        let totals = vec![2.0];
+        let small_gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 1.0), Rc::new(|_| -2.0)];
+        let large_gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 1.0e9), Rc::new(|_| -2.0e9)];
+        let half_stoich = stoich.clone() * 0.5;
+
+        let small = equilibrium_scaling(&stoich, &elements, &small_gibbs, &totals, 300.0).unwrap();
+        let large = equilibrium_scaling(&stoich, &elements, &large_gibbs, &totals, 3000.0).unwrap();
+        let half =
+            equilibrium_scaling(&half_stoich, &elements, &large_gibbs, &totals, 3000.0).unwrap();
+
+        assert_eq!(small, large);
+        assert!((small[0] - 5.0_f64.sqrt()).abs() < 1.0e-12);
+        assert!((half[0] - 0.5 * small[0]).abs() < 1.0e-12);
     }
 
     #[test]
@@ -778,10 +798,33 @@ mod tests {
             );
         }
 
-        // element scales should be >= reaction scales floor
-        let floor = 10.0; // or whatever floor equilibrium_scaling uses
-        assert!(scale[r] >= floor);
-        assert!(scale[r + 1] >= floor);
+        assert_eq!(
+            scale[r], 2.0,
+            "positive element totals are their own extensive scale"
+        );
+        assert_eq!(
+            scale[r + 1],
+            1.0,
+            "a zero element total uses the unit fallback"
+        );
+    }
+
+    #[test]
+    fn equilibrium_element_scaling_is_extensive_for_positive_inventories() {
+        let stoich = DMatrix::from_row_slice(2, 1, &[-1.0, 1.0]);
+        let elements = DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+        let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0)];
+        let baseline = equilibrium_scaling(&stoich, &elements, &gibbs, &[2.0, 3.0], 1000.0)
+            .expect("baseline scale must build");
+        let scaled = equilibrium_scaling(&stoich, &elements, &gibbs, &[2.0e4, 3.0e4], 1000.0)
+            .expect("scaled inventory scale must build");
+
+        assert_eq!(
+            baseline[0], scaled[0],
+            "reaction normalization is intensive"
+        );
+        assert_eq!(scaled[1], 1.0e4 * baseline[1]);
+        assert_eq!(scaled[2], 1.0e4 * baseline[2]);
     }
 
     #[test]

@@ -1,0 +1,19 @@
+{
+  "dataset_id": "nist.tashkun_harvey.co2_ideal_gas_low_temperature.v1",
+  "rows": [
+    { "temperature_k": 100.0, "heat_capacity_over_r": 3.51266790, "entropy_over_r": 21.5411651, "enthalpy_over_rt": 3.4995435 },
+    { "temperature_k": 160.0, "heat_capacity_over_r": 3.68006651, "entropy_over_r": 23.2196252, "enthalpy_over_rt": 3.5288058 },
+    { "temperature_k": 170.0, "heat_capacity_over_r": 3.72794153, "entropy_over_r": 23.4441427, "enthalpy_over_rt": 3.5390905 },
+    { "temperature_k": 180.0, "heat_capacity_over_r": 3.77967575, "entropy_over_r": 23.6586740, "enthalpy_over_rt": 3.5510035 },
+    { "temperature_k": 185.0, "heat_capacity_over_r": 3.80672322, "entropy_over_r": 23.7626005, "enthalpy_over_rt": 3.5575477 },
+    { "temperature_k": 190.0, "heat_capacity_over_r": 3.83442239, "entropy_over_r": 23.8644855, "enthalpy_over_rt": 3.5644681 },
+    { "temperature_k": 194.0, "heat_capacity_over_r": 3.85698681, "entropy_over_r": 23.9446058, "enthalpy_over_rt": 3.5702662 },
+    { "temperature_k": 195.0, "heat_capacity_over_r": 3.86267810, "entropy_over_r": 23.9644507, "enthalpy_over_rt": 3.5717512 },
+    { "temperature_k": 198.0, "heat_capacity_over_r": 3.87986123, "entropy_over_r": 24.0235547, "enthalpy_over_rt": 3.5762891 },
+    { "temperature_k": 199.0, "heat_capacity_over_r": 3.88562310, "entropy_over_r": 24.0431151, "enthalpy_over_rt": 3.5778291 },
+    { "temperature_k": 200.0, "heat_capacity_over_r": 3.89140097, "entropy_over_r": 24.0626064, "enthalpy_over_rt": 3.5793825 },
+    { "temperature_k": 201.0, "heat_capacity_over_r": 3.89719416, "entropy_over_r": 24.0820294, "enthalpy_over_rt": 3.5809492 },
+    { "temperature_k": 205.0, "heat_capacity_over_r": 3.92050774, "entropy_over_r": 24.1590525, "enthalpy_over_rt": 3.5873470 },
+    { "temperature_k": 298.0, "heat_capacity_over_r": 4.46552771, "entropy_over_r": 25.7223806, "enthalpy_over_rt": 3.7773425 }
+  ]
+}

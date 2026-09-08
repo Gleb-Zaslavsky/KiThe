@@ -1,0 +1,16 @@
+{
+  "dataset_id": "janaf.boudouard.reaction_thermodynamics.v1",
+  "rows": [
+    { "temperature_k": 500.0, "co_delta_f_g_kj_mol": -155.414, "co_log10_kf": 16.236, "co2_delta_f_g_kj_mol": -394.939, "co2_log10_kf": 41.259 },
+    { "temperature_k": 600.0, "co_delta_f_g_kj_mol": -164.486, "co_log10_kf": 14.320, "co2_delta_f_g_kj_mol": -395.182, "co2_log10_kf": 34.404 },
+    { "temperature_k": 700.0, "co_delta_f_g_kj_mol": -173.518, "co_log10_kf": 12.948, "co2_delta_f_g_kj_mol": -395.398, "co2_log10_kf": 29.505 },
+    { "temperature_k": 800.0, "co_delta_f_g_kj_mol": -182.497, "co_log10_kf": 11.916, "co2_delta_f_g_kj_mol": -395.586, "co2_log10_kf": 25.829 },
+    { "temperature_k": 900.0, "co_delta_f_g_kj_mol": -191.416, "co_log10_kf": 11.109, "co2_delta_f_g_kj_mol": -395.748, "co2_log10_kf": 22.969 },
+    { "temperature_k": 1000.0, "co_delta_f_g_kj_mol": -200.275, "co_log10_kf": 10.461, "co2_delta_f_g_kj_mol": -395.886, "co2_log10_kf": 20.679 },
+    { "temperature_k": 1100.0, "co_delta_f_g_kj_mol": -209.075, "co_log10_kf": 9.928, "co2_delta_f_g_kj_mol": -396.001, "co2_log10_kf": 18.805 },
+    { "temperature_k": 1200.0, "co_delta_f_g_kj_mol": -217.819, "co_log10_kf": 9.481, "co2_delta_f_g_kj_mol": -396.098, "co2_log10_kf": 17.242 },
+    { "temperature_k": 1300.0, "co_delta_f_g_kj_mol": -226.509, "co_log10_kf": 9.101, "co2_delta_f_g_kj_mol": -396.177, "co2_log10_kf": 15.919 },
+    { "temperature_k": 1400.0, "co_delta_f_g_kj_mol": -235.149, "co_log10_kf": 8.774, "co2_delta_f_g_kj_mol": -396.240, "co2_log10_kf": 14.784 },
+    { "temperature_k": 1500.0, "co_delta_f_g_kj_mol": -243.740, "co_log10_kf": 8.488, "co2_delta_f_g_kj_mol": -396.288, "co2_log10_kf": 13.800 }
+  ]
+}

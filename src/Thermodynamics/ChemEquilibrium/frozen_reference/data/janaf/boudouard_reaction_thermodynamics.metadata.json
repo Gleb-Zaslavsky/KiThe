@@ -1,0 +1,48 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "janaf.boudouard.reaction_thermodynamics.v1",
+  "title": "NIST-JANAF thermochemical reference for the Boudouard reaction",
+  "evidence_kind": "frozen_external",
+  "data_file": "boudouard_reaction_thermodynamics.rows.json",
+  "source": {
+    "organization": "National Institute of Standards and Technology (NIST)",
+    "name": "NIST-JANAF Thermochemical Tables",
+    "version": "SRD 13 / Fourth Edition data",
+    "citation": "CO(g): C-093; CO2(g): C-095; C(ref), graphite: C-002",
+    "source_table": "C-093, C-095, C-002",
+    "stable_identifier": "NIST-JANAF-Boudouard-C093-C095-C002"
+  },
+  "transcription": "Selected primary species values were frozen from the published NIST-JANAF tables. Reaction quantities are derived locally from the frozen CO and CO2 columns; graphite C(ref) has Delta_f G = 0 and log Kf = 0 throughout this range. No JANAF implementation or network access is used during regression tests.",
+  "quantities": [
+    {
+      "column": "temperature_k",
+      "meaning": "absolute temperature",
+      "unit": "K",
+      "source_precision": "selected 100 K grid values"
+    },
+    {
+      "column": "co_delta_f_g_kj_mol",
+      "meaning": "standard Gibbs energy of formation of CO(g)",
+      "unit": "kJ/mol",
+      "source_precision": "published table precision"
+    },
+    {
+      "column": "co_log10_kf",
+      "meaning": "base-10 formation equilibrium constant of CO(g)",
+      "unit": "1",
+      "source_precision": "published table precision"
+    },
+    {
+      "column": "co2_delta_f_g_kj_mol",
+      "meaning": "standard Gibbs energy of formation of CO2(g)",
+      "unit": "kJ/mol",
+      "source_precision": "published table precision"
+    },
+    {
+      "column": "co2_log10_kf",
+      "meaning": "base-10 formation equilibrium constant of CO2(g)",
+      "unit": "1",
+      "source_precision": "published table precision"
+    }
+  ]
+}

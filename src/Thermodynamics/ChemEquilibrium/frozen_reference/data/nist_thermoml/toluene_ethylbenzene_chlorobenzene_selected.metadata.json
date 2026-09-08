@@ -1,0 +1,24 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "nist.thermoml.toluene_ethylbenzene_chlorobenzene.selected_interior.v1",
+  "title": "Toluene + ethylbenzene + chlorobenzene selected interior boiling-temperature rows",
+  "evidence_kind": "frozen_external",
+  "data_file": "toluene_ethylbenzene_chlorobenzene_selected.rows.json",
+  "source": {
+    "organization": "National Institute of Standards and Technology (NIST), Thermodynamics Research Center",
+    "name": "ThermoML record for Journal of Chemical and Engineering Data 47 (2002) 1324-1329",
+    "version": "ThermoML 2.0; selected from PureOrMixtureData #8",
+    "citation": "J. Chem. Eng. Data 47 (2002) 1324-1329, DOI 10.1021/je020186c",
+    "source_table": "PureOrMixtureData #8: boiling temperature at total pressure versus liquid mole fractions of toluene and ethylbenzene",
+    "stable_identifier": "https://trc.nist.gov/ThermoML/10.1021/je020186c.json"
+  },
+  "transcription": "Four published interior rows were selected from the official ThermoML payload. The source reports liquid x(toluene), liquid x(ethylbenzene), total pressure in kPa, and boiling temperature in K; it reports no vapor composition. x(chlorobenzene) is the exact ternary-simplex complement 1 - x(toluene) - x(ethylbenzene). Pressure is converted exactly from kPa to Pa. These values characterize the independent Antoine/Raoult route and must never tune it.",
+  "quantities": [
+    { "column": "liquid_toluene_mole_fraction", "meaning": "published liquid mole fraction of ThermoML component 1, toluene", "unit": "1", "source_precision": "published ThermoML value" },
+    { "column": "liquid_ethylbenzene_mole_fraction", "meaning": "published liquid mole fraction of ThermoML component 2, ethylbenzene", "unit": "1", "source_precision": "published ThermoML value" },
+    { "column": "liquid_chlorobenzene_mole_fraction", "meaning": "liquid mole fraction of chlorobenzene inferred only by ternary simplex complement", "unit": "1", "source_precision": "1 - published x(toluene) - published x(ethylbenzene)" },
+    { "column": "pressure_pa", "meaning": "published total pressure", "unit": "Pa", "source_precision": "converted exactly from published kPa" },
+    { "column": "source_temperature_k", "meaning": "published boiling temperature at the stated pressure and liquid composition", "unit": "K", "source_precision": "published ThermoML value" },
+    { "column": "source_temperature_uncertainty_k", "meaning": "published expanded uncertainty associated with boiling temperature", "unit": "K", "source_precision": "published ThermoML value" }
+  ]
+}

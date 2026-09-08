@@ -195,6 +195,12 @@ impl EquilibriumComparisonReport {
     }
 }
 
+/// Verifies that two accepted solutions share an identical phase layout.
+///
+/// Comparison is only meaningful when both solutions use the same
+/// phase-qualified component identities in the same order. This guard rejects
+/// a vector-by-position comparison of solutions that merely happen to have the
+/// same length, returning an invalid-problem error naming the layout field.
 fn ensure_compatible_layouts(
     left: &MultiphaseEquilibriumSolution,
     right: &MultiphaseEquilibriumSolution,
@@ -211,10 +217,21 @@ fn ensure_compatible_layouts(
     Ok(())
 }
 
+/// Computes a scale-invariant relative difference between two values.
+///
+/// Normalizes the absolute difference by the larger magnitude, floored at
+/// `1e-30` so a comparison between two zero values returns `0.0` instead of
+/// dividing by zero. Used for mole-fraction and energy deltas where absolute
+/// differences alone would be misleading across vastly different scales.
 fn relative_delta(left: f64, right: f64) -> f64 {
     (right - left).abs() / left.abs().max(right.abs()).max(1e-30)
 }
 
+/// Renders an optional semantic phase name into a stable display label.
+///
+/// Returns the stored name when present, otherwise the placeholder
+/// `"single"` for the common single-phase case. This keeps comparison rows and
+/// report labels deterministic for unnamed phases.
 fn phase_label(phase: &Option<String>) -> String {
     phase.clone().unwrap_or_else(|| "single".to_string())
 }

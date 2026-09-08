@@ -874,6 +874,74 @@ impl PreparedEquilibriumProblem {
         })
     }
 
+    /// Replaces reaction coordinates for an internal metamorphic regression.
+    ///
+    /// Production preparation always uses the deterministic SVD basis. This
+    /// test-only hook verifies that an element-conserving permutation or
+    /// non-zero rescaling of its columns cannot change physical acceptance.
+    #[cfg(test)]
+    pub(crate) fn with_reaction_matrix_for_test(
+        &self,
+        reactions: DMatrix<f64>,
+    ) -> Result<Self, ReactionExtentError> {
+        let species_count = self.problem.species().len();
+        let reaction_count = self.reaction_basis.reactions.ncols();
+        if reactions.nrows() != species_count || reactions.ncols() != reaction_count {
+            return Err(ReactionExtentError::DimensionMismatch(format!(
+                "test reaction matrix has shape {}x{}; expected {}x{}",
+                reactions.nrows(),
+                reactions.ncols(),
+                species_count,
+                reaction_count
+            )));
+        }
+        if reactions.iter().any(|value| !value.is_finite()) {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "test_reaction_basis",
+                message: "test reaction matrix must contain only finite values".to_owned(),
+            });
+        }
+        if (0..reaction_count).any(|column| reactions.column(column).norm() <= f64::EPSILON) {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "test_reaction_basis",
+                message: "test reaction matrix must not contain a zero reaction column".to_owned(),
+            });
+        }
+
+        let conservation = self.problem.element_composition().transpose() * &reactions;
+        let max_conservation_error = conservation
+            .iter()
+            .fold(0.0_f64, |maximum, value| maximum.max(value.abs()));
+        // This is a test-only hook, but legitimate row normalization can span
+        // many orders of magnitude. Check the dimensionless conservation
+        // defect relative to the tested basis rather than rejecting an
+        // otherwise conserved high-norm representation on an absolute scale.
+        let conservation_tolerance = 1.0e-10 * reactions.norm().max(1.0);
+        if max_conservation_error > conservation_tolerance {
+            return Err(ReactionExtentError::InvalidProblem {
+                field: "test_reaction_basis",
+                message: format!(
+                    "test reaction matrix violates elemental conservation: max |A^T*N|={max_conservation_error:e}, tolerance={conservation_tolerance:e}"
+                ),
+            });
+        }
+
+        let reaction_basis = ReactionBasis {
+            rank: self.reaction_basis.rank,
+            num_reactions: reaction_count,
+            reactions,
+        };
+        let phase_stoichiometry =
+            reaction_phase_stoichiometry(&reaction_basis.reactions, self.problem.phases());
+        Ok(Self {
+            problem: self.problem.clone(),
+            reaction_basis,
+            element_totals: self.element_totals.clone(),
+            species_phase: self.species_phase.clone(),
+            phase_stoichiometry,
+        })
+    }
+
     /// Evaluates the canonical residual without changing solver state.
     pub fn residual(&self, log_moles: &[f64]) -> Result<Vec<f64>, ReactionExtentError> {
         let conditions = self.problem.conditions();

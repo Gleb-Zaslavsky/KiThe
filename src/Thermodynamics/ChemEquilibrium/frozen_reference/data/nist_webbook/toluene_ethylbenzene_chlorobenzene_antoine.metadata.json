@@ -1,0 +1,29 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "nist.webbook.ternary_vle_antoine_gauge.v1",
+  "title": "NIST Chemistry WebBook pure-component Antoine records for the toluene ethylbenzene chlorobenzene test-only P,T gauge",
+  "evidence_kind": "frozen_external",
+  "data_file": "toluene_ethylbenzene_chlorobenzene_antoine.rows.json",
+  "source": {
+    "organization": "NIST",
+    "name": "NIST Chemistry WebBook, SRD 69",
+    "version": "reviewed Antoine source transcriptions for KiThe ternary VLE test",
+    "citation": "Toluene: Williamham, Taylor, Pignocco and Rossini (1945); ethylbenzene: NIST reviewed Antoine entry; chlorobenzene: Brown (1952).",
+    "source_table": "log10(P/bar) = A - B/(T + C) pure-component vapor-pressure correlations",
+    "stable_identifier": "nist.webbook.ternary_vle_antoine_gauge.v1"
+  },
+  "transcription": "Independent pure-component saturation-pressure evidence. It must never be derived from or tuned to NIST ThermoML DOI 10.1021/je020186c. This fixture is P,T-only and uses explicit p0 = 100000 Pa.",
+  "quantities": [
+    { "column": "compound", "meaning": "chemical name", "unit": "text" },
+    { "column": "formula", "meaning": "molecular formula", "unit": "text" },
+    { "column": "cas_registry_number", "meaning": "CAS Registry Number", "unit": "text" },
+    { "column": "elemental_composition", "meaning": "atoms per molecular identity", "unit": "atoms" },
+    { "column": "a", "meaning": "Antoine coefficient A", "unit": "1" },
+    { "column": "b_k", "meaning": "Antoine coefficient B", "unit": "K" },
+    { "column": "c_k", "meaning": "Antoine coefficient C", "unit": "K" },
+    { "column": "lower_temperature_k", "meaning": "inclusive correlation lower temperature", "unit": "K" },
+    { "column": "upper_temperature_k", "meaning": "inclusive correlation upper temperature", "unit": "K" },
+    { "column": "pressure_unit", "meaning": "Antoine pressure unit", "unit": "text" },
+    { "column": "source_route", "meaning": "reviewed source route", "unit": "text" }
+  ]
+}

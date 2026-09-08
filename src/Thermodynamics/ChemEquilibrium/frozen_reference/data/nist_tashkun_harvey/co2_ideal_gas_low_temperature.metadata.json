@@ -1,0 +1,22 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "nist.tashkun_harvey.co2_ideal_gas_low_temperature.v1",
+  "title": "NIST Tashkun-Harvey natural-abundance CO2 ideal-gas low-temperature anchors",
+  "evidence_kind": "frozen_external",
+  "data_file": "co2_ideal_gas_low_temperature.rows.json",
+  "source": {
+    "organization": "NIST",
+    "name": "Ideal-gas thermochemical properties for carbon dioxide and its isotopologues",
+    "version": "CO2-total.txt, natural isotopic composition",
+    "citation": "S. A. Tashkun and A. H. Harvey, Partition Functions and Ideal-Gas Thermodynamics for Carbon Dioxide, J. Phys. Chem. Ref. Data 54, 023102 (2025).",
+    "source_table": "CO2-total.txt, selected 1 K tabulation rows",
+    "stable_identifier": "doi:10.18434/mds2-2364; doi:10.1063/5.0276615; sha256:4e0e057bfd3b92dcb9344c850362a60fa524101eb4235627df33bc1b68dfffba"
+  },
+  "transcription": "Read-only subset transcribed from the official natural-abundance CO2-total.txt file. Source functions are dimensionless Cp/R, S/R, and H/(R*T); source standard-state pressure is 100000 Pa. This table is external evidence and a future low-temperature gas-segment input review, not a second CO2(g) identity or a production thermochemistry record.",
+  "quantities": [
+    { "column": "temperature_k", "meaning": "thermodynamic temperature", "unit": "K" },
+    { "column": "heat_capacity_over_r", "meaning": "standard ideal-gas isobaric heat capacity divided by source R", "unit": "1" },
+    { "column": "entropy_over_r", "meaning": "standard ideal-gas entropy divided by source R at 100000 Pa", "unit": "1" },
+    { "column": "enthalpy_over_rt", "meaning": "standard ideal-gas enthalpy divided by source R*T", "unit": "1" }
+  ]
+}

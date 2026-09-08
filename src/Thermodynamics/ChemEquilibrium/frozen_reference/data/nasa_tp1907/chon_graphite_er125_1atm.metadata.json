@@ -1,0 +1,29 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "nasa_tp1907.chon_graphite.er125.1atm.v1",
+  "title": "NASA TP-1907 Table 11.3E CHON + graphite equilibrium composition",
+  "evidence_kind": "frozen_external",
+  "data_file": "chon_graphite_er125_1atm.rows.json",
+  "source": {
+    "organization": "National Aeronautics and Space Administration",
+    "name": "NASA Technical Paper 1907",
+    "version": "July 1982",
+    "citation": "S. Gordon, Thermodynamic and Transport Combustion Properties of Hydrocarbons with Air, Part II: Compositions Corresponding to Kelvin Temperature Schedules in Part I",
+    "source_table": "Table 11.3E",
+    "stable_identifier": "NASA-TP-1907-Table-11.3E"
+  },
+  "transcription": "Rows were transcribed from NASA TP-1907 Table 11.3E for H/C=2.000, F/A=0.084535, equivalence ratio=1.250, chemical equivalence ratio=1.2496, dry air, 101.325 kPa. The printed gas and condensed values sum to one within five-decimal rounding only when C(gr) is included; the frozen contract therefore models them as system-total mole fractions. NASA considered 55 gases and 3 condensed phases before printing its selected columns. Tests never download or re-run NASA software.",
+  "quantities": [
+    {"column": "problem_type", "meaning": "fixed pressure and temperature equilibrium", "unit": "text"},
+    {"column": "temperature_k", "meaning": "published equilibrium temperature", "unit": "K", "source_precision": "nearest 10 K"},
+    {"column": "pressure_pa", "meaning": "physical system pressure", "unit": "Pa"},
+    {"column": "fuel_h_to_c_atom_ratio", "meaning": "model-fuel atom ratio", "unit": "mol-atom/mol-atom"},
+    {"column": "fuel_air_mass_ratio", "meaning": "published fuel to dry-air mass ratio", "unit": "kg/kg"},
+    {"column": "equivalence_ratio", "meaning": "published fuel-air equivalence ratio", "unit": "1"},
+    {"column": "chemical_equivalence_ratio", "meaning": "published chemical equivalence ratio", "unit": "1"},
+    {"column": "dry_air", "meaning": "no added water in reactant air", "unit": "bool"},
+    {"column": "normalization", "meaning": "published heterogeneous composition normalization", "unit": "text"},
+    {"column": "gas_species", "meaning": "selected printed gas components", "unit": "system-mole-fraction", "source_precision": "five decimal places"},
+    {"column": "condensed_species", "meaning": "printed condensed candidates", "unit": "system-mole-fraction", "source_precision": "five decimal places"}
+  ]
+}

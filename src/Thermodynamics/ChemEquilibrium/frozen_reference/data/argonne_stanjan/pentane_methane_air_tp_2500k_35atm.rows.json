@@ -1,0 +1,40 @@
+{
+  "dataset_id": "argonne.stanjan.pentane_methane_air.tp.2500k_35atm.v1",
+  "rows": [
+    {
+      "problem_type": "TP",
+      "temperature_k": 2500.0,
+      "pressure_pa": 3546375.0,
+      "original_reactants": [
+        {"species": "C5H12", "amount_mol": 1.0},
+        {"species": "CH4", "amount_mol": 1.0},
+        {"species": "O2", "amount_mol": 10.0},
+        {"species": "N2", "amount_mol": 37.6}
+      ],
+      "element_totals": [
+        {"element": "C", "amount_mol_atoms": 6.0},
+        {"element": "H", "amount_mol_atoms": 16.0},
+        {"element": "O", "amount_mol_atoms": 20.0},
+        {"element": "N", "amount_mol_atoms": 75.2}
+      ],
+      "species_mole_fractions": [
+        {"species": "C5H12", "mole_fraction": 0.0},
+        {"species": "CH4", "mole_fraction": 3.5264e-15},
+        {"species": "O2", "mole_fraction": 3.9936e-3},
+        {"species": "CO2", "mole_fraction": 1.0522e-1},
+        {"species": "H2O", "mole_fraction": 1.5006e-1},
+        {"species": "N2", "mole_fraction": 7.2183e-1},
+        {"species": "N", "mole_fraction": 4.1642e-8},
+        {"species": "O", "mole_fraction": 1.5334e-4},
+        {"species": "NO", "mole_fraction": 3.1852e-3},
+        {"species": "OH", "mole_fraction": 2.7484e-3},
+        {"species": "H", "mole_fraction": 2.0628e-4},
+        {"species": "N2O", "mole_fraction": 9.0274e-7},
+        {"species": "CO", "mole_fraction": 1.0223e-2},
+        {"species": "H2", "mole_fraction": 2.3828e-3},
+        {"species": "NO2", "mole_fraction": 2.1039e-6},
+        {"species": "HO2", "mole_fraction": 2.4386e-6}
+      ]
+    }
+  ]
+}

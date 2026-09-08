@@ -25,6 +25,31 @@
 
 ---
 
+## 0. Source Layout
+
+The Rust module names remain stable, while implementation files are grouped by
+responsibility to keep the equilibrium directory navigable:
+
+```text
+ChemEquilibrium/
+|- equilibrium_constants/  independent K_eq validation domain and solver
+|- nonlinear_solvers/      legacy/RST backends, policy, adapter, acceptance
+|- ph/                     fixed-P,H constraint, formulation, workflow, range
+|- postprocessing_and_logging/  timing, diagnostics, reports, interpolation
+|- phase_control/          active sets, TPD stability, lifecycle outer loop
+|- phase_bridge/           resolved phase data to canonical P,T problem/result
+|- test_suites/live_data/  offline real-thermochemistry production evidence
+|- cross_validation/       independent pure-phase P,T/P,H evidence and fixtures
+|- frozen_reference/       read-only external reference datasets and loaders
+`- root modules            canonical P,T/phase-control orchestration and bridges
+```
+
+Each directory has a local `README.md` defining its ownership boundary. The
+root `ChemEquilibrium.rs` uses explicit `#[path]` declarations so this
+filesystem organization does not change established Rust imports or test names.
+
+---
+
 ## 1. Введение и общая архитектура
 
 Модуль `ChemEquilibrium` — это ядро расчёта химического равновесия в библиотеке KiThe. Он решает задачу минимизации энергии Гиббса для многофазных систем при фиксированных температуре и давлении.
@@ -43,14 +68,15 @@
 │  equilibrium_workflows.rs → PhaseManager                    │
 ├─────────────────────────────────────────────────────────────┤
 │              Слой бэкенда (адаптеры)                         │
-│  equilibrium_rst_backend.rs   (RustedSciThe — символьный)   │
-│  equilibrium_legacy_backend.rs (Legacy — численный)          │
-│  equilibrium_backend_adapter.rs (единый интерфейс)           │
+│  nonlinear_solvers/equilibrium_rst_backend.rs   (RustedSciThe — символьный)   │
+│  nonlinear_solvers/equilibrium_legacy_backend.rs (Legacy — численный)          │
+│  nonlinear_solvers/equilibrium_backend_adapter.rs (единый интерфейс)           │
 ├─────────────────────────────────────────────────────────────┤
 │              Слой валидации                                  │
-│  equilibrium_validation.rs   (каноническая проверка)         │
-│  equilibrium_constant_solver.rs (независимый K_eq решатель)  │
-│  equilibrium_constant_cross_validation.rs (сравнение)        │
+│  nonlinear_solvers/equilibrium_validation.rs   (каноническая проверка)         │
+│  equilibrium_constants/equilibrium_constant_solver.rs (независимый K_eq решатель)  │
+│  equilibrium_constants/equilibrium_constant_cross_validation.rs    │
+│  (сравнение)                                                  │
 ├─────────────────────────────────────────────────────────────┤
 │              Мостовой слой (фазовая подсистема)              │
 │  phase_equilibrium_problem.rs → мост ResolvedPhaseSystem    │
@@ -176,7 +202,7 @@ EquilibriumSolverSettings {
 
 ### 2.6 Политика решателя
 
-Файл: [`equilibrium_solver_policy.rs`](equilibrium_solver_policy.rs)
+Файл: [`equilibrium_solver_policy.rs`](nonlinear_solvers/equilibrium_solver_policy.rs)
 
 ```rust
 enum SolverBackend {
@@ -198,7 +224,7 @@ SolverCascadeBudget {
 
 ### 2.7 Управление фазами
 
-Файл: [`equilibrium_workflows.rs`](equilibrium_workflows.rs)
+Файл: [`equilibrium_workflows.rs`](phase_control/equilibrium_workflows.rs)
 
 ```rust
 PhaseManager {
@@ -222,7 +248,7 @@ PhaseTransitionPlan {
 
 ### 2.8 Проекция активного набора
 
-Файл: [`equilibrium_active_set.rs`](equilibrium_active_set.rs)
+Файл: [`equilibrium_active_set.rs`](phase_control/equilibrium_active_set.rs)
 
 ```rust
 ActiveSetProjection {
@@ -240,7 +266,7 @@ ActiveSetProjection {
 
 ### 2.9 Мостовые структуры
 
-Файл: [`phase_equilibrium_problem.rs`](phase_equilibrium_problem.rs)
+Файл: [`phase_equilibrium_problem.rs`](phase_bridge/phase_equilibrium_problem.rs)
 
 ```rust
 PhaseEquilibriumMetadata {
@@ -259,7 +285,7 @@ PhaseEquilibriumBuildRequest {
 }
 ```
 
-Файл: [`phase_equilibrium_solution.rs`](phase_equilibrium_solution.rs)
+Файл: [`phase_equilibrium_solution.rs`](phase_bridge/phase_equilibrium_solution.rs)
 
 ```rust
 MultiphaseEquilibriumSolution {
@@ -293,7 +319,7 @@ MultiphaseInitialComposition {
 
 ### 2.11 Валидация
 
-Файл: [`equilibrium_validation.rs`](equilibrium_validation.rs)
+Файл: [`equilibrium_validation.rs`](nonlinear_solvers/equilibrium_validation.rs)
 
 ```rust
 EquilibriumCandidateReport {
@@ -316,7 +342,7 @@ EquilibriumAcceptanceCriteria {
 
 ### 2.12 Независимый K_eq решатель
 
-Файл: [`equilibrium_constant_solver.rs`](equilibrium_constant_solver.rs)
+Файл: [`equilibrium_constant_solver.rs`](equilibrium_constants/equilibrium_constant_solver.rs)
 
 ```rust
 EquilibriumConstantSolver {
@@ -474,7 +500,7 @@ solve_for_T_range(T_start, T_end, T_step)
     │
     └── postprocess_temperature_series()
         └── PCHIP интерполяция, передискретизация
-        [equilibrium_temperature_postprocessing.rs]
+        [postprocessing_and_logging/equilibrium_temperature_postprocessing.rs]
 ```
 
 ### 3.5 Путь независимой K_eq валидации
@@ -485,19 +511,19 @@ EquilibriumSolution (каноническое)
     ▼
 EquilibriumConstantProblem
     │  (одна реакция, закон действующих масс)
-    │  [equilibrium_constant_problem.rs]
+    │  [equilibrium_constants/equilibrium_constant_problem.rs]
     ▼
 EquilibriumConstantSolver::solve()
     │  safeguarded Newton в пространстве extent
     │  bracket search, feasibility bounds
-    │  [equilibrium_constant_solver.rs]
+    │  [equilibrium_constants/equilibrium_constant_solver.rs]
     ▼
 EquilibriumConstantSolveResult
-    │  [equilibrium_constant_solver.rs]
+    │  [equilibrium_constants/equilibrium_constant_solver.rs]
     ▼
 EquilibriumConstantCrossValidationStatus
     │  сравнение: species_mole_delta, fraction_delta, total_Gibbs_delta
-    │  [equilibrium_constant_cross_validation.rs]
+    │  [equilibrium_constants/equilibrium_constant_cross_validation.rs]
 ```
 
 ---
@@ -520,10 +546,10 @@ f_{r+el}(y) = Σ_i a_{i,el} · exp(y_i) - b_el = 0
 ### 4.2 Символьный и численный стек
 
 **Где:**
-- Символьный: [`equilibrium_rst_backend.rs`](equilibrium_rst_backend.rs), [`equilibrium_workflows.rs`](equilibrium_workflows.rs) → `multiphase_equilibrium_residual_generator_sym`
-- Численный: [`equilibrium_nonlinear.rs`](equilibrium_nonlinear.rs) → `LMSolver`, `NRSolver`, `TrustRegionSolver`
-- Legacy адаптер: [`equilibrium_legacy_backend.rs`](equilibrium_legacy_backend.rs)
-- Единый интерфейс: [`equilibrium_backend_adapter.rs`](equilibrium_backend_adapter.rs)
+- Символьный: [`equilibrium_rst_backend.rs`](nonlinear_solvers/equilibrium_rst_backend.rs), [`equilibrium_workflows.rs`](phase_control/equilibrium_workflows.rs) → `multiphase_equilibrium_residual_generator_sym`
+- Численный: [`equilibrium_nonlinear.rs`](nonlinear_solvers/equilibrium_nonlinear.rs) → `LMSolver`, `NRSolver`, `TrustRegionSolver`
+- Legacy адаптер: [`equilibrium_legacy_backend.rs`](nonlinear_solvers/equilibrium_legacy_backend.rs)
+- Единый интерфейс: [`equilibrium_backend_adapter.rs`](nonlinear_solvers/equilibrium_backend_adapter.rs)
 
 **Зачем:** Два независимых стека реализуют одну и ту же математическую формулировку. Символьный стек (RustedSciThe) строит residual и Jacobian как символьные выражения, затем лямбдифицирует их в численные функции. Численный стек (Legacy) использует hand-written Jacobian.
 
@@ -578,7 +604,7 @@ ResidualScalingContract {
 
 ### 4.5 SVD реакционный базис
 
-**Где:** [`equilibrium_nonlinear.rs`](equilibrium_nonlinear.rs) → `compute_reaction_basis()`, [`equilibrium_reaction_basis.rs`](equilibrium_reaction_basis.rs) → `ValidatedReactionBasis`
+**Где:** [`equilibrium_nonlinear.rs`](nonlinear_solvers/equilibrium_nonlinear.rs) → `compute_reaction_basis()`, [`equilibrium_reaction_basis.rs`](equilibrium_reaction_basis.rs) → `ValidatedReactionBasis`
 
 **Зачем:** Из элементного состава системы нужно выделить независимые реакции. SVD разложение матрицы элементного состава даёт базис нуль-пространства, который и является набором независимых реакций.
 
@@ -593,7 +619,7 @@ ResidualScalingContract {
 
 ### 4.6 Управление фазами: гистерезис, No flip-flop, bounded outer loop
 
-**Где:** [`equilibrium_workflows.rs`](equilibrium_workflows.rs) → `PhaseManager`, `solve_with_phase_control()`
+**Где:** [`equilibrium_workflows.rs`](phase_control/equilibrium_workflows.rs) → `PhaseManager`, `solve_with_phase_control()`
 
 **Зачем:** В многофазной системе нужно решить, какие фазы активны. Простое правило «активна, если n > 0» приводит к флип-флопу (фаза появляется-исчезает на соседних итерациях).
 
@@ -629,7 +655,7 @@ return PhaseControlDidNotConverge
 
 ### 4.7 Phase stability (проверка стабильности фаз)
 
-**Где:** [`equilibrium_workflows.rs`](equilibrium_workflows.rs) → `compute_phase_stability_reports()`
+**Где:** [`equilibrium_workflows.rs`](phase_control/equilibrium_workflows.rs) → `compute_phase_stability_reports()`
 
 **Зачем:** Определить, должна ли неактивная фаза появиться, или активная — исчезнуть.
 
@@ -643,7 +669,7 @@ return PhaseControlDidNotConverge
 
 ### 4.8 Element-validation after activation
 
-**Где:** [`equilibrium_active_set.rs`](equilibrium_active_set.rs) → `validate_element_totals_representable()`
+**Где:** [`equilibrium_active_set.rs`](phase_control/equilibrium_active_set.rs) → `validate_element_totals_representable()`
 
 **Зачем:** После активации/деактивации фазы нужно убедиться, что новый набор активных веществ может представить исходный элементный инвентарь системы.
 
@@ -658,10 +684,10 @@ return PhaseControlDidNotConverge
 ### 4.9 Независимая K_eq валидация
 
 **Где:**
-- [`equilibrium_constant_problem.rs`](equilibrium_constant_problem.rs) — постановка задачи
-- [`equilibrium_constant_solver.rs`](equilibrium_constant_solver.rs) — решатель
-- [`equilibrium_constant_validation.rs`](equilibrium_constant_validation.rs) — отчёт
-- [`equilibrium_constant_cross_validation.rs`](equilibrium_constant_cross_validation.rs) — сравнение
+- [`equilibrium_constant_problem.rs`](equilibrium_constants/equilibrium_constant_problem.rs) — постановка задачи
+- [`equilibrium_constant_solver.rs`](equilibrium_constants/equilibrium_constant_solver.rs) — решатель
+- [`equilibrium_constant_validation.rs`](equilibrium_constants/equilibrium_constant_validation.rs) — отчёт
+- [`equilibrium_constant_cross_validation.rs`](equilibrium_constants/equilibrium_constant_cross_validation.rs) — сравнение
 
 **Зачем:** Основной решатель использует residual/Jacobian формулировку. Независимый K_eq решатель использует закон действующих масс — полностью другую математическую формулировку. Если два независимых решателя дают одинаковый ответ, доверие к решению выше.
 
@@ -696,7 +722,7 @@ return PhaseControlDidNotConverge
 
 ### 4.11 Политика решателя (SolverPolicy) и каскад
 
-**Где:** [`equilibrium_solver_policy.rs`](equilibrium_solver_policy.rs), [`equilibrium_backend_adapter.rs`](equilibrium_backend_adapter.rs)
+**Где:** [`equilibrium_solver_policy.rs`](nonlinear_solvers/equilibrium_solver_policy.rs), [`equilibrium_backend_adapter.rs`](nonlinear_solvers/equilibrium_backend_adapter.rs)
 
 **Зачем:** Разные численные методы имеют разные профили сходимости. Каскад пробует методы по порядку, пока один не сойдётся.
 
@@ -716,7 +742,7 @@ return PhaseControlDidNotConverge
 
 ### 4.12 Температурные серии и постобработка
 
-**Где:** [`equilibrium_temperature_postprocessing.rs`](equilibrium_temperature_postprocessing.rs)
+**Где:** [`equilibrium_temperature_postprocessing.rs`](postprocessing_and_logging/equilibrium_temperature_postprocessing.rs)
 
 **Зачем:** После расчёта равновесия в диапазоне температур нужно построить гладкие кривые для визуализации.
 
@@ -742,22 +768,22 @@ return PhaseControlDidNotConverge
    - `EquilibriumLogMoles::solve_candidate_from_seed()` — ядро каскада
    - `evaluate_equilibrium_logmole_residual()` — математическая формулировка
 
-3. **Потом [`equilibrium_workflows.rs`](equilibrium_workflows.rs)** — управление фазами:
+3. **Потом [`equilibrium_workflows.rs`](phase_control/equilibrium_workflows.rs)** — управление фазами:
    - `PhaseManager`, `PhaseSet`, `PhaseTransitionPlan`
    - `solve_with_phase_control()` — bounded outer loop
    - `compute_phase_stability_reports()` — проверка стабильности
 
 **Если вы хотите добавить новый бэкенд:**
 
-1. [`equilibrium_backend_adapter.rs`](equilibrium_backend_adapter.rs) — trait `EquilibriumNonlinearBackend`
-2. [`equilibrium_solver_policy.rs`](equilibrium_solver_policy.rs) — добавить вариант в `SolverBackend`
-3. [`equilibrium_rst_backend.rs`](equilibrium_rst_backend.rs) или новый файл адаптера
+1. [`equilibrium_backend_adapter.rs`](nonlinear_solvers/equilibrium_backend_adapter.rs) — trait `EquilibriumNonlinearBackend`
+2. [`equilibrium_solver_policy.rs`](nonlinear_solvers/equilibrium_solver_policy.rs) — добавить вариант в `SolverBackend`
+3. [`equilibrium_rst_backend.rs`](nonlinear_solvers/equilibrium_rst_backend.rs) или новый файл адаптера
 
 **Если вы хотите понять валидацию:**
 
-1. [`equilibrium_validation.rs`](equilibrium_validation.rs) — каноническая проверка
-2. [`equilibrium_constant_solver.rs`](equilibrium_constant_solver.rs) — независимый K_eq решатель
-3. [`equilibrium_constant_cross_validation.rs`](equilibrium_constant_cross_validation.rs) — сравнение
+1. [`equilibrium_validation.rs`](nonlinear_solvers/equilibrium_validation.rs) — каноническая проверка
+2. [`equilibrium_constant_solver.rs`](equilibrium_constants/equilibrium_constant_solver.rs) — независимый K_eq решатель
+3. [`equilibrium_constant_cross_validation.rs`](equilibrium_constants/equilibrium_constant_cross_validation.rs) — сравнение
 
 ### 5.2 Карта файлов
 
@@ -767,27 +793,27 @@ return PhaseControlDidNotConverge
 | [`equilibrium_component.rs`](equilibrium_component.rs) | Фазово-квалифицированный компонент | `EquilibriumComponentDescriptor` |
 | [`equilibrium_problem.rs`](equilibrium_problem.rs) | Граница задачи | `EquilibriumProblem`, `PreparedEquilibriumProblem`, `EquilibriumSolution`, `LogMolesInitialGuess`, `ResidualScalingContract` |
 | [`equilibrium_log_moles.rs`](equilibrium_log_moles.rs) | Основной оркестратор (3881 строка) | `EquilibriumLogMoles`, `EquilibriumSolverSettings`, `Solvers`, `SolverParams`, `EquilibriumSolveCandidate`, `TemperatureWorkerSeed` |
-| [`equilibrium_nonlinear.rs`](equilibrium_nonlinear.rs) | Численные решатели | `LMSolver`, `NRSolver`, `TrustRegionSolver`, `ReactionBasis`, `ReactionExtentError` |
-| [`equilibrium_workflows.rs`](equilibrium_workflows.rs) | Управление фазами, stability, convenience (2043 строки) | `PhaseManager`, `PhaseSet`, `PhaseTransitionPlan`, `PhaseStabilityReport`, `PhaseControlledSolveReport`, `MultiphaseAcceptanceReport`, `gas_solver()` |
-| [`equilibrium_active_set.rs`](equilibrium_active_set.rs) | Проекция активного набора фаз | `ActiveSetProjection` |
+| [`equilibrium_nonlinear.rs`](nonlinear_solvers/equilibrium_nonlinear.rs) | Численные решатели | `LMSolver`, `NRSolver`, `TrustRegionSolver`, `ReactionBasis`, `ReactionExtentError` |
+| [`equilibrium_workflows.rs`](phase_control/equilibrium_workflows.rs) | Управление фазами, stability, convenience (2043 строки) | `PhaseManager`, `PhaseSet`, `PhaseTransitionPlan`, `PhaseStabilityReport`, `PhaseControlledSolveReport`, `MultiphaseAcceptanceReport`, `gas_solver()` |
+| [`equilibrium_active_set.rs`](phase_control/equilibrium_active_set.rs) | Проекция активного набора фаз | `ActiveSetProjection` |
 | [`equilibrium_activity.rs`](equilibrium_activity.rs) | Модели активности фаз | `PhaseActivityModel` |
-| [`equilibrium_validation.rs`](equilibrium_validation.rs) | Каноническая проверка кандидатов | `EquilibriumCandidateReport`, `EquilibriumAcceptanceCriteria` |
-| [`equilibrium_solver_policy.rs`](equilibrium_solver_policy.rs) | Политика выбора бэкенда | `SolverPolicy`, `SolverBackend`, `SolverCascadeBudget`, `SolverAttemptReport` |
-| [`equilibrium_backend_adapter.rs`](equilibrium_backend_adapter.rs) | Единый интерфейс бэкенда | `EquilibriumNonlinearBackend`, `BackendSolveRequest` |
-| [`equilibrium_rst_backend.rs`](equilibrium_rst_backend.rs) | Адаптер RustedSciThe (символьный) | `RstPreparedProblem`, `RustedSciTheSolver`, `RustedSciTheSolveOutcome` |
-| [`equilibrium_legacy_backend.rs`](equilibrium_legacy_backend.rs) | Адаптер Legacy (численный) | `solve_legacy_backend()` |
-| [`equilibrium_constant_problem.rs`](equilibrium_constant_problem.rs) | K_eq постановка задачи | `EquilibriumConstantProblem` |
-| [`equilibrium_constant_solver.rs`](equilibrium_constant_solver.rs) | K_eq решатель | `EquilibriumConstantSolver`, `EquilibriumConstantSolveResult` |
-| [`equilibrium_constant_validation.rs`](equilibrium_constant_validation.rs) | K_eq отчёт валидации | `EquilibriumConstantValidationReport` |
-| [`equilibrium_constant_cross_validation.rs`](equilibrium_constant_cross_validation.rs) | Сравнение канонического и K_eq | `EquilibriumConstantCrossValidationStatus` |
+| [`equilibrium_validation.rs`](nonlinear_solvers/equilibrium_validation.rs) | Каноническая проверка кандидатов | `EquilibriumCandidateReport`, `EquilibriumAcceptanceCriteria` |
+| [`equilibrium_solver_policy.rs`](nonlinear_solvers/equilibrium_solver_policy.rs) | Политика выбора бэкенда | `SolverPolicy`, `SolverBackend`, `SolverCascadeBudget`, `SolverAttemptReport` |
+| [`equilibrium_backend_adapter.rs`](nonlinear_solvers/equilibrium_backend_adapter.rs) | Единый интерфейс бэкенда | `EquilibriumNonlinearBackend`, `BackendSolveRequest` |
+| [`equilibrium_rst_backend.rs`](nonlinear_solvers/equilibrium_rst_backend.rs) | Адаптер RustedSciThe (символьный) | `RstPreparedProblem`, `RustedSciTheSolver`, `RustedSciTheSolveOutcome` |
+| [`equilibrium_legacy_backend.rs`](nonlinear_solvers/equilibrium_legacy_backend.rs) | Адаптер Legacy (численный) | `solve_legacy_backend()` |
+| [`equilibrium_constant_problem.rs`](equilibrium_constants/equilibrium_constant_problem.rs) | K_eq постановка задачи | `EquilibriumConstantProblem` |
+| [`equilibrium_constant_solver.rs`](equilibrium_constants/equilibrium_constant_solver.rs) | K_eq решатель | `EquilibriumConstantSolver`, `EquilibriumConstantSolveResult` |
+| [`equilibrium_constant_validation.rs`](equilibrium_constants/equilibrium_constant_validation.rs) | K_eq отчёт валидации | `EquilibriumConstantValidationReport` |
+| [`equilibrium_constant_cross_validation.rs`](equilibrium_constants/equilibrium_constant_cross_validation.rs) | Сравнение канонического и K_eq | `EquilibriumConstantCrossValidationStatus` |
 | [`equilibrium_reaction_basis.rs`](equilibrium_reaction_basis.rs) | Типобезопасный реакционный базис | `ValidatedReactionBasis` |
 | [`equilibrium_multiphase_domain.rs`](equilibrium_multiphase_domain.rs) | Многофазная доменная граница | `MultiphaseEquilibriumLayout`, `MultiphaseInitialComposition` |
-| [`phase_equilibrium_problem.rs`](phase_equilibrium_problem.rs) | Мост к фазовой подсистеме | `PhaseEquilibriumMetadata`, `PhaseEquilibriumBuildRequest`, `PhaseEquilibriumSolutionBundle` |
-| [`phase_equilibrium_solution.rs`](phase_equilibrium_solution.rs) | Иммутабельный многофазный результат | `MultiphaseEquilibriumSolution` |
-| [`phase_equilibrium_workflow.rs`](phase_equilibrium_workflow.rs) | Публичный фасад fixed-P,T | `solve_resolved_pt()` |
-| [`equilibrium_temperature_postprocessing.rs`](equilibrium_temperature_postprocessing.rs) | Постобработка температурных серий | `TemperaturePostprocessingPolicy`, `TemperatureSweepSeries` |
+| [`phase_equilibrium_problem.rs`](phase_bridge/phase_equilibrium_problem.rs) | Мост к фазовой подсистеме | `PhaseEquilibriumMetadata`, `PhaseEquilibriumBuildRequest`, `PhaseEquilibriumSolutionBundle` |
+| [`phase_equilibrium_solution.rs`](phase_bridge/phase_equilibrium_solution.rs) | Иммутабельный многофазный результат | `MultiphaseEquilibriumSolution` |
+| [`phase_equilibrium_workflow.rs`](phase_bridge/phase_equilibrium_workflow.rs) | Публичный фасад fixed-P,T | `solve_resolved_pt()` |
+| [`equilibrium_temperature_postprocessing.rs`](postprocessing_and_logging/equilibrium_temperature_postprocessing.rs) | Постобработка температурных серий | `TemperaturePostprocessingPolicy`, `TemperatureSweepSeries` |
 | [`easy_equilibrium.rs`](easy_equilibrium.rs) | Упрощённый интерфейс (одна реакция) | `EasyEquilibrium` |
-| [`NR_Legacy.rs`](NR_Legacy.rs) | Legacy Newton-Raphson | `NRSolver` (legacy) |
+| [`NR_Legacy.rs`](nonlinear_solvers/NR_Legacy.rs) | Legacy Newton-Raphson | `NRSolver` (legacy) |
 
 ### 5.3 Типичные сценарии использования
 
@@ -847,17 +873,17 @@ equilibrium_ids.rs
     │               │       │       ├── equilibrium_activity.rs
     │               │       │       └── (PhaseManager, PhaseSet, stability)
     │               │       │
-    │               │       ├── equilibrium_backend_adapter.rs
-    │               │       │       ├── equilibrium_rst_backend.rs
-    │               │       │       └── equilibrium_legacy_backend.rs
+    │               │       ├── nonlinear_solvers/equilibrium_backend_adapter.rs
+    │               │       │       ├── nonlinear_solvers/equilibrium_rst_backend.rs
+    │               │       │       └── nonlinear_solvers/equilibrium_legacy_backend.rs
     │               │       │
-    │               │       ├── equilibrium_solver_policy.rs
-    │               │       ├── equilibrium_validation.rs
-    │               │       ├── equilibrium_constant_solver.rs
-    │               │       │       ├── equilibrium_constant_problem.rs
-    │               │       │       └── equilibrium_constant_validation.rs
-    │               │       ├── equilibrium_constant_cross_validation.rs
-    │               │       └── equilibrium_temperature_postprocessing.rs
+    │               │       ├── nonlinear_solvers/equilibrium_solver_policy.rs
+    │               │       ├── nonlinear_solvers/equilibrium_validation.rs
+    │               │       ├── equilibrium_constants/equilibrium_constant_solver.rs
+    │               │       │       ├── equilibrium_constants/equilibrium_constant_problem.rs
+    │               │       │       └── equilibrium_constants/equilibrium_constant_validation.rs
+    │               │       ├── equilibrium_constants/equilibrium_constant_cross_validation.rs
+    │               │       └── postprocessing_and_logging/equilibrium_temperature_postprocessing.rs
     │               │
     │               └── phase_equilibrium_problem.rs
     │                       │

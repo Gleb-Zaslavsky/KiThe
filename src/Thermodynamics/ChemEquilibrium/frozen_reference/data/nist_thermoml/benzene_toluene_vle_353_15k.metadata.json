@@ -1,0 +1,21 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "nist.thermoml.benzene_toluene.vle.353_15k.v1",
+  "title": "Benzene + toluene isothermal VLE P-x subset at 353.15 K",
+  "evidence_kind": "frozen_external",
+  "data_file": "benzene_toluene_vle_353_15k.rows.json",
+  "source": {
+    "organization": "National Institute of Standards and Technology (NIST), Thermodynamics Research Center",
+    "name": "ThermoML record for Fluid Phase Equilibria 280 (2009) 42-48",
+    "version": "ThermoML 2.0; source JSON MD5 59e9f2afd895dd5d7deceeef3b56ad75",
+    "citation": "Lee et al., Isothermal vapor liquid equilibria for binary mixtures of benzene, toluene, m-xylene, and N-methylformamide at 333.15 K and 353.15 K, Fluid Phase Equilibria 280 (2009) 42-48",
+    "source_table": "PureOrMixtureData #1, vapor or sublimation pressure versus liquid mole fraction of compound 1",
+    "stable_identifier": "https://trc.nist.gov/ThermoML/10.1016/j.fluid.2009.03.012.json"
+  },
+  "transcription": "Five published rows were selected verbatim from the official ThermoML JSON: compound 1 is benzene (C6H6), compound 2 is toluene (C7H8), variable is liquid mole fraction of compound 1, and property is total vapor or sublimation pressure in kPa. The source publishes P-x, not an experimental vapor composition; pressure values are converted only from kPa to Pa.",
+  "quantities": [
+    { "column": "temperature_k", "meaning": "isothermal liquid/vapor equilibrium temperature", "unit": "K", "source_precision": "353.15 K" },
+    { "column": "liquid_benzene_mole_fraction", "meaning": "liquid mole fraction of ThermoML compound 1, benzene", "unit": "1", "source_precision": "published ThermoML value" },
+    { "column": "experimental_pressure_pa", "meaning": "published vapor or sublimation pressure", "unit": "Pa", "source_precision": "converted exactly from published kPa" }
+  ]
+}

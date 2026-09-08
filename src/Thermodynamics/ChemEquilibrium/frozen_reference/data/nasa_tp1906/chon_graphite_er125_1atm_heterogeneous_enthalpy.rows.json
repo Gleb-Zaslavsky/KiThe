@@ -1,0 +1,9 @@
+{
+  "dataset_id": "nasa_tp1906.chon_graphite.er125.1atm.heterogeneous_enthalpy.v1",
+  "rows": [
+    {"temperature_k":680.0,"pressure_pa":101325.0,"fuel_h_to_c_atom_ratio":2.0,"fuel_air_mass_ratio":0.084535,"equivalence_ratio":1.25,"chemical_equivalence_ratio":1.2496,"dry_air":true,"specific_enthalpy_j_g":-2375.5},
+    {"temperature_k":700.0,"pressure_pa":101325.0,"fuel_h_to_c_atom_ratio":2.0,"fuel_air_mass_ratio":0.084535,"equivalence_ratio":1.25,"chemical_equivalence_ratio":1.2496,"dry_air":true,"specific_enthalpy_j_g":-2334.1},
+    {"temperature_k":720.0,"pressure_pa":101325.0,"fuel_h_to_c_atom_ratio":2.0,"fuel_air_mass_ratio":0.084535,"equivalence_ratio":1.25,"chemical_equivalence_ratio":1.2496,"dry_air":true,"specific_enthalpy_j_g":-2291.4},
+    {"temperature_k":740.0,"pressure_pa":101325.0,"fuel_h_to_c_atom_ratio":2.0,"fuel_air_mass_ratio":0.084535,"equivalence_ratio":1.25,"chemical_equivalence_ratio":1.2496,"dry_air":true,"specific_enthalpy_j_g":-2247.1}
+  ]
+}

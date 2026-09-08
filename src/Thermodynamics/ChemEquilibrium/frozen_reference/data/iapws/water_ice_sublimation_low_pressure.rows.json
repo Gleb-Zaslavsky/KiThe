@@ -1,0 +1,13 @@
+{
+  "dataset_id": "iapws.water_ice_ih_sublimation.low_pressure.v1",
+  "rows": [
+    { "temperature_k": 200.0, "pressure_pa": 0.162604017609 },
+    { "temperature_k": 210.0, "pressure_pa": 0.701727345913 },
+    { "temperature_k": 220.0, "pressure_pa": 2.654072384481 },
+    { "temperature_k": 230.0, "pressure_pa": 8.947352740189 },
+    { "temperature_k": 240.0, "pressure_pa": 27.266844274857 },
+    { "temperature_k": 250.0, "pressure_pa": 76.012669510247 },
+    { "temperature_k": 260.0, "pressure_pa": 195.801674007263 },
+    { "temperature_k": 270.0, "pressure_pa": 470.061877573792 }
+  ]
+}

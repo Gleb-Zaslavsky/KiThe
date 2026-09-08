@@ -19,13 +19,16 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
 };
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingReport;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseSet;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
     PhaseEquilibriumBuildRequest, SupportedPhaseModelPolicy,
     build_phase_equilibrium_problem_with_timing,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::MultiphaseEquilibriumSolution;
-use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::EquilibriumSolveOptions;
-use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::PhaseControlPolicy;
+use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
+    EquilibriumSolveOptions, PhaseControlPolicy, ResolvedPhaseEquilibriumRequest,
+    recover_resolved_pt_after_numerical_failure,
+};
 use crate::Thermodynamics::User_PhaseOrSolution::ResolvedPhaseSystem;
 
 /// Direction of a validated temperature grid.
@@ -98,6 +101,9 @@ pub enum TemperatureRangePointPreparation {
     /// The formulation was reused and only temperature-dependent state was
     /// refreshed before solving this point.
     ReusedFormulation,
+    /// The cached physical formulation failed and the point was accepted by
+    /// the canonical extensive-normalization recovery transaction.
+    RecoveryFormulation,
 }
 
 /// Timing snapshot for one reduced active-set formulation retained by a
@@ -460,6 +466,29 @@ impl<'a> TemperatureRangeRequest<'a> {
         self
     }
 
+    fn recover_failed_point(
+        &self,
+        conditions: EquilibriumConditions,
+        seed: LogMolesInitialGuess,
+        phase_set: Option<PhaseSet>,
+        physical_error: ReactionExtentError,
+    ) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
+        let request = ResolvedPhaseEquilibriumRequest::new(
+            self.resolved,
+            conditions,
+            self.initial_composition.clone(),
+        )
+        .with_model_policy(self.model_policy)
+        .with_solve_options(self.solve_options.clone());
+        let request = match self.phase_control_policy.clone() {
+            Some(policy) => request
+                .with_phase_control_policy(policy)
+                .with_continuation_state(seed, phase_set),
+            None => request.with_multi_start_seeds(vec![seed]),
+        };
+        recover_resolved_pt_after_numerical_failure(request, physical_error)
+    }
+
     /// Solves every point transactionally with continuation from the previous
     /// accepted point. A failure returns an error and publishes no range.
     pub fn solve(self) -> Result<TemperatureRangeSolution, ReactionExtentError> {
@@ -526,30 +555,49 @@ impl<'a> TemperatureRangeRequest<'a> {
             let conditions =
                 EquilibriumConditions::new(temperature, self.pressure, self.reference_pressure)?;
             let continuation = index > 0;
-            let solution = template
-                .solve_at(
-                    conditions,
-                    seed.clone(),
-                    self.solve_options.clone().into_settings(),
-                    timing_mode,
-                )
-                .map_err(|error| range_point_error(index, temperature, error))?;
+            let point_seed = seed.clone();
+            let point_started = Instant::now();
+            let (solution, recovered) = match template.solve_at(
+                conditions,
+                point_seed.clone(),
+                self.solve_options.clone().into_settings(),
+                timing_mode,
+            ) {
+                Ok(solution) => (solution, false),
+                Err(error) => (
+                    self.recover_failed_point(conditions, point_seed, None, error)
+                        .map_err(|error| range_point_error(index, temperature, error))?,
+                    true,
+                ),
+            };
+            let solution = if recovered {
+                solution.with_timing_total(point_started.elapsed())
+            } else {
+                solution
+            };
             seed = LogMolesInitialGuess::new(solution.accepted_solution().log_moles().to_vec())?;
             points.push(TemperatureRangePoint {
                 report: TemperatureRangePointReport {
                     temperature_bits: temperature.to_bits(),
-                    preparation: if continuation {
+                    preparation: if recovered {
+                        TemperatureRangePointPreparation::RecoveryFormulation
+                    } else if continuation {
                         TemperatureRangePointPreparation::ReusedFormulation
                     } else {
                         TemperatureRangePointPreparation::InitialFormulation
                     },
                     continuation,
                     thermochemistry_refreshed: true,
-                    symbolic_parameter_reused: template.last_symbolic_parameter_reused(),
+                    symbolic_parameter_reused: !recovered
+                        && template.last_symbolic_parameter_reused(),
                     phase_control_transitions: 0,
                     phase_control_iterations: 0,
                     phase_set_reused: false,
-                    formulation_build: template.last_formulation_build(),
+                    formulation_build: if recovered {
+                        recovery_formulation_duration(solution.timing_report())
+                    } else {
+                        template.last_formulation_build()
+                    },
                     formulation_cache_timings: Vec::new(),
                     timing: *solution.timing_report(),
                 },
@@ -571,8 +619,20 @@ impl<'a> TemperatureRangeRequest<'a> {
             report: TemperatureRangeSolveReport {
                 direction: self.temperatures.direction(),
                 point_count: points.len(),
-                formulation_builds: 1,
-                formulation_reuses: points.len().saturating_sub(1),
+                formulation_builds: 1 + points
+                    .iter()
+                    .filter(|point| {
+                        point.report.preparation()
+                            == TemperatureRangePointPreparation::RecoveryFormulation
+                    })
+                    .count(),
+                formulation_reuses: points
+                    .iter()
+                    .filter(|point| {
+                        point.report.preparation()
+                            == TemperatureRangePointPreparation::ReusedFormulation
+                    })
+                    .count(),
                 symbolic_parameter_updates: points
                     .iter()
                     .filter(|point| point.report.symbolic_parameter_reused())
@@ -646,15 +706,25 @@ impl<'a> TemperatureRangeRequest<'a> {
                     .phase_control_report()
                     .map(|report| report.final_phase_set.clone())
             });
-            let mut solution = template
-                .solve_at(
-                    conditions,
-                    seed.clone(),
-                    self.solve_options.clone().into_settings(),
-                    timing_mode,
-                    phase_set,
-                )
-                .map_err(|error| range_point_error(index, temperature, error))?;
+            let point_seed = seed.clone();
+            let point_started = Instant::now();
+            let (mut solution, recovered) = match template.solve_at(
+                conditions,
+                point_seed.clone(),
+                self.solve_options.clone().into_settings(),
+                timing_mode,
+                phase_set.clone(),
+            ) {
+                Ok(solution) => (solution, false),
+                Err(error) => (
+                    self.recover_failed_point(conditions, point_seed, phase_set, error)
+                        .map_err(|error| range_point_error(index, temperature, error))?,
+                    true,
+                ),
+            };
+            if recovered {
+                solution = solution.with_timing_total(point_started.elapsed());
+            }
             let (point_transitions, phase_control_iterations) = solution
                 .phase_control_report()
                 .map(|report| (report.transitions.len(), report.iterations))
@@ -686,18 +756,24 @@ impl<'a> TemperatureRangeRequest<'a> {
             points.push(TemperatureRangePoint {
                 report: TemperatureRangePointReport {
                     temperature_bits: temperature.to_bits(),
-                    preparation: if continuation {
+                    preparation: if recovered {
+                        TemperatureRangePointPreparation::RecoveryFormulation
+                    } else if continuation {
                         TemperatureRangePointPreparation::ReusedFormulation
                     } else {
                         TemperatureRangePointPreparation::InitialFormulation
                     },
                     continuation,
                     thermochemistry_refreshed: true,
-                    symbolic_parameter_reused: template.last_rst_symbolic_reused(),
+                    symbolic_parameter_reused: !recovered && template.last_rst_symbolic_reused(),
                     phase_control_transitions: point_transitions,
                     phase_control_iterations,
                     phase_set_reused: continuation,
-                    formulation_build: template.last_formulation_build(),
+                    formulation_build: if recovered {
+                        recovery_formulation_duration(solution.timing_report())
+                    } else {
+                        template.last_formulation_build()
+                    },
                     formulation_cache_timings,
                     timing: *solution.timing_report(),
                 },
@@ -718,8 +794,20 @@ impl<'a> TemperatureRangeRequest<'a> {
             report: TemperatureRangeSolveReport {
                 direction: self.temperatures.direction(),
                 point_count: points.len(),
-                formulation_builds: 1,
-                formulation_reuses: points.len().saturating_sub(1),
+                formulation_builds: 1 + points
+                    .iter()
+                    .filter(|point| {
+                        point.report.preparation()
+                            == TemperatureRangePointPreparation::RecoveryFormulation
+                    })
+                    .count(),
+                formulation_reuses: points
+                    .iter()
+                    .filter(|point| {
+                        point.report.preparation()
+                            == TemperatureRangePointPreparation::ReusedFormulation
+                    })
+                    .count(),
                 symbolic_parameter_updates: points
                     .iter()
                     .filter(|point| point.report.symbolic_parameter_reused())
@@ -751,6 +839,15 @@ fn summarize_point_timing(points: &[TemperatureRangePoint]) -> TemperatureRangeD
         .map(|point| point.report.timing.total())
         .collect();
     summarize_durations(&durations)
+}
+
+fn recovery_formulation_duration(report: &EquilibriumTimingReport) -> Duration {
+    report.thermochemistry_preparation()
+        + report.numeric_closure_construction()
+        + report.symbolic_construction()
+        + report.equation_construction()
+        + report.numerical_problem_preparation()
+        + report.projection_build()
 }
 
 fn summarize_durations(input: &[Duration]) -> TemperatureRangeDurationSummary {

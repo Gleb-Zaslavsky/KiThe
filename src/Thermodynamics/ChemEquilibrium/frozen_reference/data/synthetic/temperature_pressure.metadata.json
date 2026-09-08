@@ -1,0 +1,33 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "synthetic.temperature_pressure.v1",
+  "title": "Synthetic temperature-pressure loader fixture",
+  "evidence_kind": "synthetic_infrastructure",
+  "data_file": "temperature_pressure.rows.json",
+  "source": {
+    "organization": "KiThe test suite",
+    "name": "synthetic infrastructure fixture",
+    "version": "1",
+    "citation": "Not physical evidence; hand-authored for parser tests",
+    "source_table": "three-row example",
+    "stable_identifier": "kithe.synthetic.temperature-pressure.v1"
+  },
+  "transcription": "Hand-authored values used only to test frozen-reference infrastructure.",
+  "quantities": [
+    {
+      "column": "temperature_k",
+      "meaning": "absolute temperature",
+      "unit": "K",
+      "source_precision": "1 K"
+    },
+    {
+      "column": "pressure_pa",
+      "meaning": "absolute pressure",
+      "unit": "Pa",
+      "uncertainty": {
+        "value": 0.0,
+        "unit": "Pa"
+      }
+    }
+  ]
+}

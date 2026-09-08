@@ -1,0 +1,31 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "nist.webbook.ethylbenzene.pure_component_seed.v1",
+  "title": "NIST Chemistry WebBook ethylbenzene pure-component numerical seeds",
+  "evidence_kind": "frozen_external",
+  "data_file": "ethylbenzene_pure_component_seed.rows.json",
+  "source": {
+    "organization": "NIST",
+    "name": "NIST Chemistry WebBook, SRD 69",
+    "version": "reviewed values accessed for KiThe ternary VLE source review",
+    "citation": "Ethylbenzene, CAS 100-41-4; condensed/gas thermochemistry and phase-change/Antoine tables.",
+    "source_table": "reviewed pure-component thermochemistry, vaporization enthalpy, Majer-Svoboda, and Antoine entries",
+    "stable_identifier": "nist.webbook.C100414"
+  },
+  "transcription": "Approved numerical seeds for source review only. They are independent from NIST ThermoML DOI 10.1021/je020186c and do not constitute a fitted gas/liquid G0 closure.",
+  "quantities": [
+    { "column": "compound", "meaning": "chemical name", "unit": "text" },
+    { "column": "formula", "meaning": "molecular formula", "unit": "text" },
+    { "column": "cas_registry_number", "meaning": "CAS Registry Number", "unit": "text" },
+    { "column": "reference_temperature_k", "meaning": "standard-state anchor temperature", "unit": "K" },
+    { "column": "liquid_formation_enthalpy_j_mol", "meaning": "liquid standard formation enthalpy", "unit": "J/mol", "uncertainty": { "value": 840.0, "unit": "J/mol" } },
+    { "column": "liquid_formation_enthalpy_uncertainty_j_mol", "meaning": "liquid formation enthalpy uncertainty", "unit": "J/mol" },
+    { "column": "liquid_standard_entropy_j_mol_k", "meaning": "liquid standard entropy", "unit": "J/mol/K" },
+    { "column": "gas_formation_enthalpy_j_mol", "meaning": "gas standard formation enthalpy", "unit": "J/mol", "uncertainty": { "value": 840.0, "unit": "J/mol" } },
+    { "column": "gas_formation_enthalpy_uncertainty_j_mol", "meaning": "gas formation enthalpy uncertainty", "unit": "J/mol" },
+    { "column": "liquid_heat_capacity_anchors", "meaning": "reviewed liquid heat-capacity anchors", "unit": "J/mol/K" },
+    { "column": "vaporization_enthalpy_points", "meaning": "independent vaporization-enthalpy characterization points", "unit": "J/mol" },
+    { "column": "majer_svoboda", "meaning": "Majer-Svoboda vaporization-enthalpy correlation output", "unit": "J/mol" },
+    { "column": "antoine", "meaning": "Antoine saturation pressure output", "unit": "bar" }
+  ]
+}

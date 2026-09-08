@@ -1,0 +1,51 @@
+{
+  "dataset_id": "nist.webbook.ethylbenzene.pure_component_seed.v1",
+  "rows": [
+    {
+      "compound": "ethylbenzene",
+      "formula": "C8H10",
+      "cas_registry_number": "100-41-4",
+      "reference_temperature_k": 298.15,
+      "liquid_formation_enthalpy_j_mol": -12500.0,
+      "liquid_formation_enthalpy_uncertainty_j_mol": 840.0,
+      "liquid_standard_entropy_j_mol_k": 255.01,
+      "gas_formation_enthalpy_j_mol": 29800.0,
+      "gas_formation_enthalpy_uncertainty_j_mol": 840.0,
+      "liquid_heat_capacity_anchors": [
+        { "temperature_k": 293.31, "heat_capacity_j_mol_k": 184.8 },
+        { "temperature_k": 298.15, "heat_capacity_j_mol_k": 185.572 },
+        { "temperature_k": 298.15, "heat_capacity_j_mol_k": 185.559 },
+        { "temperature_k": 298.15, "heat_capacity_j_mol_k": 185.78 },
+        { "temperature_k": 298.15, "heat_capacity_j_mol_k": 186.04 },
+        { "temperature_k": 298.15, "heat_capacity_j_mol_k": 185.81 }
+      ],
+      "vaporization_enthalpy_points": [
+        { "temperature_k": 294.01, "vaporization_enthalpy_j_mol": 42490.0 },
+        { "temperature_k": 313.0, "vaporization_enthalpy_j_mol": 41800.0 },
+        { "temperature_k": 328.0, "vaporization_enthalpy_j_mol": 40500.0, "uncertainty_j_mol": 100.0 },
+        { "temperature_k": 335.0, "vaporization_enthalpy_j_mol": 40600.0 },
+        { "temperature_k": 343.0, "vaporization_enthalpy_j_mol": 39500.0, "uncertainty_j_mol": 100.0 },
+        { "temperature_k": 345.0, "vaporization_enthalpy_j_mol": 40000.0 },
+        { "temperature_k": 358.0, "vaporization_enthalpy_j_mol": 38600.0, "uncertainty_j_mol": 100.0 },
+        { "temperature_k": 409.3, "vaporization_enthalpy_j_mol": 35570.0 },
+        { "temperature_k": 424.0, "vaporization_enthalpy_j_mol": 37000.0 },
+        { "temperature_k": 472.0, "vaporization_enthalpy_j_mol": 35800.0 },
+        { "temperature_k": 564.0, "vaporization_enthalpy_j_mol": 35500.0 }
+      ],
+      "majer_svoboda": {
+        "coefficient_j_mol": 58320.0,
+        "beta": 0.2823,
+        "critical_temperature_k": 617.1,
+        "lower_temperature_k": 295.0,
+        "upper_temperature_k": 437.0
+      },
+      "antoine": {
+        "a": 4.07488,
+        "b_k": 1419.315,
+        "c_k": -60.539,
+        "lower_temperature_k": 329.74,
+        "upper_temperature_k": 410.27
+      }
+    }
+  ]
+}

@@ -3826,7 +3826,7 @@ pub fn reaction_standard_gibbs(stoich: &DMatrix<f64>, gibbs: &[GibbsFn], T: f64)
 ///
 /// The returned vector has one entry per residual row:
 /// - the first `r` entries correspond to reaction-equilibrium equations and
-///   are measured in the same dimensionless log-space as the residual itself;
+///   normalize only the arbitrary norm of the reaction-basis column;
 /// - the remaining `e` entries correspond to element-balance equations and are
 ///   measured in mole units.
 ///
@@ -3868,10 +3868,7 @@ pub fn equilibrium_scaling(
         )));
     }
 
-    let rt = 8.314462618 * T;
-
     // --- reaction scaling ---
-    let dg0 = reaction_standard_gibbs(stoich, gibbs, T);
     let mut scale = vec![0.0; r + e];
 
     for k in 0..r {
@@ -3882,12 +3879,33 @@ pub fn equilibrium_scaling(
         }
         nu_norm = nu_norm.sqrt();
 
-        scale[k] = dg0[k].abs().max(rt * nu_norm).max(10.0); // dimensionless, log-scale
+        // The reaction residual is already dimensionless:
+        //
+        //     nu^T ln(a) + DeltaG0 / (R*T).
+        //
+        // Scaling it by `DeltaG0` or `R*T` mixes units and can make a raw
+        // affinity error of order one look smaller than a `1e-6` acceptance
+        // tolerance.  Only the arbitrary normalization of the null-space
+        // basis is removed here.  A machine floor handles a degenerate zero
+        // column defensively; reaction-basis validation rejects such a column
+        // before production solves reach this function.  Unlike a unit floor,
+        // this preserves invariance under `c*nu` for every usable nonzero `c`.
+        scale[k] = nu_norm.max(f64::EPSILON);
     }
 
     // --- element balance scaling ---
     for el in 0..e {
-        scale[r + el] = element_totals[el].abs().max(10.0);
+        // A positive conserved total is the natural extensive scale of its
+        // balance row. An arbitrary mole floor here makes the scaled Jacobian
+        // depend on the chosen unit inventory, breaking the expected
+        // invariance under `n -> c*n`. A zero total has no extensive scale;
+        // retain a unit denominator solely to keep that valid degenerate row
+        // finite and well-defined.
+        scale[r + el] = if element_totals[el] == 0.0 {
+            1.0
+        } else {
+            element_totals[el].abs()
+        };
     }
 
     Ok(scale)

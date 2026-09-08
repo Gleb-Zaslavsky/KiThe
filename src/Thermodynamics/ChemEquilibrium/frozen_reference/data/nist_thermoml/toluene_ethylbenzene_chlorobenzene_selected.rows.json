@@ -1,0 +1,9 @@
+{
+  "dataset_id": "nist.thermoml.toluene_ethylbenzene_chlorobenzene.selected_interior.v1",
+  "rows": [
+    { "liquid_toluene_mole_fraction": 0.126, "liquid_ethylbenzene_mole_fraction": 0.748, "liquid_chlorobenzene_mole_fraction": 0.126, "pressure_pa": 26660.0, "source_temperature_k": 361.87, "source_temperature_uncertainty_k": 0.22 },
+    { "liquid_toluene_mole_fraction": 0.126, "liquid_ethylbenzene_mole_fraction": 0.748, "liquid_chlorobenzene_mole_fraction": 0.126, "pressure_pa": 53330.0, "source_temperature_k": 382.79, "source_temperature_uncertainty_k": 0.27 },
+    { "liquid_toluene_mole_fraction": 0.334, "liquid_ethylbenzene_mole_fraction": 0.333, "liquid_chlorobenzene_mole_fraction": 0.333, "pressure_pa": 26660.0, "source_temperature_k": 355.69, "source_temperature_uncertainty_k": 0.31 },
+    { "liquid_toluene_mole_fraction": 0.334, "liquid_ethylbenzene_mole_fraction": 0.333, "liquid_chlorobenzene_mole_fraction": 0.333, "pressure_pa": 53330.0, "source_temperature_k": 376.39, "source_temperature_uncertainty_k": 0.31 }
+  ]
+}

@@ -57,20 +57,30 @@ impl std::error::Error for ReproducibilityCapsuleError {}
 /// Immutable component-level identity of one selected thermochemistry record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EquilibriumRecordIdentity {
+    /// Collision-free `phase::substance` component label.
     pub component: String,
+    /// Semantic phase name.
     pub phase: String,
+    /// Bare substance name used for record lookup.
     pub substance: String,
+    /// Thermochemistry library that supplied the record.
     pub library: String,
+    /// Exact record key selected in that library.
     pub record_key: String,
+    /// Lookup-priority label describing how the record was resolved.
     pub lookup_priority: String,
 }
 
 /// Immutable declaration of one resolved physical phase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EquilibriumPhaseSpecSnapshot {
+    /// Semantic phase name.
     pub phase: String,
+    /// Physical state (`Gas`, `Liquid`, ...) selected for the phase.
     pub physical_state: String,
+    /// Domain-level phase model label.
     pub model: String,
+    /// Component labels belonging to this phase, in declared order.
     pub components: Vec<String>,
 }
 
@@ -80,38 +90,61 @@ pub struct EquilibriumPhaseSpecSnapshot {
 /// production data release should additionally supply `data_release_label`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThermoCatalogSnapshot {
+    /// Stable structural fingerprint over all indexed/payload record identities.
     pub structure_fingerprint: u64,
+    /// Number of index entries in the catalog.
     pub indexed_pair_count: usize,
+    /// Number of unique index entries.
     pub unique_indexed_pair_count: usize,
+    /// Number of payload entries.
     pub payload_pair_count: usize,
+    /// Number of duplicated index pairs.
     pub duplicate_index_pair_count: usize,
+    /// Number of indexed records without a matching payload.
     pub indexed_without_payload_count: usize,
+    /// Number of payload records without a matching index.
     pub payload_without_index_count: usize,
+    /// Whether the catalog is structurally consistent.
     pub consistent: bool,
 }
 
 /// Candidate-selection evidence when a top-level element query built the run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EquilibriumCandidateSelectionSnapshot {
+    /// Elements requested by the selection transaction.
     pub requested_elements: Vec<String>,
+    /// Element-search mode label.
     pub element_mode: String,
+    /// Library preference order used by selection.
     pub library_preference: Vec<String>,
+    /// Optional physical-state filter applied during selection.
     pub physical_states: Option<Vec<String>>,
+    /// Optional temperature-domain filter in K.
     pub temperature_range_kelvin: Option<(f64, f64)>,
+    /// Optional cap on the number of selected candidates.
     pub max_candidates: Option<usize>,
+    /// Selected candidate records in deterministic order.
     pub selected_records: Vec<EquilibriumCandidateRecordSnapshot>,
+    /// Number of candidates rejected during selection.
     pub rejected_record_count: usize,
 }
 
 /// Candidate record identity retained before phase-plan construction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EquilibriumCandidateRecordSnapshot {
+    /// Bare substance name.
     pub substance: String,
+    /// Thermochemistry library that supplied the record.
     pub library: String,
+    /// Exact record key selected in that library.
     pub record_key: String,
+    /// Optional physical state selected for this record.
     pub physical_state: Option<String>,
+    /// Elements present in this record's composition.
     pub elements: Vec<String>,
+    /// Temperature-support interval label reported by the library.
     pub temperature_support: String,
+    /// Zero-based priority rank within the library preference order.
     pub library_rank: usize,
 }
 
@@ -131,16 +164,25 @@ pub struct EquilibriumReproducibilityCapsule {
     pub layout_fingerprint: u64,
     /// Stable FNV-1a identity hash over the exact selected component records.
     pub selected_record_identity_fingerprint: u64,
+    /// Effective NIST fallback policy label used by the run.
     pub nist_fallback_policy: String,
+    /// Declared physical phases in canonical order.
     pub phases: Vec<EquilibriumPhaseSpecSnapshot>,
+    /// Exact selected record identities consumed by the run.
     pub selected_records: Vec<EquilibriumRecordIdentity>,
+    /// Effective numerical options snapshot submitted to the pipeline.
     pub solve_options: EquilibriumSolveOptionsSnapshot,
+    /// Backend that accepted the final candidate.
     pub accepted_backend: String,
+    /// Accepted residual L2 norm.
     pub residual_l2_norm: f64,
+    /// Maximum absolute elemental-balance error of the accepted result.
     pub max_abs_element_balance_error: f64,
     /// Optional user/release-supplied payload manifest identifier.
     pub data_release_label: Option<String>,
+    /// Repository structural evidence, when a live repository was used.
     pub catalog: Option<ThermoCatalogSnapshot>,
+    /// Candidate-selection evidence, when an element query built the run.
     pub candidate_selection: Option<EquilibriumCandidateSelectionSnapshot>,
 }
 
@@ -278,6 +320,12 @@ fn find_obsolete_stability_field(value: &serde_json::Value) -> Option<String> {
 }
 
 impl ThermoCatalogSnapshot {
+    /// Projects a repository consistency report into an immutable snapshot.
+    ///
+    /// Derives a stable structural fingerprint from the indexed/unique/payload
+    /// counts plus every duplicate, missing, and orphan record identity, then
+    /// retains the discrete counts and the consistency flag. No repository I/O
+    /// is performed; the snapshot only captures already-collected evidence.
     fn from_report(report: &ThermoCatalogConsistencyReport) -> Self {
         let mut identities = Vec::new();
         identities.push(format!("indexed={}", report.indexed_pair_count()));
@@ -315,6 +363,14 @@ impl ThermoCatalogSnapshot {
 }
 
 impl EquilibriumCandidateSelectionSnapshot {
+    /// Projects an auditable candidate-selection report into an immutable
+    /// snapshot for reproducibility.
+    ///
+    /// Captures the effective selection policy (element mode, library
+    /// preference, physical states, temperature range, candidate cap) and the
+    /// selected record identities together with the rejected-record count. This
+    /// preserves exactly how records were chosen without holding a live
+    /// repository handle.
     fn from_report(report: &EquilibriumCandidateSelectionReport) -> Self {
         let policy = report.policy();
         Self {

@@ -1,0 +1,30 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "iapws.water_ice_ih_sublimation.low_pressure.v1",
+  "title": "IAPWS sublimation pressure of ordinary water ice Ih",
+  "evidence_kind": "frozen_external",
+  "data_file": "water_ice_sublimation_low_pressure.rows.json",
+  "source": {
+    "organization": "International Association for the Properties of Water and Steam (IAPWS)",
+    "name": "Revised Release on the Pressure along the Melting and Sublimation Curves of Ordinary Water Substance",
+    "version": "R14-08(2011)",
+    "citation": "Section 4, equation (6), sublimation pressure",
+    "source_table": "Equation (6), ice-Ih sublimation-pressure correlation",
+    "stable_identifier": "IAPWS-R14-08(2011)"
+  },
+  "transcription": "Values evaluated once from published IAPWS R14-08(2011) section 4 equation (6), then frozen in the KiThe test repository. No IAPWS implementation or correlation is called during regression tests.",
+  "quantities": [
+    {
+      "column": "temperature_k",
+      "meaning": "absolute temperature",
+      "unit": "K",
+      "source_precision": "exact selected grid values"
+    },
+    {
+      "column": "pressure_pa",
+      "meaning": "sublimation pressure of ordinary-water ice Ih",
+      "unit": "Pa",
+      "source_precision": "frozen from the published correlation"
+    }
+  ]
+}

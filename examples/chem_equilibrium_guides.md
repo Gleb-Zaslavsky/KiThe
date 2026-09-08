@@ -49,8 +49,8 @@ Use this when you want the production equilibrium path with solver fallback,
 validation, and accepted-solution publication.
 
 See:
-- `src/Thermodynamics/ChemEquilibrium/phase_equilibrium_workflow.rs`
-- `src/Thermodynamics/ChemEquilibrium/phase_equilibrium_problem.rs`
+- `src/Thermodynamics/ChemEquilibrium/phase_bridge/phase_equilibrium_workflow.rs`
+- `src/Thermodynamics/ChemEquilibrium/phase_bridge/phase_equilibrium_problem.rs`
 - `examples/chem_equilibrium_gas_example.rs`
 
 ```rust,ignore
@@ -110,7 +110,7 @@ than the canonical solver and operates in reaction-extent space.
 See:
 - `src/Thermodynamics/ChemEquilibrium/equilibrium_constant_problem.rs`
 - `src/Thermodynamics/ChemEquilibrium/equilibrium_constant_solver.rs`
-- `src/Thermodynamics/ChemEquilibrium/equilibrium_constant_validation.rs`
+- `src/Thermodynamics/ChemEquilibrium/equilibrium_constants/equilibrium_constant_validation.rs`
 - `examples/chem_equilibrium_constant_validation_example.rs`
 
 ```rust,ignore
@@ -160,7 +160,7 @@ Use this when a solved temperature sweep needs a smoother export grid or a
 compact textual report for logs and previews.
 
 See:
-- `src/Thermodynamics/ChemEquilibrium/equilibrium_temperature_postprocessing.rs`
+- `src/Thermodynamics/ChemEquilibrium/postprocessing_and_logging/equilibrium_temperature_postprocessing.rs`
 - `examples/chem_equilibrium_temperature_postprocessing_example.rs`
 
 ```rust,ignore
@@ -214,8 +214,8 @@ provenance. The one-shot facade is intentionally transactional: it neither
 mutates `ResolvedPhaseSystem` nor exposes the historical mutable solver.
 
 See:
-- `src/Thermodynamics/ChemEquilibrium/phase_equilibrium_workflow.rs`
-- `src/Thermodynamics/ChemEquilibrium/phase_equilibrium_solution.rs`
+- `src/Thermodynamics/ChemEquilibrium/phase_bridge/phase_equilibrium_workflow.rs`
+- `src/Thermodynamics/ChemEquilibrium/phase_bridge/phase_equilibrium_solution.rs`
 - `examples/chem_equilibrium_resolved_phase_example.rs`
 
 ```rust,ignore
@@ -236,4 +236,4 @@ println!("{solution}");
 - `src/Thermodynamics/ChemEquilibrium/equilibrium_log_moles_tests.rs`
 - `src/Thermodynamics/ChemEquilibrium/equilibrium_constant_tests.rs`
 - `src/Thermodynamics/ChemEquilibrium/equilibrium_constant_solver_tests.rs`
-- `src/Thermodynamics/ChemEquilibrium/equilibrium_temperature_postprocessing.rs`
+- `src/Thermodynamics/ChemEquilibrium/postprocessing_and_logging/equilibrium_temperature_postprocessing.rs`

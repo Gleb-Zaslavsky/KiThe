@@ -2553,6 +2553,16 @@ fn format_live_diagnostic_event(event: &EquilibriumDiagnosticEvent) -> String {
         EquilibriumDiagnosticEvent::PhRouteFailed {
             route, error_kind, ..
         } => format!("P,H route failed: {route:?} ({error_kind:?})"),
+        EquilibriumDiagnosticEvent::ExtensiveNormalizationRecoveryAccepted {
+            physical_inventory_scale,
+            discovery_backend,
+            physical_retry_backend,
+            reconstructed_physical_boundary,
+            ..
+        } => format!(
+            "Extensive normalization accepted: scale={physical_inventory_scale:.3e} mol, discovery={discovery_backend}, physical_retry={}, reconstructed={reconstructed_physical_boundary}",
+            physical_retry_backend.as_deref().unwrap_or("none"),
+        ),
         EquilibriumDiagnosticEvent::SolveFailed {
             continuation_restored,
             message,

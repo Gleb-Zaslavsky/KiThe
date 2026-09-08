@@ -1,0 +1,30 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "iapws.water_liquid_saturation.low_pressure.v1",
+  "title": "IAPWS saturation pressure of ordinary water at low pressure",
+  "evidence_kind": "frozen_external",
+  "data_file": "water_liquid_saturation_low_pressure.rows.json",
+  "source": {
+    "organization": "International Association for the Properties of Water and Steam (IAPWS)",
+    "name": "Revised Supplementary Release on Saturation Properties of Ordinary Water Substance",
+    "version": "SR1-86(1992)",
+    "citation": "IAPWS SR1-86(1992), equation (1), vapor pressure",
+    "source_table": "Equation (1), vapor-pressure correlation",
+    "stable_identifier": "IAPWS-SR1-86(1992)"
+  },
+  "transcription": "Values evaluated once from the published IAPWS SR1-86(1992) equation (1) vapor-pressure correlation, rounded to 1e-9 Pa, and then frozen in the KiThe test repository. No IAPWS implementation is called during tests.",
+  "quantities": [
+    {
+      "column": "temperature_k",
+      "meaning": "absolute temperature on ITS-90",
+      "unit": "K",
+      "source_precision": "exact selected grid values, 1 K spacing"
+    },
+    {
+      "column": "pressure_pa",
+      "meaning": "saturation vapor pressure of ordinary water",
+      "unit": "Pa",
+      "source_precision": "frozen to 1e-9 Pa after correlation evaluation"
+    }
+  ]
+}

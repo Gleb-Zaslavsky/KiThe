@@ -1,0 +1,23 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "argonne.stanjan.pentane_methane_air.tp.2500k_35atm.v1",
+  "title": "Argonne/STANJAN pentane-methane-air fixed-P,T equilibrium benchmark",
+  "evidence_kind": "frozen_external",
+  "data_file": "pentane_methane_air_tp_2500k_35atm.rows.json",
+  "source": {
+    "organization": "Argonne National Laboratory",
+    "name": "Development of a fast, robust equilibrium chemistry solver for analyses of combustion products",
+    "citation": "S. M. Aithal, Argonne National Laboratory, Table 4: Verification of equilibrium composition of pentane-methane-air mixture.",
+    "source_table": "Table 4 - Verification of equilibrium composition of pentane-methane-air mixture",
+    "stable_identifier": null
+  },
+  "transcription": "Mole fractions were manually transcribed from the published STANJAN comparison table. They are rounded external characterization values, not a machine-precision STANJAN state. The source C5H12 product row is retained at zero even though the local executable universe uses an element-equivalent feed and does not require a C5H12 record.",
+  "quantities": [
+    {"column": "problem_type", "meaning": "Published equilibrium problem class", "unit": "text"},
+    {"column": "temperature_k", "meaning": "Fixed equilibrium temperature", "unit": "K", "source_precision": "integer K"},
+    {"column": "pressure_pa", "meaning": "Physical equilibrium pressure: 35 atm converted with 101325 Pa/atm", "unit": "Pa", "source_precision": "exact conversion"},
+    {"column": "original_reactants", "meaning": "Published molecular input basis", "unit": "mol", "source_precision": "source input values"},
+    {"column": "element_totals", "meaning": "Closed-system elemental inventory reconstructed from the published feed", "unit": "mol-atoms", "source_precision": "exact from printed reactants"},
+    {"column": "species_mole_fractions", "meaning": "Published STANJAN equilibrium mole fractions keyed by species identity", "unit": "1", "source_precision": "rounded presentation values"}
+  ]
+}

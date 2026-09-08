@@ -1,0 +1,26 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "nasa_tp1906.chon_graphite.er125.1atm.heterogeneous_enthalpy.v1",
+  "title": "NASA TP-1906 Table 11.3E CHON + graphite heterogeneous equilibrium enthalpy",
+  "evidence_kind": "frozen_external",
+  "data_file": "chon_graphite_er125_1atm_heterogeneous_enthalpy.rows.json",
+  "source": {
+    "organization": "National Aeronautics and Space Administration",
+    "name": "NASA Technical Paper 1906",
+    "version": "July 1982",
+    "citation": "S. Gordon, Thermodynamic and Transport Combustion Properties of Hydrocarbons with Air, Part I: Properties Corresponding to Equilibrium Compositions in Part II",
+    "source_table": "Table 11.3E",
+    "stable_identifier": "NASA-TP-1906-Table-11.3E"
+  },
+  "transcription": "Rows were transcribed from the heterogeneous-properties column H [J/g] of NASA TP-1906 Table 11.3E for H/C=2.000, F/A=0.084535, equivalence ratio=1.250, chemical equivalence ratio=1.2496, dry air, and 101.325 kPa. H is the published specific enthalpy of the equilibrium heterogeneous mixture. It remains a separate source from the TP-1907 Table 11.3E composition rows and is converted to a local extensive target only through the reviewed executable inventory mass.",
+  "quantities": [
+    {"column": "temperature_k", "meaning": "published equilibrium temperature", "unit": "K", "source_precision": "nearest 10 K"},
+    {"column": "pressure_pa", "meaning": "physical system pressure", "unit": "Pa"},
+    {"column": "fuel_h_to_c_atom_ratio", "meaning": "model-fuel atom ratio", "unit": "mol-atom/mol-atom"},
+    {"column": "fuel_air_mass_ratio", "meaning": "published fuel to dry-air mass ratio", "unit": "kg/kg"},
+    {"column": "equivalence_ratio", "meaning": "published fuel-air equivalence ratio", "unit": "1"},
+    {"column": "chemical_equivalence_ratio", "meaning": "published chemical equivalence ratio", "unit": "1"},
+    {"column": "dry_air", "meaning": "no added water in reactant air", "unit": "bool"},
+    {"column": "specific_enthalpy_j_g", "meaning": "heterogeneous equilibrium-mixture specific enthalpy", "unit": "J/g", "source_precision": "one decimal place"}
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "nasa_cea.h2_o2.hp.scitech_2025.v1",
+  "title": "NASA CEA Tutorial H2/O2 equilibrium HP example",
+  "evidence_kind": "frozen_external",
+  "data_file": "h2_o2_hp_scitech_2025.rows.json",
+  "source": {
+    "organization": "NASA",
+    "name": "NASA Chemical Equilibrium with Applications (CEA) Tutorial",
+    "version": "AIAA SciTech 2025",
+    "citation": "Mark Leader et al., NASA Glenn Research Center, AIAA SciTech 2025, Equilibrium Problem Example / HP.",
+    "source_table": "H2/O2 HP equilibrium example",
+    "stable_identifier": "NASA-20240016039"
+  },
+  "transcription": "Values were manually transcribed from the official NASA CEA Tutorial HP example. The printed species amounts are rounded presentation values and are external equilibrium characterization data, not a machine-precision CEA state dump.",
+  "quantities": [
+    {"column": "problem_type", "meaning": "CEA equilibrium problem class", "unit": "text"},
+    {"column": "reactant_temperature_k", "meaning": "Common reactant temperature", "unit": "K", "source_precision": "integer K"},
+    {"column": "oxidizer_fuel_mass_ratio", "meaning": "O2/H2 reactant mass ratio", "unit": "kg/kg", "source_precision": "6 decimal digits"},
+    {"column": "pressure_pa", "meaning": "Physical equilibrium pressure", "unit": "Pa", "source_precision": "1 atm converted exactly to 101325 Pa"},
+    {"column": "equilibrium_temperature_k", "meaning": "Published HP equilibrium temperature", "unit": "K", "source_precision": "0.01 K"},
+    {"column": "total_amount_kgmol_per_kg", "meaning": "Published total product amount per kg reactant mixture", "unit": "kg-mol/kg", "source_precision": "4 significant digits"},
+    {"column": "species_amounts", "meaning": "Published product amounts keyed by declared CEA species identity", "unit": "kg-mol/kg", "source_precision": "rounded presentation values"}
+  ]
+}

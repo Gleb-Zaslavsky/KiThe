@@ -1,0 +1,17 @@
+{
+  "dataset_id": "synthetic.temperature_pressure.v1",
+  "rows": [
+    {
+      "temperature_k": 300.0,
+      "pressure_pa": 1000.0
+    },
+    {
+      "temperature_k": 400.0,
+      "pressure_pa": 2000.0
+    },
+    {
+      "temperature_k": 500.0,
+      "pressure_pa": 3000.0
+    }
+  ]
+}

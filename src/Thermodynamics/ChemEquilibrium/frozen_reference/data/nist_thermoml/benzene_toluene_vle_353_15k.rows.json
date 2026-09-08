@@ -1,0 +1,10 @@
+{
+  "dataset_id": "nist.thermoml.benzene_toluene.vle.353_15k.v1",
+  "rows": [
+    { "temperature_k": 353.15, "liquid_benzene_mole_fraction": 0.0, "experimental_pressure_pa": 38500.0 },
+    { "temperature_k": 353.15, "liquid_benzene_mole_fraction": 0.207, "experimental_pressure_pa": 50500.0 },
+    { "temperature_k": 353.15, "liquid_benzene_mole_fraction": 0.5, "experimental_pressure_pa": 69500.0 },
+    { "temperature_k": 353.15, "liquid_benzene_mole_fraction": 0.702, "experimental_pressure_pa": 82700.0 },
+    { "temperature_k": 353.15, "liquid_benzene_mole_fraction": 1.0, "experimental_pressure_pa": 100500.0 }
+  ]
+}

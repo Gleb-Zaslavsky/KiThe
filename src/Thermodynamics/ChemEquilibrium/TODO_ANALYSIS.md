@@ -6,6 +6,415 @@ This checklist covers `Thermodynamics/ChemEquilibrium` only. Its goal is one
 maintainable equilibrium engine with explicit numerical policies, typed failure
 reporting, independent validation, and deterministic tests.
 
+## P8 - Independent Pure-Phase Boundary Cross-Validation
+
+The original validation kernel is scoped to synthetic ideal-gas reactions
+with one pure condensed candidate at fixed `P,T`. It remains an independent
+harness, not a second production phase-control path. Later P8-P10 layers reuse
+that kernel with immutable offline real-data fixtures and P,H adapters while
+still excluding network NIST, Cantera, and non-ideal activity models.
+
+- [x] Let `PurePhaseBoundaryProblem` accept independently supplied elemental
+  compositions and reject a non-conserving supplied reaction instead of
+  silently projecting it onto a conservative basis.
+- [x] Add an opt-in strict-family structural contract based on an independent
+  SVD rank calculation: one full reaction direction and no gas-only reaction
+  direction.
+- [x] Cover valid structure, non-conservation, excessive full reaction-space
+  dimension, residual gas-only chemistry, and explicit opt-in behavior with
+  focused synthetic tests.
+- [x] Add a controlled analytic-temperature synthetic fixture with a known
+  boundary `T*` and an independent `ln(Q)-ln(K)` bisection reference.
+- [x] Bridge that fixture to canonical phase-control evidence and compare
+  `TPD_candidate` against `R*T*(ln(Q)-ln(K))/nu_candidate` before hysteresis.
+- [x] Keep outer-loop topology, appearance/disappearance, hysteresis, cycle,
+  and rollback tests separate from pure-phase boundary algebra. They remain in
+  `prepared_phase_control_runner.rs` and live lifecycle matrices rather than
+  being duplicated by the independent `K_eq` validator.
+- [x] Compare finite equilibrium from the independent `K_eq` extent solver
+  against canonical final equilibrium for the strict family.
+- [x] Prove that the independent finite-equilibrium state is invariant under
+  synthetic reaction-coordinate scalings `0.5*nu`, `nu`, and `2*nu`.
+- [x] Repeat the finite-equilibrium comparison under stoichiometric scalings
+  `0.5*nu`, `nu`, and `2*nu`; equilibrium state must remain invariant.
+
+### P8.1 - Pure-Phase Boundary Lifecycle Evidence
+
+This follow-up keeps the three validation layers explicit: boundary algebra,
+fixed-topology Gibbs equilibrium, and the production active-set lifecycle.
+
+- [x] Classify `Boundary` as `HysteresisDependent` rather than implicitly
+  inactive; report topology agreement as `Option<bool>`.
+- [x] Split cross-validation evidence into thermodynamic, topology, and
+  composition agreement fields. The aggregate remains only a convenience.
+- [x] Make the one-point TPD test compare TPD and independent driving force
+  directly, without borrowing finite K_eq composition as fake evidence.
+- [x] Add an analytic three-temperature sweep proving both sign and magnitude
+  agreement of independent `ln(Q)-ln(K)` and canonical TPD.
+- [x] Extend scaling tests with reaction-coordinate quantities, inverse extent
+  scaling, and invariant per-candidate driving force.
+- [x] Add a production `PhaseManager` hysteresis matrix for activate, inactive
+  band retention, active hold, and safe deactivation.
+- [x] Add an end-to-end `PreparedPhaseControlRunner` synthetic story:
+  inactive candidate -> negative evaluated TPD -> activation record -> restart
+  -> accepted two-phase state matching independent finite K_eq equilibrium.
+- [x] Add the symmetric end-to-end stable-inactive story: positive TPD, no
+  activation record, and no finite independent two-phase solution.
+- [x] Assert lifecycle provenance on the activation story: the transition must
+  retain the evaluated negative TPD and the TPD-derived restart seed, rather
+  than merely widening a numerical phase mask.
+- [x] Publish post-seed phase totals in activation records, so audit evidence
+  describes the physical restart state rather than the pre-activation trace.
+
+### P8.2 - Synthetic Boundary Regression Completion
+
+Keep the independent validator, canonical thermodynamic evidence, and
+production lifecycle as three separately named test layers. Do not expand this
+synthetic work to real databases, Boudouard chemistry, P,H, or multi-component
+candidate phases.
+
+- [x] Move canonical TPD and fixed-topology Gibbs comparisons out of
+  `phase_boundary_validation.rs`; that module must test only the independent
+  validator, while `phase_boundary_cross_validation_tests.rs` owns cross-system
+  evidence.
+- [x] Add test-local canonical-TPD bisection and prove that its mathematical
+  root agrees with both the independent `ln(Q)-ln(K)` root and known `T*`.
+- [x] Lock exact `PhaseManager` hysteresis inequalities: equality with
+  `dg_create` must not activate and equality with `dg_keep` must not deactivate.
+- [x] Compare lifecycle TPD values numerically, not only by sign, against the
+  independent per-candidate driving force in both appearance and stable-absence
+  stories.
+- [x] Extend scaling evidence with invariant gas mole fractions.
+- [x] Add deliberately broken canonical evidence fixtures proving that the
+  cross-validation report independently localizes thermodynamic, topology, and
+  composition disagreement.
+- [x] Add a second, non-collinear strict synthetic phase-forming family with
+  three gas species and `nu_candidate != 1`, and repeat the key TPD, lifecycle,
+  and finite-equilibrium cross-validation stories.
+
+### P8.3 - Pure-Phase Lifecycle Completion
+
+Close the remaining synthetic lifecycle evidence without modifying production
+hysteresis semantics, diagnostic-report structure, or the public API. This
+stage remains limited to one-component pure candidate phases and deliberately
+excludes real databases, non-ideal activity models, P,H, and candidate
+solutions.
+
+- [x] Make the test-local canonical-TPD boundary bisection fail explicitly on
+  exhausted iterations instead of returning an unverified bracket midpoint.
+- [x] Assert that each controlled appearance fixture makes exactly one
+  `Activate` transition, while stable-inactive fixtures make none.
+- [x] Add an end-to-end `PreparedPhaseControlRunner` disappearance story.
+  For a one-component pure phase with no positive interior solution, the
+  canonical route is active fixed-set failure -> validated boundary recovery
+  on the gas-only set -> positive TPD -> `Deactivate` -> accepted restart.
+  The test locks that physical route, conservation, trace reseeding, and the
+  exactly-one-transition contract.
+- [x] Assess a history-dependent end-to-end hysteresis story using the current
+  continuation API. Do not add a second continuation or orchestration API just
+  to make this synthetic test possible. Assessment correction: the existing
+  runner already exposes crate-local numeric retargeting and accepted
+  `PhaseSet` continuation, and the typed temperature-range facade uses both.
+  The actual history-aware regression belongs to P8.7 below.
+
+### P8.4 - Cross-Validation Identity and Evidence Completeness
+
+The comparator must prove that the independent result, canonical result, and
+declared boundary problem describe the same physical case. Vector lengths and
+the absence of a failed check are not sufficient evidence.
+
+- [x] Introduce a deterministic boundary-case identity/fingerprint containing
+  conditions, ordered gas-component identities, candidate identity,
+  stoichiometry, and the gas-only boundary inventory. Either retain this
+  identity in `PurePhaseValidationResult` or make the high-level comparator run
+  the independent validator directly from the supplied problem.
+- [x] Add ordered component identities to `CanonicalPurePhaseEvidence`.
+  Composition comparison must align by identity or reject a mismatched layout;
+  it must not assume that two unnamed `Vec<f64>` values use the same order.
+- [x] Keep the current low-level comparison helper crate-private/test-only if
+  needed, and expose one canonical cross-validation entry point that cannot be
+  called with an independent result from a different problem.
+- [x] Separate agreement from evidence completeness. Add an explicit coverage
+  or status contract such as `Complete`, `ConsistentButPartial`,
+  `InsufficientEvidence`, and `Disagreed`; absence of applicable checks must
+  never produce a fully validated result.
+- [x] Preserve the three independent diagnostic axes: thermodynamic,
+  topology, and composition. The aggregate status may summarize them but must
+  not erase `None`/not-applicable evidence.
+- [x] Add contract tests:
+  - [x] `cross_validation_rejects_independent_result_from_another_problem`;
+  - [x] `cross_validation_rejects_independent_result_at_another_temperature`;
+  - [x] `canonical_evidence_matches_components_by_identity_not_vector_position`;
+  - [x] `consistent_species_permutation_preserves_cross_validation`;
+  - [x] `zero_applicable_checks_cannot_produce_validated_status`;
+  - [x] `partial_evidence_is_consistent_but_not_complete`.
+
+### P8.5 - Production Evidence Adapters
+
+Connect the independent mathematics to evidence that is actually published by
+the production outer loop. Avoid test-only manual reconstruction of canonical
+TPD and final compositions wherever a typed production report already owns the
+same facts.
+
+- [x] Add a typed adapter for a stable inactive candidate using the final
+  accepted `PhaseStabilityReport` plus the accepted component layout.
+- [x] Add a typed adapter for phase appearance using the activation
+  `PhaseTransitionRecord` as boundary TPD evidence and the final accepted
+  solution as composition/topology evidence. A final active-phase TPD report
+  must not be substituted for the pre-activation gas-only boundary TPD.
+- [x] Make both adapters verify candidate phase identity, one-component pure
+  topology, component ordering, finite TPD, and finite feasible mole values.
+- [x] Route the existing activation, stable-inactive, and disappearance
+  stories through the high-level comparator after their lifecycle assertions.
+  - [x] Activation and stable-inactive now use the immutable production adapter
+    plus independent local NASA `H2O(g) <=> H2O(l)` validation. Activation
+    compares TPD at the pre-activation gas boundary reconstructed from the
+    transition restart seed, while composition remains the final accepted
+    two-phase state.
+  - [x] Disappearance now has a symmetric immutable adapter. It accepts only a
+    recorded `BoundaryUnstableActivePhase` transition from active to inactive,
+    uses the transition's reduced-boundary TPD/restart state, and never infers
+    physical absence from final trace moles. The local NASA water/liquid story
+    passes this evidence through the same independent `ln(Q)-ln(K)` comparator.
+    The existing synthetic story remains the focused lower-level runner proof.
+- [x] Add adapter tests:
+  - [x] `stable_inactive_outcome_builds_complete_canonical_evidence`;
+  - [x] `activation_transition_builds_boundary_and_final_composition_evidence`;
+  - [x] `adapter_rejects_wrong_candidate_phase`;
+  - [x] `adapter_rejects_multicomponent_candidate` (the gas assemblage cannot
+    masquerade as a pure condensed candidate);
+  - [x] `adapter_rejects_missing_or_nonfinite_tpd` (wrong lifecycle route is
+    rejected before evidence publication);
+  - [x] `adapter_rejects_component_layout_mismatch` through immutable
+    solution/layout bounds and named phase lookup.
+  - [x] Disappearance rejects both a still-active candidate and an inactive
+    candidate without a matching deactivation transition.
+
+### P8.6 - Metamorphic Thermodynamic Matrix
+
+Exercise transformations whose expected physical effect is known analytically.
+These tests provide more independent information than adding another reaction
+family with the same pressure, amount scale, and component ordering.
+
+- [x] Add combined absolute-plus-relative composition tolerances. Absolute
+  tolerances alone cannot compare otherwise equivalent systems spanning trace
+  inventories through very large mole counts. The independent scalar extent
+  bisection now operates in normalized extent coordinates, and the scaling
+  matrix uses scale-aware absolute-plus-relative assertions.
+- [x] Verify ideal-gas pressure dependence:
+  `delta ln(Q) = delta_nu_gas * ln(P2/P1)`, including matching canonical TPD.
+- [x] Verify invariance when pressure and reference pressure are multiplied by
+  the same positive factor, preserving `P/P0`.
+- [x] Add an inert gas with zero reaction stoichiometry and an independent
+  elemental row. Its Gibbs contribution is zero, but dilution must alter
+  reacting-species mole fractions, `ln(Q)`, and TPD consistently.
+- [x] Scale the complete initial inventory by
+  `1e-9, 1e-3, 1, 1e3, 1e9`. Boundary prediction and mole fractions must be
+  invariant; equilibrium extent and every physical phase amount must scale
+  linearly.
+- [x] Permute gas species, elemental-composition rows, canonical phase
+  component indices, and reported output consistently. Boundary root, TPD,
+  topology, and identity-aligned composition must remain invariant.
+- [x] Lock the independent classification tolerance with residuals at
+  `-1.01*tol`, `-0.99*tol`, `0`, `0.99*tol`, and `1.01*tol`. Keep this
+  tolerance separate from production `dg_create`/`dg_keep` hysteresis.
+- [ ] Add tests:
+  - [x] `pressure_dependence_matches_delta_nu_gas_ln_pressure`;
+  - [x] `joint_pressure_reference_scaling_is_invariant`;
+  - [x] `inert_dilution_changes_q_and_matches_canonical_tpd`;
+  - [x] `global_inventory_scaling_preserves_boundary_and_scales_equilibrium`;
+  - [x] `species_permutation_preserves_boundary_root_and_final_equilibrium`;
+  - [x] `boundary_classification_respects_independent_tolerance_edges`.
+
+### P8.7 - History-Aware End-to-End Lifecycle
+
+Use the existing `PreparedPhaseControlRunner::retarget_numeric`, continuation
+phase-set support, and typed temperature-range path. Do not emulate history by
+calling `PhaseManager` manually.
+
+- [x] Construct a controlled temperature-dependent synthetic boundary and
+  solve a point where the pure candidate is unambiguously active. Retarget the
+  same prepared runner to a nearby point inside the hysteresis band while
+  carrying only the previously accepted seed and `PhaseSet`.
+- [x] Solve the same second point from a fresh inactive history. Prove that
+  discrete topology follows the declared hysteresis policy while continuous
+  TPD evidence remains identical.
+- [x] Run ascending and descending grids across the analytic boundary. Record
+  transition temperatures, reasons, counts, continuation provenance, and
+  final complementarity evidence.
+- [x] Characterize the log-moles boundary explicitly. A one-component pure
+  phase with no positive interior root may require validated boundary recovery
+  rather than an ordinary active-set solve. If an active in-band history cannot
+  be represented, expose a typed lifecycle limitation or fix the canonical
+  boundary representation; do not loosen nonlinear acceptance tolerances.
+  - Fixed: boundary recovery now examines the accepted continuation seed,
+    rather than construction-time `initial_moles`. A phase created at an
+    earlier temperature can therefore be considered for later disappearance.
+- [x] Require every continuation seed to come from an accepted point. Inject a
+  failed intermediate solve and prove transactional restoration of both seed
+  and phase set before the next attempt.
+  - [x] Owner-level `PreparedPhaseControlRunner` tests inject a failure after
+    continuation consumption and assert restoration of seed, phase set, and
+    streamed rollback diagnostics. This is deliberately not duplicated in the
+    independent cross-validation suite.
+- [ ] Add tests:
+  - [x] `same_in_band_point_uses_previous_active_set_history`;
+  - [x] `ascending_and_descending_boundary_sweeps_expose_hysteresis`;
+  - [x] `failed_boundary_point_does_not_poison_continuation` (covered by
+    `failed_lifecycle_attempt_restores_accepted_continuation_state`);
+  - `boundary_history_preserves_element_inventory_and_trace_contract`.
+
+### P8.8 - Independent Root and Error Matrix
+
+Lock all typed failure modes of the independent implementation. These tests
+belong in a separate `phase_boundary_validation_tests.rs` module so production
+code and the cross-system suite remain readable.
+
+- [x] Cover temperature-root endpoint acceptance, invalid/unordered brackets,
+  missing sign changes, problem-factory temperature mismatch, non-finite
+  factory output, and explicit iteration-budget exhaustion.
+  - [x] Endpoint acceptance, unordered/missing-sign/mismatched-factory
+    rejection, and explicit `MaxIterations` are covered in the dedicated
+    `phase_boundary_validation_tests` module.
+  - [x] Non-finite factory Gibbs output preserves the candidate component and
+    requested-temperature context.
+- [x] Cover finite-extent roots close to zero and close to a gas-species
+  positivity boundary without evaluating a non-positive activity.
+- [x] Add a favorable-at-zero case with no finite interior two-phase root and
+  require typed `ValidationNotApplicable`, documenting that exact gas-species
+  disappearance is outside this validator's current scope.
+- [ ] Cover invalid structural, boundary, cross-validation, and scalar-solver
+  tolerances, including NaN and infinity.
+- [x] Cover non-finite gas and candidate Gibbs closures with typed errors that
+  preserve the failing temperature and component context.
+  - [x] Boundary and scalar-solver invalid settings are covered; structural and
+    cross-validation tolerance matrices remain separate work.
+  - [x] Candidate Gibbs now uses `InvalidDG0` with deterministic candidate
+    component index `gas_species.len()`, matching gas-closure failure typing.
+- [ ] Add tests:
+  - [x] `temperature_root_accepts_each_bracket_endpoint`;
+  - [x] `temperature_root_rejects_unbracketed_and_mismatched_factory_cases`;
+  - [x] `temperature_root_fails_explicitly_after_iteration_budget`;
+  - [x] `finite_extent_root_is_robust_near_each_feasibility_boundary`;
+  - [x] `favorable_boundary_without_interior_root_is_not_applicable`;
+  - [x] `invalid_settings_and_nonfinite_gibbs_return_typed_errors`.
+
+### P8.9 - Validation Coverage Inventory
+
+Use the following levels consistently when describing evidence:
+
+- **I1 - independent thermodynamics:** direct `ln(Q)-ln(K)` or scalar extent
+  mathematics that does not reuse canonical Gibbs residual equations;
+- **I2 - independent numerical route:** a separate scalar bisection/root solve
+  compared with canonical TPD or fixed-topology minimization;
+- **I3 - production lifecycle:** the real prepared active-set outer loop,
+  continuation, hysteresis, rollback, and immutable reports;
+- **I4 - offline real data:** local repository resolution and real
+  thermochemical closures, with no network and no JSON mutation.
+
+Passing at I3 or I4 does not imply I1 independence. Conversely, an I1
+synthetic fixture does not prove the repository-to-solver production path.
+
+| Physical / numerical scenario | I1-I2 independent evidence | I3 production lifecycle | I4 offline real data | Remaining gap |
+|---|---|---|---|---|
+| Pure phase should appear | Two synthetic reaction families; canonical TPD magnitude/sign; scalar finite extent | Prepared activation transition and restart composition | Shared local NASA water/liquid, water/ice, and Boudouard/graphite fixtures pass the complete comparator | Current I1+I3+I4 coverage includes two chemical families and is sufficient |
+| Pure phase remains absent | Positive independent boundary residual and canonical TPD | Stable-inactive prepared solve | High-temperature water/liquid and hot carbon stories | Current coverage is sufficient; more same-family tests would duplicate it |
+| Pure phase disappears | Independent positive TPD exists at the reduced boundary | Synthetic boundary recovery, continuation-aware active-to-inactive sweep, immutable disappearance adapter | Local NASA water/liquid disappearance passes the high-level comparator | Current I1+I3+I4 coverage is sufficient |
+| Exact boundary | Independent endpoint/root bisection and tolerance-edge matrix | History-dependent topology is explicitly not overclassified | No stable real-data exact-root fixture | Optional real boundary fixture; do not hard-code a database-dependent exact temperature |
+| Hysteresis / path dependence | Independent continuous TPD is fixed while topology differs | In-band previous-active vs fresh-inactive; ascending/descending sweep | Real marginal liquid retention | Add no duplicate test unless P,H continuation exhibits a distinct contract |
+| Pressure and reference pressure | Analytical `delta_nu*ln(P2/P1)` plus canonical TPD | Same canonical activity implementation | Covered indirectly by real P,T cases | Sufficient for ideal-gas physics |
+| Inert dilution | Independent quotient change plus canonical TPD | No separate lifecycle story | No dedicated real-data inert fixture | Optional; current I1-I2 evidence already isolates the equation |
+| Inventory / reaction-coordinate scaling | `1e-9..1e9`, stoichiometric scaling, near-zero and near-positivity roots | Conservation and trace contracts in phase-control tests | Large real-data scaling matrices elsewhere | Generated corpus still needs explicit rank/comparator status per case |
+| Species / element permutation | Species, element-row/column, identity-aligned evidence permutation | Canonical layout ordering tested elsewhere | Repository provenance preserves named components | Sufficient; avoid additional positional-vector tests |
+| Failure and rollback | Typed scalar/root/settings/Gibbs errors | Injected continuation rollback, budget and cycle evidence | Real water budget rollback | Sufficient for this stage |
+| P,H phase lifecycle | Local water stable absence/disappearance compare independent `ln(Q)-ln(K)` with canonical TPD; water, ice, and Boudouard points add independent scalar P,H roots | Monolithic/nested P,H lifecycle, accepted-only continuation, rollback, and hysteresis are covered | Shared local NASA water/liquid, water/ice, and graphite fixture families are resolved read-only | Core pure-phase I1-I4 matrix is complete; non-NASA payload remains a separate format-diversity gap |
+| Non-ideal or multi-component candidate phase | Not applicable to current pure-phase scalar contract | Unsupported models rejected explicitly | None | Future physics, not a missing test for the current validator |
+| Thermochemistry format diversity | Formula-agnostic closure contract | Same solver API for all closures | NASA gas/condensed only for stable local fixtures | Local non-NASA fixture remains a fundamental evidence gap |
+
+Prioritized gaps after the inventory:
+
+1. [x] Complete immutable disappearance evidence and high-level comparison.
+2. [ ] Add rank/conservation/comparator-completeness assertions to each fixed
+   generated fixture; do not grow the corpus until those axes are complete.
+3. [ ] Add a stable local non-NASA fixture when one exists in the repository.
+4. [ ] Keep exact real P,T boundary temperature deferred, but develop the
+   independent synthetic P,H boundary validator under P9 before adding another
+   real-data fixture.
+
+Evidence ownership (use this map before adding another test):
+
+- `phase_boundary_validation_tests.rs` owns scalar-root contracts, malformed
+  inputs, feasibility-boundary behavior, and typed independent-validator
+  failures (I1-I2).
+- `phase_boundary_cross_validation_tests.rs` owns independent K_eq/extent vs
+  canonical TPD comparisons, metamorphic invariants, deterministic generated
+  fixtures, and synthetic prepared-runner lifecycle stories (I1-I3).
+- `prepared_phase_control_runner.rs` owns transactional continuation rollback
+  and streamed rejection/rollback diagnostics (I3). Cross-validation tests
+  should not duplicate these unless they also compare independent physics.
+- `pure_phase_pt_live_data_tests.rs` owns shared-fixture P,T appearance,
+  stable-absence, and disappearance comparisons against independent
+  `ln(Q)-ln(K)` boundary problems (I1-I4). It also owns the read-only JSON
+  contract for those stories.
+- `equilibrium_multiphase_story_tests.rs` owns general immutable fixed-P,T
+  result/facade stories. It consumes shared fixtures where phase-pair data are
+  needed but no longer owns a second hand-built boundary-validation fixture.
+- `equilibrium_live_data_tests.rs` owns repository-to-solver water/ice,
+  water/liquid, carbon, hysteresis, budget rollback, and release evidence
+  using local thermochemical libraries (I4).
+
+Before accepting a new validation test, require it to add at least one missing
+cell in the matrix, raise an existing scenario to a stronger independence
+level, or reproduce a distinct regression. A new temperature, tolerance, or
+backend alone is not additional physical evidence.
+
+### P8.10 - Deterministic Generated and Offline Evidence
+
+Add breadth only after identity, completeness, adapter, and metamorphic
+contracts are stable.
+
+- [x] Build a deterministic generated-fixture matrix (fixed seed, no flaky
+  randomness) for strict one-reaction families. Vary stoichiometric scale,
+  inventory scale, pressure ratio, species permutation, and boundary sign.
+  - [x] The initial fixed corpus carries a stable fixture id and exercises
+    boundary sign, stoichiometric scale, inventory scale, and pressure ratio;
+    the species/element permutation leg remains the named P8.6 fixture.
+- [ ] For every generated case, check independent conservation/rank evidence,
+  finite-extent acceptance when applicable, canonical TPD magnitude/sign, and
+  comparator coverage status.
+- [x] Keep generated failures reproducible by printing the fixture seed and
+  all physical inputs in the assertion message.
+- [x] Add one or two stable offline real-data pure-phase stories only after the
+  synthetic suite is complete. Reuse immutable local thermochemistry and prove
+  that tests do not modify JSON libraries; do not make network NIST access part
+  of this suite. Shared water/liquid P,T now covers appearance, stable absence,
+  and disappearance; shared water/ice and Boudouard fixtures add independent
+  solid-phase appearance stories. Every story snapshots the local JSON files.
+- [x] Do not duplicate general backend cascade, cycle, cancellation, or
+  rollback matrices already owned by their production workflow modules. Add a
+  cross-validation story only when it contributes independent K_eq evidence.
+  The former hand-built water adapter story was removed after the shared P,T
+  matrix superseded it.
+
+### P8.11 - Boundary Module Engineering Hygiene
+
+- [ ] Repair mojibake in thermodynamic formulas and documentation (`Delta G`,
+  `Sigma`, `nu`, `xi`, degree superscripts) using the repository's established
+  UTF-8 encoding; add a source-text audit preventing known corrupted sequences
+  from returning.
+- [ ] Move the independent validator unit tests out of
+  `phase_boundary_validation.rs` into
+  `phase_boundary_validation_tests.rs`. Keep cross-system tests in
+  `phase_boundary_cross_validation_tests.rs`.
+- [ ] If the production module remains difficult to navigate after test
+  extraction, split only cohesive responsibilities: problem/structure,
+  independent roots, evidence comparison, and report formatting. Do not create
+  another equilibrium orchestration facade.
+- [ ] Use one canonical high-precision molar gas constant within
+  `ChemEquilibrium`. Algorithmic independence must come from different
+  equations and solvers, not from duplicated physical constants that can
+  silently drift.
+
 - [x] Treat the logarithmic `Chem_eq_K_eq*` formulation as the candidate
   source of truth for equilibrium calculations.
 - [x] Treat the legacy classical equilibrium stack as a migration/reference path, not as a
@@ -19,6 +428,1546 @@ reporting, independent validation, and deterministic tests.
 - [x] Replace the misleading `Chem_eq_K_eq*` module family with names that
   reflect its actual responsibilities: log-moles formulation, workflows, and
   nonlinear support.
+
+## P9 - Independent Pure-Phase `P,H` Cross-Validation
+
+### Scope and evidence boundary
+
+Build a second mathematical route for one ideal-gas phase plus one pure,
+one-component condensed candidate at fixed pressure and total enthalpy. This
+is a validation subsystem, not a replacement P,H engine and not a second
+phase-control orchestration stack.
+
+The evidence ladder is intentionally staged:
+
+- **I1 - independent thermodynamics:** direct `ln(Q)-ln(K)` and additive
+  enthalpy equations in reaction extent/temperature coordinates;
+- **I2 - independent numerical route:** nested scalar extent root inside a
+  safeguarded scalar temperature root, without canonical P,H residuals,
+  Jacobians, backend policy, or prepared P,T workflow;
+- **I3 - production lifecycle:** only after I1-I2, compare immutable
+  production P,H reports, active-set transitions, and final states;
+- **I4 - offline real data:** only after the synthetic I1-I3 suite is stable;
+  local resolved records only, with no network or JSON mutation.
+
+Do not describe I1-I2 as independent thermochemical data: initially they may
+use the same synthetic functions as production comparison fixtures. Their
+independence is the equations and numerical route.
+
+### P9.1 - Keep the P,H validator separate and typed
+
+- [x] Create `pure_phase_ph_validation.rs`; do not turn the fixed-P,T
+  `PurePhaseBoundaryProblem` into a broad P,T/P,H union type.
+- [x] Define a typed `PurePhasePhProblem` for one strict phase-forming
+  reaction with:
+  - ordered gas identities, initial gas moles, gas stoichiometry, and one
+    positive candidate stoichiometry;
+  - physical initial candidate amount, candidate identity, pressure, and
+    reference pressure;
+  - target total enthalpy and a finite ordered temperature bracket;
+  - fallible standard Gibbs and molar enthalpy capabilities. Reuse
+    `MolarThermoFunction` where its typed `Result` contract fits instead of
+    creating a parallel closure alias merely for this validator;
+  - optional independent elemental composition for structural checks.
+- [x] Preserve the strict independent-family contract whenever element data is
+  supplied: conservative reaction, full reaction-space rank one, and gas-only
+  reaction-space rank zero. Reuse only small independent SVD/rank helpers from
+  P8, never the canonical reaction-basis builder.
+- [x] Keep the scalar bisection local because the P,T extent solver is
+  intrinsically tied to a zero-candidate boundary state, while P,H needs a
+  general signed physical extent interval. The only shared code is the small
+  independent SVD/rank helper; no broad P,T problem type leaks into P,H.
+- [x] Return typed `ReactionExtentError` variants for invalid dimensions,
+  non-finite functions, infeasible extents, invalid brackets, and exhausted
+  budgets. The validator must not fall back silently to `solve_resolved_ph`.
+
+### P9.2 - Independent nested scalar route
+
+- [x] At fixed temperature solve the inner chemical equation
+  `ln(Q(xi))-ln(K(T)) = 0` on the physically feasible extent interval.
+  Keep the phase model explicit: ideal-gas activities and unit pure-condensed
+  activity only.
+- [x] Define `H_eq(T) = H(xi_eq(T), T)` from the additive physical amounts and
+  independent molar enthalpy functions. Do not call canonical P,H residual,
+  Jacobian, enthalpy model, or P,T solve objects from this path.
+- [x] Solve `H_eq(T)-H_target = 0` with a bracketed/safeguarded scalar method.
+  Require a verified sign bracket, finite inner state/enthalpy, a positive
+  finite temperature, and explicit non-convergence failure; never accept an
+  unverified midpoint.
+- [x] Publish a compact `PurePhasePhEquilibriumResult`: accepted temperature,
+  extent, physical gas/candidate moles, chemical log residual, enthalpy
+  residual, outer iterations, total inner solves, and total inner iterations.
+  Do not expose a sprawling per-iteration diagnostic API in the first pass.
+
+### P9.3 - Deterministic synthetic I1-I2 corpus
+
+- [x] Build a named analytic fixture from predeclared `T_star` and `xi_star`,
+  then derive `H_target = H(xi_star, T_star)`. The expected point must follow
+  from fixture construction, never from the validator under test.
+- [x] Add the base I1-I2 recovery test: recover `T_star`, `xi_star`, physical
+  gas/candidate moles, conservation, `abs(lnQ-lnK)`, and enthalpy residual.
+- [x] Add reaction-coordinate scaling cases (`0.5*nu`, `nu`, `2*nu`). Check
+  inverse extent scaling while temperature, physical amounts, mole fractions,
+  total enthalpy, and per-candidate driving force stay invariant.
+- [x] Add monotone target-enthalpy perturbations around the exact fixture;
+  assert the fixture-specific temperature ordering instead of claiming a
+  universal sign for `dT/dH`.
+- [x] Add the typed failure matrix: reversed/non-positive/non-finite
+  temperature brackets, unbracketed enthalpy target, unavailable inner extent
+  root, non-finite Gibbs/enthalpy callback, infeasible extent, and exhausted
+  inner/outer iteration budgets.
+- [x] Label every test comment with its evidence layer (`I1`, `I2`, later
+  `I3`/`I4`) so a passing synthetic root cannot be misread as production
+  lifecycle coverage.
+
+### P9.4 - Fixed-topology P,H comparison
+
+- [x] After the independent synthetic route is green, build the same physical
+  fixture through the canonical fixed-declared-phase P,H path only. Do not use
+  bounded phase control in this comparison.
+- [x] Introduce `PurePhasePhCrossValidationReport` rather than forcing P,H
+  semantics into the P,T report. It must retain temperature, thermodynamic,
+  topology, composition, and enthalpy agreement as `Option<bool>` where
+  `None` means genuinely not applicable, never implicit success.
+- [x] Compare accepted temperature, physical gas/candidate moles, gas mole
+  fractions, additive total enthalpy, conservation, and residual contracts.
+  The comparator must keep independent and canonical identity/order checks
+  explicit.
+- [x] Add deliberately mismatched synthetic evidence to prove that the report
+  localizes temperature, thermodynamic, composition, and enthalpy disagreement
+  independently.
+
+### P9.5 - Production P,H lifecycle only after fixed topology
+
+- [x] Add a clearly favorable inactive-to-active pure-phase story, far outside
+  the hysteresis band. Require real TPD/transition evidence; a candidate in a
+  numerical recovery mask is not physical activation.
+- [x] Add the stable-inactive counterpart and route its final stability
+  evidence through the P,H comparator.
+  - The I3 fixture now compares the dimensionless I1 `ln(Q)-ln(K)` driving
+    force against the canonical pure-phase TPD through `TPD = R*T*residual`;
+    both must be positive before an inactive phase can remain absent.
+- [x] Add active-to-inactive recovery. Accept the physically meaningful
+  `BoundaryUnstableActivePhase` route when no positive interior state exists;
+  do not force an artificial `n_phase < phase_eps` mechanism.
+- [x] Only then add an accepted-target continuation sweep and compare every
+  accepted P,H point against the independent nested validator. Failed trial
+  coordinates must never become continuation seeds.
+- [x] Keep an in-band hysteresis scenario deferred until the single-point
+  appearance/disappearance contracts are established.
+  - The I3 history test now establishes an active phase at a neighboring
+    favorable P,H point, retargets to an in-band TPD, and contrasts that
+    continuation with a fresh gas-only solve of the identical target. The
+    independent scalar I2 route is intentionally not asserted for this
+    near-boundary point because its fixed-topology contract requires a
+    positive inner extent throughout the complete temperature bracket.
+
+### P9.6 - Offline real-data evidence
+
+The fixed-topology local-water I4 bridge now proves that resolved real closures
+can be shared by canonical and independent routes without network access or
+library mutation. Phase-controlled water/ice stories prove production
+lifecycle behavior, but do not automatically become I1/I2 evidence: the
+independent scalar route must admit the same interior topology. Keep that
+distinction explicit in reports and test comments.
+
+- [x] Add a pinned P9 evidence inventory before growing the corpus. A passing
+  production test sharing the same local database is I3/I4 evidence, not
+  automatically independent I1/I2 evidence.
+
+  | Scenario | I1 | I2 | I3 | I4 | Owner / status |
+  |---|---:|---:|---:|---:|---|
+  | `H2O(g)/O2(g) -> H2O(l)`, 350 K fixed topology | yes | yes | fixed topology | yes | `pure_phase_ph_live_data_tests::p9_i4_local_water_fixed_topology_scalar_route_matches_canonical_ph` |
+  | `H2O(g)/O2(g)`, 550 K, liquid initially absent | yes | n/a | yes | yes | `p9_i1_i3_local_hot_water_ph_keeps_liquid_inactive_and_matches_boundary_tpd` |
+  | `H2O(g)/O2(g)`, 550 K, liquid initially active | yes | boundary-only | yes | yes | `p9_i1_i3_i4_local_hot_water_ph_deactivates_initial_liquid_transactionally` |
+  | `2 CO(g) <=> CO2(g) + C(gr)`, 700 K fixed topology | yes | yes | fixed topology | yes | `p9_i1_i2_i4_boudouard_independent_reference_matches_fixed_topology_ph` |
+  | `H2O(g) -> H2O(s)`, 250 K phase control | yes | yes | yes | yes | `p9_i4_local_ice_phase_control_activates_solid_and_matches_independent_ph` |
+- [x] Add a pinned local `H2O(g)/O2(g)` plus `H2O(l)` preflight fixture,
+  subject to the actual overlap of locally resolved native intervals. It
+  resolves through the ordinary immutable repository/capability path with
+  explicit `NASA_gas`/`NASA_cond` provenance, NIST disabled, and byte-for-byte
+  library immutability before and after the solve.
+  - The initial I4 point is intentionally bracketed within `345..355 K`.
+    The same local fixture has no liquid-containing inner root at `375 K`, so
+    a broad bracket would make the test physically inapplicable rather than
+    more robust.
+- [x] For that fixture, add an I4 fixed-topology point safely inside the
+  liquid-containing region. The test feeds resolved local `G_i(T)` and
+  `H_i(T)` capabilities to the independent I1/I2 scalar validator and compares
+  its accepted temperature, gas composition, liquid moles, additive enthalpy,
+  chemical residual, and elemental conservation with canonical
+  fixed-topology `P,H`.
+- [x] Add an I3/I4 real appearance story only where the independent scalar
+  route has a genuine interior enthalpy bracket for the same lifecycle target.
+  - The first local water/liquid candidate is not suitable: its P,H outer
+    bracket rejects a topology jump rather than manufacturing a liquid branch.
+  - The real water/ice 250 K lifecycle now supplies complete I1-I4 evidence.
+    Its former missing bracket was a fixture defect: canonical target enthalpy
+    represented `0.5 mol` total water, while the independent problem silently
+    added `0.1 mol` initial ice and therefore solved a `0.6 mol` inventory.
+    Using one gas-only scenario for P,T target construction, independent P,H,
+    and canonical P,H restores the honest bracket without relaxing tolerances.
+- [x] Add the I1/I3/I4 hot-water stable-absence story. At the recovered
+  gas-only boundary, compare positive independent `ln(Q)-ln(K)` with positive
+  canonical TPD using `TPD = R*T*(ln(Q)-ln(K))/nu_candidate`; do not require a
+  finite liquid-containing I2 root on the inactive side. The shared local
+  `H2O(g)/O2(g)/H2O(l)` test derives its target enthalpy at 550 K, keeps liquid
+  inactive, and compares final TPD evidence against independent boundary
+  thermodynamics.
+- [x] Add the I3/I4 water disappearance story from positive liquid inventory.
+  Accept either documented physical route: `VanishingUnstableActivePhase` for
+  a finite interior phase driven below the destruction threshold, or
+  `BoundaryUnstableActivePhase` when no positive fixed-topology root remains.
+  The final result must publish one deactivation, valid P,H acceptance, and
+  boundary driving-force agreement when boundary recovery was used. The local
+  550 K water story takes `BoundaryUnstableActivePhase`; independent boundary
+  thermodynamics is deliberately evaluated at the recorded reduced-boundary
+  restart composition, not at the original two-phase inventory.
+- [ ] Only after isolated water points are stable, add a short local enthalpy
+  sweep through appearance/retention and reverse disappearance. Compare every
+  state admitting a positive independent I2 root with that route; use the
+  boundary-driving-force comparison for gas-only endpoints. Do not certify a
+  database-dependent exact transition temperature.
+- [ ] Add real history-dependent hysteresis only if an observed local point
+  lies inside the configured band: previously accepted liquid-active history
+  must retain it while a fresh inactive history must not create it. The
+  independent route supplies continuous driving force only; it does not choose
+  a topology inside an artificial hysteresis band.
+- [x] Every current P9 I4 test proves no network access and byte-for-byte JSON
+  library immutability before and after execution. Do not add online NIST,
+  live Cantera/CEA, non-ideal, or multicomponent-solution physics to this
+  validation stage.
+- [x] Add a second local family, `2 CO <=> CO2 + C(graphite)`, after water is
+  stable. Its 700 K fixed-topology P,H story matches an independent scalar
+  solution on temperature, composition, enthalpy, chemical residual, and the
+  canonical solver's accepted element-balance scale. It adds a different
+  gas-phase reaction geometry without pretending to prove format diversity.
+
+### P9.7 - Real Boudouard `P,H` Phase-Control Evidence
+
+Keep the existing frozen JANAF thermochemistry and `P,T` boundary modules
+unchanged: they remain I5 reaction/pressure characterization, not an external
+`P,H` table. This pass reuses only `RealPurePhaseFamily::BoudouardCarbon` and
+the generic independent `PurePhasePhProblem`/validator to complete the missing
+local I1-I4 lifecycle evidence at one explicit convention:
+`P = p0 = 100000 Pa`.
+
+- [x] Replace the current Boudouard fixed-topology test's canonical-`P,T`
+  source point with an independent scalar extent root at a deliberately
+  selected interior temperature. Materialize `H_target` solely from the local
+  additive `CO/CO2/C(gr)` enthalpy closures at that independent state.
+  - [x] Add a small typed independent state materialization API so a test can
+    obtain feasible physical moles and additive enthalpy from an accepted
+    extent without copying private closure arithmetic or calling canonical
+    `P,H` residual code.
+  - [x] Recover that target through the independent nested `P,H` root and the
+    canonical fixed-topology `P,H` route; compare temperature, extent-scaled
+    physical moles, gas fractions, total enthalpy, chemical residual, and
+    scale-aware elemental conservation.
+- [x] Add a Boudouard I3 appearance story from gas-only inventory only after
+  the interior state passes. Its target must come from an independently
+  materialized positive-graphite state; require an activation transition,
+  negative pre-activation TPD, accepted conservation, and final agreement
+  with the independent nested `P,H` state.
+  - [x] Review `PhSolveMode::Auto` for a monolithic all-active recovery-probe
+    rejection. Deliberately keep the current answer: `Auto` falls back only
+    after a classified retryable *numerical* failure; a phase-stability
+    rejection is physical evidence and must not be bypassed silently. The I3
+    topology-changing Boudouard story therefore requests explicit guarded
+    `NestedTemperature`, consistent with the existing real water/ice Auto
+    probe-rejection contract.
+- [x] Add stable-inactive and active-to-inactive Boudouard `P,H` stories.
+  For an inactive final state, compare positive independent `ln(Q)-ln(K)` to
+  positive canonical TPD at the accepted gas-only boundary. If no positive
+  graphite I2 root exists, treat that as boundary evidence, not a failed
+  interior-root test.
+- [x] Add a short forward/reverse accepted-target enthalpy sweep only after
+  the three isolated lifecycle stories are stable. Reuse only the last
+  accepted production state, compare interior points to freshly materialized
+  independent I2 problems, and use boundary evidence for gas-only endpoints.
+  Keep real in-band hysteresis deferred unless a natural local point occurs.
+  - [x] Make the independent scalar P,H validator branch-aware: a positive
+    condensed-phase extent may exist only on a strict subinterval of the
+    declared common temperature range. Scan only for adjacent valid interior
+    roots and bracket `H-H_target` inside that continuous branch; do not turn
+    a physical endpoint disappearance into a solver or data failure.
+- [x] Add an ignored compact diagnostic table for the selected interior state
+  and each lifecycle route: `P`, `p0`, `H_target`, independent/canonical/
+  production temperature and moles, phase status/transitions, TPD or chemical
+  driving force, and validation errors. Snapshot both local JSON libraries
+  and frozen JANAF rows around every Boudouard test; no network NIST, external
+  `P,H` reference table, CEA/Cantera, non-ideal activity, or large CHON sweep
+  belongs in this stage. The P,H range portion prints both final lifecycle
+  transitions and the larger total of nested-temperature trial phase events;
+  they are intentionally not conflated.
+
+### P10 - Shared real pure-phase fixture layer for P,T and P,H
+
+The real-data suite must describe a resolved physical family once, then adapt
+that same immutable chemistry to independent P,T, independent P,H, and
+canonical requests. It must not duplicate water/carbon record selection or
+reaction vectors across test modules.
+
+- [x] Create a crate-private real pure-phase fixture module. Its base fixture
+  owns resolved phase data, canonical component identities, selected-record
+  provenance, explicit reaction stoichiometry, elemental composition, and the
+  common thermochemistry interval. It contains no target enthalpy, expected
+  phase transition, or other scenario assertion. `real_pure_phase_fixtures`
+  now holds `RealPurePhaseFamily`, immutable resolved payloads, and shared
+  inventory data used by both P,T and P,H scenarios.
+- [x] Resolve and report an offline inventory through ordinary KiThe APIs for
+  four deliberately restricted validation families: `H2O(g)/H2O(l)`,
+  `H2O(g)/H2O(s)`, `2 CO(g) <=> CO2(g) + C(condensed)`, and
+  `CH4(g) <=> 2 H2(g) + C(condensed)`. Pin provenance and record identities;
+  do not assume a library-specific phase or polymorph name without checking
+  the resolved report. The ignored inventory diagnostic currently finds all
+  four locally: water/liquid `[273.15, 600] K`, water/ice `[200, 273.15] K`,
+  and both carbon families `[200, 5000] K`.
+- [ ] Have each constructor validate: exact requested states, no NIST use,
+  immutable JSON libraries, non-empty common temperature range, G/H capability,
+  Cp availability when monolithic P,H is requested, elemental conservation,
+  `full reaction dimension == 1`, and `gas-only reaction dimension == 0`.
+  Incompatible real families must return a typed not-applicable reason rather
+  than silently widening their species universe or weakening the scalar test.
+- [x] The resolved offline fixture rejects enabled NIST fallback and validates
+  common G/H/Cp capability, phase physical state/model/component ordering, and
+  non-empty local Thermo provenance from the expected NASA library. Its P,T/P,H
+  adapter matrix checks elemental conservation and strict reaction dimensions
+  for all four declared families, while byte snapshots prove that resolving
+  and materializing every family leaves JSON libraries unchanged.
+- [ ] Add narrow adapters from one fixture to `PurePhaseBoundaryProblem`,
+  `PurePhasePhProblem`, and existing typed canonical requests. Reuse the
+  existing `ResolvedThermochemistry` capabilities directly; never copy
+  coefficients into a second closure layer.
+  - [x] `PurePhaseBoundaryProblem` and `PurePhasePhProblem` adapters now
+    materialize phase-qualified component order, zero-stoichiometry inerts,
+    and independent element matrices from one resolved payload.
+  - [ ] Add a narrow typed canonical-request adapter once at least two shared
+    stories would otherwise repeat `MultiphaseInitialComposition` construction.
+- [x] Keep P,T/P,H scenario inputs separate from fixture chemistry. Only add
+  `RealPtScenario` or `RealPhScenario` types if repeated tests demonstrate
+  actual duplication; do not build a framework merely to name a temperature.
+  `RealPurePhaseGasScenario` and `RealPurePhaseInventory` are shared by
+  independent and canonical P,T/P,H routes. Inerts and candidate inventory
+  remain explicit scenario inputs rather than fixture chemistry.
+- [x] Add inventory/capability tests before lifecycle tests. The report must
+  say which families support P,T and P,H and why a family is unavailable.
+  It is test/diagnostic output only, never default production logging.
+  The diagnostic is ignored and prints availability/range/component layout;
+  normal tests verify that all inventoried families construct strict P,T/P,H
+  independent problems.
+- [x] Add a dedicated shared-fixture P,T I1-I4 matrix instead of retaining the
+  historical hand-built water pair in the general multiphase story module.
+  `pure_phase_pt_live_data_tests` now compares immutable production evidence
+  with independently materialized `ln(Q)-ln(K)` problems for water/liquid
+  appearance, stable absence and disappearance, water/ice appearance, and
+  Boudouard/graphite appearance. The suite also proves byte-for-byte JSON
+  immutability.
+- [x] After inventory review, select one family with a wide interior interval
+  for the first shared real P,T/P,H cross-validation story. Expand to
+  appearance/disappearance/hysteresis only one scenario at a time and only
+  where the independent scalar contract is applicable. Dedicated P,T stories
+  now cover water/liquid appearance, stable absence and disappearance plus
+  water/ice and Boudouard/graphite appearance. P,H stories cover fixed topology,
+  stable absence, disappearance, ice appearance, and Boudouard chemistry. Every
+  route derives its canonical and independent inputs from the same validated
+  inventory instead of reconstructing dense vectors by hand.
+
+### P10.1 - Validation Integrity and Scale Contracts
+
+The shared real-data fixtures make it possible to compare P,T and P,H routes
+honestly. The comparators themselves must now reject cross-case evidence and
+remain meaningful across trace and large inventories.
+
+- [x] Give `PurePhasePhProblem`, `PurePhasePhEquilibriumResult`, and canonical
+  P,H evidence one typed case identity containing component identities,
+  physical inventory, stoichiometry, pressure/reference pressure, target
+  enthalpy, and temperature bracket. The comparator must reject an independent
+  or canonical record originating from another case before evaluating numeric
+  deltas.
+- [x] Publish independent accepted-state elemental conservation evidence in
+  the P,H scalar result and compare it explicitly with canonical conservation
+  evidence. A canonical balance below tolerance alone is not a two-route
+  conservation comparison.
+- [x] Replace absolute-only molecule/enthalpy comparison thresholds with
+  combined absolute-plus-relative contracts for P,T and P,H comparator paths.
+  Keep residual and TPD tolerances dimensionally explicit; do not hide them in
+  a generic floating-point epsilon.
+- [x] Complete a table-driven invalid-settings matrix for structural, P,T
+  boundary/cross-validation, and P,H solver/cross-validation tolerances using
+  zero, negative, `NaN`, and infinity inputs. Every rejection must be typed.
+- [x] Upgrade the deterministic generated P,T corpus so every case supplies
+  independent element/rank evidence and a complete high-level comparator
+  result, not only a boundary residual and hand-computed TPD.
+- [x] Add symmetric P,H metamorphic checks: full inventory plus target-H
+  scaling, joint pressure/reference-pressure scaling, and identity-preserving
+  component permutation. Add inert dilution only after its P,H expected
+  enthalpy contract is stated explicitly.
+- [ ] Add short shared-fixture P,T temperature and P,H enthalpy sweeps after
+  the single-point contracts are stable. Reuse accepted continuation only;
+  compare each point with the independent scalar route where a positive
+  interior root exists and use boundary evidence for gas-only endpoints.
+  - [x] P,T: the offline water/liquid `350 -> 450 -> 550 K` story uses the
+    production range API, verifies accepted-only continuation and phase-set
+    reuse, then independently validates the appearance boundary and final
+    stable-inactive boundary without mutating local JSON libraries.
+  - [ ] P,H: add the matching shared-fixture target-enthalpy sweep. Each
+    accepted range point must be compared with a freshly materialized
+    independent P,H scalar problem carrying that point's exact target H.
+- [ ] Keep real in-band hysteresis and an exact database transition temperature
+  deferred unless an observed local point supplies evidence naturally.
+
+### P11 - I5 frozen external reference evidence
+
+I5 is an independent evidence layer, not an extension of the local repository
+path. I4 resolves real thermochemistry from KiThe's offline databases and runs
+the production solver. I5 compares KiThe results with small authoritative
+external numerical tables frozen in the test tree. Passing either level does
+not imply passing the other.
+
+- [x] Add a test-only, read-only frozen-reference loader that does not call the
+  NASA/NIST handlers, access the network, mutate local JSON libraries, or enter
+  the runtime dependency graph. The chosen first-pass format is a strict JSON
+  pair: one provenance document and one typed row document. It reuses existing
+  `serde`/`serde_json`; no dependency was added.
+- [x] Separate numerical rows from typed provenance. Metadata records stable
+  dataset identity, evidence kind, expected data filename, source
+  organization/name/version, citation/table/stable identifier, manual
+  transcription statement, column meanings, explicit units, and optional
+  source precision/uncertainty.
+- [x] Make synthetic infrastructure fixtures impossible to confuse with real
+  I5 evidence through `FrozenReferenceEvidenceKind`. The initial three-row
+  temperature/pressure fixture exists only to exercise parsing and validation.
+- [x] Add a generic typed-row contract without introducing a universal
+  `HashMap<String, f64>` schema. The first narrow record is
+  `TemperaturePressureReference`; future phase-boundary, species-
+  thermochemistry, and full-equilibrium tables must define their own row types
+  and dimensional schemas.
+- [x] Validate non-empty datasets, finite/positive values where required by the
+  concrete row type, strictly increasing temperatures, duplicate temperatures,
+  required non-empty provenance, unique columns, exact typed schema and units,
+  optional uncertainty, dataset-id agreement, and metadata/data filename
+  agreement. Parsing is strict and never skips malformed or unknown fields.
+- [x] Add negative tests for empty, duplicate, unordered, non-positive,
+  malformed, missing-field, unknown-field, non-finite textual/numeric,
+  mismatched-unit, dataset-id, and filename cases. Prove byte-for-byte that a
+  successful load does not modify either fixture file.
+- [x] Preserve row-level provenance context for future assertion failures while
+  keeping comparison tolerances outside the loader. Published uncertainty and
+  test/model acceptance policy are different contracts.
+- [x] Review and freeze the first authoritative external dataset: ten IAPWS
+  `H2O(g) <=> H2O(l)` low-pressure saturation points at 275..320 K. The JSON
+  provenance pins `IAPWS SR1-86(1992)`, equation (1), the explicit correlation
+  table identity, SI units, and the statement that values were calculated once
+  from the published correlation before being frozen. Tests never implement or
+  call IAPWS at runtime.
+- [x] Add the semantic `WaterSaturationPressureReference` row type. Its strict
+  validation owns water-specific invariants: temperatures above the triple
+  point, positive and strictly increasing temperatures, and strictly
+  increasing saturation pressures. These constraints do not leak into generic
+  reference rows.
+- [x] Add an ignored IAPWS P,T diagnostic that finds one pressure root from
+  the independent `ln(Q)-ln(K)` boundary and another from canonical TPD,
+  records both against every frozen IAPWS row, prints external and internal
+  relative errors, and proves frozen JSON immutability. The I1/I2-versus-TPD
+  root has a strict internal contract; KiThe-versus-IAPWS remains diagnostic
+  until the observed model discrepancy is reviewed. The diagnostic now uses
+  direct `H2O(g)/H2O(l)` with no zero-stoichiometry carrier; the independent
+  and canonical TPD roots agree to the strict internal tolerance.
+- [x] Move IAPWS row evidence, summary statistics, and table rendering into a
+  typed `WaterSaturationComparisonReport`; retain the pressure-root search in
+  the physical diagnostic. The report keeps I1/I2 and canonical TPD roots,
+  residuals, iterations, external deltas, and strict internal-root validation
+  separate, so a printed table is no longer the only evidence carrier.
+- [x] Define the first source/model-specific external comparison contract as
+  explicit `CharacterizationOnly`. It pins the IAPWS dataset/source identity
+  and current NASA-gas/NASA-condensed ideal-phase scope, but deliberately does
+  not turn the observed model discrepancy into a generic solver tolerance.
+  A later physics review must choose any enforced external acceptance bounds.
+- [x] Add `dataset_format_version` to the strict frozen-data schema and record
+  the IAPWS correlation-evaluation/rounding provenance plus source precision.
+  Missing or zero format versions are rejected; the loader remains read-only
+  and deliberately has no refresh or download path.
+- [x] Generalize the canonical fixed-P,T bridge to reduce dependent elemental
+  constraints deterministically for physically valid low-dimensional systems.
+  The direct `H2O(g) + H2O(l)` fixed-declared path now retains complete H/O
+  conservation evidence in its bridge report while providing only a stable
+  independent H basis to the square log-moles formulation. Real local NASA
+  gas/condensed water solves without an O2 carrier, and a boundary regression
+  proves that a zero-stoichiometry O2 carrier does not change `p_H2O`.
+- [x] Extend the same direct low-dimensional support through bounded TPD
+  phase-control. The failure was an active-set/TPD contract bug, not bad NASA
+  data and not a backend-specific convergence defect: after liquid activation
+  away from saturation, the all-active pure-water equations correctly have no
+  interior coexistence root, but the liquid-only recovery could not prove gas
+  absence because every ideal-gas phase was unconditionally labelled
+  `FixedGasAssemblage`. An inactive gas phase is now evaluated against the
+  condensed reference only when no gas assemblage is active. Existing active
+  gas assemblages still retain the one-gas-phase policy. The production path
+  now performs the validated `gas -> liquid` replacement, conserves inventory,
+  and the direct IAPWS TPD boundary no longer needs `O2` or relaxed acceptance.
+- [x] Complete the two-sided gas/condensed regression contract exposed by the
+  direct-water lifecycle fix. This is internal phase-stability hardening, not
+  a new external dataset or a real-fluid model:
+  - [x] Keep an active ideal-gas reference as `FixedGasAssemblage` with no gas
+    TPD while the inactive liquid remains an evaluated candidate.
+  - [x] Evaluate an inactive ideal gas against a condensed-only reference and
+    retain a finite TPD instead of `FixedGasAssemblage`; the focused synthetic
+    unit contract is present.
+  - [x] On real local water data, require positive inactive-gas TPD above the
+    saturation boundary and negative inactive-gas TPD below it.
+  - [x] Find the canonical gas-side root
+    `TPD(liquid | gas reference) = 0` and the independent condensed-side root
+    `TPD(gas | liquid reference) = 0` using test-local log-pressure bisection.
+    Require both roots and the independent I1/I2 root to agree under one strict
+    internal tolerance. Keep this search out of the production API.
+  - [x] Lock the high-pressure complete-condensation lifecycle: liquid
+    activation, failed positive-interior coexistence solve, validated
+    liquid-only recovery, positive missing-gas TPD, gas deactivation, complete
+    inventory conservation, and transactional publication.
+  - [x] Add the reverse low-pressure lifecycle from accepted liquid-only
+    history: negative gas TPD must permit evaporation and publish a
+    gas-containing accepted state. Assert thermodynamic evidence and topology,
+    not one incidental sequence of nonlinear restarts.
+  - [x] Once the two-sided roots are stable, extend the IAPWS-specific typed
+    report with separate liquid-from-gas and gas-from-liquid root deltas only
+    if this improves auditability without mixing lifecycle details into the
+    generic frozen-reference loader. The ten-point IAPWS diagnostic reports
+    zero at printed precision for every I1/I2-to-liquid-TPD,
+    I1/I2-to-gas-TPD, and liquid-TPD-to-gas-TPD delta.
+- [x] Keep the external IAPWS result in `CharacterizationOnly`: retain visible
+  max/RMS external errors but do not freeze the current 1.09--1.47 percent
+  discrepancy as an acceptance target. Likely contributors include consistency
+  of local NASA gas/condensed standard Gibbs functions, reference-state and
+  polynomial approximation effects, and only to a lesser degree at these low
+  pressures ideal-gas versus real-fluid behavior. Quantitative attribution is
+  a separate validation study.
+- [ ] Add a second frozen IAPWS I5 benchmark for `H2O(s, ice Ih) <=> H2O(g)`.
+  It complements, rather than dilutes, the liquid-water characterization:
+  - [x] Freeze the eight reviewed IAPWS R14-08(2011), section 4 equation (6)
+    sublimation rows at 200..270 K with source identity and transcription
+    provenance in read-only JSON. Regression tests must not implement the
+    IAPWS correlation dynamically.
+  - [x] Give ice sublimation a separate typed row contract: finite positive
+    values, increasing temperature/pressure, and the official 50..273.16 K
+    domain. It must not inherit liquid-above-triple-point semantics merely
+    because both tables contain `(T, p)`.
+  - [x] Add an IAPWS-specific typed report with `I1/I2`, `TPD(ice|gas)`, and
+    `TPD(gas|ice)` roots; strict three-way internal equality; relative, RMS,
+    and mean-signed external diagnostics. Keep it distinct from the generic
+    frozen loader and from the liquid-only report.
+  - [x] Add the ignored real-data diagnostic using log-pressure root search.
+    Before solving, intersect the local `H2O(g)`/`H2O(s)` validity interval
+    with frozen rows, explicitly report excluded rows, and never extrapolate
+    a local polynomial to retain a reference point. At 200 K prove trace
+    seeds, log-moles, activities, and `ln(P/P0)` remain finite.
+  - [x] Lock direct `gas -> ice deposition` above, and `ice -> gas
+    sublimation` below, the *KiThe internal* 250 K boundary. Lifecycle
+    pressure offsets must be relative to that internal root so the test
+    isolates phase-control from the external model discrepancy.
+  - [ ] Record release output in `STORY_TESTS.md`; keep IAPWS comparison
+    `CharacterizationOnly` until a source/model-specific discrepancy review
+    justifies an external acceptance contract.
+- [ ] Add the first Boudouard I4/I5 reaction-thermochemistry layer before any
+  Boudouard pressure-boundary, TPD, or lifecycle story:
+  - [x] Freeze eleven primary NIST-JANAF rows at 500..1500 K for CO(g) C-093
+    and CO2(g) C-095. Pin C(ref), graphite C-002 in provenance and retain the
+    primary `Delta_f G` and `log10 Kf` columns rather than a pre-combined Kp.
+    The JSON is read-only and tests never access JANAF online.
+  - [x] Add a separate typed row schema and a Boudouard-specific comparison
+    report. Derive `Delta_r G = Delta_f G(CO2) - 2 Delta_f G(CO)` and derive
+    `log10 Kp` independently from frozen Gibbs and frozen log-Kf columns.
+    Validate those two JANAF representations under a rounding-aware internal
+    contract, not machine precision.
+  - [x] Resolve only the existing `RealPurePhaseFamily::BoudouardCarbon`
+    fixture, assert exact phase-qualified layout `CO`, `CO2`, `C(gr)`, local
+    NASA-gas/NASA-cond provenance, full reaction dimension one, and gas-only
+    reaction dimension zero. A graphite identity mismatch must fail rather
+    than silently selecting a generic carbon record.
+  - [x] Make the JANAF `p0 = 100000 Pa` comparison convention explicit. This
+    first layer compares only local standard `G0(T)` closures, therefore it
+    applies no hidden ideal-gas pressure correction or 1-bar/1-atm tolerance.
+  - [x] Expose the local thermochemistry standard-state pressure as typed
+    component provenance. Resolution now reads only explicit JSON fields
+    (`standard_state_pressure_pa` or `reference_pressure_pa`) and reports
+    `Undeclared` otherwise; it never guesses 1 bar or 1 atm from a NASA/NIST
+    polynomial type. The current bundled NASA Boudouard records are explicitly
+    observed as `Undeclared`.
+  - [ ] Before promoting the separate JANAF pressure-boundary
+    characterization into an external acceptance contract, add reviewed
+    standard-state-pressure metadata for every selected local record or
+    library family. The current `G0(T)` and boundary diagnostics deliberately
+    make no conversion or 1-bar/1-atm inference from an undocumented
+    convention.
+  - [x] Require the local common validity interval to cover every frozen row;
+    otherwise report exact excluded temperatures and refuse extrapolation.
+  - [x] Add an ignored diagnostic table with JANAF/KiThe reaction Gibbs,
+    `log10 Kp`, signed/RMS/max deltas, frozen-file immutability, and external
+    `CharacterizationOnly` policy. Debug evidence shows a smooth local bias
+    of 41--62 J/mol and no basis to alter records or relax the solver.
+  - [ ] Record the release diagnostic in `STORY_TESTS.md`. The separate
+    `janaf_boudouard_boundary` module now owns the JANAF-derived `P,T`
+    boundary, TPD, and lifecycle characterization; this thermochemistry-only
+    layer must remain free of those concerns.
+- [x] Add a separate Boudouard `P,T` I5 pressure-boundary and lifecycle layer.
+  The existing JANAF module remains thermochemistry-only; this layer may reuse
+  its frozen primary CO/CO2/C(gr) rows and derived `Kp(T)`, but must own its
+  pressure roots, canonical TPD evidence, and production lifecycle tests.
+  - [x] Derive the external 50/50-gas analytical oracle directly from the
+    frozen JANAF rows: `P_boundary = 2 * 100000 Pa / Kp(T)`. Do not create a
+    second hand-transcribed Kp table or obtain this boundary from KiThe.
+  - [x] Use only the existing 800/900/1000 K frozen rows on the first pass;
+    validate finite positive composition, Kp, and pressure values, and retain
+    `2 CO -> CO2 + C(gr)` orientation with `nu_C > 0`.
+  - [x] Build both local roots with `reference_pressure = 100000 Pa`: the
+    independent I1/I2 `ln(Q)-ln(K)` root and the canonical `TPD(C | gas)`
+    root. Search in log-pressure with typed unbracketed/non-finite/budget
+    failure, then require their strict internal agreement.
+  - [x] Keep JANAF-to-local boundary deltas `CharacterizationOnly`. The local
+    NASA records currently publish `ThermochemistryStandardStatePressure::Undeclared`;
+    print that fact and do not disguise it with a 1-bar/1-atm correction.
+  - [x] Repeat the structural contract at every boundary fixture: gas-only
+    reaction dimension zero and full reaction dimension one. Do not copy the
+    water `TPD(gas | condensed)` symmetry story: graphite-only inventory cannot
+    represent the same C/O elemental inventory as CO/CO2 gas.
+  - [x] Add one 900 K local-lifecycle story after the two roots agree: at
+    `3 * P_local`, initially inactive graphite must activate with negative
+    pre-activation TPD; at `P_local / 3` it must remain inactive with positive
+    final TPD. Both routes must retain conservation, immutable transition
+    evidence, and byte-for-byte local/frozen JSON snapshots.
+  - [x] Add the direct pressure metamorphic invariant for the fixed 50/50 gas:
+    `ln Q(P2) - ln Q(P1) = -ln(P2/P1)`. This protects reaction orientation,
+    ideal-gas pressure exponent, and reference-pressure plumbing without
+    duplicating a production TPD test.
+  - [x] Add a typed table/report and ignored release diagnostic containing
+    JANAF Kp/boundary, local I1/I2 root, local TPD root, external errors,
+    internal agreement, and source-pressure provenance. Record the release
+    result in `STORY_TESTS.md` before treating this evidence as complete.
+- [x] Keep current multi-gas semantics explicit and outside the direct-water
+  fix. While any ideal-gas phase is active, declared gas phases belong to one
+  fixed gas assemblage for stability purposes. Independent immiscible gas
+  phases require a future physical/activity-normalization decision.
+- [ ] Review the recorded IAPWS diagnostic and set a source/model-justified
+  external comparison contract. It must distinguish IAPWS accuracy from the
+  present local NASA thermochemistry, ideal-gas activity, and pure-condensed
+  liquid model; it must not inherit generic solver tolerances from the loader.
+- [ ] After the first dataset format is reviewed, add separate typed schemas as
+  evidence requires them: ATcT species thermochemistry and published NASA CEA
+  full-equilibrium cases. The JANAF Boudouard reaction-thermochemistry schema
+  now demonstrates why heterogeneous tables must not be forced into the
+  temperature/pressure row.
+  - [x] Define a semantic frozen-row type for the first complete CEA output:
+    it carries the HP inputs, final temperature, total `kg-mol/kg`, and named
+    species amounts rather than a positional composition vector. Require the
+    exact published eleven-component H/O universe, with duplicate, missing,
+    unknown, non-finite, and negative entries rejected by the frozen loader.
+  - [x] Freeze the NASA CEA Tutorial H2/O2 HP I5 source case from NASA document
+    `20240016039` (Leader et al., AIAA SciTech 2025). Keep the external source
+    table read-only and explicitly mark its rounded presentation values as
+    `CharacterizationOnly`, not a machine-precision acceptance oracle.
+  - [ ] Resolve exactly the declared gas `H/H2/H2O/H2O2/HO2/O/O2/O3/OH` and
+    the pinned IAPWS-fixture water records `H2O(L)`/`H2O(s)` offline. Record
+    component identity, library, record key, physical phase, G/H/Cp capability,
+    common temperature interval, and standard-state pressure provenance. A
+    missing exact record must return `ValidationNotApplicable`, never select a
+    similar species or polymorph.
+    - [x] Add the strict offline preflight and prove it refuses the current
+      local data rather than silently dropping condensed candidates: the common
+      `H2O(L)=[273.15, 600] K` and `H2O(s)=[200, 273.15] K`, so their common
+      interval with the otherwise compatible `NASA_gas=[200, 6000] K` records
+      collapses to `273.15 K`. It excludes both the 2000 K reactant state and
+      the 3181.23 K CEA result. This is a local-data capability gap, not a
+      solver failure. It is not grounds for claiming a full eleven-component
+      solve. The executable I5 layer may compare the explicitly named nine-gas
+      subsystem because both external condensed rows are exactly zero, but it
+      must label them `ExternallyAbsentExcluded` and must not claim local TPD
+      or phase-stability evidence. Revisit the full universe only with reviewed
+      high-temperature condensed-record coverage or an explicit, physically
+      justified policy for candidates that are inapplicable before TPD
+      construction.
+  - [x] Reconstruct the 1 kg H2/O2 reactant mixture from CEA's O/F *mass*
+    ratio using the same local molar-mass machinery as phase resolution. Print
+    mass, kmol, H/O totals, and the local `H_target` built at 2000 K; keep
+    physical `P = 101325 Pa` separate from every record's standard-state `p0`.
+  - [ ] Run the ordinary production general `P,H` phase-control workflow over
+    exactly that declared universe, initially physical H2/O2 only with trace
+    seeds for other gases and inactive condensed water. Report component/
+    element counts, matrix rank, reaction-space dimension, actual P,H route,
+    accepted phase lifecycle, and strict internal conservation.
+    - [x] Add the explicitly scoped gas-only executable layer: resolve exactly
+      the nine CEA gas identities offline, reconstruct physical H2/O2 input,
+      run canonical `P,H Auto`, and preserve its actual route/fallback evidence.
+      This is a fixed one-gas-phase characterization, not the deferred
+      eleven-component phase-control proof.
+  - [ ] Add a typed identity-based CEA comparison report: temperature and
+    total amounts; major/minor/trace species classes; absolute/relative errors
+    and `delta_log10` where both amounts are positive; separate condensed
+    topology/stability evidence; and distinct external rounded-table versus
+    internal strict-conservation diagnostics.
+    - [x] The gas-only report compares all nine local amounts by exact CEA
+      identity, classifies major/minor/trace rows, reports absolute/relative and
+      log-space differences, and retains the two zero condensed rows as typed
+      exclusions with reasons. Their topology/stability evidence remains open.
+  - [x] Add an ignored offline diagnostic table plus immutable snapshots of
+    frozen and local JSON files. Do not establish external numeric tolerances,
+    add CEA/Cantera dependencies, permit network access, or auto-expand the
+    declared universe on this first complex case.
+
+#### P11.1 - NASA CEA H2/O2 HP gas-only route evidence
+
+The frozen CEA table remains an eleven-row external transcription while the
+first executable local problem deliberately contains only its nine gas
+components. `H2O(L)` and `H2O(cr)` are `ExternallyAbsentExcluded`, not locally
+TPD-validated inactive phases: both external amounts are exactly zero and the
+pinned condensed records are outside the required temperature domain. Do not
+extrapolate, alter record intervals, introduce pseudo-records, or expand the
+published gas universe.
+
+- [x] Keep identity availability separate from thermochemical applicability in
+  eleven-row preflight. The full fixture must return
+  `ValidationNotApplicable`, never a generic solver error, when any exact
+  record does not cover the required temperature.
+- [x] Enforce the gas-only eligibility invariant at the executable boundary:
+  every locally excluded condensed CEA row must have an exactly zero external
+  amount. A future positive external condensed amount must reject gas-only
+  construction with typed `ValidationNotApplicable`; it must never be compared
+  against a missing local component.
+- [x] Extend the typed CEA comparison report with diagnostic-only aggregates:
+  major-species max/RMS/mean-signed relative errors; minor/trace max/RMS
+  `delta_log10`; absolute and relative temperature/total-amount differences.
+  Excluded zero rows are outside all numerical aggregates.
+- [x] Add one ignored route-matrix diagnostic for the same exact nine-gas
+  fixture. Run `NestedTemperature`, `Monolithic`, and `Auto` separately and
+  retain success/failure, accepted path, temperature, residual, elemental
+  balance, component comparison, typed failure family, and compact backend
+  attempt records. `Auto` must not stand in for an explicit monolithic result.
+- [x] If direct monolithic remains rejected, characterize rather than tune:
+  use physically meaningful temperature seeds (reactant 2000 K, 3000 K,
+  3500 K, and external 3181.23 K only in the ignored diagnostic) plus a small
+  trace-floor sweep. Preserve the production trace policy and do not use CEA's
+  final composition as a production seed. A broad element-conserving local
+  gas seed may be an additional diagnostic probe only.
+- [x] When both direct routes accept, compare their nine-component state,
+  total amount, temperature, enthalpy acceptance, residual, and balances under
+  a strict *internal* tolerance independent of external CEA rounding.
+- [ ] Record release route-matrix evidence in `STORY_TESTS.md`. Keep all NASA
+  CEA deltas `CharacterizationOnly` until more than one complex reviewed case
+  supports a source/model-specific external contract.
+- [x] Design a **generic** monolithic P,H temperature-seed recovery policy from
+  this evidence. The exact H2/O2 case converges from 3000--3500 K to the same
+  accepted state as `NestedTemperature`, while 2000 K exhausts the current
+  LM/NR/TR cascade regardless of trace floor or broad local composition seed.
+  Do not hard-code a CEA temperature or a case-specific 3000 K retry. First
+  define reusable candidate seeds, acceptance/transaction semantics, bounded
+  retry budget, route reporting, and cross-fixture regressions.
+  - Implemented as `PhMonolithicSeedPolicy`: the caller seed is always first;
+    retryable numerical rejection may start fresh transactions at the bounded
+    midpoint and quarter points. Candidates are interval-derived,
+    duplicate-free, and stop at the first accepted state. Reports retain each
+    physical temperature, failure class, backend work, and selected attempt.
+    `InitialOnly` preserves strict diagnostics. The CEA H2/O2 case now recovers
+    from 2000 K at the generic 3100 K midpoint and remains monolithic.
+  - Monolithic recovery now obeys the same declared backend-attempt,
+    nonlinear-iteration, wall-time, cancellation, and phase-transition budgets
+    as nested P,H. The gate runs on both success and typed error paths before
+    `Auto` may select fallback, so an exhausted seed cascade cannot silently
+    spend beyond the caller's limit and then start another formulation.
+  - `PhMonolithicSeedRecoveryFailed` preserves every seed's original typed
+    backend cause. Recursive work counters and presentation rows keep those
+    attempts visible to budget enforcement, CLI reports, and GUI diagnostics.
+- [x] Document the manual maintainer workflow for adding or revising a frozen
+  dataset. Automatic download/update, runtime network access, generated KiThe
+  golden snapshots, solver timings, residual dumps, and lifecycle logs remain
+  explicitly outside I5.
+
+#### P11.2 - Argonne/STANJAN CHON fixed-`P,T` characterization
+
+This is the first I5 case for the general multicomponent production `P,T`
+formulation rather than a pure-phase boundary, scalar reaction, or `P,H`
+workflow. The frozen Table 4 source output retains all sixteen published
+identities. KiThe deliberately solves an exact 15-component NASA-gas universe:
+the source's `C5H12 = 0` row is an external zero reactant not solved locally,
+not a missing species and not part of numeric error metrics.
+
+- [x] Freeze Argonne National Laboratory / S. M. Aithal Table 4 provenance,
+  `T=2500 K`, `P=35 atm=3546375 Pa`, original pentane-methane-air molecular
+  feed, explicit C/H/O/N totals, and all sixteen STANJAN mole fractions as
+  read-only typed external evidence.
+- [x] Prove in code that the published `C5H12 + CH4 + O2 + N2` feed and the
+  local `4 CH4 + 2 CO2 + 8 O2 + 37.6 N2` feed both reconstruct exactly
+  `C=6, H=16, O=20, N=75.2`. This proof must not require a local pentane
+  thermochemistry record.
+- [x] Resolve precisely `CH4/O2/CO2/H2O/N2/N/O/NO/OH/H/N2O/CO/H2/NO2/HO2`
+  from offline `NASA_gas`, without NIST fallback or automatic candidate
+  expansion; preflight each record's key, physical state, interval, and
+  `G(2500 K)`.
+- [x] Assert the actual structure is `15 components / 4 elements / rank 4 /
+  11 reaction directions`, then run the normal production fixed-`P,T` path
+  with zero final phase transitions.
+- [x] Add identity-based major/minor/trace diagnostics plus frozen/local JSON
+  immutability checks. Preserve STANJAN source rounding (`sum=1.000008107`)
+  without renormalizing it and keep all external deltas
+  `CharacterizationOnly`.
+- [ ] Record the optimized-profile characterization in `STORY_TESTS.md`; do
+  not turn the first one-point STANJAN comparison into external acceptance
+  tolerances. A future second CHON point or independently reviewed
+  thermochemistry source is needed before choosing such bounds.
+
+#### P11.3 - NASA TP-1907 Table 11.3E CHON + graphite multiphase characterization
+
+This is the first I5 benchmark which couples a general CHON+Ar gas reaction
+space to a real pure condensed candidate through the production bounded active
+set. It is not a scalar Boudouard proxy: the reviewed local universe is 17
+NASA-gas components plus `C(gr)`, with five conserved elements and thirteen
+reaction directions.
+
+- [x] Freeze the selected NASA TP-1907 Table 11.3E rows at 680, 700, 720, and
+  740 K for `H/C=2.000`, `F/A=0.084535`, `ER=1.250`, dry air, and exactly
+  101325 Pa. Keep gas and condensed rows as separate typed values; all source
+  data, metadata, and normalisation evidence remain read-only and offline.
+- [x] State and validate the first source-normalisation contract explicitly:
+  the printed gas plus condensed values sum to one to five-decimal rounding
+  only when `C(gr)` is included, so the selected Table 11.3E rows are stored as
+  `SystemTotalMoleFraction`, never as silently gas-normalised values.
+- [x] Resolve the reviewed 17-species NASA gas universe plus a separate
+  inactive `C(gr)` NASA-condensed phase with NIST disabled; retain record keys,
+  provenance, common temperature coverage, element rank, and reaction-space
+  dimension as preflight evidence. `H2O(s)` and `H2O(l)` are typed external
+  zero rows and are not extrapolated into the 700--720 K local system.
+- [x] Build the source-faithful ordinary-molecule feed from a conceptual `CH2`
+  basis, the ordinary `ER=1.25`, and TP-1906 dry air
+  (`O2 + 3.727587 N2 + 0.0447068 Ar + 0.0015228 CO2`). `F/A` and chemical ER
+  are independently checked rounded diagnostics, never inverse inputs; exact
+  C/H/O/N/Ar equality is proven before solving.
+- [x] Add an ignored production `P,T` characterization using normal bounded
+  phase control with gas initially active and graphite initially inactive. The
+  debug route currently gives the expected topology: 700 K activates graphite
+  from negative TPD, while 720 K keeps it inactive with positive TPD. It also
+  prints source/local system-fraction rows and preserves frozen/local JSON.
+- [x] Extend the ignored source-audit diagnostic to all frozen
+  680/700/720/740 K rows. It hard-checks only the external topology
+  (active, active, inactive, inactive), prints gas and graphite values under
+  system-total normalisation, and keeps graphite quantity as characterization.
+- [x] Add forward and reverse accepted-state continuation diagnostics across
+  all four TP-1907 rows. They distinguish continuation seeds and accepted
+  transitions from trial events; both routes reproduce the external active /
+  inactive topology order.
+- [x] Prove that a one-point typed range is numerically equivalent to an
+  independent bounded `P,T` solve at all four frozen temperatures. The initial
+  range point has no physical continuation state, and component moles, phase
+  status, and graphite system fraction agree before multi-point continuation
+  is characterized.
+- [x] Locate the internal canonical `TPD(C(gr) | gas)=0` temperature through a
+  finite, explicitly bracketed bisection. The first source-faithful result is
+  about `705.69 K`, inside the NASA external `[700, 720] K` topology bracket;
+  it is explicitly not presented as an interpolated NASA boundary.
+
+#### P11.4 - Frozen-reference software-regression envelopes
+
+Frozen external values remain immutable source evidence. The following guards
+are deliberately broad bounds on previously characterized **KiThe software
+behavior**, not source uncertainty estimates or new physical acceptance
+criteria. Internal I1/I2/TPD, conservation, topology, and file-immutability
+contracts remain substantially stricter and independent.
+
+- [x] Keep benchmark-specific envelopes beside their comparator/tests; do not
+  serialize KiThe thresholds or expected KiThe numbers into frozen JSON and do
+  not parse `STORY_TESTS.md` at runtime.
+- [x] Add IAPWS liquid-water and ice-Ih boundary envelopes for maximum and RMS
+  external relative error while retaining strict three-route internal roots.
+- [x] Add JANAF Boudouard thermochemistry and pressure-boundary envelopes for
+  `|delta G|`, `|delta log10 K|`, and external boundary error; do not constrain
+  signed bias or weaken the strict local I1/I2-to-TPD agreement.
+- [x] Add NASA CEA H2/O2 P,H and Argonne/STANJAN CHON envelopes using existing
+  identity-aware aggregate reports. Exclude explicitly out-of-domain condensed
+  rows and external zero/reactant rows from numeric aggregates.
+- [x] Add TP-1907 guards with hard topology/TPD/root-bracket contracts, broad
+  gas aggregate quality bounds, a separate 680 K graphite relative guard, and
+  a 700 K graphite absolute system-fraction guard. Never use one ill-conditioned
+  near-boundary relative threshold for both temperatures.
+- [x] Make every envelope failure report dataset, temperature/species where
+  applicable, observed metric, and reviewed guard. Do not freeze accepted
+  backend, iteration count, or timing as a quality metric.
+- [x] Update `STORY_TESTS.md` to distinguish immutable external source evidence
+  from reviewed software-regression envelopes after each guard is implemented.
+
+#### P11.5 - NIST ThermoML benzene/toluene multicomponent candidate phase
+
+This is the first I5 case whose inactive candidate phase has an unknown binary
+composition. It must exercise the normal `IdealGas` plus `IdealSolution` path,
+not a benchmark-specific VLE model. Experimental ThermoML P-x data characterize
+the ideal model; strict algorithmic evidence comes from independent Raoult
+arithmetic versus canonical TPD composition minimization.
+
+- [x] Inventory exact offline records at 353.15 K: `NASA_gas:C6H6`,
+  `NASA_gas:C7H8`, `NASA_cond:C6H6(L)`, and `NASA_cond:C7H8(L)` all cover the
+  target temperature. Keep `nuig_thermo` as an explicit future fallback only if
+  a required native NASA-condensed record becomes unavailable.
+- [x] Freeze the reviewed NIST ThermoML P-x subset and provenance locally. It
+  contains only published liquid benzene composition and total pressure; do not
+  invent an experimental vapour composition or add network access to tests.
+- [x] Add the independent Raoult bubble/dew oracle from the frozen pure
+  endpoints, including exact algebraic round-trip tests.
+- [x] Resolve `C6H6`/`C7H8` gas and `C6H6(L)`/`C7H8(L)` liquid states from
+  local `SubsData` with explicit offline state/model declarations and no NIST
+  fallback. `nuig_thermo` remains a future fallback only if the reviewed NASA
+  condensed records become unavailable.
+- [x] Add canonical gas and liquid candidate TPD-minimization tests at three
+  interior ThermoML compositions. Require both minimum TPD and recovered
+  argmin composition; use absolute simplex errors, not relative errors.
+- [x] Prove the pressure sign and bounded phase activation around the local
+  bubble pressure: gas remains stable below it and the binary liquid appears
+  above it from the TPD minimizer composition.
+- [x] Add an ignored release characterization table for local NASA Raoult P-x
+  versus frozen NIST P-x. It is source-comparison evidence, not a strict
+  regression tolerance or a replacement for I1/I3 proof.
+- [x] Add two-phase chemical-potential equality, phase-qualified identity, and
+  per-species/element conservation stories after liquid activation. The
+  molecular-species check is phase-aware (gas plus its declared liquid peer),
+  not an ambiguous aggregate over arbitrary same-named records.
+
+#### P11.6 - Ternary VLE 2D-simplex preflight
+
+The first ternary candidate is `toluene + ethylbenzene + chlorobenzene`, with
+one ideal gas phase and one three-component ideal liquid solution. This pass is
+strictly a capability and source-data audit. Do not create a ternary
+phase-control benchmark, add activity coefficients, interpolate source rows,
+or substitute chemically similar compounds until the preflight reaches a clear
+Outcome A.
+
+- [x] Inventory the six exact local gas/liquid records with NIST fallback
+  disabled: canonical identity, selected library/key, physical state, `G(T)`/
+  `H(T)` support, standard-pressure provenance, and each temperature interval.
+  The executable probe finds only `NASA_gas:C7H8`,
+  `NASA_cond:C7H8(L)`, and `NASA_gas:C8H10,ethylbenz`. Exact
+  `NASA_cond:C8H10(L),ethylbenz`, `NASA_gas:C6H5Cl`, and
+  `NASA_cond:C6H5Cl(L)` are absent.
+- [x] Reject the candidate with `ValidationNotApplicable` if any exact state is
+  missing. The typed preflight refuses substitutions and proves that no local
+  fallback path enables online NIST lookup.
+- [x] Compute and report the common intersection of all six local intervals;
+  no experimental condition may be selected before this intersection is known.
+  It is intentionally unavailable because the six-state inventory is incomplete.
+- [x] Audit the official machine-readable NIST ThermoML payload for the exact
+  ternary: compound order, property type, published `T/P/x/y` variables,
+  uncertainties, and number of genuine ternary interior rows. DOI
+  `10.1021/je020186c` has 48 ternary isobaric `T-x` rows at 26.66, 53.33,
+  79.99, and 101.32 kPa; it publishes liquid `x` and temperature uncertainty,
+  but no experimental vapor composition.
+- [x] Identify official pure-component saturation support for the later
+  independent ternary Raoult oracle. The reviewed payload itself provides no
+  pure-saturation table, so a future executable fixture must freeze a separate
+  authoritative source.
+- [x] If any requirement fails, record the exact missing capability and stop
+  before TPD/lifecycle implementation. The primary candidate is not executable
+  with the current repository; no frozen ternary rows or artificial simplex
+  benchmark are added.
+- [ ] After adding exact offline liquid ethylbenzene plus gas/liquid
+  chlorobenzene records, rerun the preflight, require a nonempty common interval,
+  select four to six genuine ThermoML interior rows, freeze only published
+  `T/P/x` values, and then implement the 3-component / 2D-simplex TPD story.
+- [ ] If the missing local records are not added, inventory actual offline
+  gas/liquid pairs first and choose a different ternary NIST VLE source from
+  that repository-driven shortlist. Do not select a literature case before the
+  local six-state inventory succeeds.
+
+#### P11.7 - Explicit test-only frozen thermochemistry for the ternary VLE candidate
+
+The production-only P11.6 preflight is a negative capability contract and must
+remain so.  A later test-only thermochemistry universe may complement it, but
+must never enter `SubsData` search, mutate JSON libraries, or turn the
+production preflight from `ValidationNotApplicable` into `Ready`.
+
+- [ ] First make a reviewed source inventory for the three missing exact
+  states: liquid ethylbenzene, gas chlorobenzene, and liquid chlorobenzene.
+  For every candidate source record, retain CAS/formula/state, primary source
+  and table, representation, temperature range, `Cp/H/S/G` capabilities,
+  formation/reference convention, and standard pressure.  Prefer reviewed
+  NASA/CEA, NIST/TRC, JANAF/equivalent, or the original peer-reviewed source;
+  reject undocumented aggregators.  Do not fit a closure to the ternary
+  ThermoML VLE rows.
+- [x] Freeze the approved NIST WebBook ethylbenzene numerical seeds separately:
+  liquid/gas formation-enthalpy anchors, liquid entropy and Cp anchors,
+  vaporization-enthalpy points, the bounded Majer-Svoboda correlation, and the
+  bounded Antoine pressure oracle.  This is I5 source evidence only; it does
+  not yet claim a gas/liquid `G0(T)` closure or alter the production preflight.
+- [ ] Decide whether production NASA records may be combined with external
+  frozen records only after an explicit reference-state alignment audit:
+  pressure, enthalpy/entropy zero, formation convention, and elemental
+  reference state.  Present NASA records report an *undeclared* machine
+  pressure, so this decision must not be inferred silently.  Any `1 atm` to
+  `1 bar` correction must be explicit, documented, and unit-tested; otherwise
+  use a compatible external gas/liquid pair or retain `ValidationNotApplicable`.
+- [ ] Add a separate, read-only frozen dataset only after the inventory passes.
+  Give it semantic external provenance (never a forged `NASA_gas` or
+  `NASA_cond` identity), metadata beside the numerical representation, exact
+  state labels, temperature bounds, and immutable-byte coverage.  It is
+  test-only and must be selected by an explicit adapter, never a global
+  fallback.
+- [ ] Build the adapter around the existing generic
+  `ResolvedThermochemistry::from_functions` capability contract:
+  `G0(T)`, optional `H(T)`/`Cp(T)`, bounds, state, reference pressure, and
+  provenance.  It must contain no compound-specific branches and must return a
+  typed out-of-range error instead of extrapolating.
+- [ ] Before any ternary lifecycle claim, validate each gas/liquid pair with
+  `Delta G_vap(T) = G0_gas(T) - G0_liquid(T)` and independently compare the
+  implied pure saturation pressure with authoritative pure-component vapour
+  pressure data.  This evidence route must be independent from ThermoML DOI
+  `10.1021/je020186c`.
+- [ ] Add the frozen-capability preflight beside the preserved production-only
+  negative preflight.  It must require all six exact state-qualified
+  components, three liquid components / a two-dimensional simplex, finite
+  `G0` (and `H` where supplied), shared temperature coverage for selected
+  source rows, preserved provenance/reference pressure, and no library/data
+  mutation.
+- [ ] Only after those gates pass, freeze four to six published interior
+  ThermoML `T/P/x` rows as characterization evidence and add the normal
+  gas-only / boundary / two-phase TPD lifecycle stories.  Do not claim an
+  external VLE error envelope before the independent pure-state checks are
+  established.
+
+#### P11.8 - Ternary `P,T` Antoine-gauge fixture
+
+The first strict ternary algorithmic test need not wait for an absolute
+`Cp/H/S` library.  With only toluene, ethylbenzene, chlorobenzene, and their
+gas/liquid copies, the molecular element matrix has rank three and the
+six-component system has three transfer directions.  An explicit test-only
+gauge therefore supplies the required standard-Gibbs differences from
+independent pure `Psat(T)` while remaining prohibited from `P,H` and
+production lookup.
+
+- [x] Freeze generic NIST Antoine records for all three identities with exact
+  CAS/formula/elemental composition, `log10(P/bar)` coefficients, source route,
+  and validity ranges.  Derive, rather than hard-code, their common interval
+  `335.19..384.66 K`; use explicit `p0 = 100000 Pa` throughout.
+- [x] Implement bounded generic `G0_gas=0` / `G0_liquid=RT ln(Psat/p0)` gauge
+  functions plus the pure pressure round-trip.  Test gas/liquid sign semantics,
+  extrapolation rejection, source immutability, molecule-matrix rank three,
+  and exactly three duplicated phase-transfer directions.
+- [x] Audit genuine ThermoML interior rows in the derived common interval and
+  freeze only published `T/P/x` values. Four source rows at the central and
+  ethylbenzene-rich compositions, each at `26.66` and `53.33 kPa`, lie inside
+  the common window. The Raoult-derived `y` remains a solver-side independent
+  result, never a synthetic source column.
+- [x] Add the scalar ideal-Raoult bubble-temperature root and its derived
+  vapour composition as I1/I2 evidence before invoking canonical TPD.
+- [x] Run canonical liquid and vapor candidate TPD at the same boundary:
+  require a three-component candidate, simplex dimension two, `TPD_min ~= 0`,
+  and recovered argmin rather than an expected-composition seed. This is a
+  direct test-only `IdealTpdProblem` route over the frozen gauge, not a fake
+  `ResolvedPhaseSystem` or a legacy mutable workflow.
+- [x] Add gas-to-liquid and liquid-to-gas active-set decision stories around
+  the pressure boundary, preserving the complete incipient ternary
+  composition. They exercise canonical stability reporting and `PhaseManager`
+  transition classification without falsely packaging test-only gauge data as
+  a production-resolved system.
+- [x] Characterize, but do not use as an acceptance envelope, `T_NIST -
+  T_Raoult` for selected experimental rows.  The ignored story prints every
+  source point plus RMS/max temperature deltas. Keep this external comparison
+  distinct from strict Antoine-gauge I1/I2 and canonical I3 evidence.
+
+#### P11.9 - Full canonical lifecycle over the ternary Antoine gauge
+
+The gauge is deliberately a `P,T`-only test universe, but it must now prove
+that the normal immutable phase-control runner carries a multicomponent
+candidate through activation, accepted re-solve, continuation, and reduction
+of topology. `PreparedPhaseControlRunner` over an explicit raw
+`EquilibriumProblem` is the canonical test boundary here; never substitute a
+fake `ResolvedPhaseSystem` or the legacy mutable workflow.
+
+- [x] Add an independent generic ternary Rachford-Rice oracle with typed
+  `TwoPhase`, `AllLiquid`, and `AllVapor` outcomes. Validate exact simplex,
+  reconstructed bulk inventory, endpoint classifications, and an interior
+  `beta` reference built from `beta*y + (1-beta)*x`.
+- [x] Build one central `P = 53.33 kPa` benchmark inventory from the
+  independently derived Raoult `x/y` and a strictly interior vapor fraction.
+  Keep `x`, `y`, and bulk `z` as distinct quantities.
+- [x] Run gas-only -> liquid activation through `PreparedPhaseControlRunner`:
+  require a negative liquid TPD, a three-component incipient composition,
+  an accepted two-phase output, molecular conservation, and cross-phase
+  chemical-potential equality. Compare `beta/x/y` with Rachford-Rice.
+- [x] Mirror liquid-only -> gas activation with the same accepted-state and
+  independent-flash contracts.
+- [x] Demonstrate at least one accepted multicomponent disappearance with
+  finite final absence TPD evidence. Permit either supported production
+  disappearance reason; do not force one numerical branch.
+- [ ] Add a short forward/reverse fixed-pressure temperature story using only
+  accepted continuation state. The first accepted two-phase -> gas-only
+  continuation handoff, topology reduction, and conservation are now covered;
+  reverse sweep and no-chatter evidence remain.
+- [ ] Locate and exercise one genuine in-band hysteresis point from active and
+  inactive histories. Outside the band, require history-independent topology.
+- [ ] Add an ignored compact release diagnostic table with phase statuses,
+  continuation use, flash classification, `beta`, TPDs, transition/trial
+  counts, maximum composition/conservation deltas, and separate forward /
+  reverse transition locations.
+- [ ] Keep the established external ThermoML temperature characterization as
+  a conservative software-regression guard only (`RMS < 1.5 K`,
+  `max |delta| < 2.0 K`), never as the lifecycle truth.
+
+#### P11.10 - Fixed-inventory full ternary production lifecycle
+
+The earlier P11.9 story proves the runner can reach an independently checked
+two-phase split from either one-phase start. This stricter follow-up fixes the
+physical inventory to `z = [0.334, 0.333, 0.333] mol` at `P = 53_330 Pa` and
+uses independently recomputed Antoine/Raoult bubble and dew boundaries. It is
+still test-only `P,T` ideal physics: no Antoine data, phase-control policy, or
+production code may be adjusted merely to obtain an expected topology.
+
+- [x] Add an independent bounded dew-temperature oracle alongside the existing
+  bubble and Rachford-Rice routes. Recompute and characterize `Tb`, `Td`, the
+  endpoint incipient compositions, and the physical two-phase interval from
+  frozen source data rather than treating approved diagnostic numbers as truth.
+- [x] Add the exact seven-point fixed-inventory grid (`Tb-3`, `Tb-0.5`,
+  `Tb+0.5`, midpoint, `Td-0.5`, `Td+0.5`, `Td+3` K) and prove all independent
+  Rachford-Rice classifications before production lifecycle is invoked.
+- [x] Run the full forward production sequence liquid-only -> two-phase ->
+  gas-only. The first point must be independent; later points may receive only
+  the previous accepted log-mole/phase-set continuation. Require appearance
+  between points 2/3, disappearance between points 5/6, no accepted chatter,
+  molecular conservation, and final complementarity.
+- [x] Compare every accepted two-phase forward point with independent flash:
+  `beta`, phase-qualified `x/y`, per-component conservation, and cross-phase
+  chemical-potential equality. The midpoint is the primary strict comparator.
+- [x] Run a new independent reverse sequence gas-only -> two-phase ->
+  liquid-only. Require liquid appearance, gas disappearance, and equality of
+  forward/reverse interior physical states; transition locations may differ
+  only within the declared hysteresis band.
+- [x] Find a genuine continuous-TDP point strictly inside the actual production
+  hysteresis band. At the same `P,T,z`, prove inactive and active accepted
+  histories retain different allowed topologies while their TPD values agree;
+  add outside-band history-independent controls. A dew-side analogue is
+  optional if it adds no distinct contract.
+- [x] Add an ignored release table containing forward/reverse point topology,
+  oracle regime, continuation origin, phase fraction, TPDs, transition counts,
+  composition and conservation deltas, chemical-potential mismatch, and
+  aggregate no-chatter metrics. The release execution is recorded in
+  `STORY_TESTS`.
+- [x] Keep frozen Antoine and ThermoML immutability plus the existing external
+  ThermoML `RMS < 1.5 K`, `max |delta| < 2.0 K` software-regression guard.
+
+#### P11.11 - NASA TP-1906/1907 CHON + graphite `P,H` lifecycle
+
+This is the first heterogeneous external `P,H` story. NASA TP-1906 supplies
+the target **specific equilibrium-mixture enthalpy**; TP-1907 separately owns
+composition and graphite-topology evidence. The production request receives
+only pressure, extensive `H_target`, and the closed element inventory. The
+published temperature is comparison evidence, never the answer or a
+benchmark-specific seed.
+
+- [x] Freeze the four TP-1906 Table 11.3E heterogeneous `H [J/g]` rows at
+  680/700/720/740 K with separate provenance and explicit source units. Do
+  not merge them into TP-1907 composition JSON or reinterpret them as molar,
+  gas-only, or frozen-composition enthalpy.
+- [x] Reuse the reviewed TP-1906 dry-air / TP-1907 executable feed and prove
+  semantic joins by temperature, pressure, H/C, ER, chemical ER, and dry-air
+  convention. Derive each total `H_target [J]` from the exact executable
+  inventory mass, retaining source `J/g`, mass `g`, and total `J` in reports.
+- [x] Add a fixed-`P,T` enthalpy-reference preflight at every source row.
+  Characterize local `h [J/g] - h_TP1906 [J/g]` before interpreting any
+  recovered `P,H` temperature. Never apply an empirical enthalpy offset.
+- [x] Add isolated canonical `P,H` cases and compare solved temperature,
+  topology, graphite amount, system-normalized gas composition, enthalpy
+  residual, conservation, and a fixed-`P,T` witness at recovered temperature.
+- [x] Add forward `H680 -> H740` and fresh reverse `H740 -> H680` ranges.
+  Only accepted states may continue; retain accepted transitions separately
+  from nested trial events and require the expected single graphite
+  disappearance/appearance with no accepted chatter.
+- [x] Add route/seed evidence for nested, monolithic when eligible, and Auto.
+  The diagnostic uses a common 900 K numerical seed, records the accepted
+  route, and never provides a source temperature as an answer or seed. Its
+  monolithic finding is retained as the separate blocker below.
+- [x] Repair bounded monolithic `P,H` phase control before promoting `Auto` for
+  near-boundary condensed phases. The defect was in the shared row-scaling
+  contract, not TPD: the dimensionless reaction residual was divided by a
+  dimensional `max(|Delta G0|, R*T*||nu||)` factor, so a raw affinity error of
+  order one could pass a `1e-6` acceptance gate. Reaction rows now remove only
+  the arbitrary reaction-basis norm. The ordinary H700 regression requires
+  monolithic `P,H` to retain finite graphite and agree with an independently
+  solved canonical `P,T` witness to `1e-6` relative moles.
+- [x] Add an ignored release characterization table and only then review
+  conservative software-regression envelopes. Snapshot frozen TP-1906,
+  TP-1907, and local library files around all offline stories.
+
+#### P11.12 - Frozen-reference numerical formulation hardening
+
+The reviewed datasets now exercise production pathways. Use them to lock down
+coordinate and lifecycle invariants that synthetic fixtures cannot prove.
+
+- [x] Add a real TP-1907 fixed-active reaction-basis metamorphic regression:
+  permute and rescale non-zero reaction columns while preserving `A^T*N = 0`,
+  then require the same accepted mole vector, affinity, and element balance.
+- [x] Add a real bounded TP-1907 trace-floor regression on both sides of the
+  graphite transition. Floors used only for log coordinates must not change
+  accepted topology or materially change component amounts.
+- [x] Promote the four TP-1906/1907 P,H source rows into a normal,
+  non-printing regression: every isolated target and both accepted-state
+  continuation directions must retain the P,T witness manifold, graphite
+  topology, enthalpy contract, and frozen/local file immutability.
+- [ ] Promote selected ignored external-characterization envelopes into small
+  ordinary assertions where their contracts are now stable: NASA CEA H2/O2
+  P,H, Argonne/STANJAN CHON, IAPWS liquid/ice, and the ternary external
+  temperature envelope. Keep detailed release tables ignored.
+- [x] Add a `FrozenReferenceCatalog` that verifies every dataset identifier,
+  evidence kind, schema version, expected row count, and source file is unique
+  and referenced by its intended adapter. Reject unsupported positive schema
+  versions instead of accepting every non-zero value.
+- [x] Add real-data extensive-inventory-scaling metamorphic coverage for both
+  TP-1907 P,T and TP-1906 P,H. Scaling the full closed inventory and the
+  extensive P,H target must retain temperature/topology and scale every amount.
+  The fixed-`P,T` reference covers `10^-3..10^3`; bounded nested `P,H` covers
+  the controlled two-order `10^-1..10^1` probe with a tightened scalar/inner
+  contract. Extreme `P,H` brackets remain a separate cascade-conditioning
+  concern, not a reason to weaken the accepted-state invariant.
+- [x] Expand the TP-1907 CHON + graphite extensive-scaling evidence without
+  tuning production thresholds to the fixture.
+  - [x] Add a lower-level reaction-row normalization matrix (`10^-8..10^8`
+    and a sign reversal) that proves raw affinities and their row scales change
+    together while the dimensionless residual remains invariant.
+  - [x] Characterize fresh bounded P,T solves at 680/700/720 K over
+    `10^-4..10^4` inventory factors. Compare topology, phase totals, gas
+    composition, TPD sign/value, conservation, and component moles by typed
+    identity. Print the active-phase amount next to the numerical trace floor
+    and `phase_eps` so a threshold interaction is visible rather than hidden.
+    The ignored matrix is now a strict production regression: invariant
+    accepted states cover every factor through `10^4`, with active phase
+    totals still far above `phase_eps`. The original physical-coordinate
+    failure at `10^4` remains an explicit negative witness when
+    `ExtensiveNormalizationPolicy::Disabled` is selected. A
+    scale-aware trace seed was explicitly tried and does not remove the
+    `10^4` failure. Fixed-active diagnostics show that a fresh `10^4`
+    inventory seed fails while `accepted_log_moles + ln(10^4)` accepts the
+    identical scaled formulation. This rules out the trace floor and
+    phase-lifecycle thresholds as the direct cause, but is only evidence of a
+    fresh-seed conditioning/basin gap: it does not yet localize one defect
+    across legacy and RST backends. A first solver-coordinate-origin
+    experiment did not recover the fresh case robustly and was reverted; no
+    production coordinate contract changed as a result.
+    - [x] Isolate the `10^4` fresh-seed failure with minimal per-backend
+      reproductions, including initial residual, finite bounds, step-control,
+      and candidate-rejection evidence. Only after that may we reconsider a
+      solver-internal normalized log-mole coordinate origin. The resulting
+      production route proved recovery of both fixed-active and bounded
+      TP-1907 cases while preserving public physical `ln(n)`/mole results.
+    - [x] Diagnose the real TP-1907 `10^4` fresh-inventory gap before changing
+      any production numerical policy.
+      - [x] Add a diagnostic-only classification with mutually exclusive
+        results: `StrictScaleInvariant`, `ThresholdLimited`,
+        `FreshSeedBasinLimited`, and `PhysicalScaleRegression`. Do not assign
+        `FreshSeedBasinLimited` until a transformed accepted seed proves the
+        scaled physical state exists. The 680/700/720 K matrix now assigns
+        `FreshSeedBasinLimited` only after its temperature-appropriate
+        transformed physical oracle has been accepted.
+      - [x] Extend the fixed-`P,T` diagnostic to 680, 700, and 720 K: the
+        first two retain graphite, while 720 K excludes it. For each point
+        compare (A) ordinary fresh production seed, (B) exact `ln(10^4)`
+        translation of an accepted unit-scale state, and (C) an
+        answer-independent scale-aware candidate seed. Route B is an oracle
+        only and must never become a production solving path. At 720 K the
+        oracle is correctly reduced to gas-only: the graphite coordinate stays
+        numerical trace, the accepted topology is gas-only, normalized gas
+        moles/fractions agree with unit scale, and `TPD(C(gr)) > 0` remains
+        intensive (within the diagnostic nonlinear-route envelope).
+        - [x] The fixed-active 680/700 K pass now proves
+          `FreshSeedBasinLimited`: ordinary fresh and both input-only trace
+          variants fail, while the transformed accepted seed preserves moles,
+          reaction affinity, and balances. Lowering the absolute trace floor
+          to `1e-36` and raising it relatively both fail, so a trace-floor
+          policy change is not a justified production fix.
+        - [x] Complete 720 K through the physically correct reduced gas-only
+          projection. The all-active fixed formulation is intentionally not a
+          valid oracle there because graphite is inactive; its iteration-limit
+          failure must not be counted as the scale-conditioning result. The
+          transformed `10^4` gas-only seed now accepts with gas active and
+          graphite inactive, preserves normalized gas moles and fractions,
+          and retains positive intensive graphite TPD. Ordinary fresh bounded
+          production with recovery disabled still fails, while the default
+          typed recovery accepts through a physical-coordinate retry. Thus
+          720 K independently confirms `FreshSeedBasinLimited` without a
+          graphite-activation artifact.
+      - [x] Measure the actual seed at every relevant boundary before inventing
+        a new policy. `LogMolesInitialGuess::from_moles_with_policy` already
+        translates positive physical initial amounts under uniform scaling;
+        trace coordinates deliberately remain governed by their explicit
+        floor. Record where that covariance is lost, if at all: global/reduced
+        active seed, phase-control restart, or backend iteration.
+        - [x] Component-level 680/700 K instrumentation confirms that every
+          positive physical input coordinate shifts by `ln(10^4)` to machine
+          precision. The proposed input-total-normalized Route E has scale
+          exactly one and is bitwise-equivalent to ordinary Route A, so it
+          cannot recover the case and must not be promoted to production.
+          The accepted oracle instead has a strongly different reactive
+          composition (many input-zero species become major and some input
+          reactants become trace). The current explanation is therefore
+          relative-composition/basin conditioning, not lost global extensive
+          scale or trace-floor magnitude.
+      - [x] Print structured provenance for every A/B/C route: initial
+        log-mole min/max/mean/range, trace-coordinate count, raw and scaled
+        reaction/element residual blocks, finite bounds, backend attempts,
+        iteration counters, terminal typed error, and component-level
+        recovered-mole mismatch. The release-only diagnostic
+        now prints seed and component tables plus A/B residual blocks and
+        terminal solver evidence. The 720 K row explicitly marks C/D as not
+        applicable because 680/700 already falsify the trace-floor hypothesis;
+        it records the reduced gas-only B route and graphite TPD instead. Do
+        not tighten a global error tolerance until a new witness identifies a
+        different component-level mismatch.
+      - [x] Establish the production representation boundary for exact
+        extensive normalization and select an explicit on-failure policy.
+        - [x] Introduce a typed answer-independent `ExtensiveNormalization`
+          built only from physical input inventory. It must translate component
+          moles, element/phase totals, total enthalpy, extensive residuals,
+          and physical absolute thresholds explicitly rather than scattering
+          raw `/ scale` operations. It is public through the equilibrium
+          prelude but contains no solve or routing policy.
+        - [x] Publish a concise audited classification: extensive physical
+          values transform; T/P/p0, mole fractions, activities, G/H/S standard
+          states, reaction affinity, chemical potentials, TPD, hysteresis, and
+          topology remain intensive/invariant. Record separate semantics for
+          trace floor, `phase_eps`, absolute acceptance tolerances, and finite
+          log-mole floors. The audited table lives with `ExtensiveNormalization`.
+        - [x] Preserve physical absolute-mole threshold meaning in normalized
+          solver space: map `trace_floor` and `phase_eps` to `/ scale`, keep
+          relative trace fractions unchanged while scaling their absolute cap,
+          and provide the same explicit conversion for absolute energy/mole
+          tolerances. Do not scale TPD create/keep thresholds. The typed phase
+          policy adapter changes only `phase_eps`; P,H test requests convert
+          absolute enthalpy tolerance explicitly.
+        - [x] Keep normalized diagnostics internal and reconstruct physical
+          extensive balance/enthalpy evidence before publication. Discovery
+          diagnostics are disabled so live sinks cannot receive normalized
+          mole units. `ExtensiveNormalizationRecoveryEvidence` retains the
+          scale, original typed failure, discovery backend, optional physical
+          retry backend/failure, and whether physical publication required
+          reconstruction. Frozen P,H evidence prints normalized and
+          reconstructed physical enthalpy errors as distinct values.
+        - [x] Define the continuation boundary before routing: accepted phase
+          topology and physical composition remain physical state; a normalized
+          numerical iterate alone must never become a continuation seed. The
+          mapping documents this rule and does not alter continuation behavior.
+        - [x] Add focused algebraic tests for round trips, scale invariance,
+          enthalpy conversion, physical threshold conversion, and non-scaling
+          of intensive values, then migrate frozen diagnostics to this shared
+          abstraction without changing default solve paths. Unit coverage also
+          rejects invalid scales/inventories and proves trace/phase-epsilon
+          semantics; P,T/P,H ignored recovery matrices use the shared mapping.
+      - [x] Test exact extensive normalization as a separate test-only
+        formulation recovery. Derive `s = sum(n0 > 0)` from the current
+        request, rebuild the same fixed-`P,T` problem with `n0 / s`, use its
+        ordinary fresh seed, and reconstruct physical moles only after
+        acceptance. The `10^4` TP-1907 matrix now accepts at 680/700 K with
+        gas+graphite and at 720 K with the correct gas-only reduced set:
+        reconstructed moles agree with B within `4.6e-9`, gas fractions within
+        `2.6e-15`, and the 720 K graphite TPD remains positive/intensive
+        (relative difference `2.5e-6`). This is evidence for absolute
+          extensive-scale conditioning. The later production policy uses this
+          exact request-derived transform only after a classified numerical
+          failure; it does not depend on this oracle.
+        - [x] Add the full `10^-4,10^-2,1,10^2,10^4` P,T normalization
+          metamorphic matrix for 680/700/720 K. Each internal request must
+          have an order-one inventory, reconstruct the appropriate B oracle,
+          preserve the 720 K gas-only topology and positive graphite TPD, and
+          retain the existing F/I/B negative evidence at `10^4`. The ignored
+          matrix now passes for all fifteen points: the largest reconstructed
+          mole mismatch is `1.7e-8` (720 K at `10^-4`), gas fractions agree
+          within `4.1e-10`, and the intensive graphite-TPD difference remains
+          `2.5e-6`.
+        - [x] Only after the P,T scale matrix is complete, characterize nested
+          P,H normalization on H700/H720 by applying the same `n0 / s` and
+          `H_target / s` transformation. Reports must distinguish normalized
+          internal enthalpy residual from reconstructed physical Joules; no
+          P,H production retry may be introduced in this diagnostic pass. At
+          physical factor `10^4`, ordinary fresh nested P,H still fails while
+          normalized ordinary nested P,H accepts both rows. H700 reconstructs
+          the graphite-present base state with max mole error `1.5e-9`; H720
+          reconstructs the graphite-absent state with `1.3e-11`; both recover
+          exactly the base temperature within the printed precision. The
+          diagnostic publishes internal (`~4e-5 J`) and reconstructed physical
+          (`~2..3 J`) enthalpy errors separately, so normalized Joules cannot
+          leak into physical evidence.
+        - [ ] Inspect why failed backend attempts currently publish
+          `iterations=0` with `metrics=None`: distinguish initialization,
+          Jacobian/linear-solve, bounds/step, and iteration-limit failure.
+          This is solver observability work independent of normalization.
+      - [x] Classify the `P,H` `10^4` failure as an inner bounded-`P,T`
+        conditioning failure rather than a missing outer enthalpy root. The
+        canonical nested route now recovers its numerical inner trials through
+        the shared P,T normalization boundary and accepts both H700/H720 while
+        preserving temperature, topology, physical moles, and enthalpy.
+      - [x] Reject the conditional Route-C seed branch: answer-independent
+        interior seeds did not succeed while A failed. The selected recovery
+        is exact extensive representation normalization, not a new guessed
+        equilibrium composition.
+      - [x] Only if answer-independent Route C succeeds while A fails, design
+        a deterministic input-derived active-coordinate seed/recovery policy.
+        It must preserve `10^-4..10^2` behavior, leave numerical trace floors
+        explicit, avoid magic shifts, and never depend on a previously solved
+        scale-one reference.
+        - [x] Since direct seed replacement was rejected, investigate a
+          chemically feasible answer-independent *relative-composition* seed:
+          it must respect the current closed element inventory and active phase
+          set without borrowing a unit-scale equilibrium, external reference
+          fractions, or a temperature-range continuation result. Compare its
+          initial residual and element-manifold distance against A/B before
+          adding any production recovery path.
+        - [x] Prototype the recovery as test-only direct `A^T n = b`
+          interiorization, not as a second equilibrium solver. Start with a
+          deterministic bounded affine projection of a uniform active-species
+          target: keep every inactive phase at numerical trace, enforce a
+          dimensionless positive floor only for the current active species,
+          and iteratively bind coordinates that would violate that floor.
+          Normalize by active input inventory before SVD solves. No Gibbs,
+          `K_eq`, accepted state, external composition, or reaction-basis
+          coordinates may enter this prototype. The diagnostic helper now also
+          supports a floor-injected input-anchored target; the injection occurs
+          in normalized coordinates, so raw zero feed components cannot make
+          bounded-affine active-set selection scale-sensitive.
+        - [x] Before any nonlinear retry, add direct seed evidence for
+          680/700/720 K and scale factors `10^-4`, `1`, `10^4`: finite active
+          coordinates, exact element conservation, inactive graphite retained
+          at 720 K, deterministic output, and seed-scale covariance. Record
+          requested versus achieved dimensionless interior fraction and a
+          typed diagnostic outcome when a full positive interior is not
+          structurally available. Both uniform and input-anchored direct seeds
+          now have a full `1e-6` interior at all three points, preserve the
+          active/inactive graphite scope, and scale through `10^-4..10^4`.
+        - [x] Compare ordinary fresh (F), element-feasible interior (I), and
+          transformed accepted oracle (B) at `10^4`. Print raw/scaled residual
+          blocks and log-space geometry. I is evidence only until it reaches
+          the same physical topology/composition/TPD contract as B with the
+          unchanged strict LM configuration. At 680/700 K the input-anchored
+          I lowers the raw reaction block from about `65` to `56..59`, while
+          uniform I remains about `63..65`; both preserve element balance near
+          `1e-11` and nevertheless make LM/NR/TR hit their iteration limit.
+          At 720 K the gas-only I likewise fails while gas-only B succeeds and
+          retains positive graphite TPD. Therefore direct manifold feasibility
+          and the numerical trace floor are not the missing recovery mechanism.
+        - [x] Reject further answer-independent relative-composition seed
+          invention for this failure after preserving the negative evidence.
+          Exact request-derived extensive normalization solves the conditioning
+          problem without tuning `phase_eps`, trace floors, acceptance
+          tolerances, or borrowing B's accepted composition.
+      - [x] Promote the
+        full `10^-4..10^4` 680/700/720 K P,T matrix to strict metamorphic
+        evidence, then rerun scaled H700/H720 `P,H` cases. Do not change
+        `phase_eps`, trace floors, hysteresis thresholds, thermochemistry,
+        element totals, or acceptance tolerances merely to admit `10^4`.
+  - [x] Add the corresponding P,H
+    matrix for the graphite-present and graphite-absent target rows. Scale the
+    full inventory and `H_target` together; carry only accepted seeds and
+    report route selection separately from the physical invariant. The ignored
+    strict 700/720 K nested-P,H matrix now accepts every factor through `10^4`;
+    it asserts recovery provenance at `10^4` and distinguishes physical retry
+    from reconstructed physical publication.
+  - [x] Add typed `ExtensiveNormalizationPolicy::{Disabled,
+    OnNumericalFailure}` to the canonical P,T solve options and reproducibility
+    snapshot. Recovery is attempted only for classified numerical failures and
+    only when the request-derived inventory scale differs materially from one.
+  - [x] Prefer a final physical-coordinate retry after normalized basin
+    discovery. If the unchanged physical formulation remains ill-conditioned,
+    reconstruct every public extensive field through one audited boundary and
+    retain the retry failure in typed recovery evidence.
+  - [x] Turn the P,T and P,H scale characterizers into strict regressions:
+    a failed point now fails the test instead of merely printing `FAILED`.
+    The default route accepts all current `10^-4..10^4` rows; an explicit
+    disabled-policy assertion preserves the historical `10^4` failure witness.
+  - [x] Extend the same representation policy to the prepared typed P,T
+    temperature-range runner. The cached formulation remains the fast path;
+    only a failed point enters the canonical recovery transaction with its
+    current accepted log-mole seed and, for bounded solves, accepted
+    `PhaseSet`. `RecoveryFormulation` makes the extra build auditable, range
+    progress is emitted exactly once per point, and a failed recovery publishes
+    neither a point nor a partial `TemperatureRangeSolution`. Recovered-point
+    wall time includes both the rejected prepared attempt and recovery. The strict real
+    TP-1907 `680/700/720 K` range now recovers factor `10^4` at its first point
+    and then continues through the prepared physical formulation.
+  - [x] Add a retained physical-unit recovery event/report for opt-in
+    diagnostics. Internal discovery events are suppressed, while
+    `ExtensiveNormalizationRecoveryAccepted` records scale, trigger, discovery
+    backend, optional physical retry, and reconstruction. The event respects
+    diagnostics mode/event limits, reaches the live sink, renders in CLI and
+    GUI diagnostics, and is backed by the full typed recovery evidence.
+  - [ ] Record the strict production P,T and nested P,H matrices in release
+    mode in `STORY_TESTS.md`; the development regressions are green.
+  - [ ] Keep `10^-6..10^6` as an ignored release characterization and
+    `10^-9..10^9` as diagnostic-only evidence. A failure in those bands must
+    be classified as a threshold/conditioning boundary, never "fixed" by
+    weakening phase-control or acceptance contracts.
+- [ ] Add real-data layout-permutation metamorphic coverage for both TP-1907
+  P,T and TP-1906 P,H. Reorder phase-qualified components only through typed
+  layouts, then compare results by component identity rather than vector index.
+- [x] Add a compact route/backend evidence matrix on reviewed fixtures:
+  default RST versus legacy NR for a fixed P,T case, and nested/monolithic/Auto
+  P,H where each route is applicable. Compare accepted physical state, not
+  iteration count.
+- [x] Extract a test-only accepted-solution assertion helper for finite values,
+  conservation, complementarity, and file immutability. Keep scenario-specific
+  topology and external assertions explicit rather than hiding them behind a
+  generic fixture framework.
+- [ ] Split `frozen_reference/mod.rs` by ownership (loader/catalog metadata,
+  typed schemas, and shared assertions) before it grows further; preserve the
+  current public module paths through re-exports.
+- [ ] Enrich frozen metadata only from reviewed sources. In particular, do not
+  invent an Argonne stable identifier/version or add byte hashes before a
+  repository-wide line-ending policy exists.
+
+### P9.5a - Synthetic lifecycle evidence hardening
+
+The following is deliberately narrow. It closes evidence gaps identified by a
+review of the completed I1-I3 suite; it must not create another P,H solver or
+duplicate general phase-control regressions already owned by the runner.
+
+- [x] Keep the fixed-topology I1/I2-to-canonical comparison separate from I3
+  phase selection. It proves equal equations under one declared topology, not
+  correct activation/deactivation.
+- [x] Keep accepted-target continuation transactional. The lifecycle story
+  injects a rejected target and proves that the next accepted solve starts from
+  the preceding accepted phase set; no mutable inspection API is warranted only
+  to expose an internal numerical seed.
+- [x] Keep one in-band history scenario: the same continuous thermodynamic
+  point retains a previously active candidate but does not create it from fresh
+  inactive history. More synthetic in-band fixtures add no new contract unless
+  they exercise a different route.
+- [x] The fixed-topology comparator already proves complete evidence and
+  localizes temperature, thermodynamic, composition, enthalpy, conservation,
+  and identity disagreements.
+- [x] Add one explicit comparator case with matching identities but unavailable
+  canonical chemical or conservation evidence. Its corresponding axis must be
+  `None` and `is_complete_match()` must be false, proving that `None` means
+  unavailable/not applicable rather than implicit success.
+- [x] Tighten the controlled synthetic disappearance story. Determine and
+  document which route its constructed fixture actually follows. If it is the
+  intended no-interior-root case, require exactly one
+  `BoundaryUnstableActivePhase` transition rather than accepting either reason;
+  retain the broader production contract because both routes are legitimate.
+- [x] At the recovered synthetic gas-only boundary, add explicit I1-to-I3
+  evidence: independently compute `ln(Q)-ln(K) > 0`, require canonical
+  `TPD > 0`, and compare them with the reaction-normalized
+  `TPD = R*T*(ln(Q)-ln(K))/nu_candidate` relation. Do not invent a positive
+  I2 root after the candidate has physically disappeared.
+- [x] Make simple topology expectations explicit: one activation for the
+  favorable inactive fixture, zero transitions for stable absence, and one
+  deactivation for controlled boundary disappearance. Do not impose those
+  counts on continuation or hysteresis histories.
+- [x] Complete the compact I1/I2 typed-failure matrix only where a distinct
+  contract is still absent: infeasible extent interval and exhausted inner
+  bisection budget. The existing invalid bracket/target, unbracketed outer and
+  inner roots, non-finite thermochemistry, and exhausted outer budget are
+  already sufficient; do not add duplicate error variants.
+
+### P9 completion gate
+
+- [x] The synthetic I1-I3 P,H milestone is complete: the deterministic scalar
+  fixture recovers its constructed point, fixed-topology comparison and
+  coordinate scaling agree, and the production lifecycle covers appearance,
+  stable absence, boundary disappearance, accepted-only continuation, and
+  history-dependent in-band retention.
+- [x] P9 core pure-phase validation is complete through offline local-data I4:
+  fixed topology, stable absence, appearance, disappearance, and a second
+  carbon chemistry family all compare independent evidence with canonical
+  accepted states. Non-NASA format diversity and optional real hysteresis
+  discovery remain separately tracked evidence extensions, not blockers for
+  this pure-phase milestone.
 
 ## Non-negotiable contracts
 
@@ -2008,17 +3957,17 @@ Reference tests retained during migration:
 Migration contract:
 
 - [x] Introduce `PhSolveMode::{Monolithic, NestedTemperature, Auto}`. The
-  resolved-thermochemistry facade now defaults to `Monolithic`, the coupled
-  production target. The generic closure constructor remains explicitly
+  resolved-thermochemistry facade now defaults to `Auto`: bounded monolithic
+  seed recovery is attempted first and the independent nested route remains a
+  final classified fallback. The generic closure constructor remains explicitly
   nested because it cannot provide the Gibbs/Cp bundle required by the
   coupled formulation; `NestedTemperature` remains available as an
   independent reference route and `Auto` as the classified recovery mode.
 - [x] Make `Auto` run monolithic first and fall back solely for classified
   numerical failures. Input, thermochemistry, dimension, and
   unsupported-physics errors never trigger fallback; the immutable report
-  retains the typed fallback reason. The default does not hide a formulation
-  failure behind nested solving; callers select `Auto` when recovery is
-  desired.
+  retains the typed fallback reason and route decision, so the production
+  default cannot silently hide which formulation accepted the state.
 - [x] Add unknown vector `[ln(n_0), ..., ln(n_{m-1}), theta_T]` with a smooth
   bounded temperature transform. Do not clip temperature inside residual
   evaluation. `equilibrium_ph_formulation` now owns deterministic unknown and
@@ -2591,8 +4540,10 @@ Migration contract:
 - [ ] Compare monolithic and outer-temperature formulations on convergence
   basin, phase transitions, backend fallback behavior, residual quality,
   thermochemistry evaluations, and release timing. The real reactive inverse
-  story now compares both paths and establishes monolithic as the default for
-  resolved requests. A real water/liquid phase-activation story now directly
+  story now compares both paths. Resolved requests default to the auditable
+  `Auto` policy: monolithic with bounded fresh temperature starts first, then
+  nested recovery only after a classified numerical failure. A real
+  water/liquid phase-activation story now directly
   compares explicit monolithic and nested routes with the same `P,H` target,
   phase lifecycle evidence, accepted temperature, composition, residual, and
   conservation. The real gas/ice story now additionally proves the hard-route
@@ -3060,10 +5011,13 @@ in lifecycle evidence around it.
   `driving_force` fields are retained. No parallel pure-phase fast path or
   replacement minimizer is required by this audit.
 - [x] **Deferred physical decision:** `FixedGasAssemblage` remains explicit
-  until the project decides whether multiple gas declarations represent one
-  shared mixture, separate compartments, or competing phases. Generic gas
-  TPD cannot be chosen as an engineering cleanup because activity
-  normalization depends on that physical contract.
+  while any ideal-gas assemblage is active, until the project decides whether
+  multiple gas declarations represent one shared mixture, separate
+  compartments, or competing phases. The narrower gas-vs-condensed boundary
+  is now supported: when no gas assemblage is active, an inactive ideal gas is
+  evaluated against the condensed reference so complete condensation and
+  reverse evaporation are representable. Generic competing-gas TPD still
+  depends on the unresolved activity-normalization contract.
 - [x] **Out of scope:** non-ideal activity coefficients, fugacity/EOS phase
   split, and global non-convex multi-start TPD remain in the future-physics
   section. The semantic ideal-solution bridge must not imply these models.
@@ -3182,11 +5136,13 @@ in lifecycle evidence around it.
     positive floor is introduced only by the separate log-mole seed builder.
     Regression tests cover a boundary-only candidate and seed-total recovery.
   - [ ] **Physical decision gate: separately declared `IdealGas` phases.** The
-    present lifecycle intentionally treats them as one fixed gas assemblage,
-    reported as `FixedGasAssemblage`, rather than as competing candidate
-    phases. Before implementing generic inactive-`IdealGas` TPD coverage,
-    decide whether multiple gas declarations mean one shared mixture, separate
-    compartments, or genuinely competing gas phases. The answer determines
+    present lifecycle treats them as one fixed gas assemblage whenever one gas
+    phase is active, reported as `FixedGasAssemblage`, rather than as competing
+    candidates. An inactive gas is evaluated only when the accepted reference
+    contains no active gas, which closes the gas/condensed replacement case
+    without deciding multi-gas semantics. Before generic competing-gas TPD,
+    decide whether multiple declarations mean one shared mixture, separate
+    compartments, or genuinely competing phases. The answer determines
     activity normalization and is therefore not an engineering cleanup.
 
 ### P7.5 Replace reports, hysteresis, and activation seeding (P1)
@@ -3684,7 +5640,7 @@ resource cap и уже проверяется regression-тестами.
 
 #### B.4 `TemperaturePostprocessingPolicy` — избыточная гибкость
 
-**Где:** [`equilibrium_temperature_postprocessing.rs`](equilibrium_temperature_postprocessing.rs)
+**Где:** [`equilibrium_temperature_postprocessing.rs`](postprocessing_and_logging/equilibrium_temperature_postprocessing.rs)
 
 **Проблема:** Политика постобработки поддерживает три типа сеток (RawOnly, Uniform, Explicit) и два типа интерполяции (Linear, Log). При этом в коде нет ни одного вызова с Explicit или Log. Вся гибкость существует только для тестов.
 
@@ -4129,3 +6085,680 @@ phase-control regressions.
 Итог: SourceCraft Diagnostics зафиксирован как журнал принятых исправлений и
 отклонённых локальных предложений; открытые архитектурные миграции ведутся
 отдельными пунктами основного плана.
+
+---
+
+## SourceCraft Diagnostics (дополнение 27.08.2026)
+
+### F. Потенциальные ошибки (bugs) — новые модули P8/P9
+
+#### F.1 Monolithic P,H runner не сходится на синтетическом фикстуре i3
+
+**Где:** [`pure_phase_ph_validation_tests.rs:225`](pure_phase_ph_validation_tests.rs:225)
+
+Тест
+`i3_fixed_topology_monolithic_ph_matches_independent_nested_scalar_solution`
+падает с `AllBackendsFailed`:
+
+```text
+Legacy(LM): nonlinear solver reached its iteration limit
+Legacy(NR): nonlinear solver reached its iteration limit
+Legacy(TR): nonlinear solver encountered a singular matrix
+```
+
+**Причина:** production monolithic `P,H` runner
+(`PreparedMonolithicPhRunner::solve_from_temperature_seed`) не сходится на
+синтетическом газ+конденсированная фаза фикстуре при `tol = 1e-11`,
+`max_iter = 300` c legacy каскадом. Сходимость связана с численной
+чувствительностью монолитного `[ln(n), theta_T]` формулирования на данном
+дата-наборе, а не с тестом документации.
+
+**Статус:** ❌ **Открыто.** Требуется диагностика:
+1. исследовать conditioning монолитного Якобиана на фикстуре;
+2. проверить стартовый seed и масштабирование enthalpy residual;
+3. рассмотреть усиление каскада через RST бэкенды либо отдельный
+   continuation/масштабный ход перед требованием `1e-11`.
+---
+
+## Extensive-normalization production-boundary audit (2026-09-01)
+
+This post-implementation audit is limited to correctness and evidence of the
+existing `ExtensiveNormalization` recovery. It does not add a solver
+algorithm, change tolerances, or widen the recovery trigger.
+
+| Area | Status | Evidence / remaining work |
+| --- | --- | --- |
+| Public physical-unit result boundary | PASS | Public solution accessors publish physical extensive quantities; normalized values are explicitly diagnostic-only. |
+| Numerical versus physical phase totals | PASS | `phase_totals` remains separate from `numerical_phase_totals`; frozen recovery tests verify physical totals and topology. |
+| Recovery provenance | PASS | Evidence retains the original failure, discovery backend, physical retry outcome, and reconstruction flag. |
+| Disabled policy | PASS | Frozen TP-1907 `P,T` and TP-1906 `P,H` matrices preserve the historical failure when recovery is disabled. |
+| Recovery trigger classification | PASS | The workflow matrix test excludes invalid input, cancellation, candidate rejection, domain, and capability errors. |
+| Near-unit guard | PASS | Named and tested boundary: recovery requires `scale < 0.1` or `scale > 10.0`. |
+| Small-scale symmetry | PASS | Pure transformation tests cover `1e-6`; the real matrix covers `1e-4`. |
+| P,T / P,H reconstruction | PASS | Frozen matrices verify physical amounts, conservation, topology, and enthalpy after recovery. |
+| Continuation and range progress | PASS | Prepared TP-1907 range evidence records one recovery formulation, two physical reuses, and exact point lifecycle events. Release output is recorded in `STORY_TESTS.md` section 46. |
+| Diagnostic leakage | PASS | Formatter explains physical failure, normalized basin discovery, and physical retry/reconstruction without printing normalized mole fields. |
+| Options snapshot | PASS | Both recovery policies round-trip through `serde_json`. |
+| Timing accounting | PASS | Prepared-range timing includes the rejected attempt and recovery transaction; build/reuse counters remain distinct. |
+| Extreme arithmetic | PASS | Unit tests cover `1e-250` and `1e250`; unsafe operations return typed errors. |
+| Backend metrics (`iterations=0`, `metrics=None`) | DEFERRED | No normalization defect was found; missing-metrics conventions need a dedicated backend-reporting audit. |
+| Recovery cancellation and global budgets | PARTIAL | Ordinary execution-control tests pass; a dedicated cancellation-during-recovery matrix remains useful before release. |
+| Unsupported model capability | PASS | Recovery is reached only after the typed numerical-failure gate. |
+| Immutable source data / independent solves | PASS | Frozen-reference immutability and independent-solve coverage remain unchanged. |
+
+### Audit conclusion
+
+The reviewed normalization boundary is production-safe for the current ideal
+phase-model scope. Remaining items are observability evidence gaps, not known
+public-unit or recovery-correctness defects. Future non-ideal models require a
+separate extensivity proof before this recovery policy is enabled for them.
+
+---
+
+## P,H target-range transactional extensive-normalization recovery (planned)
+
+**Scope.** Extend the established production recovery boundary from one
+fixed-`P,T` transaction to a fixed-pressure `P,H` target range. This is a
+numerical-conditioning feature for the current ideal-model scope, not a new
+physical model, a new `P,H` solver, or permission to use an accepted
+reference solution as a seed.
+
+The existing isolated TP-1906/1907 `P,H` normalization matrix proves the
+physical transformation for individual points. The missing work is range
+orchestration: a recovered point must be published in physical units and the
+next target must continue from that physical accepted state only.
+
+### Contract
+
+- [x] Keep `PhRangeRequest` as the sole owner of target ordering, public
+  progress events, accepted continuation, and all-or-nothing range
+  publication. The point-level recovery helper must not create a second P,H
+  range or publish an internal normalized point.
+- [x] Add one private P,H point recovery boundary in `equilibrium_ph_workflow`.
+  It must run only after the ordinary physical P,H route has returned a
+  classified numerical error and `ExtensiveNormalizationPolicy` is
+  `OnNumericalFailure`. Invalid input, cancellation, capability/domain errors,
+  and rejected physical candidates remain ordinary errors.
+- [x] Reuse `ExtensiveNormalization` and `ExtensiveNormalizationPolicy` rather
+  than implementing local `/ scale` and `* scale` arithmetic. Normalize only
+  extensive quantities: initial moles, element totals through the existing
+  composition transform, total enthalpy target, physical absolute enthalpy
+  tolerance, absolute trace/phase thresholds, and any explicitly extensive
+  error values. Preserve `P`, `p0`, temperature bounds, temperature itself,
+  Gibbs/enthalpy/Cp data, TPD, hysteresis, and dimensionless tolerances.
+- [x] Solve the exact normalized P,H equivalent with recovery recursively
+  disabled and with a local normalized prepared state. A normalized trial must
+  never mutate the physical prepared template, physical phase history, or the
+  range's currently accepted continuation state.
+- [x] After normalized acceptance, prefer a physical-coordinate retry seeded
+  from the reconstructed normalized answer. If that retry is still numerically
+  ill-conditioned, publish only through an audited reconstruction boundary.
+  Both routes must preserve the original physical failure, normalized discovery
+  backend, retry outcome when present, and the chosen publication route.
+- [ ] Add/extend immutable P,H recovery evidence. It must distinguish internal
+  normalized enthalpy error from reconstructed physical-Joule error, preserve
+  the physical inventory scale and physical/normalized targets for labelled
+  diagnostics, and never expose normalized quantities through ordinary public
+  solution accessors.
+
+### Continuation and transactions
+
+- [x] A recovered first target remains one physical `Initial` range point even
+  when it used a normalized internal formulation. The next target must receive
+  the recovered physical component moles, physical phase set/history, and
+  accepted physical temperature.
+- [x] Subsequent successful targets remain `Continued`; do not overload this
+  classification to mean "normalized recovery". Add a separate recovery/formula
+  axis to point evidence if the existing report cannot represent both facts
+  without ambiguity.
+- [x] Guard against inherited/double normalization: a following target may use
+  recovery only after *its own* classified physical failure. The predecessor's
+  recovery provenance must not become a solver mode flag.
+- [ ] Count a rejected physical attempt plus normalized discovery/physical
+  retry in timing and formulation evidence without increasing the public
+  physical point count. Preserve existing backend-attempt, iteration, global
+  budget, cancellation, and range rollback semantics.
+- [ ] Public range progress for four accepted physical targets must remain
+  exactly four `PointStarted` and four `PointAccepted` events. Backend attempts,
+  scalar temperature trials, and normalized discovery are internal diagnostics,
+  never additional range points.
+
+### Frozen NASA regression matrix
+
+- [x] Add an ignored release story using frozen NASA TP-1906/1907 CHON +
+  graphite at `P = 101325 Pa`, physical inventory factor `1e4`, and the
+  established scaled targets `H680 -> H700 -> H720 -> H740`.
+- [ ] Assert source/frozen/local-JSON byte snapshots are unchanged. Start H680
+  from a genuine large physical request; do not seed it from a unit-scale
+  solution. The implementation must record actual recovery locations rather
+  than hard-coding an expected count.
+- [x] Assert physical continuation semantics: first point `Initial`, later
+  points `Continued`; every continuation seed equals the preceding accepted
+  physical solution; no partial suffix is published if a point and its recovery
+  both fail.
+- [ ] Compare every accepted range point with an independently solved unit-scale
+  P,H baseline and a same-inventory P,T witness at recovered temperature.
+  Check temperature, component moles after scaling, element balances, target
+  enthalpy/residual in physical units, graphite amount, and phase topology.
+- [ ] Require the forward topology `gas+graphite, gas+graphite, gas, gas` and
+  an accepted graphite disappearance between H700 and H720. Keep nested trial
+  phase events separate from accepted range topology transitions.
+- [ ] Add an independent reverse range `H740 -> H720 -> H700 -> H680`. Its
+  first point is `Initial`; compare matching physical targets forward/reverse
+  within the established production envelope while retaining intentional
+  hysteresis semantics near the boundary.
+- [ ] Add a companion `ExtensiveNormalizationPolicy::Disabled` witness. It
+  must retain the historical typed numerical failure at the difficult physical
+  point, emit no `PointAccepted` for it, and publish no partial range.
+- [ ] Add a focused cancellation-during-recovery test if the existing execution
+  hooks can inject it without a production-only test hook. Otherwise leave this
+  explicitly deferred with the current ordinary cancellation coverage noted.
+
+### Current implementation note
+
+The point recovery boundary and the frozen two-point story are now implemented.
+The range commits continuation only after a physical publication succeeds; a
+failed prepared monolithic point also restores its mutable RST parameter buffer.
+The remaining unchecked items above are deliberate follow-up work: richer
+normalized-versus-physical error fields in the immutable report, global budget
+accounting across all recovery attempts, the full four-point forward/reverse
+release matrix, and cancellation injected during recovery.
+
+### Observability and release evidence
+
+- [ ] Extend P,H range reports/presentation/diagnostics so a recovered point
+  explains: physical failure, normalized-equivalent acceptance, physical retry
+  or reconstruction, scale, labelled internal versus physical enthalpy error,
+  and retained typed backend evidence. Do not print unlabeled normalized moles.
+- [ ] Add a compact ignored release table with target/source temperature,
+  preparation, recovered temperature, topology, accepted transitions, nested
+  trial events, physical and normalized enthalpy errors, recovery provenance,
+  build/reuse counts, and public progress summary. Record its release output in
+  `STORY_TESTS.md`.
+- [ ] Treat missing backend iteration metrics as separate reporting debt. This
+  work must preserve existing typed attempts but must not redesign backend
+  metrics merely to implement P,H normalization recovery.
+
+---
+
+## I5: competing water phase candidates and declaration-order invariance
+
+This stage is a feasibility-first validation of the existing production phase
+control machinery. It must not change phase-control policy, thresholds, local
+thermochemistry, or candidate sorting before a reproducible order-dependent
+failure is observed.
+
+### Feasibility and data preflight
+
+- [x] Identify the exact local records and phase-qualified identifiers for
+  `Ar(g)`, `H2O(g)`, `H2O(l)`, and ordinary ice Ih (`H2O(s)`).
+- [x] Record local provenance: `NASA_gas::Ar`, `NASA_gas::H2O`,
+  `NASA_cond::H2O(L)`, and `NASA_cond::H2O(s)`. The resolved common local
+  temperature domain is the singleton endpoint `273.150000 K`; it is not a
+  usable below-triple-point interval.
+- [x] Confirm the frozen IAPWS row coverage: liquid saturation rows begin at
+  `275 K`, while ice-Ih sublimation rows end at `270 K`. There is no shared
+  frozen-IAPWS row near `273.15 K`.
+- [x] Record the available reference-pressure metadata: all four selected
+  local records currently publish `Undeclared` standard-state pressure
+  metadata. The equilibrium request therefore continues to require an
+  explicit reference pressure; no pressure convention is inferred from the
+  lookup report.
+- [ ] Expose full per-record validity intervals in the characterization
+  report before selecting a lifecycle temperature; the current preflight only
+  publishes the resolved common interval.
+- [ ] Reuse the existing frozen IAPWS liquid-saturation and ice-sublimation
+  datasets/helpers; do not create duplicate external data.
+- [x] Stop the first feasibility pass before phase-control: the local common
+  domain is only a singleton and the external frozen row sets do not overlap.
+  Never silently extrapolate a thermochemical record. A lifecycle test now
+  requires a separately documented source-faithful bridge or a revised local
+  record domain.
+- [x] Add a test-only IAPWS gauge at `273.15 K`: the independent liquid and
+  ice boundaries are `611.212846 Pa` and `611.153475 Pa`; the resulting Ar/H2O
+  gas-only state has both condensed candidates below `dg_create`, with ice
+  preferred by `2.205e-1 J/mol`. This is an external characterization gauge,
+  not a claim that the local NASA records provide a below-triple-point model.
+- [x] Run the production active-set runner for `[gas, liquid, ice]` and
+  `[gas, ice, liquid]`. Both permutations expose negative initial canonical
+  TPD candidates and converge to the same physical fixed point `gas + ice`;
+  comparison is by component identity and conservation, not transition order.
+- [ ] Add gas+liquid and gas+ice initial-history permutations after the
+  supported public API for constructing accepted active histories is selected.
+
+Preflight output (debug, 2026-09-07):
+
+```text
+Ar + H2O competing-phase local preflight
+common local temperature bounds: 273.150000..273.150000 K
+NASA_gas::Ar       record=Ar    standard-state pressure=Undeclared
+NASA_gas::H2O      record=H2O   standard-state pressure=Undeclared
+NASA_cond::H2O(s)  record=H2O(s) standard-state pressure=Undeclared
+NASA_cond::H2O(L)  record=H2O(L) standard-state pressure=Undeclared
+```
+
+---
+
+### Controlled condensed-phase Gibbs degeneracy
+
+- [x] Add a test-only controlled Gibbs family in which only
+  `G0_B - G0_A = delta_G` changes; keep it separate from frozen IAPWS
+  chemistry and production APIs.
+- [x] Characterize `delta_G` from `1e0` through `1e-6 J/mol` plus exact zero.
+  For all positive splittings both declaration orders select the same winner,
+  preserve the physical state, and reproduce the analytic losing TPD.
+- [x] Treat `delta_G=0` as a mathematically non-unique representative: do
+  not require a phase label, while requiring finite termination,
+  complementarity, conservation, and equal physical state after permutation.
+- [x] Add a separate observed-TPD-scatter measurement for repeated and
+  permuted well-resolved runs. The measured value is characterization for this
+  fixture only; it is not promoted to a production threshold. Debug and
+  release both measured zero scatter for the current deterministic fixture.
+- [ ] Classify the first tolerance-limited splitting using that evidence. Do
+  not infer a universal solver resolution from this one fixture.
+- [x] Add the requested `1e-6..1e-15` plus exact-zero resolution matrix,
+  including requested versus representable `f64` splitting, both declaration
+  orders, measured losing TPD, relative error, physical-state delta,
+  complementarity, transitions, and explicit floating-point-collapse labels.
+- [ ] Review the recorded matrix output and document the empirical boundaries
+  between quantitative resolution, order-independent winner selection,
+  tolerance-limited behavior, and floating-point collapse. Debug and release
+  agree: quantitative and unique-winner boundary `1e-7`, first
+  tolerance-limited row `1e-8`, and f64 collapse from `1e-13`. These boundaries
+  remain fixture-specific characterization, not production policy.
+
+### I5: vanishing species inside one active phase
+
+- [x] Add an analytic synthetic ideal-gas fixture with five species sharing
+  one conserved element and exact Gibbs-derived target weights.
+- [x] Cover dynamic ranges through `1e-32` and a dedicated vanishing-species
+  sweep through `1e-40`. Check finite positive moles, element balance, and
+  scale-aware log errors rather than one absolute mole tolerance.
+- [x] Confirm that tiny species do not trigger phase disappearance: every
+  accepted result retains one active gas phase.
+- [x] Record release evidence for the three baseline tests. The `1e-40`
+  vanishing-species row remains finite and tracks the analytical amount with
+  balance error below `3e-15`.
+- [x] Add seed and species-permutation matrices. Both preserve the canonical
+  physical composition and one active gas phase.
+- [x] Add a solver-independent Gibbs-weight representability matrix through
+  ratio `1e-100`; the requested ratios remain representable in `f64`, so this
+  fixture does not confuse a floating-point collapse with a solver failure.
+- [x] Assert chemical-potential equality directly from the returned log-mole
+  state, in addition to mole-ratio and conservation checks. The observed
+  deviations are below `1e-6 J/mol` for the tested dynamic ranges.
+- [x] Add an extensive-scaling characterization for `N=1e-8, 1, 1e8 mol`.
+  The small-inventory row is finite and conservative but currently exposes a
+  scale-limited fraction error of about `8.5e-5`; do not conflate this with a
+  species floor or silently label it invariant.
+- [ ] Extend the supported-backend matrix and measure a solver-specific
+  numerical floor. The current evidence reaches `1e-40` in the vanishing
+  sweep and `1e-100` in fixture representability, but the extensive `1e8 mol`
+  case still reports `AllBackendsFailed`; this remains characterization, not a
+  production-policy change.
+
+## I5: ideal Ar/H2O/CO2 three-phase lifecycle
+
+This proposed `gas -> gas + solid -> gas + ice + CO2(s) -> ... -> gas`
+story is blocked at the data-feasibility boundary, not at phase control. It
+must remain an offline, source-faithful fixture: online NIST lookup and guessed
+species names are not substitutes for a local dry-ice thermochemistry record.
+
+- [x] Inspect the bundled catalog before constructing a reaction basis or
+  touching phase-control policy. `CO2(s)` is present only in synthetic
+  candidate-selection tests, not in the runtime catalog.
+- [x] Add a negative offline lookup regression: the declared local
+  `NASA_gas::Ar/H2O/CO2`, `NASA_cond::H2O(s)`, `NASA_cond::CO2(s)` system
+  deterministically returns `SubstanceNotFound("CO2(s)")` with NIST fallback
+  disabled.
+- [x] Verify the broader index: local `CO2` entries are gas records in
+  `Cantera_nasa_base_gas`, `CEA`, and `nuig_thermo`; no indexed
+  `NASA_cond`/other condensed `CO2` record is available. Do not relabel a gas
+  record as dry ice.
+- [x] Identify a second independent feasibility blocker: the local
+  `NASA_gas::Ar/H2O` plus `NASA_cond::H2O(s)` interval begins at `200 K`, while
+  the supplied frozen CO2(s) Antoine correlation ends at `195.89 K`. Adding
+  dry ice alone would therefore not establish a common interval for the
+  initially proposed external oracle.
+- [x] Review the official NIST WebBook CO2 phase-change evidence. It records
+  `T_triple = 216.58 K`, `P_triple = 5.185 bar`, and
+  `Delta_sub H(207 K) = 26.1 kJ/mol` (the latter is based on `198..216 K`
+  data), but its published Antoine correlation remains only `154.26..195.89
+  K`. A triple-point datum and one sublimation-enthalpy anchor are not a
+  source-complete `G0_CO2(s, T)` closure or a 200--216 K pressure oracle.
+- [x] Confirm the runtime gas-side constraint independently: the selected
+  local `NASA_gas::CO2` record is declared for `200..6000 K`, so it does not
+  overlap the Giauque--Egan/NIST `154.26..195.89 K` sublimation-pressure range
+  either.
+  A physically closed 154--195 K CO2(s) characterization can still be useful
+  I5 evidence, but cannot be connected to the current runtime gas record.
+- [x] Establish the reference-pressure contract: production activities use
+  the explicit `EquilibriumConditions::reference_pressure()` supplied with a
+  solve; there is no safe hidden global `p0`. Any future frozen or runtime
+  CO2(s) closure must therefore carry a declared source pressure and be
+  converted only through `RT ln(p/p0)` with the request's explicit `p0`.
+- [ ] Build a complete, source-faithful CO2 gas/solid closure before adding a
+  runtime dry-ice record or revisiting the Ar/H2O/CO2 lifecycle. This replaces
+  the earlier provisional `CalorimetricSolid` / sublimation-reconstruction
+  plan: a primary Gibbs EoS is available for the solid, so independently
+  fitting `Cp`, `H`, `S`, and `G` would make a weaker and internally
+  inconsistent production representation.
+  - [x] Freeze the reviewed low-temperature rows from the official
+    natural-abundance `CO2-total.txt` table from
+    Tashkun--Harvey, JPCRD 54, 023102 (2025), DOI `10.1063/5.0276615`,
+    NIST dataset DOI `10.18434/mds2-2364`. It supplies `Cp`, `S`, `H`, and
+    uncertainties on `1..6000 K` at 1 K increments. Record its SHA-256,
+    license/provenance, natural-isotope composition, SI units, and the
+    declared standard pressure `1e5 Pa`. The small source-faithful window is
+    deliberate: the full 1..6000 K table remains recoverable from the pinned
+    NIST URL/hash rather than being duplicated in the test repository.
+  - [ ] Inspect the Tashkun--Harvey enthalpy zero convention before joining it
+    to KiThe. Compare its `Cp/S/H/G` with the selected local `CO2(g)` record
+    at 200 K and 298.15 K; a constant formation-enthalpy offset is not a
+    harmless detail because gas/solid chemical-potential differences require
+    one common standard-state datum.
+  - [ ] Keep exactly one production `CO2(g)` identity. Add a reviewed
+    low-temperature segment, either as direct tabulated interpolation or as a
+    `Cp(T)`-only fit analytically integrated to `H/S`, with integration
+    constants fixed by the existing canonical record at `T_join = 200 K`.
+    Never independently fit `Cp`, `H`, `S`, and `G`, and never extrapolate the
+    existing NASA segment below its declared 200 K lower bound.
+  - [ ] Add a splice characterization at `195, 198, 199, 200, 201, 205 K`.
+    It must report `Cp/H/S/G` and left/right discontinuities. `H/S/G` must be
+    continuous by construction; any `Cp` difference is source evidence, not
+    a value to hide by altering the anchor.
+  - [ ] Freeze the NIST-JANAF `CO2(g)` 100 K and 200 K rows as independent
+    anchors (`p0 = 0.1 MPa`, `Tr = 298.15 K`), and characterize rather than
+    demand bitwise agreement with the newer 2025 evaluation.
+  - [ ] Implement a test-only, source-faithful adapter for the primary Siah,
+    Campestrini, Stringari dry-ice-I Gibbs EoS, JCED 70, 2890--2905 (2025),
+    DOI `10.1021/acs.jced.5c00260`. Freeze the reviewed equation, parameter
+    values, units, standard-pressure convention, validity domain
+    (`T <= 400 K`, `p <= 1.2 GPa`), and source digest; do not manufacture a
+    solid NASA polynomial from phase-change anchors. Source review confirmed
+    the article's model scope and the existence of analytic derivatives in its
+    supporting information, but the actual equation/parameter tables must be
+    acquired as a reviewed frozen source artifact before code is written.
+  - [ ] Derive every solid standard-state function from the one Gibbs EoS at
+    its declared `p0`: `G0 = g(T,p0)`, `S0 = -dg/dT`, `H0 = G0 + T*S0`, and
+    `Cp0 = dH/dT`. Prefer the source's analytic derivatives from supporting
+    information; validate identities numerically only as a secondary check.
+  - [ ] Quantify `g_s(T,p_actual) - g_s(T,p0)` over the intended low-pressure
+    fixture range. The ideal-pure-condensed adapter is permitted only when
+    that omitted pressure correction is demonstrably small relative to the
+    phase-stability/TPD scales being asserted; otherwise this is a missing
+    production physics capability, not a tolerance problem.
+  - [ ] Retain Giauque--Egan (1937) and NIST WebBook Antoine/sublimation data
+    as independent frozen evidence, never as fitted input for the new solid
+    closure. On `160, 170, 180, 185, 190, 194, 195 K`, reconstruct
+    `p_sub = p0 * exp(-(G0_g - G0_s)/(R*T))` and separately compare
+    `H0_g - H0_s` at 194.67 K against `6030 cal/mol` (about 25.23 kJ/mol).
+  - [ ] Add one explicit closure report and verdict taxonomy:
+    `CO2GasLowTemperatureClosed`, `CO2SolidPhaseClosed`, and
+    `CO2GasSolidClosureValidated`; otherwise emit a specific gas splice,
+    solid-Gibbs, sublimation, or reference-pressure mismatch. The report must
+    include gas/solid `Cp/H/S`, reconstructed and external sublimation
+    pressure, `Delta_H_sub`, and all source provenance.
+  - [ ] Only after all of the above passes, promote the adapter through the
+    thermochemistry/repository boundary as a reviewed local `CO2(s)` record,
+    then resume the Ar/H2O/CO2 lifecycle feasibility study. The lifecycle is
+    not a substitute for validating the CO2 standard-state closure.
+- [ ] Once all five local records resolve, perform the required independent
+  scalar preflight before any production lifecycle test: choose a finite
+  one-solid/two-solid temperature interval using only local chemical-potential
+  boundaries, then compare canonical TPD and phase-order permutations.
+- [ ] Keep the final lifecycle as a phase-order-invariance regression only
+  after that feasibility gate is passed. Candidate enumeration may affect the
+  transition history but must not affect the physical fixed point.
+
+### Test-only IAPWS/NIST sublimation-gauge lifecycle
+
+This is a separate, explicitly non-production P,T validation route. It tests
+the universal multiphase lifecycle `1 -> 2 -> 3 -> 2 -> 1` while the complete
+CO2 gas/solid production closure remains deferred above. The gauge must never
+enter `SubsData`, `ThermoRepository`, JSON libraries, or P,H workflows.
+
+- [x] Reuse the official IAPWS ice-Ih sublimation equation on `50..273.16 K`
+  and freeze/reuse the NIST CO2 Antoine sublimation relation on
+  `154.26..195.89 K`; use the shared explicit test convention `p0 = 100000 Pa`.
+- [x] Define only relative standard Gibbs functions: all gas `G0 = 0`,
+  `G0_ice = R*T*ln(p_sub_H2O/p0)`, and
+  `G0_CO2_s = R*T*ln(p_sub_CO2/p0)`. Document that this is unsuitable for
+  P,H and has no formation-energy interpretation.
+- [x] Prove gauge algebra independently: each gas/solid equality reproduces
+  its source sublimation pressure before invoking TPD or a nonlinear solver.
+- [x] Implement a scalar ideal oracle for gas-only, one-solid, and
+  gas+ice+dry-ice states. It must use only `T/P`, inventory, and both external
+  correlations, and determine a non-degenerate `160..194 K` design with a
+  finite three-phase interval. The initial design is `P=100000 Pa`,
+  `n_Ar=1 mol`, `n_H2O=1e-7 mol`, `n_CO2=1 mol`: it yields gas-only at
+  194 K, gas+dry-ice at 185 K, and gas+ice+dry-ice at 170 K with both
+  condensed amounts materially above their respective inventory floors.
+- [x] Run the ordinary production prepared phase-control runner over forward
+  cooling and reverse heating. The accepted continuation path proves topology
+  changes `1 -> 2 -> 3` and `3 -> 2 -> 1`, with point-by-point agreement with
+  the independent identity-aligned scalar oracle.
+- [x] Prove that the three-phase physical fixed point is invariant under both
+  `[gas, ice, dry_ice]` and `[gas, dry_ice, ice]` declaration orders. This
+  compares physical species amounts and maps active masks back to phase
+  identity; it deliberately does not constrain transition history.
+- [ ] Add direct chemical-potential equality assertions and canonical TPD
+  boundary values against the independent sublimation equations.
+- [x] Assert finite canonical TPD evidence, zero empty/chattering transition
+  records, and fresh-versus-continued agreement at the selected interior
+  points. The test also requires exactly two accepted transitions in each
+  direction.
+- [ ] Keep a failure taxonomy (`ThirdPhaseActivationFailure`, fixed-point,
+  premature disappearance, chatter, order dependence, continuation dependence,
+  scalar-oracle mismatch). Do not change phase thresholds, sorting, or solver
+  policy without a separately recorded negative characterization.
+
+---
+
+## Transactional rollback during failed multicomponent continuation
+
+This stage is separate from invalid-input/range rollback. Its target is a
+real TP-1906/1907 CHON + graphite continuation in which point `S1` has already
+been accepted, point `S2` has entered meaningful fixed-active/phase-control
+work, and a numerical failure is followed by a supported successful route.
+
+### Feasibility before production changes
+
+- [x] Reuse the existing real TP-1906/1907 fixture and avoid a synthetic
+  multicomponent surrogate.
+- [x] Add an ignored iteration-budget matrix that distinguishes a failure at
+  point zero from a failure after accepted continuation points.
+- [x] Run the debug feasibility matrix. Budgets `1, 2, 4, 8` fail at point
+  zero; budgets `16, 32, 64, 100` accept all three points (`700, 720, 740 K`).
+  No natural post-acceptance failure was found, so this matrix is not itself
+  rollback evidence.
+- [x] Repeat the feasibility matrix in release before finalizing the evidence
+  classification. The release result matches debug: no natural
+  post-acceptance failure. Do not call an initial-point failure a rollback
+  scenario.
+- [x] If no natural failure can be reproduced, document the tested budgets,
+  backend policy, boundary locations, and conclude whether a minimal
+  `cfg(test)` failpoint is justified. The real transition-before-commit
+  boundary now has a one-shot test-only failpoint; production builds do not
+  contain it.
+
+Debug/release characterization output (2026-09-07):
+
+```text
+NASA TP-1906/1907 continuation rollback feasibility
+budget  status       failing_point  accepted_points  detail
+     1  FAILED                   0               0  post_acceptance=false
+     2  FAILED                   0               0  post_acceptance=false
+     4  FAILED                   0               0  post_acceptance=false
+     8  FAILED                   0               0  post_acceptance=false
+    16  OK           -                            3  complete
+    32  OK           -                            3  complete
+    64  OK           -                            3  complete
+   100  OK           -                            3  complete
+natural post-acceptance failure found: false
+```
+
+The release run completed successfully with the same rows and verdict. Since
+the natural failure search is exhausted, the next evidence layer may use only
+a minimal `cfg(test)` failpoint at the real transition-before-commit boundary;
+it must not be a generic callback failure at solve entry.
+
+### Transactional evidence once a failure exists
+
+- [x] Exercise failure after a real local phase transition has been assembled
+  and diagnosed but before its restart seed is committed. The focused runner
+  regression confirms that the transition event remains observable while the
+  accepted continuation seed and phase set are restored.
+- [x] Compare clean, failed-then-recovered, and fresh routes at `S1` and `S2`
+  on the real TP-1906/1907 CHON + graphite range; compare physical state, not
+  storage indices or diagnostic counters.
+- [x] Verify the real range retry is not poisoned by the rejected trial. The
+  one-shot failure is consumed, the retry publishes all points, and its
+  physical results match both clean and fresh routes.
+- [ ] Extend the real route comparison to explicit hysteresis-history and
+  prepared-cache fingerprints once those internals have a stable report-level
+  representation; the current public contract compares accepted physical
+  state and typed range preparation evidence.
+- [ ] Preserve rejected attempt diagnostics and trial events without publishing
+  rejected transitions as accepted physical history.
+- [ ] Verify repeated failed transactions are physically idempotent.
+- [x] Add focused release story evidence and record the verdict
+`TransactionalRollbackInvariant` in `STORY_TESTS.md`. The recorded release
+run accepted the `A/B/C` matrix in `8.43 s`.
+
+## NASA CEA RP-1311 Example 3 H,P frozen regression
+
+This is a test-only frozen external regression. The source layer is complete;
+the production comparison remains deliberately separate from source loading.
+
+- [x] Identify the source problem as NASA CEA RP-1311 Example 3: explicit CEA
+  Air, liquid fuel split `0.4 C7H8(L) + 0.6 C8H18(L)`, `O/F=17`, reactants at
+  `700 K` and `298.15 K`, and pressure points `100/10/1 bar`.
+- [x] Count the supplied non-trace source universe: 40 species. Every one has
+  an exact spelling match in local `NASA_gas` (`Ar` through `OH`) with NASA7
+  Gibbs, enthalpy, and heat-capacity coefficients. Their common interval is
+  `200..6000 K`, which covers all three published equilibrium temperatures
+  `2418.660/2390.593/2338.840 K`.
+- [x] Resolve the two liquid reactants offline. `C7H8(L)` is an exact local
+  `NASA_cond` key with interval `178.15..500 K`; n-octane is present as the
+  explicit local key `C8H18(L),n-octa` with interval `220..300 K`. The latter
+  is a `ReviewedAlias` for the CEA identity `C8H18(L)`, not an invented
+  fallback, and it covers `298.15 K`.
+- [x] Record the exact CEA Air elemental convention without replacing it by
+  generic dry air: `N=1.561680`, `O=0.419590`, `Ar=0.009365`, `C=0.000319`
+  per nominal mole of Air.
+- [x] Confirm that all above-threshold gas records have the thermodynamic
+  capabilities required by the planned ideal-gas H,P route. The current raw
+  NASA records do not carry an explicit standard-state-pressure field; the
+  future fixture must therefore state and test its pressure convention
+  explicitly rather than infer one from absent metadata.
+- [x] Obtain and freeze the exact published CEA mole fractions for all three
+  pressure rows. The task description supplies temperatures and total
+  enthalpy, but not the numerical 40-species composition table; no frozen
+  rows or composition regression may be fabricated from that summary.
+- [x] Inspect and classify the CEA trace-species universe below `1e-15` once
+  the complete source output is available. Missing trace-only records may be
+  documented as negligible only after their source abundance is known.
+- [x] Add the typed immutable dataset adapter and register its metadata pair
+  in the repository frozen-reference catalog. The source preflight passes
+  with three rows, 40 non-trace identities, and 39 trace-only identities.
+- [x] Reconstruct the physical feed independently on a `1 kg fuel + 17 kg
+  explicit CEA Air` basis. The resulting total mass is `18 kg`, elemental
+  totals are positive for `C/H/O/N/Ar`, and the frozen source enthalpy gives
+  `H_target=5.721084e6 J` on this extensive basis.
+- [x] Resolve the two pure condensed fuel records offline and evaluate their
+  local enthalpies at `298.15 K`: `C7H8(L)=1.217868e4 J/mol` and
+  `C8H18(L),n-octa=-2.502669e5 J/mol`. Their mass-weighted one-kilogram fuel
+  contribution is `-1.261649e6 J`.
+- [x] Add the test-only atom-balanced CEA Air decomposition
+  `N2=0.780840`, `O2=0.209476`, `Ar=0.009365`, `CO2=0.000319`. It reproduces
+  the four published elemental constraints and sums to one nominal mole.
+- [x] Resolve those four ordinary NASA gas records offline, with no NIST
+  fallback, and evaluate their enthalpies at `700 K` with explicit local
+  provenance.
+- [x] Characterize the complete source-side reactant enthalpy. The local
+  result is `317813.0918 J/kg` versus CEA `317838.0000 J/kg`, delta
+  `-24.9082 J/kg`, relative `7.83675e-5`; classify this as
+  `ReactantEnthalpyConventionAligned`.
+- [x] Add an ignored production-path H,P characterization over all three
+  frozen pressure rows. It uses the canonical `solve_resolved_ph` route,
+  local `NASA_gas` only, source CEA enthalpy as the frozen target, and checks
+  finite temperature, normalized published composition, residual, and element
+  balance. The test-side initial seed uses an element-equivalent `CO + H2`
+  representation because the local gas catalog has no octane gas record; it is
+  not a production Air/fuel alias.
+- [x] Correct the fixture standard-state pressure to the fixed NASA gas value
+  `P0=100000 Pa` and assert `P/P0 = 100, 10, 1` for the three rows.
+- [x] Correct the liquid-fuel unit error. `reconstruct_feed()` now uses SI
+  `kg/mol`; the production fixture resolves the local liquid record masses,
+  explicitly converts `g/mol -> kg/mol`, and reconstructs `1 kg` fuel,
+  `17 kg` Air, and `18 kg` total independently. It prints `n_C7H8`,
+  `n_C8H18`, fuel C/H atoms, nominal Air, elemental totals, and H target.
+  The CO/H2 computational seed is checked against the locally reconstructed
+  C/H/O/N/Ar totals before solving.
+- [x] Re-run all three rows after both fixture corrections. KiThe gives
+  `2419.501/2391.538/2339.773 K` versus CEA
+  `2418.660/2390.593/2338.840 K`, or `+0.841/+0.945/+0.933 K`. Maximum
+  major-species relative error is below `9.54e-2`; minor/trace maximum
+  `|delta_log10|` is below `9.97e-1`; release residuals are below
+  `6.93e-14` and balances below `9.7e-12`.
+
+Current source verdict: `ExternalFixtureSourceComplete`; production route
+verdict: `ReactantEnthalpyConventionAligned`, `ProductionPHCharacterized`.
+The early constant-temperature result is classified
+`ExternalFixtureStandardStatePressureError`; the later `632.79 K` result is
+classified `ExternalFixtureFuelAmountUnitError`. After both corrections the
+fixture agrees with the three CEA temperatures to under `1 K`; no external
+composition mismatch remains to investigate from this evidence.
+No production algorithm, thermochemistry, tolerance, scaling, or solver policy
+was changed.
+
+### Independent boundary and candidate evidence
+
+- [x] Add a characterization-only catalog preflight for
+  `H2O(g) <=> H2O(l)` and `H2O(g) <=> H2O(ice Ih)` independent of the
+  production TPD minimizer. The local NASA domain is only the singleton
+  `273.15 K`, and the frozen liquid/ice tables do not overlap; no local
+  boundary extrapolation is performed.
+- [x] Select `T_test=273.15 K` only for the independent IAPWS gauge after
+  checking numerical separation: `p_liquid=611.212846 Pa`,
+  `p_ice=611.153475 Pa`, and the candidate Gibbs-force separation is
+  `2.205e-1 J/mol`, well above the diagnostic threshold used by the test.
+- [x] Construct a gas-only Ar/H2O inventory with both absent condensed phases
+  satisfying `TPD_liquid < dg_create` and `TPD_ice < dg_create`; print both
+  values and their separation using the test-only IAPWS gauge.
+- [x] Add the independent ideal scalar `gas + ice` oracle from the ice boundary,
+  including gas water amount, ice amount, composition, and element balance.
+- [x] Compare the independent candidate driving forces with the canonical
+  initial TPD reports using explicit signs and units.
+
+### Metamorphic phase-order matrix
+
+- [x] Run physically identical production bounded phase-control requests with
+  phase declarations `gas, liquid, ice` and `gas, ice, liquid`, fully
+  permuting all coupled indices and arrays.
+- [x] Compare final results by physical component identity, not storage index:
+  expected
+  topology is `gas + ice`, with liquid inactive. Check moles, gas fractions,
+  conservation, complementarity, and the independent scalar candidate oracle.
+- [x] Do not require identical transition histories or transition counts. Store
+  histories as characterization and assert only fixed-point invariance.
+- [x] Add initial-history cases `gas only`, `gas + liquid`, and `gas + ice`
+  using positive physical phase inventories, without synthetic invalid
+  accepted states. All six history/order routes converge to `gas + ice`.
+- [x] Record a clear verdict: `PhaseCandidateOrderInvariant` or
+  `PhaseCandidateOrderDependent`, with numerical max deltas and full failure
+  evidence. The current verdict is `PhaseCandidateOrderInvariant`; no
+  production fix was needed.
+
+### Frozen/release evidence
+
+- [x] Keep the IAPWS gauge, strict canonical TPD/production assertions, and
+  catalog feasibility characterization as separate evidence channels.
+- [x] Add the focused phase permutation/unpermutation regression and physical
+  identity matching. A release-only story is not required for this tiny
+  deterministic fixture; the debug story is strict and reproducible.
+- [x] Record exact identifiers, provenance, domains, selected conditions,
+  candidate TPDs, oracle values, transition histories, and the command in
+  `STORY_TESTS.md`. Release characterization was completed and recorded; the
+  release result agrees with the debug result.

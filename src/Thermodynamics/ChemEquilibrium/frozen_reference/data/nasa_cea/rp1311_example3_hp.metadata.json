@@ -1,0 +1,23 @@
+{
+  "dataset_format_version": 1,
+  "dataset_id": "nasa_cea.rp1311.example3.hydrocarbon_air.hp.v1",
+  "title": "NASA CEA RP-1311 Example 3 hydrocarbon-air HP equilibrium",
+  "evidence_kind": "frozen_external",
+  "data_file": "rp1311_example3_hp.rows.json",
+  "source": {
+    "organization": "NASA",
+    "name": "Chemical Equilibrium with Applications (CEA)",
+    "version": "CEA 3.3.4",
+    "citation": "NASA CEA documentation, RP-1311 Example 3, current official publication.",
+    "source_table": "Example 3 H,P hydrocarbon-air equilibrium",
+    "stable_identifier": "NASA CEA RP-1311 Example 3"
+  },
+  "transcription": "Source-faithful frozen mole fractions for explicit CEA Air, 0.4 C7H8(L) + 0.6 C8H18(L), O/F=17, and pressures 100, 10, and 1 bar. CEA trace threshold is 1e-15; values below it are retained when the species is printed at another pressure.",
+  "quantities": [
+    {"column": "problem_type", "meaning": "CEA equilibrium problem class", "unit": "text"},
+    {"column": "pressure_pa", "meaning": "equilibrium pressure", "unit": "Pa", "source_precision": "bar converted exactly"},
+    {"column": "equilibrium_temperature_k", "meaning": "published HP equilibrium temperature", "unit": "K", "source_precision": "0.001 K"},
+    {"column": "source_specific_enthalpy_j_kg", "meaning": "published mixture specific enthalpy", "unit": "J/kg", "source_precision": "0.001 kJ/kg"},
+    {"column": "species_mole_fractions", "meaning": "published source species mole fractions", "unit": "mole fraction", "source_precision": "CEA printed values"}
+  ]
+}
