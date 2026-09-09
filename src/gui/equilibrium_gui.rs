@@ -14,19 +14,24 @@ use crate::gui::equilibrium_gui_execution::{
     EquilibriumGuiExecution, EquilibriumGuiPublication, EquilibriumGuiRunState,
     EquilibriumGuiRunTicket, EquilibriumGuiWorkerMessage,
 };
+use crate::gui::equilibrium_gui_help::{
+    EquilibriumHelpLanguage, field_tooltip as help_field_tooltip,
+    option_tooltip as help_option_tooltip, tab_key as help_tab_key,
+    text_with_fallback as help_text, tooltip as help_tooltip,
+};
 use crate::gui::equilibrium_gui_model::{
     ComponentDraft, EquilibriumGuiDocument, EquilibriumGuiDocumentError, EquilibriumInventoryDraft,
     EquilibriumLookupDraft, EquilibriumPhaseModeDraft, EquilibriumProblemDraft,
-    EquilibriumSolverDraft, GuiInterpolationSpace, GuiKeqValidationMode, GuiPhaseLifecycleTrace,
-    GuiPhaseModel, GuiPhysicalState, GuiPlotScale, GuiPlotTarget, GuiRangeLifecycleTrace,
-    GuiResamplingDraft, GuiResultBasis, GuiSolverBackend, GuiSolverCascadeBudgetDraft,
-    GuiTraceSeedPolicyDraft, PhTemperatureBoundsDraft, TemperatureDraft,
-    ValidatedEquilibriumGuiConfig, ValidationIssue,
+    EquilibriumSolverDraft, GuiInitialPhasePolicyDraft, GuiInterpolationSpace,
+    GuiKeqValidationMode, GuiPhSolveMode, GuiPhaseLifecycleTrace, GuiPhaseModel, GuiPhysicalState,
+    GuiPlotScale, GuiPlotTarget, GuiRangeLifecycleTrace, GuiResamplingDraft, GuiResultBasis,
+    GuiResultTableDensity, GuiSolverBackend, GuiSolverCascadeBudgetDraft, GuiTraceSeedPolicyDraft,
+    PhTemperatureBoundsDraft, TemperatureDraft, ValidatedEquilibriumGuiConfig, ValidationIssue,
 };
 use crate::gui::equilibrium_gui_plot::{EquilibriumGuiKiThePlotWindow, EquilibriumGuiPlotData};
 use crate::gui::equilibrium_gui_request::{
     EquilibriumGuiRequestError, EquilibriumGuiSolveOutcome, EquilibriumGuiSolveRequest,
-    build_equilibrium_request, select_equilibrium_candidates,
+    build_equilibrium_facade_request, select_equilibrium_candidates,
 };
 use crate::gui::equilibrium_gui_result::EquilibriumGuiResultSnapshot;
 use crate::gui::gui_plot::PlotWindow;
@@ -69,6 +74,16 @@ enum EquilibriumGuiLibraryWorkerEvent {
     Failed { error: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EquilibriumGuiTab {
+    Setup,
+    PhaseControl,
+    Libraries,
+    Solver,
+    Diagnostics,
+    Results,
+}
+
 /// State owned by the chemical-equilibrium editor window.
 pub struct EquilibriumApp {
     pub document: EquilibriumGuiDocument,
@@ -82,6 +97,10 @@ pub struct EquilibriumApp {
     candidate_worker_receiver: Option<Receiver<EquilibriumGuiCandidateWorkerEvent>>,
     library_worker_receiver: Option<Receiver<EquilibriumGuiLibraryWorkerEvent>>,
     available_libraries: Option<Vec<String>>,
+    /// A catalog failure is repository-health evidence for the Libraries tab.
+    /// It is deliberately separate from `status`: the latter is transient,
+    /// whereas this remains visible until a later successful publication.
+    library_catalog_error: Option<String>,
     library_picker: String,
     embedded_plot: Option<PlotWindow>,
     kithe_plot: EquilibriumGuiKiThePlotWindow,
@@ -97,6 +116,8 @@ pub struct EquilibriumApp {
     /// Display-only series selection. It is intentionally outside the
     /// serialized document and solver fingerprint.
     hidden_plot_series: BTreeSet<String>,
+    active_tab: EquilibriumGuiTab,
+    help_language: EquilibriumHelpLanguage,
 }
 
 impl Default for EquilibriumApp {
@@ -119,6 +140,7 @@ impl EquilibriumApp {
             candidate_worker_receiver: None,
             library_worker_receiver: None,
             available_libraries: None,
+            library_catalog_error: None,
             library_picker: String::new(),
             embedded_plot: None,
             kithe_plot: EquilibriumGuiKiThePlotWindow::default(),
@@ -130,6 +152,8 @@ impl EquilibriumApp {
             status: "Ready for a canonical P,T request".into(),
             prepared_fingerprint: None,
             hidden_plot_series: BTreeSet::new(),
+            active_tab: EquilibriumGuiTab::Setup,
+            help_language: EquilibriumHelpLanguage::English,
         }
     }
 
@@ -151,6 +175,7 @@ impl EquilibriumApp {
         self.worker_receiver = None;
         self.candidate_worker_receiver = None;
         self.library_worker_receiver = None;
+        self.library_catalog_error = None;
         self.execution.reset();
         self.document = document;
         self.validation_issues.clear();
@@ -191,14 +216,17 @@ impl EquilibriumApp {
         &mut self,
         validated: ValidatedEquilibriumGuiConfig,
     ) -> Result<(), EquilibriumGuiRequestError> {
-        let request = build_equilibrium_request(validated, None)?;
+        // The application path uses the facade. The legacy request builder is
+        // retained only for compatibility tests and low-level diagnostics.
+        let request = build_equilibrium_facade_request(validated, None)?;
         self.prepared_fingerprint = Some(self.document_fingerprint());
         self.prepared_request = Some(request);
         self.status = "Canonical request prepared; solver worker is not started".into();
         Ok(())
     }
 
-    pub fn prepared_request(&self) -> Option<&EquilibriumGuiSolveRequest> {
+    #[cfg(test)]
+    pub(crate) fn prepared_request(&self) -> Option<&EquilibriumGuiSolveRequest> {
         self.prepared_request.as_ref()
     }
 
@@ -334,6 +362,7 @@ impl EquilibriumApp {
         }
         let (sender, receiver) = mpsc::channel();
         self.library_worker_receiver = Some(receiver);
+        self.library_catalog_error = None;
         self.status = "Loading thermochemical library choices".into();
         thread::spawn(move || {
             let event = match ThermoData::try_new_fresh() {
@@ -361,17 +390,32 @@ impl EquilibriumApp {
                     }
                 }
                 self.available_libraries = Some(libraries);
+                self.library_catalog_error = None;
                 self.status = "Thermochemical library choices loaded".into();
             }
             Ok(EquilibriumGuiLibraryWorkerEvent::Failed { error }) => {
+                self.library_catalog_error = Some(error.clone());
                 self.status = format!("Library catalog failed: {error}");
             }
             Err(mpsc::TryRecvError::Empty) => {
                 self.library_worker_receiver = Some(receiver);
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                self.status = "Library catalog worker disconnected".into();
+                let error = "library catalog worker disconnected".to_string();
+                self.library_catalog_error = Some(error.clone());
+                self.status = format!("Library catalog failed: {error}");
             }
+        }
+    }
+
+    fn library_catalog_status_text(&self) -> String {
+        match self.available_libraries.as_ref() {
+            Some(libraries) => format!("Local catalog: {} libraries loaded", libraries.len()),
+            None if self.library_worker_receiver.is_some() => "Local catalog: loading".to_string(),
+            None if self.library_catalog_error.is_some() => {
+                "Local catalog: unavailable".to_string()
+            }
+            None => "Local catalog: not loaded".to_string(),
         }
     }
 
@@ -841,20 +885,84 @@ impl EquilibriumApp {
                     },
                 );
                 ui.separator();
+                ui.horizontal(|ui| {
+                    for (tab, label) in [
+                        (EquilibriumGuiTab::Setup, "Setup"),
+                        (EquilibriumGuiTab::PhaseControl, "Phase control"),
+                        (EquilibriumGuiTab::Libraries, "Libraries"),
+                        (EquilibriumGuiTab::Solver, "Numerics"),
+                        (EquilibriumGuiTab::Diagnostics, "Output"),
+                        (EquilibriumGuiTab::Results, "Results"),
+                    ] {
+                        let key = match tab {
+                            EquilibriumGuiTab::Setup => "tab.setup",
+                            EquilibriumGuiTab::PhaseControl => "tab.phase_control",
+                            EquilibriumGuiTab::Libraries => "tab.libraries",
+                            EquilibriumGuiTab::Solver => "tab.numerics",
+                            EquilibriumGuiTab::Diagnostics => "tab.output",
+                            EquilibriumGuiTab::Results => "tab.results",
+                        };
+                        ui.selectable_value(&mut self.active_tab, tab, label)
+                            .on_hover_text(help_tooltip(self.help_language, key));
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Help language")
+                        .on_hover_text(help_tooltip(self.help_language, "help.language"));
+                    ui.selectable_value(
+                        &mut self.help_language,
+                        EquilibriumHelpLanguage::English,
+                        "English",
+                    )
+                    .on_hover_text(help_tooltip(self.help_language, "language.english"));
+                    ui.selectable_value(
+                        &mut self.help_language,
+                        EquilibriumHelpLanguage::Russian,
+                        "Русский",
+                    )
+                    .on_hover_text(help_tooltip(self.help_language, "language.russian"));
+                });
+                let help_key = match self.active_tab {
+                    EquilibriumGuiTab::Setup => "Setup",
+                    EquilibriumGuiTab::PhaseControl => "Phase control",
+                    EquilibriumGuiTab::Libraries => "Libraries",
+                    EquilibriumGuiTab::Solver => "Numerics",
+                    EquilibriumGuiTab::Diagnostics => "Output",
+                    EquilibriumGuiTab::Results => "Results",
+                };
+                ui.collapsing("Help", |ui| {
+                    ui.label(help_text(self.help_language, help_tab_key(help_key)));
+                });
+                match self.active_tab {
+                    EquilibriumGuiTab::Setup => {
+                        self.render_problem(ui);
+                        self.render_inventory(ui);
+                    }
+                    EquilibriumGuiTab::PhaseControl => {
+                        self.render_phase_policy(ui);
+                    }
+                    EquilibriumGuiTab::Libraries => {
+                        self.render_lookup(ui);
+                    }
+                    EquilibriumGuiTab::Solver => self.render_solver(ui),
+                    EquilibriumGuiTab::Diagnostics => {
+                        self.render_diagnostics(ui);
+                        self.render_postprocessing(ui);
+                    }
+                    EquilibriumGuiTab::Results => self.render_results(ui),
+                }
 
-                self.render_problem(ui);
-                self.render_inventory(ui);
-                self.render_phase_policy(ui);
-                self.render_lookup(ui);
-                self.render_solver(ui);
-                self.render_diagnostics(ui);
-                self.render_postprocessing(ui);
-                self.render_results(ui);
+                self.render_readiness_summary(ui);
                 if matches!(
                     self.document.config.postprocessing.plot_target,
                     GuiPlotTarget::Embedded | GuiPlotTarget::Both
                 ) {
-                    if ui.button("Open embedded plot").clicked() {
+                    if ui
+                        .button("Open embedded plot")
+                        .on_hover_text(help_tooltip(self.help_language, "action.embedded_plot"))
+                        .clicked()
+                    {
                         if let Err(error) = self.open_embedded_plot() {
                             self.status = format!("Cannot open equilibrium plot: {error}");
                         }
@@ -864,7 +972,11 @@ impl EquilibriumApp {
                     self.document.config.postprocessing.plot_target,
                     GuiPlotTarget::KiThePlot | GuiPlotTarget::Both
                 ) {
-                    if ui.button("Open KiThePlot editor").clicked() {
+                    if ui
+                        .button("Open KiThePlot editor")
+                        .on_hover_text(help_tooltip(self.help_language, "action.kithe_plot"))
+                        .clicked()
+                    {
                         if let Err(error) = self.open_kithe_plot() {
                             self.status = format!("Cannot open KiThePlot editor: {error}");
                         }
@@ -873,7 +985,11 @@ impl EquilibriumApp {
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Validate document").clicked() {
+                    if ui
+                        .button("Validate document")
+                        .on_hover_text(help_tooltip(self.help_language, "action.validate"))
+                        .clicked()
+                    {
                         self.validation_issues = match self.document.validate_for_run() {
                             Ok(_) => {
                                 self.status = "Document is valid for a production request".into();
@@ -885,12 +1001,19 @@ impl EquilibriumApp {
                             }
                         };
                     }
-                    if ui.button("Prepare canonical request").clicked() {
+                    if ui
+                        .button("Prepare canonical request")
+                        .on_hover_text(help_tooltip(self.help_language, "action.prepare"))
+                        .clicked()
+                    {
                         let _ = self.prepare_request();
                     }
                     if self.prepared_request_is_current()
                         && self.worker_receiver.is_none()
-                        && ui.button("Run prepared request").clicked()
+                        && ui
+                            .button("Run prepared request")
+                            .on_hover_text(help_tooltip(self.help_language, "action.run"))
+                            .clicked()
                     {
                         self.start_prepared_run();
                     }
@@ -913,7 +1036,12 @@ impl EquilibriumApp {
                             });
                     });
                 }
-                if self.execution.active_ticket().is_some() && ui.button("Cancel run").clicked() {
+                if self.execution.active_ticket().is_some()
+                    && ui
+                        .button("Cancel run")
+                        .on_hover_text(help_tooltip(self.help_language, "action.cancel"))
+                        .clicked()
+                {
                     self.cancel_run();
                 }
                 if let Some(snapshot) = self.result_snapshot() {
@@ -936,7 +1064,11 @@ impl EquilibriumApp {
                         "Prepared request is stale after an editor change"
                     });
                 }
-                for issue in &self.validation_issues {
+                for issue in self
+                    .validation_issues
+                    .iter()
+                    .filter(|issue| !validation_field_has_local_section(&issue.field))
+                {
                     ui.colored_label(
                         egui::Color32::from_rgb(210, 80, 70),
                         format!("{}: {}", issue.field, issue.message),
@@ -958,337 +1090,624 @@ impl EquilibriumApp {
         }
     }
 
-    fn render_problem(&mut self, ui: &mut egui::Ui) {
-        ui.collapsing("Problem", |ui| {
-            let is_pt = matches!(
-                self.document.config.problem,
-                EquilibriumProblemDraft::FixedPt { .. }
-            );
-            ui.horizontal(|ui| {
-                if ui.selectable_label(is_pt, "P,T = const").clicked() && !is_pt {
-                    self.document.config.problem = EquilibriumProblemDraft::default();
-                    self.invalidate_prepared_request();
-                }
-                if ui.selectable_label(!is_pt, "P,H = const").clicked() && is_pt {
-                    self.document.config.problem = EquilibriumProblemDraft::FixedPh {
-                        pressure_pa: "101325".into(),
-                        reference_pressure_pa: "101325".into(),
-                        target_enthalpy_j: "0".into(),
-                        temperature_bounds: PhTemperatureBoundsDraft::default(),
-                    };
-                    self.invalidate_prepared_request();
-                }
-            });
-            match &mut self.document.config.problem {
-                EquilibriumProblemDraft::FixedPt {
-                    pressure_pa,
-                    reference_pressure_pa,
-                    temperature,
-                } => {
-                    labeled_text(ui, "Pressure [Pa]", pressure_pa);
-                    labeled_text(ui, "Reference pressure [Pa]", reference_pressure_pa);
-                    render_temperature(ui, temperature);
-                }
-                EquilibriumProblemDraft::FixedPh {
-                    pressure_pa,
-                    reference_pressure_pa,
-                    target_enthalpy_j,
-                    temperature_bounds,
-                } => {
-                    labeled_text(ui, "Pressure [Pa]", pressure_pa);
-                    labeled_text(ui, "Reference pressure [Pa]", reference_pressure_pa);
-                    labeled_text(ui, "Target total enthalpy [J]", target_enthalpy_j);
-                    render_ph_temperature_bounds(ui, temperature_bounds);
-                    ui.label(
-                        "The P,H solve uses the common selected thermochemistry interval; "
-                            .to_string(),
-                    );
-                }
+    fn render_readiness_summary(&self, ui: &mut egui::Ui) {
+        let (mode, pressure, reference_pressure, points) = match &self.document.config.problem {
+            EquilibriumProblemDraft::FixedPt {
+                pressure_pa,
+                reference_pressure_pa,
+                temperature,
+            } => {
+                let points = match temperature {
+                    TemperatureDraft::Point { .. } => "1 point".to_owned(),
+                    TemperatureDraft::Range { point_count, .. } => {
+                        format!("{point_count} temperature points")
+                    }
+                };
+                ("P,T", pressure_pa, reference_pressure_pa, points)
             }
+            EquilibriumProblemDraft::FixedPh {
+                pressure_pa,
+                reference_pressure_pa,
+                ..
+            } => (
+                "P,H",
+                pressure_pa,
+                reference_pressure_pa,
+                "1 target enthalpy".to_owned(),
+            ),
+        };
+        let (inventory_source, phase_count, component_count) = match &self.document.config.inventory
+        {
+            EquilibriumInventoryDraft::ExplicitPhases { phases } => (
+                "explicit phases",
+                phases.len(),
+                phases
+                    .iter()
+                    .map(|phase| phase.components.len())
+                    .sum::<usize>(),
+            ),
+            EquilibriumInventoryDraft::ElementCandidates { assignments, .. } => (
+                "element candidates",
+                assignments.len(),
+                assignments
+                    .iter()
+                    .map(|phase| phase.components.len())
+                    .sum::<usize>(),
+            ),
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Ready to prepare: {mode}"));
+            ui.separator();
+            ui.label(format!("P/P0: {pressure} / {reference_pressure} Pa"));
+            ui.separator();
+            ui.label(format!("Inventory: {inventory_source}"));
+            ui.separator();
+            ui.label(format!(
+                "{phase_count} phase(s), {component_count} component(s)"
+            ));
+            ui.separator();
+            ui.label(points);
         });
     }
 
-    fn render_inventory(&mut self, ui: &mut egui::Ui) {
-        ui.collapsing("Components and phases", |ui| {
-            let mut changed = false;
-            let explicit = matches!(
-                self.document.config.inventory,
-                EquilibriumInventoryDraft::ExplicitPhases { .. }
+    /// Shows validation feedback beside the editor section that owns the
+    /// invalid field. The complete list remains below the command bar as a
+    /// compact cross-tab summary.
+    fn render_validation_issues_for_prefix(&self, ui: &mut egui::Ui, prefix: &str) {
+        let issues = self
+            .validation_issues
+            .iter()
+            .filter(|issue| issue.field.starts_with(prefix))
+            .collect::<Vec<_>>();
+        if issues.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        for issue in issues {
+            ui.colored_label(
+                egui::Color32::from_rgb(210, 80, 70),
+                format!("{}: {}", issue.field, issue.message),
             );
-            ui.horizontal(|ui| {
-                if ui.selectable_label(explicit, "Explicit species").clicked() && !explicit {
-                    self.document.config.inventory = EquilibriumInventoryDraft::default();
-                    self.invalidate_prepared_request();
+        }
+    }
+
+    fn render_problem(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Problem")
+            .default_open(true)
+            .show(ui, |ui| {
+                let is_pt = matches!(
+                    self.document.config.problem,
+                    EquilibriumProblemDraft::FixedPt { .. }
+                );
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.label("Calculation mode");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(is_pt, "P,T = const")
+                            .on_hover_text(help_tooltip(self.help_language, "mode.pt"))
+                            .clicked()
+                            && !is_pt
+                        {
+                            self.document.config.problem = EquilibriumProblemDraft::default();
+                            self.invalidate_prepared_request();
+                        }
+                        if ui
+                            .selectable_label(!is_pt, "P,H = const")
+                            .on_hover_text(help_tooltip(self.help_language, "mode.ph"))
+                            .clicked()
+                            && is_pt
+                        {
+                            self.document.config.problem = EquilibriumProblemDraft::FixedPh {
+                                pressure_pa: "101325".into(),
+                                reference_pressure_pa: "101325".into(),
+                                target_enthalpy_j: "0".into(),
+                                temperature_bounds: PhTemperatureBoundsDraft::default(),
+                            };
+                            self.invalidate_prepared_request();
+                        }
+                    });
+                });
+                match &mut self.document.config.problem {
+                    EquilibriumProblemDraft::FixedPt {
+                        pressure_pa,
+                        reference_pressure_pa,
+                        temperature,
+                    } => {
+                        labeled_text_with_language(
+                            ui,
+                            "Pressure [Pa]",
+                            pressure_pa,
+                            self.help_language,
+                        );
+                        labeled_text_with_language(
+                            ui,
+                            "Reference pressure [Pa]",
+                            reference_pressure_pa,
+                            self.help_language,
+                        );
+                        render_temperature(ui, temperature, self.help_language);
+                    }
+                    EquilibriumProblemDraft::FixedPh {
+                        pressure_pa,
+                        reference_pressure_pa,
+                        target_enthalpy_j,
+                        temperature_bounds,
+                    } => {
+                        labeled_text_with_language(
+                            ui,
+                            "Pressure [Pa]",
+                            pressure_pa,
+                            self.help_language,
+                        );
+                        labeled_text_with_language(
+                            ui,
+                            "Reference pressure [Pa]",
+                            reference_pressure_pa,
+                            self.help_language,
+                        );
+                        labeled_text_with_language(
+                            ui,
+                            "Target total enthalpy [J]",
+                            target_enthalpy_j,
+                            self.help_language,
+                        );
+                        render_ph_temperature_bounds(ui, temperature_bounds, self.help_language);
+                        ui.label(
+                            "The P,H solve uses the common selected thermochemistry interval; "
+                                .to_string(),
+                        );
+                    }
                 }
-                if ui
-                    .selectable_label(!explicit, "Search by elements")
-                    .clicked()
-                    && explicit
-                {
-                    self.document.config.inventory = EquilibriumInventoryDraft::ElementCandidates {
-                        elements: vec!["C".into(), "H".into(), "O".into()],
-                        candidate_policy: Default::default(),
-                        assignments: Vec::new(),
-                    };
-                    self.invalidate_prepared_request();
-                }
-                if ui.button("Simple ideal-gas preset").clicked() {
-                    self.document = EquilibriumGuiDocument::simple_ideal_gas(["H2O"]);
-                    self.invalidate_prepared_request();
-                    self.status = "Simple ideal-gas preset applied".into();
-                }
+                self.render_validation_issues_for_prefix(ui, "problem.");
+                self.render_validation_issues_for_prefix(ui, "temperature.");
             });
-            match &mut self.document.config.inventory {
-                EquilibriumInventoryDraft::ExplicitPhases { phases }
-                | EquilibriumInventoryDraft::ElementCandidates {
-                    assignments: phases,
-                    ..
-                } => {
-                    let mut remove_phase = None;
-                    let mut move_phase = None;
-                    let phase_count = phases.len();
-                    for (phase_index, phase) in phases.iter_mut().enumerate() {
-                        // Phase IDs are validated as unique before a request is
-                        // built, so they are a better widget scope than the
-                        // current vector index. Reordering therefore keeps text
-                        // edit state attached to the same phase.
-                        let phase_key = editor_phase_key(phase, phase_index);
-                        ui.push_id(("equilibrium-phase", phase_key.as_str()), |ui| {
-                            ui.group(|ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(format!("Phase '{}'", phase.id.trim()));
-                                    if phase_index > 0 && ui.button("Up").clicked() {
-                                        move_phase = Some((phase_index, phase_index - 1));
-                                    }
-                                    if phase_index + 1 < phase_count && ui.button("Down").clicked()
-                                    {
-                                        move_phase = Some((phase_index, phase_index + 1));
-                                    }
-                                    if ui.button("Remove").clicked() {
-                                        remove_phase = Some(phase_index);
-                                    }
-                                });
-                                labeled_text(ui, "Phase id", &mut phase.id);
-                                ui.horizontal(|ui| {
-                                    ui.label("Physical state");
-                                    for (label, value) in [
-                                        ("Gas", GuiPhysicalState::Gas),
-                                        ("Liquid", GuiPhysicalState::Liquid),
-                                        ("Solid", GuiPhysicalState::Solid),
-                                    ] {
+    }
+
+    fn render_inventory(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Components and phases")
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut changed = false;
+                let explicit = matches!(
+                    self.document.config.inventory,
+                    EquilibriumInventoryDraft::ExplicitPhases { .. }
+                );
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.label("Inventory input");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(explicit, "Explicit species")
+                            .on_hover_text(help_tooltip(self.help_language, "inventory.explicit"))
+                            .clicked()
+                            && !explicit
+                        {
+                            self.document.config.inventory = EquilibriumInventoryDraft::default();
+                            self.invalidate_prepared_request();
+                        }
+                        if ui
+                            .selectable_label(!explicit, "Search by elements")
+                            .on_hover_text(help_tooltip(self.help_language, "inventory.elements"))
+                            .clicked()
+                            && explicit
+                        {
+                            self.document.config.inventory =
+                                EquilibriumInventoryDraft::ElementCandidates {
+                                    elements: vec!["C".into(), "H".into(), "O".into()],
+                                    candidate_policy: Default::default(),
+                                    assignments: Vec::new(),
+                                };
+                            self.invalidate_prepared_request();
+                        }
+                        if ui
+                            .button("Simple ideal-gas preset")
+                            .on_hover_text(help_tooltip(self.help_language, "preset.ideal_gas"))
+                            .clicked()
+                        {
+                            self.document = EquilibriumGuiDocument::simple_ideal_gas(["H2O"]);
+                            self.invalidate_prepared_request();
+                            self.status = "Simple ideal-gas preset applied".into();
+                        }
+                    });
+                });
+                match &mut self.document.config.inventory {
+                    EquilibriumInventoryDraft::ExplicitPhases { phases }
+                    | EquilibriumInventoryDraft::ElementCandidates {
+                        assignments: phases,
+                        ..
+                    } => {
+                        let mut remove_phase = None;
+                        let mut move_phase = None;
+                        let phase_count = phases.len();
+                        for (phase_index, phase) in phases.iter_mut().enumerate() {
+                            // Phase IDs are validated as unique before a request is
+                            // built, so they are a better widget scope than the
+                            // current vector index. Reordering therefore keeps text
+                            // edit state attached to the same phase.
+                            let phase_key = editor_phase_key(phase, phase_index);
+                            ui.push_id(("equilibrium-phase", phase_key.as_str()), |ui| {
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(format!("Phase '{}'", phase.id.trim()));
+                                        if phase_index > 0
+                                            && ui
+                                                .button("Up")
+                                                .on_hover_text(help_tooltip(
+                                                    self.help_language,
+                                                    "list.up",
+                                                ))
+                                                .clicked()
+                                        {
+                                            move_phase = Some((phase_index, phase_index - 1));
+                                        }
+                                        if phase_index + 1 < phase_count
+                                            && ui
+                                                .button("Down")
+                                                .on_hover_text(help_tooltip(
+                                                    self.help_language,
+                                                    "list.down",
+                                                ))
+                                                .clicked()
+                                        {
+                                            move_phase = Some((phase_index, phase_index + 1));
+                                        }
+                                        if ui
+                                            .button("Remove")
+                                            .on_hover_text(help_tooltip(
+                                                self.help_language,
+                                                "list.remove",
+                                            ))
+                                            .clicked()
+                                        {
+                                            remove_phase = Some(phase_index);
+                                        }
+                                    });
+                                    labeled_text_with_language(ui, "Phase id", &mut phase.id, self.help_language);
+                                    ui.horizontal(|ui| {
+                                        ui.label("Physical state").on_hover_text(help_tooltip(
+                                            self.help_language,
+                                            "inventory.state",
+                                        ));
+                                        for (label, value) in [
+                                            ("Gas", GuiPhysicalState::Gas),
+                                            ("Liquid", GuiPhysicalState::Liquid),
+                                            ("Solid", GuiPhysicalState::Solid),
+                                        ] {
+                                            ui.selectable_value(
+                                                &mut phase.physical_state,
+                                                value,
+                                                label,
+                                            )
+                                            .on_hover_text(help_option_tooltip(
+                                                self.help_language,
+                                                match value {
+                                                    GuiPhysicalState::Gas => "state.gas",
+                                                    GuiPhysicalState::Liquid => "state.liquid",
+                                                    GuiPhysicalState::Solid => "state.solid",
+                                                    GuiPhysicalState::Condensed => "state.solid",
+                                                },
+                                            ));
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Model").on_hover_text(help_tooltip(
+                                            self.help_language,
+                                            "inventory.model",
+                                        ));
                                         ui.selectable_value(
-                                            &mut phase.physical_state,
-                                            value,
-                                            label,
+                                            &mut phase.model,
+                                            GuiPhaseModel::IdealGas,
+                                            "Ideal gas",
+                                        )
+                                        .on_hover_text(
+                                            help_option_tooltip(
+                                                self.help_language,
+                                                "model.ideal_gas",
+                                            ),
+                                        );
+                                        ui.selectable_value(
+                                            &mut phase.model,
+                                            GuiPhaseModel::IdealSolution,
+                                            "Ideal solution",
+                                        )
+                                        .on_hover_text(
+                                            help_option_tooltip(
+                                                self.help_language,
+                                                "model.ideal_solution",
+                                            ),
+                                        );
+                                        ui.selectable_value(
+                                            &mut phase.model,
+                                            GuiPhaseModel::PureCondensed,
+                                            "Pure condensed",
+                                        )
+                                        .on_hover_text(
+                                            help_option_tooltip(
+                                                self.help_language,
+                                                "model.pure_condensed",
+                                            ),
+                                        );
+                                    });
+                                    let mut remove_component = None;
+                                    let mut move_component = None;
+                                    let component_count = phase.components.len();
+                                    for (component_index, component) in
+                                        phase.components.iter_mut().enumerate()
+                                    {
+                                        // Substance keys are unique inside a
+                                        // validated phase. The index is only a
+                                        // deterministic fallback while a row is
+                                        // still empty or temporarily duplicated.
+                                        let component_key = editor_component_key(
+                                            &phase_key,
+                                            component,
+                                            component_index,
+                                        );
+                                        ui.push_id(
+                                            ("equilibrium-component", component_key.as_str()),
+                                            |ui| {
+                                                ui.horizontal(|ui| {
+                                                    labeled_text_with_language(
+                                                        ui,
+                                                        "Substance",
+                                                        &mut component.substance,
+                                                        self.help_language,
+                                                    );
+                                                    labeled_text_with_language(
+                                                        ui,
+                                                        "Moles",
+                                                        &mut component.initial_moles,
+                                                        self.help_language,
+                                                    );
+                                                    if let Some(source_library) =
+                                                        &component.source_library
+                                                    {
+                                                        ui.label(format!(
+                                                            "pinned: {source_library}"
+                                                        ));
+                                                    }
+                                                    if component_index > 0
+                                                        && ui
+                                                            .button("Up")
+                                                            .on_hover_text(help_tooltip(
+                                                                self.help_language,
+                                                                "list.up",
+                                                            ))
+                                                            .clicked()
+                                                    {
+                                                        move_component = Some((
+                                                            component_index,
+                                                            component_index - 1,
+                                                        ));
+                                                    }
+                                                    if component_index + 1 < component_count
+                                                        && ui
+                                                            .button("Down")
+                                                            .on_hover_text(help_tooltip(
+                                                                self.help_language,
+                                                                "list.down",
+                                                            ))
+                                                            .clicked()
+                                                    {
+                                                        move_component = Some((
+                                                            component_index,
+                                                            component_index + 1,
+                                                        ));
+                                                    }
+                                                    if ui
+                                                        .button("Remove")
+                                                        .on_hover_text(help_tooltip(
+                                                            self.help_language,
+                                                            "list.remove",
+                                                        ))
+                                                        .clicked()
+                                                    {
+                                                        remove_component = Some(component_index);
+                                                    }
+                                                });
+                                            },
                                         );
                                     }
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.label("Model");
-                                    ui.selectable_value(
-                                        &mut phase.model,
-                                        GuiPhaseModel::IdealGas,
-                                        "Ideal gas",
-                                    );
-                                    ui.selectable_value(
-                                        &mut phase.model,
-                                        GuiPhaseModel::IdealSolution,
-                                        "Ideal solution",
-                                    );
-                                    ui.selectable_value(
-                                        &mut phase.model,
-                                        GuiPhaseModel::PureCondensed,
-                                        "Pure condensed",
-                                    );
-                                });
-                                let mut remove_component = None;
-                                let mut move_component = None;
-                                let component_count = phase.components.len();
-                                for (component_index, component) in
-                                    phase.components.iter_mut().enumerate()
-                                {
-                                    // Substance keys are unique inside a
-                                    // validated phase. The index is only a
-                                    // deterministic fallback while a row is
-                                    // still empty or temporarily duplicated.
-                                    let component_key = editor_component_key(
-                                        &phase_key,
-                                        component,
-                                        component_index,
-                                    );
-                                    ui.push_id(
-                                        ("equilibrium-component", component_key.as_str()),
-                                        |ui| {
-                                            ui.horizontal(|ui| {
-                                                labeled_text(
-                                                    ui,
-                                                    "Substance",
-                                                    &mut component.substance,
-                                                );
-                                                labeled_text(
-                                                    ui,
-                                                    "Moles",
-                                                    &mut component.initial_moles,
-                                                );
-                                                if let Some(source_library) =
-                                                    &component.source_library
-                                                {
-                                                    ui.label(format!("pinned: {source_library}"));
-                                                }
-                                                if component_index > 0 && ui.button("Up").clicked()
-                                                {
-                                                    move_component = Some((
-                                                        component_index,
-                                                        component_index - 1,
-                                                    ));
-                                                }
-                                                if component_index + 1 < component_count
-                                                    && ui.button("Down").clicked()
-                                                {
-                                                    move_component = Some((
-                                                        component_index,
-                                                        component_index + 1,
-                                                    ));
-                                                }
-                                                if ui.button("Remove").clicked() {
-                                                    remove_component = Some(component_index);
-                                                }
-                                            });
-                                        },
-                                    );
-                                }
-                                if ui.button("Add component").clicked() {
-                                    phase.components.push(Default::default());
-                                    changed = true;
-                                }
-                                if let Some(index) = remove_component {
-                                    phase.components.remove(index);
-                                    changed = true;
-                                } else if let Some((from, to)) = move_component {
-                                    phase.components.swap(from, to);
-                                    changed = true;
-                                }
-                            });
-                        });
-                    }
-                    if ui.button("Add phase").clicked() {
-                        phases.push(Default::default());
-                        changed = true;
-                    }
-                    if let Some(index) = remove_phase {
-                        phases.remove(index);
-                        changed = true;
-                    } else if let Some((from, to)) = move_phase {
-                        phases.swap(from, to);
-                        changed = true;
-                    }
-                    if let EquilibriumInventoryDraft::ElementCandidates {
-                        elements,
-                        candidate_policy,
-                        assignments,
-                    } = &mut self.document.config.inventory
-                    {
-                        ui.label("Candidate preview is required before phase assignment");
-                        let element_count = elements.len();
-                        let mut remove_element = None;
-                        for (index, element) in elements.iter_mut().enumerate() {
-                            // Element symbols are unique after validation; the
-                            // index keeps the editor deterministic for an
-                            // incomplete/duplicated draft.
-                            let element_key = editor_element_key(element, index);
-                            ui.push_id(("equilibrium-element", element_key.as_str()), |ui| {
-                                ui.horizontal(|ui| {
-                                    labeled_text(ui, "Element", element);
-                                    if element_count > 1 && ui.button("Remove").clicked() {
-                                        remove_element = Some(index);
+                                    if ui
+                                        .button("Add component")
+                                        .on_hover_text(help_tooltip(
+                                            self.help_language,
+                                            "list.add_component",
+                                        ))
+                                        .clicked()
+                                    {
+                                        phase.components.push(Default::default());
+                                        changed = true;
+                                    }
+                                    if let Some(index) = remove_component {
+                                        phase.components.remove(index);
+                                        changed = true;
+                                    } else if let Some((from, to)) = move_component {
+                                        phase.components.swap(from, to);
+                                        changed = true;
                                     }
                                 });
                             });
                         }
-                        if ui.button("Add element").clicked() {
-                            elements.push(String::new());
+                        if ui
+                            .button("Add phase")
+                            .on_hover_text(help_tooltip(self.help_language, "list.add_phase"))
+                            .clicked()
+                        {
+                            phases.push(Default::default());
                             changed = true;
                         }
-                        if let Some(index) = remove_element {
-                            elements.remove(index);
+                        if let Some(index) = remove_phase {
+                            phases.remove(index);
+                            changed = true;
+                        } else if let Some((from, to)) = move_phase {
+                            phases.swap(from, to);
                             changed = true;
                         }
-                        ui.horizontal(|ui| {
-                            ui.label("Element matching");
-                            ui.selectable_value(
+                        if let EquilibriumInventoryDraft::ElementCandidates {
+                            elements,
+                            candidate_policy,
+                            assignments,
+                        } = &mut self.document.config.inventory
+                        {
+                            ui.label("Candidate preview is required before phase assignment");
+                            let element_count = elements.len();
+                            let mut remove_element = None;
+                            for (index, element) in elements.iter_mut().enumerate() {
+                                // Element symbols are unique after validation; the
+                                // index keeps the editor deterministic for an
+                                // incomplete/duplicated draft.
+                                let element_key = editor_element_key(element, index);
+                                ui.push_id(("equilibrium-element", element_key.as_str()), |ui| {
+                                    ui.horizontal(|ui| {
+                                        labeled_text_with_tooltip(
+                                            ui,
+                                            "Element",
+                                            element,
+                                            "field.element",
+                                            self.help_language,
+                                        );
+                                        if element_count > 1
+                                            && ui
+                                                .button("Remove")
+                                                .on_hover_text(help_tooltip(
+                                                    self.help_language,
+                                                    "list.remove",
+                                                ))
+                                                .clicked()
+                                        {
+                                            remove_element = Some(index);
+                                        }
+                                    });
+                                });
+                            }
+                            if ui
+                                .button("Add element")
+                                .on_hover_text(help_tooltip(
+                                    self.help_language,
+                                    "list.add_element",
+                                ))
+                                .clicked()
+                            {
+                                elements.push(String::new());
+                                changed = true;
+                            }
+                            if let Some(index) = remove_element {
+                                elements.remove(index);
+                                changed = true;
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("Element matching").on_hover_text(help_tooltip(
+                                    self.help_language,
+                                    "candidate.matching",
+                                ));
+                                ui.selectable_value(
                                 &mut candidate_policy.element_mode,
                                 crate::gui::equilibrium_gui_model::GuiElementSearchMode::SubsetOf,
                                 "Subset of",
-                            );
-                            ui.selectable_value(
-                                &mut candidate_policy.element_mode,
-                                crate::gui::equilibrium_gui_model::GuiElementSearchMode::Exact,
-                                "Exact set",
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Allowed physical states");
-                            for (label, state) in [
-                                ("Gas", GuiPhysicalState::Gas),
-                                ("Liquid", GuiPhysicalState::Liquid),
-                                ("Solid", GuiPhysicalState::Solid),
-                                ("Condensed", GuiPhysicalState::Condensed),
-                            ] {
-                                let mut enabled = candidate_policy.physical_states.contains(&state);
-                                if ui.checkbox(&mut enabled, label).changed() {
-                                    if enabled {
-                                        if !candidate_policy.physical_states.contains(&state) {
-                                            candidate_policy.physical_states.push(state);
+                            ).on_hover_text(help_option_tooltip(self.help_language, "matching.subset"));
+                                ui.selectable_value(
+                                    &mut candidate_policy.element_mode,
+                                    crate::gui::equilibrium_gui_model::GuiElementSearchMode::Exact,
+                                    "Exact set",
+                                ).on_hover_text(help_option_tooltip(self.help_language, "matching.exact"));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Allowed physical states")
+                                    .on_hover_text(help_tooltip(
+                                        self.help_language,
+                                        "candidate.states",
+                                    ));
+                                for (label, state, tooltip_key) in [
+                                    ("Gas", GuiPhysicalState::Gas, "candidate.state.gas"),
+                                    ("Liquid", GuiPhysicalState::Liquid, "candidate.state.liquid"),
+                                    ("Solid", GuiPhysicalState::Solid, "candidate.state.solid"),
+                                    (
+                                        "Condensed",
+                                        GuiPhysicalState::Condensed,
+                                        "candidate.state.condensed",
+                                    ),
+                                ] {
+                                    let mut enabled =
+                                        candidate_policy.physical_states.contains(&state);
+                                    if ui
+                                        .checkbox(&mut enabled, label)
+                                        .on_hover_text(help_tooltip(
+                                            self.help_language,
+                                            tooltip_key,
+                                        ))
+                                        .changed()
+                                    {
+                                        if enabled {
+                                            if !candidate_policy.physical_states.contains(&state) {
+                                                candidate_policy.physical_states.push(state);
+                                            }
+                                        } else {
+                                            candidate_policy
+                                                .physical_states
+                                                .retain(|item| *item != state);
                                         }
-                                    } else {
-                                        candidate_policy
-                                            .physical_states
-                                            .retain(|item| *item != state);
+                                        changed = true;
                                     }
-                                    changed = true;
                                 }
-                            }
-                        });
-                        labeled_text(
-                            ui,
-                            "Candidate temperature lower [K]",
-                            &mut candidate_policy.temperature_lower_k,
-                        );
-                        labeled_text(
-                            ui,
-                            "Candidate temperature upper [K]",
-                            &mut candidate_policy.temperature_upper_k,
-                        );
-                        labeled_text(ui, "Max candidates", &mut candidate_policy.max_candidates);
-                        ui.label(format!(
-                            "Confirmed phase assignments: {}",
-                            assignments.len()
-                        ));
+                            });
+                            labeled_text_with_language(
+                                ui,
+                                "Candidate temperature lower [K]",
+                                &mut candidate_policy.temperature_lower_k,
+                                self.help_language,
+                            );
+                            labeled_text_with_language(
+                                ui,
+                                "Candidate temperature upper [K]",
+                                &mut candidate_policy.temperature_upper_k,
+                                self.help_language,
+                            );
+                            labeled_text_with_language(
+                                ui,
+                                "Max candidates",
+                                &mut candidate_policy.max_candidates,
+                                self.help_language,
+                            );
+                            ui.label(format!(
+                                "Confirmed phase assignments: {}",
+                                assignments.len()
+                            ));
+                        }
                     }
                 }
-            }
-            self.render_candidate_preview(ui);
-            if matches!(
-                self.document.config.inventory,
-                EquilibriumInventoryDraft::ElementCandidates { .. }
-            ) {
-                ui.horizontal(|ui| {
-                    if self.candidate_worker_receiver.is_some() {
-                        ui.label("Candidate worker is running");
-                        if ui.button("Cancel candidate preview").clicked() {
-                            self.cancel_candidate_preview();
+                self.render_candidate_preview(ui);
+                if matches!(
+                    self.document.config.inventory,
+                    EquilibriumInventoryDraft::ElementCandidates { .. }
+                ) {
+                    ui.horizontal(|ui| {
+                        if self.candidate_worker_receiver.is_some() {
+                            ui.label("Candidate worker is running");
+                            if ui
+                                .button("Cancel candidate preview")
+                                .on_hover_text(help_tooltip(self.help_language, "candidate.cancel"))
+                                .clicked()
+                            {
+                                self.cancel_candidate_preview();
+                            }
+                        } else if self.candidate_preview().is_none()
+                            && ui
+                                .button("Preview candidates")
+                                .on_hover_text(help_tooltip(
+                                    self.help_language,
+                                    "candidate.preview",
+                                ))
+                                .clicked()
+                        {
+                            self.start_candidate_preview();
                         }
-                    } else if self.candidate_preview().is_none()
-                        && ui.button("Preview candidates").clicked()
-                    {
-                        self.start_candidate_preview();
-                    }
-                });
-            }
-            if changed {
-                self.invalidate_prepared_request();
-            }
-        });
+                    });
+                }
+                if changed {
+                    self.invalidate_prepared_request();
+                }
+            });
     }
 
     fn render_candidate_preview(&mut self, ui: &mut egui::Ui) {
@@ -1323,13 +1742,23 @@ impl EquilibriumApp {
         if phase_ids.is_empty() {
             ui.label("Add a phase assignment before assigning candidates");
         } else {
-            egui::ComboBox::from_label("Target phase")
-                .selected_text(&target_phase)
-                .show_ui(ui, |ui| {
-                    for phase_id in &phase_ids {
-                        ui.selectable_value(&mut target_phase, phase_id.clone(), phase_id);
-                    }
-                });
+            ui.label("Target phase")
+                .on_hover_text(help_tooltip(self.help_language, "candidate.target"));
+            let target_phase_combo =
+                egui::ComboBox::from_id_salt("equilibrium-candidate-target-phase")
+                    .selected_text(&target_phase)
+                    .show_ui(ui, |ui| {
+                        for phase_id in &phase_ids {
+                            ui.selectable_value(&mut target_phase, phase_id.clone(), phase_id)
+                                .on_hover_text(help_tooltip(
+                                    self.help_language,
+                                    "candidate.target",
+                                ));
+                        }
+                    });
+            target_phase_combo
+                .response
+                .on_hover_text(help_tooltip(self.help_language, "candidate.target"));
         }
         egui::ScrollArea::vertical()
             .max_height(220.0)
@@ -1366,7 +1795,11 @@ impl EquilibriumApp {
                                     .candidate_initial_moles(row.record_key().unwrap_or_default())
                                     .unwrap_or_default()
                                     .to_string();
-                                if ui.text_edit_singleline(&mut amount).changed() {
+                                if ui
+                                    .text_edit_singleline(&mut amount)
+                                    .on_hover_text(help_tooltip(self.help_language, "field.moles"))
+                                    .changed()
+                                {
                                     pending_amount = row
                                         .record_key()
                                         .map(|record_key| (record_key.to_string(), amount));
@@ -1375,13 +1808,23 @@ impl EquilibriumApp {
                                 ui.label("-");
                             }
                             if assigned && row.record_key().is_some() {
-                                if ui.button("Unassign").clicked() {
+                                if ui
+                                    .button("Unassign")
+                                    .on_hover_text(help_tooltip(
+                                        self.help_language,
+                                        "list.unassign",
+                                    ))
+                                    .clicked()
+                                {
                                     pending_unassignment = row.record_key().map(str::to_string);
                                 }
                             } else if row.included()
                                 && row.record_key().is_some()
                                 && !phase_ids.is_empty()
-                                && ui.button("Assign").clicked()
+                                && ui
+                                    .button("Assign")
+                                    .on_hover_text(help_tooltip(self.help_language, "list.assign"))
+                                    .clicked()
                             {
                                 pending_assignment = row.record_key().map(str::to_string);
                             } else {
@@ -1408,19 +1851,23 @@ impl EquilibriumApp {
         if let Some((record_key, amount)) = pending_amount {
             self.set_candidate_initial_moles(&record_key, amount);
         }
+        self.render_validation_issues_for_prefix(ui, "inventory.");
     }
 
     fn render_lookup(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("Library lookup", |ui| {
             let mut changed = false;
             let available_libraries = self.available_libraries.clone();
+            ui.label(self.library_catalog_status_text());
+            if let Some(error) = self.library_catalog_error.as_deref() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(190, 65, 55),
+                    format!("Catalog error: {error}"),
+                );
+            }
             if let Some(libraries) = available_libraries.as_ref() {
-                ui.label(format!(
-                    "Available thermochemical libraries: {}",
-                    libraries.len()
-                ));
                 ui.horizontal(|ui| {
-                    egui::ComboBox::from_label("Catalog library")
+                    let catalog_combo = egui::ComboBox::from_label("Catalog library")
                         .selected_text(if self.library_picker.is_empty() {
                             "Select library"
                         } else {
@@ -1432,13 +1879,20 @@ impl EquilibriumApp {
                                     &mut self.library_picker,
                                     library.clone(),
                                     library,
-                                );
+                                )
+                                .on_hover_text(help_tooltip(self.help_language, "lookup.catalog"));
                             }
                         });
+                    catalog_combo
+                        .response
+                        .on_hover_text(help_tooltip(self.help_language, "lookup.catalog"));
                 });
-            } else if self.library_worker_receiver.is_some() {
-                ui.label("Loading library choices...");
-            } else if ui.button("Load local library choices").clicked() {
+            } else if self.library_worker_receiver.is_none()
+                && ui
+                    .button("Load local library choices")
+                    .on_hover_text(help_tooltip(self.help_language, "lookup.load_catalog"))
+                    .clicked()
+            {
                 self.start_library_catalog_load();
             }
             let default_policy =
@@ -1446,6 +1900,7 @@ impl EquilibriumApp {
             ui.horizontal(|ui| {
                 if ui
                     .selectable_label(default_policy, "Engine default")
+                    .on_hover_text(help_tooltip(self.help_language, "lookup.default"))
                     .clicked()
                     && !default_policy
                 {
@@ -1454,6 +1909,7 @@ impl EquilibriumApp {
                 }
                 if ui
                     .selectable_label(!default_policy, "Explicit policy")
+                    .on_hover_text(help_tooltip(self.help_language, "lookup.explicit"))
                     .clicked()
                     && default_policy
                 {
@@ -1473,17 +1929,32 @@ impl EquilibriumApp {
                 ..
             } = &mut self.document.config.lookup
             {
-                ui.label("Priority libraries (ordered)");
+                ui.label("Priority libraries (ordered)")
+                    .on_hover_text(help_tooltip(self.help_language, "lookup.priority"));
                 let mut remove_priority = None;
                 for (index, library) in priority_libraries.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
-                        labeled_text(ui, &format!("Priority {}", index + 1), library);
-                        if ui.button("Remove").clicked() {
+                        labeled_text_with_tooltip(
+                            ui,
+                            &format!("Priority {}", index + 1),
+                            library,
+                            "lookup.priority_entry",
+                            self.help_language,
+                        );
+                        if ui
+                            .button("Remove")
+                            .on_hover_text(help_tooltip(self.help_language, "list.remove"))
+                            .clicked()
+                        {
                             remove_priority = Some(index);
                         }
                     });
                 }
-                if ui.button("Add priority library").clicked() {
+                if ui
+                    .button("Add priority library")
+                    .on_hover_text(help_tooltip(self.help_language, "list.add_library"))
+                    .clicked()
+                {
                     priority_libraries.push(if self.library_picker.is_empty() {
                         String::new()
                     } else {
@@ -1497,17 +1968,32 @@ impl EquilibriumApp {
                 }
 
                 ui.separator();
-                ui.label("Permitted libraries (closed candidate set)");
+                ui.label("Permitted libraries (closed candidate set)")
+                    .on_hover_text(help_tooltip(self.help_language, "lookup.permitted"));
                 let mut remove_permitted = None;
                 for (index, library) in permitted_libraries.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
-                        labeled_text(ui, &format!("Permitted {}", index + 1), library);
-                        if ui.button("Remove").clicked() {
+                        labeled_text_with_tooltip(
+                            ui,
+                            &format!("Permitted {}", index + 1),
+                            library,
+                            "lookup.permitted_entry",
+                            self.help_language,
+                        );
+                        if ui
+                            .button("Remove")
+                            .on_hover_text(help_tooltip(self.help_language, "list.remove"))
+                            .clicked()
+                        {
                             remove_permitted = Some(index);
                         }
                     });
                 }
-                if ui.button("Add permitted library").clicked() {
+                if ui
+                    .button("Add permitted library")
+                    .on_hover_text(help_tooltip(self.help_language, "list.add_library"))
+                    .clicked()
+                {
                     permitted_libraries.push(if self.library_picker.is_empty() {
                         String::new()
                     } else {
@@ -1519,14 +2005,65 @@ impl EquilibriumApp {
                     permitted_libraries.remove(index);
                     changed = true;
                 }
-                if ui.checkbox(search_in_nist, "Allow NIST fallback").changed() {
+                if ui
+                    .checkbox(search_in_nist, "Allow online NIST fallback")
+                    .on_hover_text(help_tooltip(self.help_language, "lookup.nist"))
+                    .changed()
+                {
                     changed = true;
                 }
                 ui.label("Library names are canonicalized and validated at request build time");
             }
+            self.render_declared_component_lookup(ui);
             if changed {
                 self.invalidate_prepared_request();
             }
+            self.render_validation_issues_for_prefix(ui, "lookup.");
+        });
+    }
+
+    /// Renders declared lookup instructions only. Resolved provenance belongs
+    /// to an accepted result and must never be fabricated from this draft.
+    fn render_declared_component_lookup(&self, ui: &mut egui::Ui) {
+        let phases = match &self.document.config.inventory {
+            EquilibriumInventoryDraft::ExplicitPhases { phases }
+            | EquilibriumInventoryDraft::ElementCandidates {
+                assignments: phases,
+                ..
+            } => phases,
+        };
+        ui.collapsing("Declared component lookup", |ui| {
+            egui::Grid::new("equilibrium-declared-lookup")
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label("Phase");
+                    ui.label("Substance");
+                    ui.label("Lookup instruction");
+                    ui.end_row();
+                    for phase in phases {
+                        for component in &phase.components {
+                            ui.label(if phase.id.trim().is_empty() {
+                                "<unnamed phase>"
+                            } else {
+                                phase.id.trim()
+                            });
+                            ui.label(if component.substance.trim().is_empty() {
+                                "<unnamed substance>"
+                            } else {
+                                component.substance.trim()
+                            });
+                            ui.label(
+                                component
+                                    .source_library
+                                    .as_deref()
+                                    .filter(|library| !library.trim().is_empty())
+                                    .map(|library| format!("pinned: {library}"))
+                                    .unwrap_or_else(|| "engine policy".to_owned()),
+                            );
+                            ui.end_row();
+                        }
+                    }
+                });
         });
     }
 
@@ -1539,6 +2076,7 @@ impl EquilibriumApp {
             ui.horizontal(|ui| {
                 if ui
                     .selectable_label(fixed, "Fixed declared phases")
+                    .on_hover_text(help_tooltip(self.help_language, "phase.fixed"))
                     .clicked()
                     && !fixed
                 {
@@ -1547,6 +2085,7 @@ impl EquilibriumApp {
                 }
                 if ui
                     .selectable_label(!fixed, "Bounded phase control")
+                    .on_hover_text(help_tooltip(self.help_language, "phase.bounded"))
                     .clicked()
                     && fixed
                 {
@@ -1555,6 +2094,7 @@ impl EquilibriumApp {
                         dg_create: "-1e-6".into(),
                         dg_keep: "1e-8".into(),
                         max_phase_iterations: "20".into(),
+                        initial_phase_policy: GuiInitialPhasePolicyDraft::FromInitialMoles,
                     };
                     self.invalidate_prepared_request();
                 }
@@ -1564,26 +2104,99 @@ impl EquilibriumApp {
                 dg_create,
                 dg_keep,
                 max_phase_iterations,
+                initial_phase_policy,
             } = &mut self.document.config.phase_mode
             {
-                labeled_text(ui, "Phase epsilon", phase_epsilon);
-                labeled_text(ui, "Creation driving force", dg_create);
-                labeled_text(ui, "Keep driving force", dg_keep);
-                labeled_text(ui, "Maximum phase iterations", max_phase_iterations);
+                labeled_text_with_language(ui, "Phase epsilon", phase_epsilon, self.help_language);
+                labeled_text_with_language(ui, "Creation driving force", dg_create, self.help_language);
+                labeled_text_with_language(ui, "Keep driving force", dg_keep, self.help_language);
+                labeled_text_with_language(ui, "Maximum phase iterations", max_phase_iterations, self.help_language);
+                ui.label("Initial phase set").on_hover_text(help_tooltip(
+                    self.help_language,
+                    "phase.initial_set",
+                ));
+                let initial_phase_set_combo = egui::ComboBox::from_id_salt("equilibrium-initial-phase-set")
+                    .selected_text(match initial_phase_policy {
+                        GuiInitialPhasePolicyDraft::FromInitialMoles => "Positive inventory",
+                        GuiInitialPhasePolicyDraft::AllDeclaredCandidates => {
+                            "All declared candidates"
+                        }
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            initial_phase_policy,
+                            GuiInitialPhasePolicyDraft::FromInitialMoles,
+                            "Positive inventory",
+                        )
+                        .on_hover_text(help_tooltip(
+                            self.help_language,
+                            "phase.initial_positive",
+                        ));
+                        ui.selectable_value(
+                            initial_phase_policy,
+                            GuiInitialPhasePolicyDraft::AllDeclaredCandidates,
+                            "All declared candidates",
+                        )
+                        .on_hover_text(help_tooltip(self.help_language, "phase.initial_all"));
+                    });
+                initial_phase_set_combo
+                    .response
+                    .on_hover_text(help_tooltip(self.help_language, "phase.initial_set"));
                 ui.label(
-                    "A phase is retained inside the hysteresis band; transitions are reported after solve",
+                    "All declared candidates permits zero-inventory phases to appear through TPD; phase indices remain engine-owned",
                 );
             }
+            self.render_validation_issues_for_prefix(ui, "phase_mode.");
         });
     }
 
     fn render_solver(&mut self, ui: &mut egui::Ui) {
         let mut invalidate = false;
         ui.collapsing("Solver", |ui| {
+            if matches!(
+                self.document.config.problem,
+                EquilibriumProblemDraft::FixedPh { .. }
+            ) {
+                let previous_mode = self.document.config.solver.ph_solve_mode;
+                ui.label("P,H route")
+                    .on_hover_text(help_tooltip(self.help_language, "solver.ph_route"));
+                let ph_route_combo = egui::ComboBox::from_id_salt("equilibrium-ph-route")
+                    .selected_text(match previous_mode {
+                        GuiPhSolveMode::Auto => "Auto",
+                        GuiPhSolveMode::Monolithic => "Monolithic",
+                        GuiPhSolveMode::NestedTemperature => "Nested temperature",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.document.config.solver.ph_solve_mode,
+                            GuiPhSolveMode::Auto,
+                            "Auto",
+                        )
+                        .on_hover_text(help_tooltip(self.help_language, "solver.ph_auto"));
+                        ui.selectable_value(
+                            &mut self.document.config.solver.ph_solve_mode,
+                            GuiPhSolveMode::Monolithic,
+                            "Monolithic",
+                        )
+                        .on_hover_text(help_tooltip(self.help_language, "solver.ph_monolithic"));
+                        ui.selectable_value(
+                            &mut self.document.config.solver.ph_solve_mode,
+                            GuiPhSolveMode::NestedTemperature,
+                            "Nested temperature",
+                        )
+                        .on_hover_text(help_tooltip(self.help_language, "solver.ph_nested"));
+                    });
+                ph_route_combo
+                    .response
+                    .on_hover_text(help_tooltip(self.help_language, "solver.ph_route"));
+                invalidate |= self.document.config.solver.ph_solve_mode != previous_mode;
+                ui.separator();
+            }
             let selection = &mut self.document.config.solver.selection;
             let production = matches!(selection, EquilibriumSolverDraft::ProductionDefault);
             if ui
                 .selectable_label(production, "Production default cascade")
+                .on_hover_text(help_tooltip(self.help_language, "solver.production"))
                 .clicked()
                 && !production
             {
@@ -1598,7 +2211,7 @@ impl EquilibriumApp {
                     if backends.len() == 1 { "" } else { "s" }
                 ),
             };
-            egui::ComboBox::from_label("Concrete backend")
+            let concrete_backend_combo = egui::ComboBox::from_label("Concrete backend")
                 .selected_text(selected_backend)
                 .show_ui(ui, |ui| {
                     for backend in GuiSolverBackend::ALL {
@@ -1606,10 +2219,17 @@ impl EquilibriumApp {
                             selection,
                             EquilibriumSolverDraft::SingleBackend { backend },
                             backend.label(),
-                        );
+                        )
+                        .on_hover_text(help_tooltip(self.help_language, "solver.backend"));
                     }
                 });
-            if ui.button("Use custom cascade").clicked()
+            concrete_backend_combo
+                .response
+                .on_hover_text(help_tooltip(self.help_language, "solver.backend"));
+            if ui
+                .button("Use custom cascade")
+                .on_hover_text(help_tooltip(self.help_language, "solver.custom"))
+                .clicked()
                 && !matches!(selection, EquilibriumSolverDraft::CustomCascade { .. })
             {
                 *selection = EquilibriumSolverDraft::CustomCascade {
@@ -1626,29 +2246,54 @@ impl EquilibriumApp {
                     let backend = backends[index];
                     ui.horizontal(|ui| {
                         ui.label(format!("{}.", index + 1));
-                        egui::ComboBox::from_id_salt(("equilibrium-cascade", index))
-                            .selected_text(backend.label())
-                            .show_ui(ui, |ui| {
-                                for candidate in GuiSolverBackend::ALL {
-                                    ui.selectable_value(
-                                        &mut backends[index],
-                                        candidate,
-                                        candidate.label(),
-                                    );
-                                }
-                            });
-                        if ui.small_button("Up").clicked() && index > 0 {
+                        let cascade_backend_combo =
+                            egui::ComboBox::from_id_salt(("equilibrium-cascade", index))
+                                .selected_text(backend.label())
+                                .show_ui(ui, |ui| {
+                                    for candidate in GuiSolverBackend::ALL {
+                                        ui.selectable_value(
+                                            &mut backends[index],
+                                            candidate,
+                                            candidate.label(),
+                                        )
+                                        .on_hover_text(
+                                            help_tooltip(self.help_language, "solver.backend"),
+                                        );
+                                    }
+                                });
+                        cascade_backend_combo
+                            .response
+                            .on_hover_text(help_tooltip(self.help_language, "solver.backend"));
+                        if ui
+                            .small_button("Up")
+                            .on_hover_text(help_tooltip(self.help_language, "list.up"))
+                            .clicked()
+                            && index > 0
+                        {
                             move_up = Some(index);
                         }
-                        if ui.small_button("Down").clicked() && index + 1 < backends.len() {
+                        if ui
+                            .small_button("Down")
+                            .on_hover_text(help_tooltip(self.help_language, "list.down"))
+                            .clicked()
+                            && index + 1 < backends.len()
+                        {
                             move_down = Some(index);
                         }
-                        if ui.small_button("Remove").clicked() {
+                        if ui
+                            .small_button("Remove")
+                            .on_hover_text(help_tooltip(self.help_language, "list.remove"))
+                            .clicked()
+                        {
                             remove_index = Some(index);
                         }
                     });
                 }
-                if ui.button("Add backend").clicked() {
+                if ui
+                    .button("Add backend")
+                    .on_hover_text(help_tooltip(self.help_language, "list.add_backend"))
+                    .clicked()
+                {
                     backends.push(GuiSolverBackend::LegacyTr);
                     invalidate = true;
                 }
@@ -1665,15 +2310,17 @@ impl EquilibriumApp {
                     invalidate = true;
                 }
             }
-            labeled_text(
+            labeled_text_with_language(
                 ui,
                 "Tolerance override",
                 &mut self.document.config.solver.overrides.tolerance,
+                self.help_language,
             );
-            labeled_text(
+            labeled_text_with_language(
                 ui,
                 "Max iterations override",
                 &mut self.document.config.solver.overrides.max_iterations,
+                self.help_language,
             );
             let mut budget_override = self
                 .document
@@ -1684,6 +2331,7 @@ impl EquilibriumApp {
                 .is_some();
             if ui
                 .checkbox(&mut budget_override, "Override cascade budget")
+                .on_hover_text(help_tooltip(self.help_language, "solver.budget"))
                 .changed()
             {
                 self.document.config.solver.overrides.cascade_budget = if budget_override {
@@ -1704,22 +2352,30 @@ impl EquilibriumApp {
                 .cascade_budget
                 .as_mut()
             {
-                labeled_text(ui, "Cascade max attempts", &mut budget.max_attempts);
-                labeled_text(
+                labeled_text_with_language(
+                    ui,
+                    "Cascade max attempts",
+                    &mut budget.max_attempts,
+                    self.help_language,
+                );
+                labeled_text_with_language(
                     ui,
                     "Cascade iterations per attempt",
                     &mut budget.max_iterations_per_attempt,
+                    self.help_language,
                 );
-                labeled_text(
+                labeled_text_with_language(
                     ui,
                     "Cascade total iterations",
                     &mut budget.max_total_iterations,
+                    self.help_language,
                 );
             }
             ui.checkbox(
                 &mut self.document.config.solver.overrides.scaling_enabled,
                 "Enable scaling",
-            );
+            )
+            .on_hover_text(help_tooltip(self.help_language, "solver.scaling"));
             let mut trace_override = self
                 .document
                 .config
@@ -1729,6 +2385,7 @@ impl EquilibriumApp {
                 .is_some();
             if ui
                 .checkbox(&mut trace_override, "Override trace-species seed policy")
+                .on_hover_text(help_tooltip(self.help_language, "solver.trace_override"))
                 .changed()
             {
                 self.document.config.solver.overrides.trace_seed_policy = if trace_override {
@@ -1753,8 +2410,14 @@ impl EquilibriumApp {
                     Some(GuiTraceSeedPolicyDraft::Absolute { .. })
                 );
                 ui.horizontal(|ui| {
-                    ui.label("Trace seed strategy");
-                    if ui.selectable_label(absolute, "Absolute floor").clicked() && !absolute {
+                    ui.label("Trace seed strategy")
+                        .on_hover_text(help_tooltip(self.help_language, "solver.trace_seed"));
+                    if ui
+                        .selectable_label(absolute, "Absolute floor")
+                        .on_hover_text(help_tooltip(self.help_language, "solver.trace_absolute"))
+                        .clicked()
+                        && !absolute
+                    {
                         self.document.config.solver.overrides.trace_seed_policy =
                             Some(GuiTraceSeedPolicyDraft::Absolute {
                                 floor: "1e-30".into(),
@@ -1763,6 +2426,7 @@ impl EquilibriumApp {
                     }
                     if ui
                         .selectable_label(!absolute, "Relative to largest mole")
+                        .on_hover_text(help_tooltip(self.help_language, "solver.trace_relative"))
                         .clicked()
                         && absolute
                     {
@@ -1785,17 +2449,36 @@ impl EquilibriumApp {
             {
                 match policy {
                     GuiTraceSeedPolicyDraft::Absolute { floor } => {
-                        labeled_text(ui, "Trace floor", floor);
+                        labeled_text_with_tooltip(
+                            ui,
+                            "Trace floor",
+                            floor,
+                            "field.trace_floor",
+                            self.help_language,
+                        );
                     }
                     GuiTraceSeedPolicyDraft::RelativeToLargestInitialMole {
                         fraction,
                         minimum_floor,
                     } => {
-                        labeled_text(ui, "Trace fraction", fraction);
-                        labeled_text(ui, "Minimum trace floor", minimum_floor);
+                        labeled_text_with_tooltip(
+                            ui,
+                            "Trace fraction",
+                            fraction,
+                            "field.trace_fraction",
+                            self.help_language,
+                        );
+                        labeled_text_with_tooltip(
+                            ui,
+                            "Minimum trace floor",
+                            minimum_floor,
+                            "field.trace_minimum_floor",
+                            self.help_language,
+                        );
                     }
                 }
             }
+            self.render_validation_issues_for_prefix(ui, "solver.");
         });
         if invalidate {
             self.invalidate_prepared_request();
@@ -1803,74 +2486,126 @@ impl EquilibriumApp {
     }
 
     fn render_diagnostics(&mut self, ui: &mut egui::Ui) {
+        let bounded_phase_control = matches!(
+            self.document.config.phase_mode,
+            EquilibriumPhaseModeDraft::Bounded { .. }
+        );
+        let temperature_range = matches!(
+            self.document.config.problem,
+            EquilibriumProblemDraft::FixedPt {
+                temperature: TemperatureDraft::Range { .. },
+                ..
+            }
+        );
         ui.collapsing("Diagnostics", |ui| {
             let diagnostics = &mut self.document.config.diagnostics;
-            ui.checkbox(&mut diagnostics.collect_timing, "Collect timing");
-            ui.checkbox(
-                &mut diagnostics.retain_backend_attempts,
-                "Retain backend attempts",
-            );
-            ui.checkbox(
-                &mut diagnostics.retain_conservation_report,
-                "Retain conservation report",
-            );
-            ui.checkbox(
-                &mut diagnostics.retain_phase_transitions,
-                "Retain phase transitions",
-            );
-            egui::ComboBox::from_label("Phase lifecycle trace")
-                .selected_text(match diagnostics.phase_lifecycle_trace {
-                    GuiPhaseLifecycleTrace::Off => "Off",
-                    GuiPhaseLifecycleTrace::Summary => "Summary",
-                    GuiPhaseLifecycleTrace::PhaseLifecycle => "Lifecycle",
-                    GuiPhaseLifecycleTrace::Detailed => "Detailed",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut diagnostics.phase_lifecycle_trace,
-                        GuiPhaseLifecycleTrace::Off,
-                        "Off",
-                    );
-                    ui.selectable_value(
-                        &mut diagnostics.phase_lifecycle_trace,
-                        GuiPhaseLifecycleTrace::Summary,
-                        "Summary",
-                    );
-                    ui.selectable_value(
-                        &mut diagnostics.phase_lifecycle_trace,
-                        GuiPhaseLifecycleTrace::PhaseLifecycle,
-                        "Lifecycle",
-                    );
-                    ui.selectable_value(
-                        &mut diagnostics.phase_lifecycle_trace,
-                        GuiPhaseLifecycleTrace::Detailed,
-                        "Detailed",
-                    );
-                });
-            egui::ComboBox::from_label("Range lifecycle trace")
-                .selected_text(match diagnostics.range_lifecycle_trace {
-                    GuiRangeLifecycleTrace::Endpoints => "Endpoints",
-                    GuiRangeLifecycleTrace::TransitionsOnly => "Transitions only",
-                    GuiRangeLifecycleTrace::EveryPoint => "Every point",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut diagnostics.range_lifecycle_trace,
-                        GuiRangeLifecycleTrace::Endpoints,
-                        "Endpoints",
-                    );
-                    ui.selectable_value(
-                        &mut diagnostics.range_lifecycle_trace,
-                        GuiRangeLifecycleTrace::TransitionsOnly,
-                        "Transitions only",
-                    );
-                    ui.selectable_value(
-                        &mut diagnostics.range_lifecycle_trace,
-                        GuiRangeLifecycleTrace::EveryPoint,
-                        "Every point",
-                    );
-                });
-            egui::ComboBox::from_label("Equilibrium-constant validation")
+            ui.checkbox(&mut diagnostics.collect_timing, "Collect timing")
+                .on_hover_text(help_tooltip(self.help_language, "diagnostics.timing"));
+            if bounded_phase_control {
+                ui.label("Phase lifecycle trace")
+                    .on_hover_text(help_tooltip(self.help_language, "diagnostics.phase_trace"));
+                let phase_trace_combo =
+                    egui::ComboBox::from_id_salt("equilibrium-phase-lifecycle-trace")
+                        .selected_text(match diagnostics.phase_lifecycle_trace {
+                            GuiPhaseLifecycleTrace::Off => "Off",
+                            GuiPhaseLifecycleTrace::Summary => "Summary",
+                            GuiPhaseLifecycleTrace::PhaseLifecycle => "Lifecycle",
+                            GuiPhaseLifecycleTrace::Detailed => "Detailed",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut diagnostics.phase_lifecycle_trace,
+                                GuiPhaseLifecycleTrace::Off,
+                                "Off",
+                            )
+                            .on_hover_text(help_tooltip(
+                                self.help_language,
+                                "diagnostics.phase_off",
+                            ));
+                            ui.selectable_value(
+                                &mut diagnostics.phase_lifecycle_trace,
+                                GuiPhaseLifecycleTrace::Summary,
+                                "Summary",
+                            )
+                            .on_hover_text(help_tooltip(
+                                self.help_language,
+                                "diagnostics.phase_summary",
+                            ));
+                            ui.selectable_value(
+                                &mut diagnostics.phase_lifecycle_trace,
+                                GuiPhaseLifecycleTrace::PhaseLifecycle,
+                                "Lifecycle",
+                            )
+                            .on_hover_text(help_tooltip(
+                                self.help_language,
+                                "diagnostics.phase_lifecycle",
+                            ));
+                            ui.selectable_value(
+                                &mut diagnostics.phase_lifecycle_trace,
+                                GuiPhaseLifecycleTrace::Detailed,
+                                "Detailed",
+                            )
+                            .on_hover_text(help_tooltip(
+                                self.help_language,
+                                "diagnostics.phase_detailed",
+                            ));
+                        });
+                phase_trace_combo
+                    .response
+                    .on_hover_text(help_tooltip(self.help_language, "diagnostics.phase_trace"));
+                labeled_text_with_language(
+                    ui,
+                    "Retained lifecycle events override",
+                    &mut diagnostics.max_lifecycle_events,
+                    self.help_language,
+                );
+                if temperature_range {
+                    ui.label("Range lifecycle trace")
+                        .on_hover_text(help_tooltip(self.help_language, "diagnostics.range_trace"));
+                    let range_trace_combo =
+                        egui::ComboBox::from_id_salt("equilibrium-range-lifecycle-trace")
+                            .selected_text(match diagnostics.range_lifecycle_trace {
+                                GuiRangeLifecycleTrace::Endpoints => "Endpoints",
+                                GuiRangeLifecycleTrace::TransitionsOnly => "Transitions only",
+                                GuiRangeLifecycleTrace::EveryPoint => "Every point",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut diagnostics.range_lifecycle_trace,
+                                    GuiRangeLifecycleTrace::Endpoints,
+                                    "Endpoints",
+                                )
+                                .on_hover_text(help_tooltip(
+                                    self.help_language,
+                                    "diagnostics.range_endpoints",
+                                ));
+                                ui.selectable_value(
+                                    &mut diagnostics.range_lifecycle_trace,
+                                    GuiRangeLifecycleTrace::TransitionsOnly,
+                                    "Transitions only",
+                                )
+                                .on_hover_text(help_tooltip(
+                                    self.help_language,
+                                    "diagnostics.range_transitions",
+                                ));
+                                ui.selectable_value(
+                                    &mut diagnostics.range_lifecycle_trace,
+                                    GuiRangeLifecycleTrace::EveryPoint,
+                                    "Every point",
+                                )
+                                .on_hover_text(help_tooltip(
+                                    self.help_language,
+                                    "diagnostics.range_every_point",
+                                ));
+                            });
+                    range_trace_combo
+                        .response
+                        .on_hover_text(help_tooltip(self.help_language, "diagnostics.range_trace"));
+                }
+            }
+            ui.label("Equilibrium-constant validation")
+                .on_hover_text(help_tooltip(self.help_language, "diagnostics.keq"));
+            let keq_validation_combo = egui::ComboBox::from_id_salt("equilibrium-keq-validation")
                 .selected_text(match diagnostics.keq_validation {
                     GuiKeqValidationMode::Off => "Off",
                     GuiKeqValidationMode::WhenApplicable => "When applicable",
@@ -1881,125 +2616,224 @@ impl EquilibriumApp {
                         &mut diagnostics.keq_validation,
                         GuiKeqValidationMode::Off,
                         "Off",
-                    );
+                    )
+                    .on_hover_text(help_tooltip(self.help_language, "diagnostics.keq_off"));
                     ui.selectable_value(
                         &mut diagnostics.keq_validation,
                         GuiKeqValidationMode::WhenApplicable,
                         "When applicable",
-                    );
+                    )
+                    .on_hover_text(help_tooltip(
+                        self.help_language,
+                        "diagnostics.keq_when_applicable",
+                    ));
                     ui.selectable_value(
                         &mut diagnostics.keq_validation,
                         GuiKeqValidationMode::Required,
                         "Required",
-                    );
+                    )
+                    .on_hover_text(help_tooltip(self.help_language, "diagnostics.keq_required"));
                 });
+            keq_validation_combo
+                .response
+                .on_hover_text(help_tooltip(self.help_language, "diagnostics.keq"));
+            self.render_validation_issues_for_prefix(ui, "diagnostics.");
         });
     }
 
     fn render_postprocessing(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("Postprocessing and plots", |ui| {
             ui.horizontal(|ui| {
-                ui.label("Result basis");
+                ui.label("Result basis")
+                    .on_hover_text(help_tooltip(self.help_language, "output.basis"));
                 ui.selectable_value(
                     &mut self.document.config.postprocessing.result_basis,
                     GuiResultBasis::ComponentMoles,
                     "Moles",
-                );
+                )
+                .on_hover_text(help_option_tooltip(self.help_language, "basis.moles"));
                 ui.selectable_value(
                     &mut self.document.config.postprocessing.result_basis,
                     GuiResultBasis::MoleFractions,
                     "Mole fractions",
-                );
+                )
+                .on_hover_text(help_option_tooltip(self.help_language, "basis.fractions"));
                 ui.selectable_value(
                     &mut self.document.config.postprocessing.result_basis,
                     GuiResultBasis::PhaseTotals,
                     "Phase totals",
-                );
+                )
+                .on_hover_text(help_option_tooltip(
+                    self.help_language,
+                    "basis.phase_totals",
+                ));
             });
             ui.horizontal(|ui| {
-                ui.label("Plot target");
+                ui.label("Plot target")
+                    .on_hover_text(help_tooltip(self.help_language, "output.plot_target"));
                 ui.selectable_value(
                     &mut self.document.config.postprocessing.plot_target,
                     GuiPlotTarget::None,
                     "None",
-                );
+                )
+                .on_hover_text(help_tooltip(self.help_language, "output.plot_none"));
                 ui.selectable_value(
                     &mut self.document.config.postprocessing.plot_target,
                     GuiPlotTarget::Embedded,
                     "Embedded",
-                );
+                )
+                .on_hover_text(help_tooltip(self.help_language, "output.plot_embedded"));
                 ui.selectable_value(
                     &mut self.document.config.postprocessing.plot_target,
                     GuiPlotTarget::KiThePlot,
                     "KiThePlot",
-                );
+                )
+                .on_hover_text(help_tooltip(self.help_language, "output.plot_kithe_plot"));
                 ui.selectable_value(
                     &mut self.document.config.postprocessing.plot_target,
                     GuiPlotTarget::Both,
                     "Both",
-                );
+                )
+                .on_hover_text(help_tooltip(self.help_language, "output.plot_both"));
             });
             ui.horizontal(|ui| {
-                ui.label("Y scale");
+                ui.label("Y scale")
+                    .on_hover_text(help_tooltip(self.help_language, "output.scale"));
                 ui.selectable_value(
                     &mut self.document.config.postprocessing.y_scale,
                     GuiPlotScale::Linear,
                     "Linear",
-                );
+                )
+                .on_hover_text(help_option_tooltip(self.help_language, "scale.linear"));
                 ui.selectable_value(
                     &mut self.document.config.postprocessing.y_scale,
                     GuiPlotScale::Log10,
                     "Log10",
-                );
+                )
+                .on_hover_text(help_option_tooltip(self.help_language, "scale.log"));
             });
+            ui.horizontal(|ui| {
+                ui.label("Result table")
+                    .on_hover_text(help_tooltip(self.help_language, "output.table_density"));
+                let result_table_combo =
+                    egui::ComboBox::from_id_salt("equilibrium-result-table-density")
+                        .selected_text(match self.document.config.postprocessing.table_density {
+                            GuiResultTableDensity::Detailed => "Detailed: moles + fraction",
+                            GuiResultTableDensity::Compact => "Compact: moles",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.document.config.postprocessing.table_density,
+                                GuiResultTableDensity::Detailed,
+                                "Detailed: moles + fraction",
+                            )
+                            .on_hover_text(help_tooltip(
+                                self.help_language,
+                                "output.table_detailed",
+                            ));
+                            ui.selectable_value(
+                                &mut self.document.config.postprocessing.table_density,
+                                GuiResultTableDensity::Compact,
+                                "Compact: moles",
+                            )
+                            .on_hover_text(help_tooltip(
+                                self.help_language,
+                                "output.table_compact",
+                            ));
+                        });
+                result_table_combo
+                    .response
+                    .on_hover_text(help_tooltip(self.help_language, "output.table_density"));
+            });
+            labeled_text_with_language(
+                ui,
+                "Hide below mole fraction (display only)",
+                &mut self.document.config.postprocessing.display_fraction_cutoff,
+                self.help_language,
+            );
             let plot_labels = self.plot_series_labels();
             if !plot_labels.is_empty() {
                 ui.collapsing("Visible plot series", |ui| {
                     ui.label("Display filters do not change the accepted solver result");
                     for label in plot_labels {
                         let mut visible = self.plot_series_visible(&label);
-                        if ui.checkbox(&mut visible, &label).changed() {
+                        if ui
+                            .checkbox(&mut visible, &label)
+                            .on_hover_text(help_tooltip(
+                                self.help_language,
+                                "output.visible_series",
+                            ))
+                            .changed()
+                        {
                             self.set_plot_series_visible(label, visible);
                         }
                     }
                 });
             }
-            let mut pchip = matches!(
-                self.document.config.postprocessing.resampling,
-                GuiResamplingDraft::Pchip { .. }
+            let supports_resampling = matches!(
+                self.document.config.problem,
+                EquilibriumProblemDraft::FixedPt {
+                    temperature: TemperatureDraft::Range { .. },
+                    ..
+                }
             );
-            if ui
-                .checkbox(&mut pchip, "PCHIP display resampling")
-                .changed()
-            {
-                self.document.config.postprocessing.resampling = if pchip {
-                    GuiResamplingDraft::Pchip {
-                        output_points: "200".into(),
-                        interpolation_space: GuiInterpolationSpace::Linear,
-                        clamp: false,
-                    }
-                } else {
-                    GuiResamplingDraft::None
-                };
-            }
-            if let GuiResamplingDraft::Pchip {
-                output_points,
-                interpolation_space,
-                clamp,
-            } = &mut self.document.config.postprocessing.resampling
-            {
-                labeled_text(ui, "Display points", output_points);
-                ui.horizontal(|ui| {
-                    ui.label("Interpolation space");
-                    ui.selectable_value(
-                        interpolation_space,
-                        GuiInterpolationSpace::Linear,
-                        "Linear",
+            if supports_resampling {
+                let mut pchip = matches!(
+                    self.document.config.postprocessing.resampling,
+                    GuiResamplingDraft::Pchip { .. }
+                );
+                if ui
+                    .checkbox(&mut pchip, "PCHIP display resampling")
+                    .on_hover_text(help_tooltip(self.help_language, "output.pchip"))
+                    .changed()
+                {
+                    self.document.config.postprocessing.resampling = if pchip {
+                        GuiResamplingDraft::Pchip {
+                            output_points: "200".into(),
+                            interpolation_space: GuiInterpolationSpace::Linear,
+                            clamp: false,
+                        }
+                    } else {
+                        GuiResamplingDraft::None
+                    };
+                }
+                if let GuiResamplingDraft::Pchip {
+                    output_points,
+                    interpolation_space,
+                    clamp,
+                } = &mut self.document.config.postprocessing.resampling
+                {
+                    labeled_text_with_language(
+                        ui,
+                        "Display points",
+                        output_points,
+                        self.help_language,
                     );
-                    ui.selectable_value(interpolation_space, GuiInterpolationSpace::Log, "Log");
-                });
-                ui.checkbox(clamp, "Clamp display values to solved range");
+                    ui.horizontal(|ui| {
+                        ui.label("Interpolation space").on_hover_text(help_tooltip(
+                            self.help_language,
+                            "output.interpolation",
+                        ));
+                        ui.selectable_value(
+                            interpolation_space,
+                            GuiInterpolationSpace::Linear,
+                            "Linear",
+                        )
+                        .on_hover_text(help_option_tooltip(
+                            self.help_language,
+                            "interpolation.linear",
+                        ));
+                        ui.selectable_value(interpolation_space, GuiInterpolationSpace::Log, "Log")
+                            .on_hover_text(help_option_tooltip(
+                                self.help_language,
+                                "interpolation.log",
+                            ));
+                    });
+                    ui.checkbox(clamp, "Clamp display values to solved range")
+                        .on_hover_text(help_tooltip(self.help_language, "output.clamp"));
+                }
             }
+            self.render_validation_issues_for_prefix(ui, "postprocessing.");
         });
     }
 
@@ -2007,9 +2841,10 @@ impl EquilibriumApp {
     /// or editable numeric result fields. The same snapshot is later consumed
     /// by both plot adapters.
     fn render_results(&self, ui: &mut egui::Ui) {
-        let has_result = self.result_snapshot().is_some();
+        // Results is a dedicated tab, so keeping its root section open avoids
+        // hiding the useful no-result state behind a second click.
         egui::CollapsingHeader::new("Results")
-            .default_open(has_result)
+            .default_open(true)
             .show(ui, |ui| {
                 let Some(snapshot) = self.result_snapshot() else {
                     ui.label("No accepted equilibrium result yet");
@@ -2037,6 +2872,48 @@ impl EquilibriumApp {
                                 ui.end_row();
                                 ui.label("Relative error");
                                 ui.label(format!("{:.8e}", enthalpy.relative_enthalpy_error()));
+                                ui.end_row();
+                            });
+                    });
+                }
+                if let Some(report) = snapshot.ph_range_report() {
+                    ui.collapsing("P,H range continuation", |ui| {
+                        egui::Grid::new("equilibrium-ph-range-summary")
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label("Direction");
+                                ui.label(format!("{:?}", report.direction()));
+                                ui.end_row();
+                                ui.label("Accepted points");
+                                ui.label(report.point_count().to_string());
+                                ui.end_row();
+                                ui.label("Continuation points");
+                                ui.label(report.continuation_points().to_string());
+                                ui.end_row();
+                                ui.label("Formulation builds / reuses");
+                                ui.label(format!(
+                                    "{} / {}",
+                                    report.formulation_builds(),
+                                    report.formulation_reuses()
+                                ));
+                                ui.end_row();
+                                ui.label("Normalization recoveries");
+                                ui.label(report.extensive_normalization_recoveries().to_string());
+                                ui.end_row();
+                                ui.label("Phase-control transitions");
+                                ui.label(report.phase_control_transitions().to_string());
+                                ui.end_row();
+                                ui.label("Point time total [ms]");
+                                ui.label(format!(
+                                    "{:.3}",
+                                    report.point_timing().total().as_secs_f64() * 1000.0
+                                ));
+                                ui.end_row();
+                                ui.label("Point time worst [ms]");
+                                ui.label(format!(
+                                    "{:.3}",
+                                    report.point_timing().worst().as_secs_f64() * 1000.0
+                                ));
                                 ui.end_row();
                             });
                     });
@@ -2239,6 +3116,10 @@ impl EquilibriumApp {
                 }
 
                 for (point_index, point) in snapshot.points().iter().enumerate() {
+                    let detailed_table = matches!(
+                        self.document.config.postprocessing.table_density,
+                        GuiResultTableDensity::Detailed
+                    );
                     ui.collapsing(
                         format!("Point {}: {:.6} K", point_index + 1, point.temperature_k()),
                         |ui| {
@@ -2247,14 +3128,28 @@ impl EquilibriumApp {
                                 .show(ui, |ui| {
                                     ui.label("Component");
                                     ui.label("Moles [mol]");
-                                    ui.label("Mole fraction");
+                                    if detailed_table {
+                                        ui.label("Mole fraction");
+                                    }
                                     ui.end_row();
                                     for (index, label) in
                                         snapshot.component_labels().iter().enumerate()
                                     {
+                                        let cutoff = self
+                                            .document
+                                            .config
+                                            .postprocessing
+                                            .display_fraction_cutoff
+                                            .parse::<f64>()
+                                            .unwrap_or(0.0);
+                                        if point.mole_fractions()[index] < cutoff {
+                                            continue;
+                                        }
                                         ui.label(label);
                                         ui.label(format!("{:.8e}", point.component_moles()[index]));
-                                        ui.label(format!("{:.8e}", point.mole_fractions()[index]));
+                                        if detailed_table {
+                                            ui.label(format!("{:.8e}", point.mole_fractions()[index]));
+                                        }
                                         ui.end_row();
                                     }
                                 });
@@ -2592,11 +3487,53 @@ fn format_point_progress(verb: &str, event: EquilibriumProgressEvent) -> String 
     }
 }
 
-fn labeled_text(ui: &mut egui::Ui, label: &str, value: &mut String) {
+fn labeled_text_with_language(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    language: EquilibriumHelpLanguage,
+) {
+    let tooltip = help_field_tooltip(language, label);
     ui.horizontal(|ui| {
-        ui.label(label);
-        ui.text_edit_singleline(value);
+        ui.label(label).on_hover_text(tooltip);
+        ui.text_edit_singleline(value).on_hover_text(tooltip);
     });
+}
+
+/// Renders a dynamic field whose visible label is not a stable help key.
+///
+/// Ordered library rows and trace-seed variants include runtime text or share
+/// names with other controls, so deriving help from their labels would silently
+/// degrade to the generic fallback.
+fn labeled_text_with_tooltip(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    tooltip_key: &str,
+    language: EquilibriumHelpLanguage,
+) {
+    let tooltip = help_tooltip(language, tooltip_key);
+    ui.horizontal(|ui| {
+        ui.label(label).on_hover_text(tooltip);
+        ui.text_edit_singleline(value).on_hover_text(tooltip);
+    });
+}
+
+/// Returns whether an issue is already rendered in the tab and editor section
+/// that owns the relevant configuration field.
+fn validation_field_has_local_section(field: &str) -> bool {
+    [
+        "problem.",
+        "temperature.",
+        "inventory.",
+        "lookup.",
+        "phase_mode.",
+        "solver.",
+        "diagnostics.",
+        "postprocessing.",
+    ]
+    .iter()
+    .any(|prefix| field.starts_with(prefix))
 }
 
 /// Returns a stable egui scope for a phase editor row.
@@ -2644,15 +3581,29 @@ fn normalize_library_choices(libraries: &[String]) -> Vec<String> {
     choices
 }
 
-fn render_temperature(ui: &mut egui::Ui, temperature: &mut TemperatureDraft) {
+fn render_temperature(
+    ui: &mut egui::Ui,
+    temperature: &mut TemperatureDraft,
+    language: EquilibriumHelpLanguage,
+) {
     let is_point = matches!(temperature, TemperatureDraft::Point { .. });
     ui.horizontal(|ui| {
-        if ui.selectable_label(is_point, "Point").clicked() && !is_point {
+        if ui
+            .selectable_label(is_point, "Point")
+            .on_hover_text(help_tooltip(language, "temperature.point"))
+            .clicked()
+            && !is_point
+        {
             *temperature = TemperatureDraft::Point {
                 temperature_k: "1000".into(),
             };
         }
-        if ui.selectable_label(!is_point, "Range").clicked() && is_point {
+        if ui
+            .selectable_label(!is_point, "Range")
+            .on_hover_text(help_tooltip(language, "temperature.range"))
+            .clicked()
+            && is_point
+        {
             *temperature = TemperatureDraft::Range {
                 start_k: "300".into(),
                 end_k: "1500".into(),
@@ -2662,30 +3613,36 @@ fn render_temperature(ui: &mut egui::Ui, temperature: &mut TemperatureDraft) {
     });
     match temperature {
         TemperatureDraft::Point { temperature_k } => {
-            labeled_text(ui, "Temperature [K]", temperature_k);
+            labeled_text_with_language(ui, "Temperature [K]", temperature_k, language);
         }
         TemperatureDraft::Range {
             start_k,
             end_k,
             point_count,
         } => {
-            labeled_text(ui, "Start [K]", start_k);
-            labeled_text(ui, "End [K]", end_k);
-            labeled_text(ui, "Solved points", point_count);
+            labeled_text_with_language(ui, "Start [K]", start_k, language);
+            labeled_text_with_language(ui, "End [K]", end_k, language);
+            labeled_text_with_language(ui, "Solved points", point_count, language);
         }
     }
 }
 
-fn render_ph_temperature_bounds(ui: &mut egui::Ui, bounds: &mut PhTemperatureBoundsDraft) {
+fn render_ph_temperature_bounds(
+    ui: &mut egui::Ui,
+    bounds: &mut PhTemperatureBoundsDraft,
+    language: EquilibriumHelpLanguage,
+) {
     ui.label("P,H temperature solve");
-    labeled_text(ui, "Lower bound [K]", &mut bounds.lower_k);
-    labeled_text(ui, "Upper bound [K]", &mut bounds.upper_k);
-    labeled_text(ui, "Initial seed [K]", &mut bounds.seed_k);
+    labeled_text_with_language(ui, "Lower bound [K]", &mut bounds.lower_k, language);
+    labeled_text_with_language(ui, "Upper bound [K]", &mut bounds.upper_k, language);
+    labeled_text_with_language(ui, "Initial seed [K]", &mut bounds.seed_k, language);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_library_choices;
+    use super::{EquilibriumApp, EquilibriumGuiLibraryWorkerEvent, normalize_library_choices};
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumDiagnosticEvent;
+    use std::sync::mpsc;
 
     #[test]
     fn library_choices_are_trimmed_sorted_and_deduplicated() {
@@ -2696,5 +3653,64 @@ mod tests {
             "".into(),
         ]);
         assert_eq!(choices, vec!["NASA_gas", "NIST"]);
+    }
+
+    #[test]
+    fn library_catalog_health_retains_failures_and_recovers_on_publication() {
+        let mut app = EquilibriumApp::new();
+        let (failure_sender, failure_receiver) = mpsc::channel();
+        app.library_worker_receiver = Some(failure_receiver);
+        failure_sender
+            .send(EquilibriumGuiLibraryWorkerEvent::Failed {
+                error: "offline catalog fixture is unavailable".into(),
+            })
+            .expect("test receiver must be alive");
+        app.poll_library_worker();
+
+        assert_eq!(
+            app.library_catalog_status_text(),
+            "Local catalog: unavailable"
+        );
+        assert_eq!(
+            app.library_catalog_error.as_deref(),
+            Some("offline catalog fixture is unavailable")
+        );
+        assert!(app.available_libraries.is_none());
+
+        let (success_sender, success_receiver) = mpsc::channel();
+        app.library_worker_receiver = Some(success_receiver);
+        success_sender
+            .send(EquilibriumGuiLibraryWorkerEvent::Loaded {
+                libraries: vec!["NASA_cond".into(), "NASA_gas".into()],
+            })
+            .expect("test receiver must be alive");
+        app.poll_library_worker();
+
+        assert_eq!(
+            app.library_catalog_status_text(),
+            "Local catalog: 2 libraries loaded"
+        );
+        assert!(app.library_catalog_error.is_none());
+        assert_eq!(app.library_picker, "NASA_cond");
+    }
+
+    #[test]
+    fn live_diagnostic_sink_view_is_bounded_and_keeps_recent_events() {
+        let mut app = EquilibriumApp::new();
+        for max_outer_iterations in 0..65 {
+            app.push_live_diagnostic(EquilibriumDiagnosticEvent::PhaseControlBudgetExhausted {
+                max_outer_iterations,
+            });
+        }
+
+        assert_eq!(app.live_diagnostic_events.len(), 64);
+        assert_eq!(
+            app.live_diagnostic_events.first().map(String::as_str),
+            Some("Phase-control budget exhausted after 1 iteration(s)")
+        );
+        assert_eq!(
+            app.live_diagnostic_events.last().map(String::as_str),
+            Some("Phase-control budget exhausted after 64 iteration(s)")
+        );
     }
 }

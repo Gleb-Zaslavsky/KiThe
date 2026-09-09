@@ -776,3 +776,495 @@ silently substituting a temperature.
 7. Add the shared plot-series model and both plotting adapters.
 8. Integrate `EquilibriumApp` into `MainApp`, then complete offline story and
    `egui_kittest` matrices.
+
+## Application facade migration and ergonomic equilibrium UI
+
+This is a separate architectural/UI plan for the equilibrium calculator. The
+goal is not to wrap the existing GUI request types indefinitely. After the
+migration, `EquilibriumCalculator` is the single application request builder;
+the GUI owns editable state and worker lifecycle, while the engine owns
+resolution, solving, fallback, and immutable result evidence.
+
+### Target ownership
+
+- [x] Define the target dependency direction and keep it one-way:
+
+  ```text
+  EquilibriumGuiDocument (editable form state)
+              |
+              v
+  ValidatedEquilibriumGuiConfig
+              |
+              v
+  EquilibriumCalculator::builder()
+              |
+              v
+  canonical P,T/P,H workflows -> immutable calculator outcome
+              |
+              v
+  EquilibriumGuiResultSnapshot / presentation / plots
+  ```
+
+- [x] Add one GUI-to-facade adapter that maps validated GUI values to
+  `EquilibriumCalculatorBuilder`, including phase specs, phase-qualified
+  inventory, repository/lookup policy, pressure and fixed standard-state
+  pressure, P,T/P,H point or range, solver policy, phase control, timing,
+  diagnostics, and P,T postprocessing.
+- [x] Make the adapter return the facade builder or a typed adapter error; it
+  must not resolve the repository, mutate the document, start a worker, or
+  duplicate engine validation.
+- [x] Preserve worker-owned `EquilibriumExecutionControl`, cancellation,
+  diagnostic sinks, stale-ticket rejection, and transactional publication.
+  Attach these concerns through facade options rather than reintroducing a
+  second solve implementation in the GUI.
+- [x] Convert facade outcomes to the existing GUI result snapshot only at one
+  boundary. Point and P,T/P,H range outcomes now cross this boundary without
+  rebuilding accepted numerical results; snapshots retain raw points and
+  range-level continuation/recovery/timing evidence. The visible UI rendering
+  of the additional route-specific fields remains a separate presentation task.
+
+### Removal strategy: debloat, do not layer wrappers
+
+- [x] Inventory every caller of `EquilibriumGuiSolveRequest`,
+  `EquilibriumGuiPhRequest`, and the manual request assembly helpers in
+  `equilibrium_gui_request.rs`. Production GUI now uses only `Facade`; the
+  no callers remain outside the facade boundary; the manual builder and
+  `EquilibriumGuiPhRequest` have been removed.
+- [x] Migrate the production preparation path for P,T point and P,T range to
+  the facade, with parity tests against the
+  current accepted result, conservation, provenance, backend policy, timing,
+  and continuation reuse.
+- [x] Migrate P,H point and P,H range second, preserving nested/monolithic
+  route selection and GUI cancellation/fallback evidence. The production app
+  now prepares every P,T/P,H point or range through `Facade`; compatibility
+  request variants remain only for focused legacy/parity tests.
+- [x] Once all production GUI callers use the facade, delete the duplicate
+  `EquilibriumGuiSolveRequest` variants and manual P,T/P,H assembly. The
+  worker request boundary now has exactly one `Facade` variant; the manual
+  P,T/P,H builders, `EquilibriumGuiPhRequest`, and their compatibility tests
+  were removed rather than retained as wrappers.
+- [x] Keep only narrowly scoped GUI adapters that perform view-model mapping;
+  remove engine policy, layout construction, thermochemistry resolution, and
+  solver invocation from GUI-specific request structs. The GUI adapter now
+  maps validated state only; resolution and orchestration are facade-owned.
+- [x] Retain low-level request construction only in explicitly labelled
+  diagnostic/architecture examples or tests that exercise the engine boundary
+  itself. The GUI tree no longer contains manual request assembly or legacy
+  request variants; every prepared GUI request is `Facade`.
+
+### Primary user-facing tab
+
+- [x] Make the first visible tab `Problem` (or `Setup`) and keep it sufficient
+  for the normal calculation path:
+  calculation mode (`P,T` or `P,H`), point/range selector, pressure,
+  temperature or target enthalpy, bounds/grid, inventory mode, amounts, and
+  the default lookup policy. `Problem` and `Components and phases` are open
+  on the initial Setup viewport; secondary sections remain collapsed.
+- [x] Make the first tab usable without opening advanced settings. The default
+  document builds the production facade request, keeps lookup local/offline,
+  uses the production solver cascade, and leaves timing, lifecycle tracing,
+  plotting, and resampling disabled. A GUI regression test pins that contract.
+- [x] Show only controls relevant to the selected mode. The Problem tab now
+  switches between P,T temperature controls and P,H enthalpy/bounds controls;
+  range-only controls remain in the P,T range branch.
+- [x] Keep validation errors adjacent to the relevant field and show a compact
+  readiness summary before starting the worker: mode, pressure/P0, inventory
+  source, phase count, and requested points. Section-local validation feedback
+  covers problem, inventory, lookup, phase policy, solver, diagnostics, and
+  postprocessing fields; the command area retains only cross-tab fallback
+  issues.
+
+### Secondary thematic tabs
+
+- [x] `Setup` owns the normal input path: explicit substances versus
+  element-defined candidate search, phase physical states/models,
+  phase-qualified amounts, candidate preview, and assignment. This keeps the
+  minimum runnable problem on the first tab rather than splitting it across
+  advanced settings.
+- [x] `Libraries`: default versus explicit library selection, permitted
+  libraries, offline mode, exact-state NIST fallback, shared repository status,
+  and per-component provenance preview. Network access must be visibly
+  opt-in. Default/explicit policy, local catalog selection, closed permitted
+  sets, explicit NIST opt-in, catalog load status/failure, and phase-qualified
+  declared lookup instructions are implemented. Actual resolved provenance
+  remains result-side evidence rather than draft metadata; it cannot be known
+  honestly before a request is resolved.
+- [x] `Solver`: default production cascade versus one backend/custom cascade,
+  solver budgets, tolerances, scaling, trace-seed policy, and a deliberate
+  P,H route-mode policy. `Auto` remains the serialized production default;
+  explicit `Monolithic` and `Nested temperature` are exposed only for P,H and
+  map directly to the calculator facade. Keep this collapsed/secondary because
+  most users should not tune it.
+- [x] `Phase control`: bounded lifecycle, TPD create/keep thresholds,
+  hysteresis, transition/cycle budgets, and initial phase history. Fixed
+  solves hide every bounded-only setting. Bounded solves expose the engine's
+  outer-loop budget and the two layout-independent initial policies: positive
+  inventory or all declared candidate phases. Index-based explicit exclusions
+  remain intentionally outside the GUI because they are not stable document
+  semantics; cycle detection itself is automatic engine safety logic.
+- [x] `Diagnostics and output`: timing, lifecycle logging, retained event
+  limit/range policy, display thresholds, units, table density, and optional
+  P,T resampling/interpolation. These settings affect observation and
+  presentation, not physical equations. Existing output controls cover timing,
+  diagnostic trace retention, explicit bounded retained-event override, plot target/basis/scale, PCHIP, and detailed/compact result tables; removed
+  legacy report-retention toggles that did not reach the engine or alter an
+  accepted snapshot. Resampling
+  is intentionally visible only for P,T ranges. Lifecycle trace controls are
+  likewise visible only for bounded phase control, with range retention only
+  for P,T ranges. SI labels are explicit at every result field. The optional
+  mole-fraction display cutoff is presentation-only and defaults to zero;
+  future unit conversion must retain source units and never alter snapshots.
+- [x] `Results` remains a read-only view rather than an input tab. It now
+  exposes a compact P,H range continuation summary (direction, accepted
+  points, reuse, normalization recovery, phase transitions, and timing) in
+  addition to the existing point diagnostics. It must
+  select the correct route-specific snapshot: monolithic P,H evidence must not
+  be represented as zero temperature trials, and failed runs must not replace
+  the last accepted snapshot.
+
+### UI ergonomics and regression gates
+
+- [x] Replace the current long single-surface settings layout with a compact
+  tabbed surface. The implemented surface provides Setup, Phase control,
+  Libraries, Numerics, Output, and Results tabs; detailed tab-specific
+  accessibility and layout tests remain below.
+  tab bar and stable per-tab sections. Avoid nested cards and avoid showing
+  advanced controls as permanent visual noise.
+- [x] Add `egui_kittest` coverage for default first-viewport setup, tab
+  switching, conditional control visibility, invalid-input focus, and facade
+  request preparation for point/range P,T/P,H configurations.
+- [x] Do not retain a pre-migration GUI path solely for parity stories. The
+  old path has been removed after facade execution, lifecycle, snapshot, and
+  real-worker stories covered the canonical route. Future evidence compares
+  the GUI facade directly with canonical engine/frozen-reference outcomes.
+- [x] Add lifecycle stories for facade-backed worker cancellation, stale result
+  discard, failed solve rollback, diagnostic sink delivery, and plot snapshot
+  publication. Cancellation, stale-result discard, failed publication rollback,
+  and bounded live diagnostic delivery are covered by GUI/unit stories; the
+  real offline P,T range story also constructs an embedded plot strictly from
+  its accepted snapshot, without a second solve.
+- [x] Add a UI smoke assertion that the default view contains the essential
+  problem controls and does not expose solver/diagnostics/library internals in
+  the first tab.
+- [x] Update GUI documentation and examples after migration. The equilibrium
+  guide now describes the facade-backed GUI tabs and explicitly identifies the
+  low-level reactive-gas example as explanatory rather than an application
+  integration pattern.
+
+## Remaining GUI quality-of-life work
+
+These items are intentionally limited to the equilibrium calculator UI. They
+must not introduce a second request path or duplicate validation owned by the
+calculator facade.
+
+### Story-level GUI regression coverage
+
+- [x] Add `egui_kittest` story tests for the complete default point workflow:
+  open Setup, enter a valid explicit inventory, validate, prepare the canonical
+  facade request, run it, switch to Results, and inspect the accepted snapshot.
+- [x] Add a matching element-defined candidate workflow, including candidate
+  preview, phase assignment, validation feedback, and successful preparation.
+  The ignored local-catalog story `offline_local_element_candidate_story_keeps_catalogs_unchanged_and_renders_audit`
+  covers the full real-data UI path; deterministic preparation constraints are
+  covered in `equilibrium_gui_story_tests`.
+- [x] Cover both P,T and P,H point routes at the facade boundary, including the visible route-specific
+  result evidence. P,H must verify that monolithic evidence is shown as
+  monolithic evidence and is not represented by fabricated temperature trials.
+- [x] Cover P,T temperature range at the facade boundary.
+- [ ] Add P,H target-range stories: ascending and descending input where
+  supported, continuation summary, formulation reuse, and immutable
+  publication of accepted points.
+- [x] Add a negative story for invalid pressure. Missing inventory,
+  invalid phase/model combinations, unsupported P,H route settings, and
+  unavailable lookup data remain to be covered with the same field-local
+  error contract.
+- [ ] Add presentation stories for tab isolation, conditional controls,
+  diagnostics trace visibility, compact/detailed result tables, display cutoff,
+  PCHIP visibility, and plot creation from an accepted snapshot without a
+  second solve.
+- [ ] Keep expensive local-catalog worker stories ignored/release-oriented;
+  keep deterministic document, validation, routing, and rendering stories in
+  the ordinary test suite. Every story must assert behavior, not merely print
+  the widget tree.
+
+### Per-tab contextual help
+
+- [x] Add a small help model keyed by stable tab/control identifiers rather than
+  by translated display text. Help lookup must be pure and must not depend on
+  repository state or a solver worker.
+- [x] Store equilibrium-calculator help content in `src/assets/`, extending the
+  existing `help_eng.*` and `help_rus.*` resources. Keep English and Russian
+  resources semantically equivalent and document the selected resource format.
+- [x] Provide contextual help for `Setup`: P,T versus P,H, point versus range,
+  explicit substances versus element-defined search, phase state/model, and
+  initial amounts.
+- [x] Provide contextual help for `Phase control`: fixed versus bounded mode,
+  creation/keep driving forces, hysteresis, iteration budget, and initial phase
+  set. Explain that these are numerical lifecycle policies, not new physical
+  models.
+- [x] Provide contextual help for `Libraries`: default/explicit priorities,
+  permitted libraries, offline mode, NIST opt-in, catalog status, and the
+  distinction between declared lookup instructions and resolved provenance.
+- [x] Provide contextual help for `Numerics`: production cascade, explicit
+  backend selection, P,H route mode, iteration budgets, scaling, and trace
+  seed policy. State clearly that advanced values are optional overrides.
+- [x] Provide contextual help for `Output`: timing, lifecycle retention, event
+  limits, result basis, table density, display cutoff, plotting, and PCHIP.
+  Explain that these settings affect observation/presentation only and do not
+  alter accepted equilibrium values.
+- [x] Provide contextual help for `Results`: accepted snapshots, route-specific
+  evidence, conservation/residual diagnostics, provenance, phase transitions,
+  continuation reuse, and fallback attempts.
+- [x] Add `egui_kittest` checks that every visible primary/secondary tab exposes a help
+  entry, that help is reachable without changing the document, and that
+  missing/unknown keys fail safely without blocking calculation.
+- [x] Add resource-loading and language-fallback tests. Missing optional help
+  text must degrade to a concise stable label; it must never invalidate or
+  modify a prepared facade request.
+
+## Remaining equilibrium GUI story matrix
+
+This is the release-oriented gap list for user-facing calculator behavior.
+Existing model, accessibility, and ignored worker tests do not replace these
+stories: each story must assert an observable contract and must not merely
+print the widget tree.
+
+### Results and presentation
+
+- [x] Add a deterministic accepted-snapshot story covering component amounts,
+  mole fractions, phase totals, conservation/residual evidence, provenance,
+  backend attempts, and route-specific P,H diagnostics.
+- [x] Prove that changing the editable document after publication cannot mutate
+  the accepted snapshot or cause it to be replaced by an invalid result.
+- [x] Add Results table stories for detailed and compact density. Verify that
+  compact mode changes only visible columns and that the snapshot retains all
+  physical quantities.
+- [x] Add display-cutoff stories proving that a cutoff hides rows only in the
+  presentation and does not alter component arrays, totals, conservation, or
+  plotting data.
+- [x] Add plotting stories for `None`, `Embedded`, `KiThePlot`, and `Both`, for
+  point and P,T range snapshots. Verify plot creation consumes the accepted
+  snapshot and does not start another solve.
+- [x] Cover PCHIP, log scale, result basis, hidden series, repeated plot opening,
+  and empty/no-result plot errors.
+
+### Complete user workflows
+
+- [x] Add a full element-defined UI story: choose elements, inspect candidate
+  preview, assign a candidate to a phase, validate, prepare, run, and inspect
+  the accepted result.
+- [x] Add a bounded phase-control UI story covering fixed/bounded switching,
+  hysteresis, initial phase policy, lifecycle budget, phase transition, and
+  rendered lifecycle trace.
+- [x] Add a Libraries UI story covering explicit priority, closed permitted set,
+  offline mode, explicit NIST opt-in, catalog loading/failure/recovery, and
+  accepted per-component provenance.
+- [x] Add a Diagnostics UI story covering timing, lifecycle trace, range trace
+  retention, event limit/truncation, fallback evidence, and phase transitions.
+
+### Invalid-input and route matrix
+
+- [x] Cover missing substances, negative/NaN/infinite amounts, duplicate phase
+  IDs, duplicate phase-qualified components, invalid candidate policies, and
+  empty/invalid library names.
+- [x] Cover invalid P,T ranges, invalid P,H bounds/seeds, unsupported
+  state/model combinations, unsupported route settings, invalid display cutoff,
+  and invalid PCHIP point counts.
+- [x] For every invalid story, assert field-local feedback, no prepared request,
+  no worker start, and no mutation of the previous accepted snapshot.
+
+### Help and future range support
+
+- [ ] Add content-aware `egui_kittest` checks for every tab help section, not
+  only Help widget presence. Pure resource tests check key terms today, but the
+  rendered story verifies only that the Help widget exists.
+- [ ] Test incomplete localized help through an injected pure lookup fixture and
+  verify English fallback without changing the document or request. The current
+  Russian `Setup` assertion exercises an existing section, not the fallback.
+- [ ] Add P,H target-range stories after the canonical P,H batch API exists:
+  continuation, formulation reuse, normalization recovery, ascending/descending
+  grids, per-point diagnostics, and transactional publication.
+
+## Equilibrium GUI hover tooltips
+
+The combustion GUI provides short hover explanations for labels, widgets, and
+buttons. Add the same low-friction affordance to the equilibrium calculator,
+while keeping the full tab Help sections as the detailed reference.
+
+- [x] Add the initial stable tooltip catalog keyed by control identifiers, not
+  translated display text, and connect it to the main tabs, actions, fields,
+  and list-management controls.
+- [ ] Explain each control's purpose, units, accepted value/domain, default
+  behavior, and whether changing it invalidates a prepared request or only
+  changes presentation. Include action buttons such as candidate refresh,
+  prepare, run, cancel, clear, and plot.
+- [x] Provide English and Russian tooltip resources with the same keys and
+  equivalent meaning. Missing localized entries must use the existing English
+  fallback and must never block rendering or calculation.
+- [x] Keep tooltips concise and complementary to the tab Help text: the tooltip
+  should answer "what is this control?", while Help explains the workflow and
+  the reason for the policy.
+- [x] Use egui's native hover-tooltip/accessibility path so the text appears on
+  mouse hover and remains available to keyboard/accessibility inspection.
+- [ ] Add `egui_kittest` coverage that every visible interactive control has a
+  non-empty tooltip, language switching changes tooltip text without mutating
+  the document, and unknown/missing keys degrade safely.
+- [x] Add story assertions for conditional controls: PCHIP only for P,T ranges,
+  bounded phase controls only in bounded mode, and route-specific P,H controls.
+- [x] Record tooltip coverage in GUI documentation and keep the catalog in sync
+  when a new control is introduced or an old control is removed.
+
+### Remaining tooltip implementation pass
+
+- [ ] Extend the catalog and UI wiring to every ComboBox, checkbox, selectable
+  option, and conditional control in the calculator. The coverage inventory
+  must include temperature point/range editors, candidate policies, physical
+  state/model selectors, trace-seed options, PCHIP/log/clamp controls, and all
+  clear/refresh/preview/assignment actions.
+- [x] Pass the selected `EquilibriumHelpLanguage` through shared field-rendering
+  helpers so text-field tooltips are localized as well as tab Help text.
+- [ ] Add `egui_kittest` hover assertions for the actual visible controls rather
+  than only checking that catalog entries are non-empty. A missing tooltip for
+  a newly rendered interactive control must fail the story.
+- [x] Add conditional-visibility stories proving that PCHIP appears only for
+  P,T ranges, bounded phase controls only in bounded mode, P,H route controls
+  only for P,H, and range lifecycle controls only for ranges.
+- [x] Add a pure coverage check mapping rendered control IDs to tooltip keys,
+  with a safe explicit allow-list for intentionally tooltip-free decorative
+  labels. Keep this check synchronized with the GUI control inventory.
+- [x] Document the tooltip authoring rule: every new interactive control gets
+  an English entry, a Russian entry or deliberate fallback, a concise purpose
+  statement, and a UI/story assertion.
+
+### Hover/help audit (2026-09-09)
+
+Current baseline is green (`10` pure help/catalog tests and `39` equilibrium
+GUI story tests), but it proves only the registered subset. The former
+`RENDERED_TOOLTIP_CONTROL_IDS` list was removed because it was maintained next
+to the catalog and could not independently detect a newly rendered widget that
+was omitted from both lists. Rendered-widget coverage must be established by an
+independent widget census plus actual hover stories.
+
+#### P0 correctness gaps
+
+- [x] Pass the selected `EquilibriumHelpLanguage` into the `Point` and `Range`
+  controls. `render_temperature` currently ignores its `language` argument and
+  requests English tooltips explicitly; add a real Russian hover assertion.
+- [x] Attach field help to the editable `TextEdit` response as well as its
+  label. At present hovering the actual input box provides no explanation even
+  though the adjacent label does.
+- [x] Introduce a strict catalog lookup for tests (`Option`/missing-key error)
+  while retaining a safe generic fallback in production. The current generic
+  fallback makes an unknown key look valid and allows spelling mistakes or
+  missing translations to pass non-empty assertions.
+- [x] Add stable field identifiers for dynamic labels. `Priority 1` and
+  `Permitted 1`, plus `Element`, `Trace floor`, `Trace fraction`, and
+  `Minimum trace floor`, no longer fall through to the generic tooltip. The
+  full typed catalog refactor remains tracked in P2.
+
+#### P1 missing UI wiring
+
+- [x] Complete Setup wiring: language choices, element add/remove actions,
+  every physical-state candidate checkbox, candidate target ComboBox options,
+  and the simple ideal-gas preset must expose localized hover text on the
+  interactive widget itself.
+- [x] Complete Libraries wiring: catalog selector and its options, `Load local
+  library choices`, `Engine default`, `Explicit policy`, and per-row remove
+  actions need stable tooltip keys and hover assertions.
+- [x] Complete Numerics wiring: P,H route options, production-default selector,
+  concrete backend selector and backend options, `Use custom cascade`, custom
+  cascade selectors, and both trace-seed strategy options need tooltips. The
+  text must distinguish production defaults, diagnostic single-backend use,
+  fallback ordering, and request invalidation.
+- [x] Complete Phase-control wiring: add option-level help for both initial
+  phase-set choices and state clearly that these alter the initial active-set
+  policy rather than the physical inventory.
+- [x] Complete Diagnostics wiring: add option-level help for phase/range trace
+  retention and K_eq validation modes, including memory cost and applicability.
+- [x] Complete Output wiring: plot-target options, result-table density and its
+  options, and dynamic series visibility need complete catalog entries and
+  rendered hover stories. Explain that all are presentation-only and do not
+  invalidate the prepared request.
+
+#### P1 help-content and test gaps
+
+- [x] Reconcile Help terminology with visible labels (`Reference pressure`,
+  `Model`, `Engine default`, and `Production default cascade`) so users can
+  find the described control. A pure bilingual resource test now pins these
+  rendered labels rather than relying on approximate terminology.
+- [x] Add a compact control-contract table for every tab covering purpose,
+  units/domain, effective default, visibility condition, and mutation class:
+  request-invalidating, preparation-only, runtime diagnostics, or display-only.
+  Both complete Help resources now carry mirrored tables and a pure test makes
+  their localized structural headings part of the contract.
+- [x] Audit Russian tooltip completeness explicitly. Every catalog key must
+  either resolve to text distinct from English or appear in the deliberate
+  `RUSSIAN_TOOLTIP_FALLBACK_KEYS` allow-list. The initial audit translated all
+  seven implicit fallbacks, so the allow-list is currently empty.
+- [x] Replace the claimed injected missing-localization story with a real pure
+  fixture. `section_from_document` now permits an incomplete synthetic
+  localized Markdown resource to prove English-section fallback and unknown-key
+  behavior without changing a GUI document, prepared request, or worker state.
+- [x] Build an independent widget census for each rendered tab/state and compare
+  it with the tooltip contract. Cover default P,T, P,T range, P,H, element
+  search, explicit lookup, bounded phases, custom cascade, diagnostics, PCHIP,
+  accepted Results, running, failed, and cancelled states. The new baseline
+  census covers every tab selector and the default Setup viewport using actual
+  accessibility labels, independently from tooltip IDs. The conditional census
+  now covers P,T range, P,H, element search, bounded lifecycle, custom cascade,
+  and PCHIP. A Results census renders `Solving`, `Cancelling`, and `Failed`
+  states; accepted snapshots and stale-publication behavior are covered by the
+  local worker tests, including rendered diagnostic sections. The census is
+  independent of tooltip IDs.
+- [ ] Add actual hover assertions for labels, text editors, checkboxes,
+  ComboBox headers and options, enabled/disabled actions, and dynamic rows.
+  Also assert that language switching and all hover operations leave the
+  editable document, prepared request, worker state, and accepted snapshot
+  unchanged. First add a deterministic test helper for nested
+  `CollapsingHeader` state: the current accesskit harness cannot reliably open
+  every conditional subsection through repeated pointer/accessibility clicks.
+  The baseline now verifies read-only hover behavior for a text editor, mode
+  selector, action button, and bounded checkbox. ComboBox option and
+  dynamic-row coverage are now present. The current renderer omits unavailable
+  actions instead of rendering disabled widgets, so disabled-action hover
+  requires an explicit UI decision and remains open.
+
+#### P2 maintainability
+
+- [x] Visually group the mutually exclusive P,T/P,H calculation modes and the
+  explicit/elements inventory modes in the Setup tab. Keep the selected
+  `selectable_label` state visible inside the grouped frames, and keep the
+  controls request-invalidating.
+- [x] Update bilingual Setup Help and mode/inventory hover resources to explain
+  the facade boundary, physical elemental inventory, candidate-only search,
+  and the effect of the selected calculation mode. Widget-census coverage now
+  pins the visible `Calculation mode` and `Inventory input` groups.
+
+- [x] Replace the duplicated declared/rendered string inventories with the
+  canonical `EquilibriumTooltipDescriptor` catalog. Catalog lookup, strict
+  validation, duplicate checks, and inventory iteration now derive from one
+  source; stable string IDs remain only at the resource/UI boundary. Do not
+  treat this catalog contract as evidence that every widget was rendered or
+  hovered: that belongs to story tests.
+- [x] Make `EquilibriumTooltipDescriptor` store a typed `EquilibriumHelpKey`
+  and bind catalog iteration/strict lookup to that key. Strings are now exposed
+  only through `as_str()` at the UI/resource boundary; the incremental call-site
+  migration can remain ergonomic without a fragile giant enum.
+- [x] Move the core action, route, field, lookup, candidate, solver, phase
+  policy, and diagnostics short tooltip translations out of the large Rust
+  `match` and into paired structured resources beside the full Help documents.
+  The resource keys are checked for parity, catalog membership, and non-empty
+  localized text at test time; lookup remains compile-time/offline.
+- [x] Migrate every catalogued short tooltip translation from the Rust `match`
+  into structured resources. The last five field entries now live in both
+  Markdown resources, and a catalog test requires English and Russian resource
+  entries for every registered key. Canonical rendering is resource-only; the
+  old match is isolated behind a deprecated compatibility shim and has no
+  internal callers.
+- [ ] Remove the deprecated `legacy_tooltip` shim after the external-consumer
+  compatibility audit. It must not be used as a fallback by the calculator.
+- [x] Split tooltip tests into catalog-contract tests and rendered-widget story
+  tests. `equilibrium_gui_help.rs` owns pure catalog/resource/fallback
+  assertions; `equilibrium_gui_story_tests.rs` owns rendered calculator
+  workflows. A green catalog test is explicitly not evidence that every widget
+  was rendered or hovered.

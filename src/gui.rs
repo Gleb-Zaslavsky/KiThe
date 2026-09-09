@@ -14,12 +14,15 @@ pub mod document_lifecycle;
 pub mod equilibrium_gui;
 pub mod equilibrium_gui_candidate;
 pub mod equilibrium_gui_execution;
+pub mod equilibrium_gui_help;
 pub mod equilibrium_gui_model;
 pub mod equilibrium_gui_plot;
 pub mod equilibrium_gui_request;
 pub mod equilibrium_gui_result;
 pub mod read_only_snapshot;
 
+#[cfg(test)]
+mod equilibrium_gui_story_tests;
 #[cfg(test)]
 mod equilibrium_gui_tests;
 pub mod experimental_kinetics_gui;

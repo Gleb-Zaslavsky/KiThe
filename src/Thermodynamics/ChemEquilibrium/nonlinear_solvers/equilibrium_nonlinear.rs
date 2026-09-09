@@ -157,6 +157,7 @@
 //! - [`equilibrium_legacy_backend`](super::equilibrium_legacy_backend) — adapter wrapping these solvers
 //! - [`equilibrium_reaction_basis`](super::equilibrium_reaction_basis) — typed reaction basis wrapper
 //!
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventoryError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptOutcome;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptReport;
 use crate::Thermodynamics::User_substances_error::SubsDataError;
@@ -245,6 +246,8 @@ pub enum ReactionExtentError {
         /// Human-readable explanation suitable for diagnostics.
         message: String,
     },
+    /// A typed input-preparation boundary rejected the requested formulation.
+    Preparation(EquilibriumPreparationError),
     /// Temperature, pressure, or reference pressure is invalid.
     InvalidConditions {
         /// Name of the invalid condition.
@@ -409,10 +412,60 @@ pub enum ReactionExtentError {
     },
 }
 
+/// Typed failures that occur while preparing an equilibrium problem before a
+/// nonlinear backend is allowed to run.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EquilibriumPreparationError {
+    /// No real phase/component universe was available for the requested input.
+    EmptySpeciesUniverse,
+    /// The supplied elemental inventory is not representable by the selected
+    /// real-component matrix.
+    NonRepresentableInventory { message: String },
+    /// Numerical linear algebra could not construct the element-feasible seed.
+    FeasibleSeedConstruction { message: String },
+    /// The inventory failed typed validation or could not align to the matrix.
+    ElementInventory(ElementInventoryError),
+}
+
+impl fmt::Display for EquilibriumPreparationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptySpeciesUniverse => {
+                write!(
+                    f,
+                    "equilibrium preparation requires at least one real species"
+                )
+            }
+            Self::NonRepresentableInventory { message } => {
+                write!(f, "elemental inventory is not representable: {message}")
+            }
+            Self::FeasibleSeedConstruction { message } => {
+                write!(f, "element-feasible seed construction failed: {message}")
+            }
+            Self::ElementInventory(error) => write!(f, "element inventory is invalid: {error}"),
+        }
+    }
+}
+
+impl Error for EquilibriumPreparationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::ElementInventory(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<ElementInventoryError> for ReactionExtentError {
+    fn from(value: ElementInventoryError) -> Self {
+        Self::Preparation(EquilibriumPreparationError::ElementInventory(value))
+    }
+}
+
 /// Machine-readable high-level classification for equilibrium failures.
 ///
-/// This keeps the existing public error enum stable while giving callers a
-/// strong, typed way to branch on failure families.
+/// This gives callers a stable, typed way to branch on failure families while
+/// the detailed preparation cause remains available through the error value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReactionExtentErrorKind {
     Cancelled,
@@ -443,6 +496,7 @@ impl fmt::Display for ReactionExtentError {
             Self::InvalidProblem { field, message } => {
                 write!(f, "invalid equilibrium problem field '{field}': {message}")
             }
+            Self::Preparation(error) => write!(f, "equilibrium preparation failed: {error}"),
             Self::InvalidConditions { parameter, value } => {
                 write!(f, "invalid equilibrium condition '{parameter}': {value}")
             }
@@ -583,6 +637,7 @@ impl Error for ReactionExtentError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Cancelled => None,
+            Self::Preparation(error) => Some(error),
             Self::SubsDataError(error) => Some(error),
             Self::SolveError(error) => Some(error),
             Self::CascadeAborted { cause, .. } => Some(cause.as_ref()),
@@ -603,6 +658,7 @@ impl ReactionExtentError {
     pub fn kind(&self) -> ReactionExtentErrorKind {
         match self {
             Self::Cancelled => ReactionExtentErrorKind::Cancelled,
+            Self::Preparation(_) => ReactionExtentErrorKind::InvalidInput,
             Self::InvalidProblem { .. }
             | Self::InvalidConditions { .. }
             | Self::DimensionMismatch(_)
@@ -763,8 +819,10 @@ impl ReactionExtentError {
 #[cfg(test)]
 mod error_contract_tests {
     use super::{
-        PhMonolithicSeedFailure, ReactionExtentError, ReactionExtentErrorKind, SolveError,
+        EquilibriumPreparationError, PhMonolithicSeedFailure, ReactionExtentError,
+        ReactionExtentErrorKind, SolveError,
     };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventoryError;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
         SolverAttemptFailureKind, SolverAttemptOutcome, SolverAttemptReport, SolverBackend,
@@ -785,6 +843,21 @@ mod error_contract_tests {
             ReactionExtentError::from(SubsDataError::SubstanceNotFound("O2".to_string()));
         assert!(data_error.to_string().contains("O2"));
         assert!(data_error.source().is_some());
+    }
+
+    #[test]
+    fn preparation_errors_keep_typed_inventory_causes_and_fail_fast_classification() {
+        let error = ReactionExtentError::from(ElementInventoryError::EmptyInventory);
+        assert!(matches!(
+            &error,
+            ReactionExtentError::Preparation(EquilibriumPreparationError::ElementInventory(
+                ElementInventoryError::EmptyInventory
+            ))
+        ));
+        assert_eq!(error.kind(), ReactionExtentErrorKind::InvalidInput);
+        assert!(error.is_non_retryable_input_error());
+        assert!(error.source().is_some());
+        assert!(error.to_string().contains("at least one positive amount"));
     }
 
     #[test]

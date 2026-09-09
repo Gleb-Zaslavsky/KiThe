@@ -232,6 +232,17 @@ pub const ELEMENTS: &[Element] = &[
     // Add more elements here...
 ];
 
+/// Returns whether `symbol` is a known chemical element in the parser's
+/// periodic-table data.
+///
+/// Formula parsing intentionally accepts syntactically valid uppercase tokens
+/// before an application decides what they mean. Callers which construct a
+/// physical element inventory can use this predicate to reject an unknown
+/// token without maintaining a second periodic-table list.
+pub fn is_known_element(symbol: &str) -> bool {
+    ELEMENTS.iter().any(|element| element.name == symbol)
+}
+
 fn filter_phases_marks(formula: &str) -> String {
     let mut formula = formula.to_string();
 

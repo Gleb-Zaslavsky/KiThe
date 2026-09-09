@@ -10,6 +10,12 @@
 //! | `G0`, `H0`, `S0`, reaction affinity, chemical potential, TPD | unchanged | intensive |
 //! | TPD create/keep hysteresis and phase topology | unchanged | physical decision semantics |
 //!
+//! The scale `s` is a numerical coordinate scale selected from the physical
+//! input representation. For an explicit component composition it is the sum
+//! of positive component amounts; for an elemental inventory it is the sum of
+//! elemental amounts. The latter is not generally the total number of system
+//! moles, because elemental amounts count atoms according to the chosen basis.
+//!
 //! This module deliberately performs no solve and chooses no retry policy.
 //! It only makes exact extensive transformations explicit so a future solver
 //! route cannot silently mix normalized internal units with physical reports.
@@ -21,6 +27,7 @@
 //! before it crosses the public workflow boundary.
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::TotalEnthalpyJoules;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventory;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
 };
@@ -30,7 +37,8 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::TraceSpeciesSee
 
 /// Answer-independent mapping between physical and normalized extensive space.
 ///
-/// The scale is the sum of positive physical input component moles. It must
+/// The scale is a numerical normalization factor derived from the physical
+/// input representation. It is not a universal physical quantity and must
 /// never be inferred from an accepted solution, expected topology, external
 /// reference data, or continuation state.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -39,7 +47,9 @@ pub struct ExtensiveNormalization {
 }
 
 impl ExtensiveNormalization {
-    /// Builds the mapping from one physical input mole vector.
+    /// Builds the mapping from one explicit physical component-mole vector.
+    ///
+    /// The scale is the sum of its positive component amounts.
     pub fn from_physical_moles(moles: &[f64]) -> Result<Self, ReactionExtentError> {
         if moles
             .iter()
@@ -54,7 +64,24 @@ impl ExtensiveNormalization {
         Self::from_physical_inventory_scale(scale)
     }
 
-    /// Builds the mapping from an already audited physical inventory scale.
+    /// Builds the mapping from the physical elemental inventory itself.
+    ///
+    /// Element-defined requests must use the same scale for `b` and for the
+    /// numerical seed. Deriving it from the inventory keeps normalized bridge
+    /// requests internally consistent even when their seed came from a
+    /// different feasible decomposition. This scale is the sum of elemental
+    /// amounts and is not, in general, the total system mole count.
+    pub fn from_element_inventory(
+        inventory: &ElementInventory,
+    ) -> Result<Self, ReactionExtentError> {
+        let scale = inventory.entries().map(|(_, amount)| amount).sum();
+        Self::from_physical_inventory_scale(scale)
+    }
+
+    /// Builds the mapping from an already audited numerical inventory scale.
+    ///
+    /// The caller is responsible for preserving the scale's provenance; this
+    /// constructor validates only its finite, strictly positive domain.
     pub fn from_physical_inventory_scale(scale: f64) -> Result<Self, ReactionExtentError> {
         if !scale.is_finite() || scale <= 0.0 {
             return Err(ReactionExtentError::InvalidProblem {
@@ -67,7 +94,10 @@ impl ExtensiveNormalization {
         })
     }
 
-    /// Physical total inventory represented by one normalized mole.
+    /// Numerical scale used to represent one normalized extensive unit.
+    ///
+    /// For an elemental input this is the sum of elemental amounts, not a
+    /// claim about the physical total number of system moles.
     pub fn physical_inventory_scale(self) -> f64 {
         self.physical_inventory_scale
     }
@@ -141,6 +171,26 @@ impl ExtensiveNormalization {
         normalized_element_totals: &[f64],
     ) -> Result<Vec<f64>, ReactionExtentError> {
         self.denormalize_moles(normalized_element_totals)
+    }
+
+    /// Converts a typed elemental inventory to normalized extensive units.
+    ///
+    /// The result remains an [`ElementInventory`], so element validation and
+    /// canonical ordering stay owned by the physical input type rather than
+    /// being replaced by an untyped vector at the normalization boundary.
+    pub fn normalize_element_inventory(
+        self,
+        physical: &ElementInventory,
+    ) -> Result<ElementInventory, ReactionExtentError> {
+        self.transform_element_inventory(physical, 1.0 / self.physical_inventory_scale)
+    }
+
+    /// Reconstructs a physical elemental inventory from normalized units.
+    pub fn denormalize_element_inventory(
+        self,
+        normalized: &ElementInventory,
+    ) -> Result<ElementInventory, ReactionExtentError> {
+        self.transform_element_inventory(normalized, self.physical_inventory_scale)
     }
 
     /// Converts a typed physical composition while retaining its layout proof.
@@ -272,6 +322,34 @@ impl ExtensiveNormalization {
             .collect()
     }
 
+    fn transform_element_inventory(
+        self,
+        inventory: &ElementInventory,
+        multiplier: f64,
+    ) -> Result<ElementInventory, ReactionExtentError> {
+        let transformed = inventory
+            .entries()
+            .map(|(element, amount)| {
+                let value = amount * multiplier;
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(ReactionExtentError::InvalidProblem {
+                        field: "extensive_normalization_element_inventory",
+                        message: format!(
+                            "element '{element}' became non-positive or non-finite during extensive normalization"
+                        ),
+                    });
+                }
+                Ok((element.to_string(), value))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        ElementInventory::from_amounts(transformed).map_err(|error| {
+            ReactionExtentError::InvalidProblem {
+                field: "extensive_normalization_element_inventory",
+                message: error.to_string(),
+            }
+        })
+    }
+
     fn transform_positive_threshold(
         self,
         value: f64,
@@ -376,6 +454,32 @@ mod tests {
                     .unwrap()[0],
                 original,
             );
+        }
+    }
+
+    #[test]
+    fn element_inventory_round_trip_uses_one_exact_extensive_scale() {
+        let inventory = ElementInventory::from_amounts([("O", 2.0e6), ("H", 4.0e6)]).unwrap();
+        let normalization = ExtensiveNormalization::from_element_inventory(&inventory).unwrap();
+
+        assert_close(normalization.physical_inventory_scale(), 6.0e6);
+        let normalized = normalization
+            .normalize_element_inventory(&inventory)
+            .unwrap();
+        let normalized_entries = normalized.entries().collect::<Vec<_>>();
+        assert_eq!(normalized_entries[0].0, "H");
+        assert_close(normalized_entries[0].1, 2.0 / 3.0);
+        assert_eq!(normalized_entries[1].0, "O");
+        assert_close(normalized_entries[1].1, 1.0 / 3.0);
+        let reconstructed_inventory = normalization
+            .denormalize_element_inventory(&normalized)
+            .unwrap();
+        let reconstructed = reconstructed_inventory.entries().collect::<Vec<_>>();
+        for ((actual_element, actual), (expected_element, expected)) in
+            reconstructed.iter().zip(inventory.entries())
+        {
+            assert_eq!(actual_element, &expected_element);
+            assert_close(*actual, expected);
         }
     }
 

@@ -10,13 +10,15 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::{
-    EquilibriumCandidatePhasePlan, EquilibriumCandidateSelectionReport,
+    ElementInventoryCandidateSelection, EquilibriumCandidatePhasePlan,
+    EquilibriumCandidateSelectionReport,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::{
     EquilibriumDiagnosticEvent, EquilibriumDiagnosticsCollector, EquilibriumDiagnosticsMode,
     EquilibriumDiagnosticsOptions,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventory;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
     EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
 };
@@ -555,6 +557,7 @@ impl From<ReactionExtentError> for PhaseEquilibriumPipelineError {
 enum PipelineInitialComposition {
     Dense(Vec<f64>),
     Sparse(Vec<(PhaseComponentId, f64)>),
+    ElementInventory(ElementInventory),
 }
 
 /// High-level one-shot request that resolves phase specs and then solves them.
@@ -566,6 +569,7 @@ enum PipelineInitialComposition {
 pub struct PhaseEquilibriumPipelineRequest {
     spec: SubstanceSystemSpec,
     initial_composition: PipelineInitialComposition,
+    candidate_selection: Option<EquilibriumCandidateSelectionReport>,
     conditions: EquilibriumConditions,
     model_policy: SupportedPhaseModelPolicy,
     solve_options: EquilibriumSolveOptions,
@@ -584,6 +588,31 @@ impl PhaseEquilibriumPipelineRequest {
         Self {
             spec,
             initial_composition: PipelineInitialComposition::Dense(initial_moles),
+            candidate_selection: None,
+            conditions,
+            model_policy: SupportedPhaseModelPolicy::default(),
+            solve_options: EquilibriumSolveOptions::default(),
+            solve_mode: PhaseEquilibriumSolveMode::fixed_declared_phases(),
+            multi_start_seeds: Vec::new(),
+            repository: None,
+        }
+    }
+
+    /// Creates a P,T pipeline from a closed elemental inventory and an
+    /// explicit real phase/species universe.
+    ///
+    /// The inventory is not expanded into an artificial species. After lookup
+    /// it enters the canonical bridge as `b`, while a seed is built from the
+    /// resolved real components only.
+    pub fn from_element_inventory(
+        spec: SubstanceSystemSpec,
+        element_inventory: ElementInventory,
+        conditions: EquilibriumConditions,
+    ) -> Self {
+        Self {
+            spec,
+            initial_composition: PipelineInitialComposition::ElementInventory(element_inventory),
+            candidate_selection: None,
             conditions,
             model_policy: SupportedPhaseModelPolicy::default(),
             solve_options: EquilibriumSolveOptions::default(),
@@ -608,7 +637,44 @@ impl PhaseEquilibriumPipelineRequest {
         conditions: EquilibriumConditions,
     ) -> Result<Self, SubstanceSystemFactoryError> {
         let spec = phase_plan.build_spec(selection)?;
-        Ok(Self::new(spec, initial_moles, conditions).with_repository(repository))
+        Ok(Self::new(spec, initial_moles, conditions)
+            .with_repository(repository)
+            .with_candidate_selection(selection.clone()))
+    }
+
+    /// Creates an element-defined pipeline from a deterministic catalog
+    /// selection and explicit physical phase plan.
+    pub fn from_candidate_selection_with_element_inventory(
+        repository: Arc<ThermoRepository>,
+        selection: &EquilibriumCandidateSelectionReport,
+        phase_plan: &EquilibriumCandidatePhasePlan,
+        element_inventory: ElementInventory,
+        conditions: EquilibriumConditions,
+    ) -> Result<Self, SubstanceSystemFactoryError> {
+        let spec = phase_plan.build_spec(selection)?;
+        Ok(
+            Self::from_element_inventory(spec, element_inventory, conditions)
+                .with_repository(repository)
+                .with_candidate_selection(selection.clone()),
+        )
+    }
+
+    /// Creates a reproducible element-defined pipeline directly from typed
+    /// selection evidence. The inventory remains the physical conservation
+    /// vector; the nested report explains the selected real record universe.
+    pub fn from_element_inventory_candidate_selection(
+        repository: Arc<ThermoRepository>,
+        selection: &ElementInventoryCandidateSelection,
+        phase_plan: &EquilibriumCandidatePhasePlan,
+        conditions: EquilibriumConditions,
+    ) -> Result<Self, SubstanceSystemFactoryError> {
+        Self::from_candidate_selection_with_element_inventory(
+            repository,
+            selection.report(),
+            phase_plan,
+            selection.inventory().clone(),
+            conditions,
+        )
     }
 
     /// Creates a pipeline request with phase-qualified initial inventory.
@@ -625,6 +691,7 @@ impl PhaseEquilibriumPipelineRequest {
         Self {
             spec,
             initial_composition: PipelineInitialComposition::Sparse(entries),
+            candidate_selection: None,
             conditions,
             model_policy: SupportedPhaseModelPolicy::default(),
             solve_options: EquilibriumSolveOptions::default(),
@@ -637,6 +704,16 @@ impl PhaseEquilibriumPipelineRequest {
     /// Uses an explicit immutable repository instead of the default search path.
     pub fn with_repository(mut self, repository: Arc<ThermoRepository>) -> Self {
         self.repository = Some(repository);
+        self
+    }
+
+    /// Retains the immutable catalog-selection transaction in the eventual
+    /// bridge build report.
+    pub fn with_candidate_selection(
+        mut self,
+        selection: EquilibriumCandidateSelectionReport,
+    ) -> Self {
+        self.candidate_selection = Some(selection);
         self
     }
 
@@ -716,6 +793,7 @@ impl PhaseEquilibriumPipelineRequest {
         let Self {
             spec,
             initial_composition,
+            candidate_selection,
             conditions,
             model_policy,
             solve_options,
@@ -760,6 +838,35 @@ impl PhaseEquilibriumPipelineRequest {
             PipelineInitialComposition::Sparse(entries) => {
                 MultiphaseInitialComposition::from_sparse(&layout, entries)?
             }
+            PipelineInitialComposition::ElementInventory(element_inventory) => {
+                if !multi_start_seeds.is_empty() {
+                    return Err(PhaseEquilibriumPipelineError::Solve(
+                        ReactionExtentError::InvalidProblem {
+                            field: "multi_start_element_inventory",
+                            message: "explicit multi-start is not yet available for element-defined P,T pipelines".to_string(),
+                        },
+                    ));
+                }
+                let phase_control = match solve_mode {
+                    PhaseEquilibriumSolveMode::FixedDeclaredPhases => None,
+                    PhaseEquilibriumSolveMode::BoundedPhaseControl(policy) => Some(policy),
+                };
+                let solution = solve_resolved_pt_from_element_inventory_with_selection(
+                    &resolved,
+                    conditions,
+                    element_inventory,
+                    None,
+                    candidate_selection,
+                    solve_options,
+                    phase_control,
+                )?
+                .with_timing_stage(
+                    EquilibriumTimingStage::RepositoryLookup,
+                    lookup_started.elapsed(),
+                )
+                .with_timing_total(started.elapsed());
+                return Ok(ResolvedPhaseEquilibriumOutcome { resolved, solution });
+            }
         };
         let lookup_elapsed = lookup_started.elapsed();
         let request =
@@ -767,7 +874,8 @@ impl PhaseEquilibriumPipelineRequest {
                 .with_model_policy(model_policy)
                 .with_solve_options(solve_options)
                 .with_multi_start_seeds(multi_start_seeds)
-                .with_fixed_declared_phases();
+                .with_fixed_declared_phases()
+                .with_candidate_selection(candidate_selection);
         let request = match solve_mode {
             PhaseEquilibriumSolveMode::FixedDeclaredPhases => request,
             PhaseEquilibriumSolveMode::BoundedPhaseControl(policy) => {
@@ -794,6 +902,7 @@ impl PhaseEquilibriumPipelineRequest {
         let Self {
             spec,
             initial_composition,
+            candidate_selection: _,
             conditions,
             model_policy,
             solve_options,
@@ -832,6 +941,14 @@ impl PhaseEquilibriumPipelineRequest {
             PipelineInitialComposition::Sparse(entries) => {
                 MultiphaseInitialComposition::from_sparse(&layout, entries)?
             }
+            PipelineInitialComposition::ElementInventory(_) => {
+                return Err(PhaseEquilibriumPipelineError::Solve(
+                    ReactionExtentError::InvalidProblem {
+                        field: "element_inventory_temperature_range",
+                        message: "element-defined temperature ranges require the prepared range migration and are not available yet".to_string(),
+                    },
+                ));
+            }
         };
         let request = TemperatureRangeRequest::new(
             &resolved,
@@ -862,6 +979,15 @@ pub struct ResolvedPhaseEquilibriumOutcome {
 }
 
 impl ResolvedPhaseEquilibriumOutcome {
+    /// Rebuilds the transport wrapper after an integration layer has consumed
+    /// a calculator-facade point. No numerical payload is cloned.
+    pub fn from_parts(
+        resolved: ResolvedPhaseSystem,
+        solution: MultiphaseEquilibriumSolution,
+    ) -> Self {
+        Self { resolved, solution }
+    }
+
     /// Immutable resolved phase system and its provenance.
     pub fn resolved(&self) -> &ResolvedPhaseSystem {
         &self.resolved
@@ -895,6 +1021,8 @@ pub struct ResolvedPhaseEquilibriumRequest<'a> {
     resolved: &'a ResolvedPhaseSystem,
     conditions: EquilibriumConditions,
     initial_composition: MultiphaseInitialComposition,
+    physical_input: ResolvedPhaseEquilibriumPhysicalInput,
+    candidate_selection: Option<EquilibriumCandidateSelectionReport>,
     model_policy: SupportedPhaseModelPolicy,
     solve_options: EquilibriumSolveOptions,
     solve_mode: PhaseEquilibriumSolveMode,
@@ -906,6 +1034,12 @@ pub struct ResolvedPhaseEquilibriumRequest<'a> {
     /// Keeping this crate-internal prevents arbitrary callers from claiming
     /// unvalidated phase history.
     continuation_phase_set: Option<PhaseSet>,
+}
+
+#[derive(Clone)]
+enum ResolvedPhaseEquilibriumPhysicalInput {
+    Composition,
+    ElementInventory(ElementInventory),
 }
 
 impl<'a> ResolvedPhaseEquilibriumRequest<'a> {
@@ -920,6 +1054,8 @@ impl<'a> ResolvedPhaseEquilibriumRequest<'a> {
             resolved,
             conditions,
             initial_composition,
+            physical_input: ResolvedPhaseEquilibriumPhysicalInput::Composition,
+            candidate_selection: None,
             model_policy: SupportedPhaseModelPolicy::default(),
             solve_options: EquilibriumSolveOptions::default(),
             solve_mode: PhaseEquilibriumSolveMode::fixed_declared_phases(),
@@ -1002,6 +1138,23 @@ impl<'a> ResolvedPhaseEquilibriumRequest<'a> {
         &self.initial_composition
     }
 
+    /// Replaces only the physical conservation source with a validated
+    /// elemental inventory. The composition remains a numerical seed and is
+    /// checked against this inventory during bridge construction.
+    pub fn with_element_inventory(mut self, inventory: ElementInventory) -> Self {
+        self.physical_input = ResolvedPhaseEquilibriumPhysicalInput::ElementInventory(inventory);
+        self
+    }
+
+    /// Carries immutable candidate-selection provenance into the build report.
+    pub fn with_candidate_selection(
+        mut self,
+        selection: Option<EquilibriumCandidateSelectionReport>,
+    ) -> Self {
+        self.candidate_selection = selection;
+        self
+    }
+
     /// Numerical policy to be applied after the physical inventory is validated.
     pub fn solve_options(&self) -> &EquilibriumSolveOptions {
         &self.solve_options
@@ -1040,6 +1193,94 @@ pub fn solve_resolved_pt(
     Ok(solved)
 }
 
+/// Solves one P,T point from a closed elemental inventory over an already
+/// resolved real phase/species universe.
+///
+/// This is a typed sibling of [`solve_resolved_pt`] rather than a second
+/// solver request hierarchy. The inventory is consumed by the bridge to
+/// produce `A`, `b`, and a real-component numerical seed; all backend,
+/// acceptance, and optional phase-control behavior remains identical.
+pub fn solve_resolved_pt_from_element_inventory(
+    resolved: &ResolvedPhaseSystem,
+    conditions: EquilibriumConditions,
+    element_inventory: ElementInventory,
+    solve_options: EquilibriumSolveOptions,
+    phase_control: Option<PhaseControlPolicy>,
+) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
+    solve_resolved_pt_from_element_inventory_with_numerical_seed(
+        resolved,
+        conditions,
+        element_inventory,
+        None,
+        solve_options,
+        phase_control,
+    )
+}
+
+/// Internal continuation-capable form of
+/// [`solve_resolved_pt_from_element_inventory`].
+///
+/// `numerical_seed` affects only log-coordinate initialization. The bridge
+/// still derives conserved totals exclusively from `element_inventory`.
+pub(crate) fn solve_resolved_pt_from_element_inventory_with_numerical_seed(
+    resolved: &ResolvedPhaseSystem,
+    conditions: EquilibriumConditions,
+    element_inventory: ElementInventory,
+    numerical_seed: Option<MultiphaseInitialComposition>,
+    solve_options: EquilibriumSolveOptions,
+    phase_control: Option<PhaseControlPolicy>,
+) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
+    solve_resolved_pt_from_element_inventory_with_selection(
+        resolved,
+        conditions,
+        element_inventory,
+        numerical_seed,
+        None,
+        solve_options,
+        phase_control,
+    )
+}
+
+fn solve_resolved_pt_from_element_inventory_with_selection(
+    resolved: &ResolvedPhaseSystem,
+    conditions: EquilibriumConditions,
+    element_inventory: ElementInventory,
+    numerical_seed: Option<MultiphaseInitialComposition>,
+    candidate_selection: Option<EquilibriumCandidateSelectionReport>,
+    solve_options: EquilibriumSolveOptions,
+    phase_control: Option<PhaseControlPolicy>,
+) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
+    let trace_seed_policy = solve_options.trace_seed_policy();
+    let build_request = PhaseEquilibriumBuildRequest::from_element_inventory(
+        resolved,
+        conditions,
+        element_inventory,
+        trace_seed_policy,
+        SupportedPhaseModelPolicy::default(),
+    )?;
+    let build_request = match candidate_selection {
+        Some(selection) => build_request.with_candidate_selection(selection),
+        None => build_request,
+    };
+    let build_request = match numerical_seed {
+        Some(seed) => build_request.with_numerical_seed(seed)?,
+        None => build_request,
+    };
+    match phase_control {
+        Some(policy) => crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::
+            build_phase_equilibrium_problem(build_request)?
+            .solve_with_bounded_phase_control_with_diagnostics(
+            |settings| *settings = solve_options.clone().into_settings(),
+            |manager| *manager = policy.into_phase_manager(),
+            solve_options.diagnostics_options().clone(),
+        ),
+        None => crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::
+            build_phase_equilibrium_problem(build_request)?
+            .solve_with(|settings| *settings = solve_options.into_settings())?
+            .into_multiphase_solution(),
+    }
+}
+
 /// Runs one complete point transaction without emitting range-level progress.
 ///
 /// Prepared continuation drivers use this only after their cached fast path
@@ -1072,6 +1313,36 @@ pub(crate) fn recover_resolved_pt_after_numerical_failure<'a>(
     }
 }
 
+fn build_phase_equilibrium_request<'a>(
+    request: &ResolvedPhaseEquilibriumRequest<'a>,
+    numerical_seed: MultiphaseInitialComposition,
+) -> Result<PhaseEquilibriumBuildRequest<'a>, ReactionExtentError> {
+    let trace_seed_policy = request.solve_options.trace_seed_policy();
+    let build_request = match &request.physical_input {
+        ResolvedPhaseEquilibriumPhysicalInput::Composition => PhaseEquilibriumBuildRequest::new(
+            request.resolved,
+            request.conditions,
+            numerical_seed,
+            trace_seed_policy,
+            request.model_policy,
+        ),
+        ResolvedPhaseEquilibriumPhysicalInput::ElementInventory(inventory) => {
+            PhaseEquilibriumBuildRequest::from_element_inventory(
+                request.resolved,
+                request.conditions,
+                inventory.clone(),
+                trace_seed_policy,
+                request.model_policy,
+            )?
+            .with_numerical_seed(numerical_seed)
+        }
+    }?;
+    Ok(match &request.candidate_selection {
+        Some(selection) => build_request.with_candidate_selection(selection.clone()),
+        None => build_request,
+    })
+}
+
 /// Executes exactly one physical or explicitly normalized request.
 ///
 /// Keeping retry policy outside this function prevents recursive recovery and
@@ -1082,17 +1353,13 @@ fn solve_resolved_pt_once(
     let timing_mode = request.solve_options.timing_mode();
     let diagnostics = request.solve_options.diagnostics_options().clone();
     let started = std::time::Instant::now();
-    match request.solve_mode {
+    match request.solve_mode.clone() {
         PhaseEquilibriumSolveMode::FixedDeclaredPhases => {
-            let trace_seed_policy = request.solve_options.trace_seed_policy();
             let bundle = crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::
-                build_phase_equilibrium_problem_with_timing(PhaseEquilibriumBuildRequest::new(
-                request.resolved,
-                request.conditions,
-                request.initial_composition,
-                trace_seed_policy,
-                request.model_policy,
-            )?, timing_mode)?;
+                build_phase_equilibrium_problem_with_timing(
+                    build_phase_equilibrium_request(&request, request.initial_composition.clone())?,
+                    timing_mode,
+                )?;
             let settings = request.solve_options.into_settings();
             let solved = if request.multi_start_seeds.is_empty() {
                 bundle.solve_with(|configured| *configured = settings)
@@ -1113,15 +1380,11 @@ fn solve_resolved_pt_once(
                         .to_string(),
                 });
             }
-            let trace_seed_policy = request.solve_options.trace_seed_policy();
             let bundle = crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::
-                build_phase_equilibrium_problem_with_timing(PhaseEquilibriumBuildRequest::new(
-                request.resolved,
-                request.conditions,
-                request.initial_composition,
-                trace_seed_policy,
-                request.model_policy,
-            )?, timing_mode)?;
+                build_phase_equilibrium_problem_with_timing(
+                    build_phase_equilibrium_request(&request, request.initial_composition.clone())?,
+                    timing_mode,
+                )?;
             let settings = request.solve_options.into_settings();
             bundle
                 .solve_with_bounded_phase_control_with_diagnostics_and_seed(
@@ -1145,6 +1408,12 @@ fn solve_resolved_pt_once(
 /// exact boundary is testable without constructing a complete solve request.
 const EXTENSIVE_RECOVERY_MIN_SCALE_FACTOR: f64 = 10.0;
 
+// The normalized recovery state is used as a cross-representation witness.
+// A tighter floor prevents a scale-dependent phase-control amount from being
+// published when the ordinary production tolerance is sufficient for solve
+// acceptance but not for strict extensive equivalence.
+const EXTENSIVE_RECOVERY_MAX_SOLVER_TOLERANCE: f64 = 1.0e-12;
+
 fn is_materially_extensive_scaled(scale: f64) -> bool {
     scale.is_finite() && scale > 0.0 && scale.ln().abs() > EXTENSIVE_RECOVERY_MIN_SCALE_FACTOR.ln()
 }
@@ -1164,8 +1433,14 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
     request: ResolvedPhaseEquilibriumRequest<'a>,
     physical_error: ReactionExtentError,
 ) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
-    let normalization =
-        ExtensiveNormalization::from_physical_moles(request.initial_composition.moles())?;
+    let normalization = match &request.physical_input {
+        ResolvedPhaseEquilibriumPhysicalInput::Composition => {
+            ExtensiveNormalization::from_physical_moles(request.initial_composition.moles())?
+        }
+        ResolvedPhaseEquilibriumPhysicalInput::ElementInventory(inventory) => {
+            ExtensiveNormalization::from_element_inventory(inventory)?
+        }
+    };
     // A near-unit inventory is not an extensive-conditioning problem. Avoid
     // turning this route into an implicit general-purpose multi-start policy.
     if !is_materially_extensive_scaled(normalization.physical_inventory_scale()) {
@@ -1187,6 +1462,16 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
         .as_ref()
         .map(|seed| normalization.normalize_log_mole_guess(seed))
         .transpose()?;
+    let normalized_physical_input = match &request.physical_input {
+        ResolvedPhaseEquilibriumPhysicalInput::Composition => {
+            ResolvedPhaseEquilibriumPhysicalInput::Composition
+        }
+        ResolvedPhaseEquilibriumPhysicalInput::ElementInventory(inventory) => {
+            ResolvedPhaseEquilibriumPhysicalInput::ElementInventory(
+                normalization.normalize_element_inventory(inventory)?,
+            )
+        }
+    };
     let normalized_mode = match request.solve_mode.clone() {
         PhaseEquilibriumSolveMode::FixedDeclaredPhases => {
             PhaseEquilibriumSolveMode::FixedDeclaredPhases
@@ -1209,10 +1494,17 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
         .with_trace_seed_policy(
             normalization.normalize_trace_seed_policy(request.solve_options.trace_seed_policy())?,
         );
+    let recovery_tolerance = normalized_options
+        .reproducibility_snapshot()
+        .tolerance
+        .min(EXTENSIVE_RECOVERY_MAX_SOLVER_TOLERANCE);
+    let normalized_options = normalized_options.with_tolerance(recovery_tolerance)?;
     let normalized_request = ResolvedPhaseEquilibriumRequest {
         resolved: request.resolved,
         conditions: request.conditions,
         initial_composition: normalized_composition,
+        physical_input: normalized_physical_input,
+        candidate_selection: request.candidate_selection.clone(),
         model_policy: request.model_policy,
         solve_options: normalized_options,
         solve_mode: normalized_mode,
@@ -1283,12 +1575,9 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
             let physical_publication = (|| {
                 let physical_build_report = crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::
                     build_phase_equilibrium_problem_with_timing(
-                        PhaseEquilibriumBuildRequest::new(
-                            request.resolved,
-                            request.conditions,
-                            request.initial_composition,
-                            request.solve_options.trace_seed_policy(),
-                            request.model_policy,
+                        build_phase_equilibrium_request(
+                            &request,
+                            request.initial_composition.clone(),
                         )?,
                         request.solve_options.timing_mode(),
                     )?
@@ -1351,8 +1640,16 @@ fn attach_extensive_normalization_recovery(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::{
+        EquilibriumCandidatePhaseAssignment, EquilibriumCandidatePolicy,
+        EquilibriumCandidateSelector,
+    };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::{
         EquilibriumDiagnosticEvent, EquilibriumDiagnosticsMode, EquilibriumDiagnosticsOptions,
+    };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseStatus;
+    use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
+        PhaseEquilibriumInputKind, PhaseEquilibriumSeedSource,
     };
     use crate::Thermodynamics::ChemEquilibrium::prelude::{
         LegacyEquilibriumSolver, LogMolesInitialGuess, RustedSciTheSolver, SolverBackend,
@@ -1364,7 +1661,68 @@ mod tests {
     };
     use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
     use crate::Thermodynamics::physical_state::PhysicalState;
-    use crate::Thermodynamics::thermo_lib_api::ThermoData;
+    use crate::Thermodynamics::thermo_lib_api::{ThermoData, ThermoRepository};
+    use std::collections::HashMap;
+
+    fn real_h_o_multiphase_repository() -> Arc<ThermoRepository> {
+        let source = ThermoData::try_default_repository()
+            .expect("bundled repository must load for the real multiphase fixture");
+        let records = [
+            ("NASA_gas", "O2"),
+            ("NASA_gas", "H2O"),
+            ("NASA_cond", "H2O(L)"),
+        ];
+        let mut payloads = HashMap::new();
+        for (library, record_key) in records {
+            payloads
+                .entry(library.to_string())
+                .or_insert_with(HashMap::new)
+                .insert(
+                    record_key.to_string(),
+                    source
+                        .LibThermoData
+                        .get(library)
+                        .and_then(|records| records.get(record_key))
+                        .cloned()
+                        .expect("fixture record must exist in bundled JSON"),
+                );
+        }
+
+        let mut elements = HashMap::new();
+        for element in ["H", "O"] {
+            let rows = source
+                .ElementsData
+                .get(element)
+                .into_iter()
+                .flatten()
+                .filter(|row| {
+                    row.len() >= 2
+                        && records.iter().any(|(library, record_key)| {
+                            row[0] == *record_key && row[1] == *library
+                        })
+                })
+                .cloned()
+                .collect();
+            elements.insert(element.to_string(), rows);
+        }
+
+        Arc::new(ThermoRepository::from_parts(
+            records
+                .iter()
+                .map(|(library, record_key)| (library.to_string(), record_key.to_string()))
+                .collect(),
+            payloads,
+            elements,
+            vec!["NASA_gas".to_string(), "NASA_cond".to_string()],
+            HashMap::new(),
+            HashMap::from([
+                ("NASA_gas".to_string(), "NASA".to_string()),
+                ("NASA_cond".to_string(), "NASA".to_string()),
+            ]),
+            vec!["NASA_gas".to_string(), "NASA_cond".to_string()],
+            Vec::new(),
+        ))
+    }
 
     #[test]
     fn solve_options_round_trip_explicit_cascade_budget() {
@@ -1608,6 +1966,447 @@ mod tests {
         assert_eq!(outcome.resolved().phase_specs().len(), 1);
         assert_eq!(outcome.solution().component_moles().len(), 2);
         assert_eq!(outcome.solution().build_report().components().len(), 2);
+    }
+
+    #[test]
+    fn element_inventory_pipeline_solves_without_dense_component_moles() {
+        let spec = SubstanceSystemSpecBuilder::new(SubstancesContainer::SinglePhase(vec![
+            "H2".to_string(),
+            "O2".to_string(),
+            "H2O".to_string(),
+        ]))
+        .with_library_priorities(vec!["NASA_gas".to_string()])
+        .with_search_in_nist(false)
+        .build()
+        .unwrap();
+        let outcome = PhaseEquilibriumPipelineRequest::from_element_inventory(
+            spec,
+            ElementInventory::from_amounts([("H", 4.0), ("O", 2.0)]).unwrap(),
+            EquilibriumConditions::new(1_200.0, 101_325.0, 101_325.0).unwrap(),
+        )
+        .solve()
+        .expect("element-defined pipeline must resolve and solve locally");
+
+        assert_eq!(outcome.resolved().phase_specs()[0].components().len(), 3);
+        assert!(
+            outcome
+                .solution()
+                .component_moles()
+                .iter()
+                .all(|moles| moles.is_finite() && *moles >= 0.0)
+        );
+    }
+
+    #[test]
+    fn explicit_species_universe_changes_the_problem_without_catalog_supplementation() {
+        let inventory = ElementInventory::from_amounts([("H", 4.0), ("O", 2.0)])
+            .expect("element inventory must validate");
+        let conditions = EquilibriumConditions::new(1_200.0, 101_325.0, 101_325.0)
+            .expect("conditions must validate");
+        let full_spec = SubstanceSystemSpecBuilder::new(SubstancesContainer::SinglePhase(vec![
+            "H2".to_string(),
+            "O2".to_string(),
+            "H2O".to_string(),
+        ]))
+        .with_library_priorities(vec!["NASA_gas".to_string()])
+        .with_search_in_nist(false)
+        .build()
+        .expect("full explicit universe must validate");
+        let restricted_spec =
+            SubstanceSystemSpecBuilder::new(SubstancesContainer::SinglePhase(vec![
+                "H2".to_string(),
+                "O2".to_string(),
+            ]))
+            .with_library_priorities(vec!["NASA_gas".to_string()])
+            .with_search_in_nist(false)
+            .build()
+            .expect("restricted explicit universe must validate");
+
+        let full = PhaseEquilibriumPipelineRequest::from_element_inventory(
+            full_spec,
+            inventory.clone(),
+            conditions,
+        )
+        .solve()
+        .expect("full explicit universe must solve");
+        let restricted = PhaseEquilibriumPipelineRequest::from_element_inventory(
+            restricted_spec,
+            inventory,
+            conditions,
+        )
+        .solve()
+        .expect("restricted explicit universe must solve");
+
+        assert_eq!(
+            full.resolved().phase_specs()[0].components(),
+            ["H2", "O2", "H2O"]
+        );
+        assert_eq!(
+            restricted.resolved().phase_specs()[0].components(),
+            ["H2", "O2"]
+        );
+        assert_eq!(restricted.solution().component_moles().len(), 2);
+        assert!(
+            restricted
+                .solution()
+                .build_report()
+                .components()
+                .iter()
+                .all(|component| component.component().label() != "H2O")
+        );
+        assert!(full.solution().component_moles()[2] > 1.0e-12);
+        assert!(
+            restricted
+                .solution()
+                .accepted_solution()
+                .validation()
+                .max_abs_element_balance_error
+                < 1.0e-8
+        );
+    }
+
+    #[test]
+    fn truncated_catalog_selection_cannot_bypass_inventory_representability() {
+        let repository = ThermoData::try_default_repository()
+            .expect("bundled repository must load for truncation validation");
+        let inventory = ElementInventory::from_amounts([("H", 4.0), ("O", 2.0)])
+            .expect("element inventory must validate");
+        let policy = EquilibriumCandidatePolicy::default()
+            .with_library_preference(vec!["NASA_gas".to_string()])
+            .with_temperature_range(1_200.0, 1_200.0)
+            .expect("candidate temperature range must validate")
+            .with_max_candidates(1)
+            .expect("candidate limit must validate");
+        let selection = EquilibriumCandidateSelector::new(Arc::clone(&repository))
+            .select_inventory(&inventory, policy)
+            .expect("truncated H/O selection must still produce evidence");
+        assert!(selection.is_truncated());
+        assert_eq!(selection.selected().len(), 1);
+
+        let phase_plan = EquilibriumCandidatePhasePlan::new(vec![
+            EquilibriumCandidatePhaseAssignment::ideal_gas(
+                PhaseId::new(Some("gas".to_string())),
+                selection
+                    .selected()
+                    .iter()
+                    .map(|candidate| candidate.record_key().to_string())
+                    .collect(),
+            ),
+        ]);
+        let error =
+            PhaseEquilibriumPipelineRequest::from_candidate_selection_with_element_inventory(
+                repository,
+                &selection,
+                &phase_plan,
+                inventory,
+                EquilibriumConditions::new(1_200.0, 101_325.0, 101_325.0).unwrap(),
+            )
+            .expect("truncated selection must still produce a typed phase plan")
+            .solve()
+            .expect_err("a truncated universe that cannot represent b must be rejected");
+
+        assert!(matches!(
+            error,
+            PhaseEquilibriumPipelineError::Solve(ReactionExtentError::Preparation(_))
+        ));
+    }
+
+    #[test]
+    fn candidate_selection_provenance_survives_bridge_and_reproducibility() {
+        let repository = ThermoData::try_default_repository()
+            .expect("bundled repository must load for selection provenance");
+        let inventory = ElementInventory::from_amounts([("H", 4.0), ("O", 2.0)])
+            .expect("element inventory must validate");
+        let policy = EquilibriumCandidatePolicy::default()
+            .with_library_preference(vec!["NASA_gas".to_string()])
+            .with_temperature_range(1_200.0, 1_200.0)
+            .expect("temperature selection range must validate")
+            .with_max_candidates(3)
+            .expect("candidate cap must validate");
+        let selection = EquilibriumCandidateSelector::new(Arc::clone(&repository))
+            .select_inventory(&inventory, policy)
+            .expect("local H/O selection must succeed");
+        assert_eq!(selection.selected().len(), 3);
+        let phase_plan = EquilibriumCandidatePhasePlan::new(vec![
+            EquilibriumCandidatePhaseAssignment::ideal_gas(
+                PhaseId::new(Some("gas".to_string())),
+                selection
+                    .selected()
+                    .iter()
+                    .map(|candidate| candidate.record_key().to_string())
+                    .collect(),
+            ),
+        ]);
+        let outcome =
+            PhaseEquilibriumPipelineRequest::from_candidate_selection_with_element_inventory(
+                repository,
+                &selection,
+                &phase_plan,
+                inventory,
+                EquilibriumConditions::new(1_200.0, 101_325.0, 101_325.0).unwrap(),
+            )
+            .expect("candidate phase plan must build")
+            .with_solve_options(
+                EquilibriumSolveOptions::new()
+                    .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+                    .expect("single local backend policy must validate"),
+            )
+            .solve()
+            .expect("selected local H/O universe must solve");
+
+        assert_eq!(
+            outcome.solution().build_report().candidate_selection(),
+            Some(&selection)
+        );
+        let capsule = crate::Thermodynamics::ChemEquilibrium::equilibrium_reproducibility::
+            EquilibriumReproducibilityCapsule::from_outcome(
+                &outcome,
+                &EquilibriumSolveOptions::new(),
+            );
+        assert!(capsule.candidate_selection.is_some());
+        assert_eq!(
+            capsule
+                .candidate_selection
+                .as_ref()
+                .unwrap()
+                .selected_records
+                .len(),
+            selection.selected().len()
+        );
+        assert_eq!(
+            capsule
+                .candidate_selection
+                .as_ref()
+                .unwrap()
+                .rejected_records
+                .len(),
+            selection.rejected().len()
+        );
+        assert!(capsule.candidate_selection.as_ref().unwrap().truncated);
+    }
+
+    #[test]
+    fn real_offline_multiphase_fixture_tracks_phase_lifecycle_inventory_and_universe_provenance() {
+        let source = ThermoData::try_default_repository()
+            .expect("bundled repository must load for the real multiphase fixture");
+        let source_payloads = source.LibThermoData.as_ref().clone();
+        let source_elements = source.ElementsData.as_ref().clone();
+        let repository = real_h_o_multiphase_repository();
+        let inventory = ElementInventory::from_amounts([("H", 1.0), ("O", 1.0)])
+            .expect("closed H/O inventory must validate");
+        let policy = EquilibriumCandidatePolicy::default()
+            .with_library_preference(vec!["NASA_gas".to_string(), "NASA_cond".to_string()])
+            .with_temperature_range(300.0, 3_000.0)
+            .expect("real fixture range must validate")
+            .with_max_candidates(4)
+            .expect("real fixture candidate cap must validate");
+        let selection = EquilibriumCandidateSelector::new(Arc::clone(&repository))
+            .select_inventory(&inventory, policy)
+            .expect("real H/O fixture selection must succeed");
+
+        assert_eq!(
+            selection
+                .selected()
+                .iter()
+                .map(|candidate| candidate.record_key())
+                .collect::<Vec<_>>(),
+            vec!["H2O", "O2", "H2O(L)"]
+        );
+        assert_eq!(
+            selection.selected()[2].physical_state(),
+            Some(PhysicalState::Liquid)
+        );
+
+        let phase_plan = EquilibriumCandidatePhasePlan::new(vec![
+            EquilibriumCandidatePhaseAssignment::ideal_gas(
+                PhaseId::new(Some("gas".to_string())),
+                vec!["H2O".to_string(), "O2".to_string()],
+            ),
+            EquilibriumCandidatePhaseAssignment::pure_condensed(
+                PhaseId::new(Some("liquid".to_string())),
+                PhysicalState::Liquid,
+                vec!["H2O(L)".to_string()],
+            ),
+        ]);
+
+        let resolved = SubstanceSystemFactory::resolve_phase_system_with_repository(
+            phase_plan
+                .build_spec(&selection)
+                .expect("real phase plan must build a typed specification"),
+            Arc::clone(&repository),
+        )
+        .expect("real offline phase universe must resolve");
+        let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())
+            .expect("real offline phase layout must validate");
+        let solve_automatic = |temperature, initial_moles| {
+            let initial_composition =
+                MultiphaseInitialComposition::from_dense(&layout, initial_moles)
+                    .expect("element-conserving numerical seed must match the layout");
+            solve_resolved_pt(
+                ResolvedPhaseEquilibriumRequest::new(
+                    &resolved,
+                    EquilibriumConditions::new(temperature, 101_325.0, 101_325.0).unwrap(),
+                    initial_composition,
+                )
+                .with_element_inventory(inventory.clone())
+                .with_candidate_selection(Some(selection.clone()))
+                .with_solve_options(
+                    EquilibriumSolveOptions::new().with_timing_mode(EquilibriumTimingMode::Enabled),
+                )
+                .with_phase_control_policy(PhaseControlPolicy::default()),
+            )
+            .expect("real offline multiphase fixture must solve")
+        };
+        let low_temperature = solve_automatic(350.0, vec![0.5, 0.25, 0.0]);
+        let high_temperature = solve_automatic(550.0, vec![0.25, 0.25, 0.25]);
+
+        for outcome in [&low_temperature, &high_temperature] {
+            let report = outcome.build_report();
+            assert_eq!(
+                report.input_kind(),
+                PhaseEquilibriumInputKind::ElementInventory
+            );
+            assert_eq!(
+                report.seed_evidence().source(),
+                PhaseEquilibriumSeedSource::SuppliedNumericalSeed
+            );
+            assert_eq!(report.candidate_selection(), Some(&selection));
+            let totals = report
+                .element_labels()
+                .iter()
+                .zip(report.element_totals().iter().copied())
+                .map(|(label, total)| (label.as_str(), total))
+                .collect::<HashMap<_, _>>();
+            assert_eq!(totals.get("H"), Some(&1.0));
+            assert_eq!(totals.get("O"), Some(&1.0));
+            assert!(
+                outcome
+                    .acceptance_report()
+                    .expect("bounded solve must publish acceptance evidence")
+                    .final_validation
+                    .max_abs_element_balance_error
+                    < 1e-6
+            );
+        }
+
+        let low_liquid_status = low_temperature
+            .phase_status(&PhaseId::new(Some("liquid".to_string())))
+            .expect("liquid status must be published");
+        assert!(matches!(
+            low_liquid_status,
+            PhaseStatus::Appeared | PhaseStatus::Active
+        ));
+        assert!(
+            low_temperature
+                .phase_control_report()
+                .expect("low-temperature phase control report must be published")
+                .transitions
+                .iter()
+                .any(|transition| transition.activated.iter().any(|phase| phase.index() == 1))
+        );
+
+        let high_liquid_status = high_temperature
+            .phase_status(&PhaseId::new(Some("liquid".to_string())))
+            .expect("liquid status must be published");
+        assert!(matches!(
+            high_liquid_status,
+            PhaseStatus::Inactive | PhaseStatus::Disappeared
+        ));
+        assert!(
+            high_temperature
+                .phase_control_report()
+                .expect("high-temperature phase control report must be published")
+                .transitions
+                .iter()
+                .any(|transition| transition
+                    .deactivated
+                    .iter()
+                    .any(|phase| phase.index() == 1))
+        );
+
+        let explicit_initial =
+            MultiphaseInitialComposition::from_dense(&layout, vec![0.5, 0.25, 0.0])
+                .expect("explicit numerical seed must match the resolved layout");
+        let explicit = solve_resolved_pt(
+            ResolvedPhaseEquilibriumRequest::new(
+                &resolved,
+                EquilibriumConditions::new(350.0, 101_325.0, 101_325.0).unwrap(),
+                explicit_initial,
+            )
+            .with_element_inventory(inventory)
+            .with_solve_options(
+                EquilibriumSolveOptions::new().with_timing_mode(EquilibriumTimingMode::Enabled),
+            )
+            .with_phase_control_policy(PhaseControlPolicy::default()),
+        )
+        .expect("explicit real phase universe must solve");
+        assert!(explicit.build_report().candidate_selection().is_none());
+        assert_eq!(
+            explicit.build_report().input_kind(),
+            PhaseEquilibriumInputKind::ElementInventory
+        );
+        assert_eq!(
+            explicit.phases(),
+            low_temperature.phases(),
+            "automatic selection and explicit species declaration must resolve the same phases"
+        );
+        for (automatic, explicit) in low_temperature
+            .component_moles()
+            .iter()
+            .zip(explicit.component_moles())
+        {
+            assert!((automatic - explicit).abs() <= 1e-8);
+        }
+
+        let build_report = low_temperature.build_report();
+        let acceptance = low_temperature
+            .acceptance_report()
+            .expect("release story must retain acceptance evidence");
+        println!(
+            "offline automatic multiphase release story\n  b={:?}\n  selected={:?}\n  rejected={:?}\n  matrix={}x{} rank={} reaction_dimension={}\n  seed={:?} backend={:?} iterations={} residual={:.3e} balance={:.3e}\n  transitions={} provenance={:?}\n  timing={:?}\n  explicit_backend={:?} explicit_iterations={}",
+            build_report.element_totals(),
+            selection
+                .selected()
+                .iter()
+                .map(|candidate| format!("{}:{}", candidate.library(), candidate.record_key()))
+                .collect::<Vec<_>>(),
+            selection
+                .rejected()
+                .iter()
+                .map(|rejection| format!("{}:{}", rejection.library(), rejection.substance()))
+                .collect::<Vec<_>>(),
+            build_report.components().len(),
+            build_report.element_labels().len(),
+            build_report.solver_element_labels().len(),
+            build_report
+                .components()
+                .len()
+                .saturating_sub(build_report.solver_element_labels().len()),
+            build_report.seed_evidence().source(),
+            low_temperature.solve_report().accepted_backend,
+            low_temperature.nonlinear_iterations(),
+            acceptance.final_validation.residual_l2_norm,
+            acceptance.final_validation.max_abs_element_balance_error,
+            low_temperature.phase_control_transitions(),
+            build_report
+                .components()
+                .iter()
+                .map(|component| {
+                    format!(
+                        "{}<-{}:{}",
+                        component.component().label(),
+                        component.thermo_source().library(),
+                        component.thermo_source().record_key()
+                    )
+                })
+                .collect::<Vec<_>>(),
+            low_temperature.timing_report(),
+            explicit.solve_report().accepted_backend,
+            explicit.nonlinear_iterations(),
+        );
+
+        assert_eq!(source.LibThermoData.as_ref(), &source_payloads);
+        assert_eq!(source.ElementsData.as_ref(), &source_elements);
     }
 
     #[test]

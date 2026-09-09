@@ -8,17 +8,23 @@
 
 use std::time::{Duration, Instant};
 
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::EquilibriumCandidateSelectionReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumRangeDiagnosticsPolicy;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventory;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
     EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::MultiphaseInitialComposition;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
+    MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     DEFAULT_TRACE_MOLE_FLOOR, EquilibriumConditions, LogMolesInitialGuess, TraceSpeciesSeedPolicy,
 };
 
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingReport;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
+    EquilibriumTimingMode, EquilibriumTimingReport,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseSet;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
     PhaseEquilibriumBuildRequest, SupportedPhaseModelPolicy,
@@ -403,12 +409,14 @@ impl TemperatureRangeSolution {
 pub struct TemperatureRangeRequest<'a> {
     resolved: &'a ResolvedPhaseSystem,
     initial_composition: MultiphaseInitialComposition,
+    element_inventory: Option<ElementInventory>,
     pressure: f64,
     reference_pressure: f64,
     temperatures: TemperatureGrid,
     model_policy: SupportedPhaseModelPolicy,
     solve_options: EquilibriumSolveOptions,
     phase_control_policy: Option<PhaseControlPolicy>,
+    candidate_selection: Option<EquilibriumCandidateSelectionReport>,
 }
 
 impl<'a> TemperatureRangeRequest<'a> {
@@ -435,13 +443,76 @@ impl<'a> TemperatureRangeRequest<'a> {
         Ok(Self {
             resolved,
             initial_composition,
+            element_inventory: None,
             pressure,
             reference_pressure,
             temperatures,
             model_policy: SupportedPhaseModelPolicy::default(),
             solve_options: EquilibriumSolveOptions::default(),
             phase_control_policy: None,
+            candidate_selection: None,
         })
+    }
+
+    /// Creates a temperature range request from a closed elemental inventory.
+    ///
+    /// The first real-component seed is built once during request assembly;
+    /// every prepared formulation and recovery attempt retains the original
+    /// inventory as the physical conservation source.
+    pub fn from_element_inventory(
+        resolved: &'a ResolvedPhaseSystem,
+        element_inventory: ElementInventory,
+        pressure: f64,
+        reference_pressure: f64,
+        temperatures: TemperatureGrid,
+    ) -> Result<Self, ReactionExtentError> {
+        let first_conditions =
+            EquilibriumConditions::new(temperatures.values()[0], pressure, reference_pressure)?;
+        let bundle = build_phase_equilibrium_problem_with_timing(
+            PhaseEquilibriumBuildRequest::from_element_inventory(
+                resolved,
+                first_conditions,
+                element_inventory.clone(),
+                TraceSpeciesSeedPolicy::Absolute {
+                    floor: DEFAULT_TRACE_MOLE_FLOOR,
+                },
+                SupportedPhaseModelPolicy::default(),
+            )?,
+            EquilibriumTimingMode::Disabled,
+        )?;
+        let layout = crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::
+            MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
+        let initial_composition = MultiphaseInitialComposition::from_dense(
+            &layout,
+            bundle.problem().initial_moles().to_vec(),
+        )?;
+
+        Ok(Self {
+            resolved,
+            initial_composition,
+            element_inventory: Some(element_inventory),
+            pressure,
+            reference_pressure,
+            temperatures,
+            model_policy: SupportedPhaseModelPolicy::default(),
+            solve_options: EquilibriumSolveOptions::default(),
+            phase_control_policy: None,
+            candidate_selection: None,
+        })
+    }
+
+    /// Replaces only the first numerical seed of an element-defined range.
+    ///
+    /// The closed elemental inventory remains the physical conservation
+    /// source; the composition is retained solely as the first solver seed.
+    pub fn with_initial_composition(
+        mut self,
+        composition: MultiphaseInitialComposition,
+    ) -> Result<Self, ReactionExtentError> {
+        let layout = MultiphaseEquilibriumLayout::new(self.resolved.phase_specs().to_vec())?;
+        composition.validate_for(&layout)?;
+        self.initial_composition = composition;
+        Ok(self)
     }
 
     /// Replaces the supported activity-model policy.
@@ -453,6 +524,16 @@ impl<'a> TemperatureRangeRequest<'a> {
     /// Replaces numerical and timing options for every point.
     pub fn with_solve_options(mut self, options: EquilibriumSolveOptions) -> Self {
         self.solve_options = options;
+        self
+    }
+
+    /// Retains the immutable catalog-selection transaction in every range
+    /// point's bridge report.
+    pub fn with_candidate_selection(
+        mut self,
+        selection: EquilibriumCandidateSelectionReport,
+    ) -> Self {
+        self.candidate_selection = Some(selection);
         self
     }
 
@@ -480,6 +561,14 @@ impl<'a> TemperatureRangeRequest<'a> {
         )
         .with_model_policy(self.model_policy)
         .with_solve_options(self.solve_options.clone());
+        let request = match &self.element_inventory {
+            Some(inventory) => request.with_element_inventory(inventory.clone()),
+            None => request,
+        };
+        let request = match &self.candidate_selection {
+            Some(selection) => request.with_candidate_selection(Some(selection.clone())),
+            None => request,
+        };
         let request = match self.phase_control_policy.clone() {
             Some(policy) => request
                 .with_phase_control_policy(policy)
@@ -505,13 +594,27 @@ impl<'a> TemperatureRangeRequest<'a> {
             self.pressure,
             self.reference_pressure,
         )?;
-        let build_request = PhaseEquilibriumBuildRequest::new(
-            self.resolved,
-            first_conditions,
-            self.initial_composition.clone(),
-            trace_policy,
-            self.model_policy,
-        )?;
+        let build_request = match &self.element_inventory {
+            Some(inventory) => PhaseEquilibriumBuildRequest::from_element_inventory(
+                self.resolved,
+                first_conditions,
+                inventory.clone(),
+                trace_policy,
+                self.model_policy,
+            )?
+            .with_numerical_seed(self.initial_composition.clone())?,
+            None => PhaseEquilibriumBuildRequest::new(
+                self.resolved,
+                first_conditions,
+                self.initial_composition.clone(),
+                trace_policy,
+                self.model_policy,
+            )?,
+        };
+        let build_request = match &self.candidate_selection {
+            Some(selection) => build_request.with_candidate_selection(selection.clone()),
+            None => build_request,
+        };
         let bundle = build_phase_equilibrium_problem_with_timing(build_request, timing_mode)?;
         if let Some(control) = &execution_control {
             control.report(EquilibriumProgressEvent::new(

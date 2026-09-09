@@ -483,6 +483,7 @@ impl RustedSciTheSolver {
 
         let started = Instant::now();
         let mut contract = contract.clone();
+        let mut initial_log_moles = initial_log_moles.to_vec();
         if let Some(bounds) = problem.log_mole_bounds() {
             if bounds.len() != initial_log_moles.len() {
                 return Err(ReactionExtentError::DimensionMismatch(format!(
@@ -491,13 +492,14 @@ impl RustedSciTheSolver {
                     initial_log_moles.len()
                 )));
             }
+            clamp_initial_log_moles_to_roundoff_bounds(&mut initial_log_moles, bounds);
             contract = contract.with_log_mole_bounds(bounds)?;
         }
         let timed_problem = TimedSymbolicProblem::new(problem.as_problem());
         method
             .solve(
                 &timed_problem,
-                DVector::from_vec(initial_log_moles.to_vec()),
+                DVector::from_vec(initial_log_moles),
                 contract.to_options()?,
             )
             .map(|result| {
@@ -628,7 +630,7 @@ mod policy_tests {
 
 #[cfg(test)]
 mod solve_contract_tests {
-    use super::RustedSciTheSolveContract;
+    use super::{RustedSciTheSolveContract, clamp_initial_log_moles_to_roundoff_bounds};
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 
     #[test]
@@ -686,6 +688,47 @@ mod solve_contract_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn initial_log_moles_clamp_only_removes_roundoff_at_bounds() {
+        let lower = -4.0;
+        let upper = 4.0;
+        let mut near = vec![
+            lower - 4.0 * f64::EPSILON,
+            upper + 4.0 * f64::EPSILON,
+        ];
+        clamp_initial_log_moles_to_roundoff_bounds(&mut near, &[(lower, upper), (lower, upper)]);
+        assert_eq!(near, vec![lower, upper]);
+
+        let mut materially_outside = vec![lower - 1.0e-6, upper + 1.0e-6];
+        clamp_initial_log_moles_to_roundoff_bounds(
+            &mut materially_outside,
+            &[(lower, upper), (lower, upper)],
+        );
+        assert_eq!(materially_outside, vec![lower - 1.0e-6, upper + 1.0e-6]);
+    }
+}
+
+/// Removes only floating-point noise at a finite log-mole box boundary.
+///
+/// Recovery can translate a log seed by `ln(s)` and then reconstruct it by
+/// `exp`/`ln`; a mathematically boundary-valued coordinate may consequently
+/// land a few ULPs outside the capacity bound. The backend must still reject
+/// a materially infeasible seed, so this is intentionally a roundoff-sized
+/// correction rather than a general projection.
+fn clamp_initial_log_moles_to_roundoff_bounds(
+    initial_log_moles: &mut [f64],
+    bounds: &[(f64, f64)],
+) {
+    for (value, &(lower, upper)) in initial_log_moles.iter_mut().zip(bounds) {
+        let scale = value.abs().max(lower.abs()).max(upper.abs()).max(1.0);
+        let tolerance = 8.0 * f64::EPSILON * scale;
+        if *value < lower && lower - *value <= tolerance {
+            *value = lower;
+        } else if *value > upper && *value - upper <= tolerance {
+            *value = upper;
+        }
     }
 }
 

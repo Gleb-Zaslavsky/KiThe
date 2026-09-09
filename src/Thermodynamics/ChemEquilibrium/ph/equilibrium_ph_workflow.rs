@@ -41,6 +41,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::EquilibriumCandidateSelectionReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
     EnthalpyScale, EquilibriumConstraint, TemperatureBounds, additive_total_enthalpy,
 };
@@ -48,6 +49,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::{
     EquilibriumDiagnosticEvent, EquilibriumDiagnosticsMode, EquilibriumDiagnosticsOptions,
     PhDiagnosticRoute,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventory;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
     EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
 };
@@ -1147,6 +1149,10 @@ pub struct ResolvedPhaseEnthalpyRequest<'a> {
     /// Immutable snapshot captured when the request is built. The solve does
     /// not borrow the caller's mutable lifecycle or depend on its storage.
     resolved: ResolvedPhaseSystem,
+    /// Physical conservation input.  A dense composition is both the legacy
+    /// physical input and its first numerical seed; an elemental inventory
+    /// remains `b` while `initial_composition` is only a numerical seed.
+    physical_input: PhPhysicalInput,
     initial_composition: MultiphaseInitialComposition,
     constraint: EquilibriumConstraint,
     temperature_bounds: TemperatureBounds,
@@ -1156,6 +1162,14 @@ pub struct ResolvedPhaseEnthalpyRequest<'a> {
     ph_solve_mode: PhSolveMode,
     temperature_options: PhTemperatureSolveOptions,
     thermochemistry: Option<ResolvedThermochemistry>,
+    candidate_selection: Option<EquilibriumCandidateSelectionReport>,
+}
+
+/// Physical P,H input kept distinct from a numerical starting composition.
+#[derive(Clone)]
+enum PhPhysicalInput {
+    Composition,
+    ElementInventory(ElementInventory),
 }
 
 impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
@@ -1204,6 +1218,7 @@ impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
     ) -> Result<Self, ReactionExtentError> {
         let request = Self {
             resolved: resolved.clone(),
+            physical_input: PhPhysicalInput::Composition,
             initial_composition,
             constraint,
             temperature_bounds,
@@ -1217,6 +1232,7 @@ impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
             ph_solve_mode: PhSolveMode::NestedTemperature,
             temperature_options: PhTemperatureSolveOptions::default(),
             thermochemistry: None,
+            candidate_selection: None,
         };
         request.validate()?;
         Ok(request)
@@ -1254,6 +1270,90 @@ impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
         request.thermochemistry = Some(thermochemistry);
         request.ph_solve_mode = PhSolveMode::default();
         Ok(request)
+    }
+
+    /// Creates a canonical P,H request from a closed elemental inventory.
+    ///
+    /// The bridge derives the first numerical seed from real resolved
+    /// components, but every subsequent P,T trial still receives the original
+    /// inventory as its conserved vector.  In particular, the generated seed
+    /// is never reinterpreted as a user-specified molecular feed.
+    pub fn from_element_inventory<'resolved>(
+        resolved: &'resolved ResolvedPhaseSystem,
+        element_inventory: ElementInventory,
+        constraint: EquilibriumConstraint,
+        temperature_bounds: TemperatureBounds,
+        thermochemistry: ResolvedThermochemistry,
+    ) -> Result<Self, ReactionExtentError> {
+        let (_, initial_temperature) = validated_ph_parameters(constraint)?;
+        let conditions = constraint.conditions_at(initial_temperature)?;
+        let bundle = build_phase_equilibrium_problem_with_timing(
+            PhaseEquilibriumBuildRequest::from_element_inventory(
+                resolved,
+                conditions,
+                element_inventory.clone(),
+                crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::TraceSpeciesSeedPolicy::Absolute {
+                    floor: crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::DEFAULT_TRACE_MOLE_FLOOR,
+                },
+                SupportedPhaseModelPolicy::default(),
+            )?,
+            EquilibriumTimingMode::Disabled,
+        )?;
+        let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
+        let numerical_seed = MultiphaseInitialComposition::from_dense(
+            &layout,
+            bundle.problem().initial_moles().to_vec(),
+        )?;
+        let mut request = Self::from_resolved_thermochemistry(
+            resolved,
+            numerical_seed,
+            constraint,
+            temperature_bounds,
+            thermochemistry,
+        )?;
+        request.physical_input = PhPhysicalInput::ElementInventory(element_inventory);
+        Ok(request)
+    }
+
+    /// Creates the canonical bridge request without allowing a numerical seed
+    /// to replace the physical conserved inventory.
+    fn build_pt_request(
+        &self,
+        conditions: crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumConditions,
+    ) -> Result<PhaseEquilibriumBuildRequest<'_>, ReactionExtentError> {
+        let request = match &self.physical_input {
+            PhPhysicalInput::Composition => PhaseEquilibriumBuildRequest::new(
+                &self.resolved,
+                conditions,
+                self.initial_composition.clone(),
+                self.solve_options.trace_seed_policy(),
+                SupportedPhaseModelPolicy::default(),
+            ),
+            PhPhysicalInput::ElementInventory(inventory) => {
+                PhaseEquilibriumBuildRequest::from_element_inventory(
+                    &self.resolved,
+                    conditions,
+                    inventory.clone(),
+                    self.solve_options.trace_seed_policy(),
+                    SupportedPhaseModelPolicy::default(),
+                )?
+                .with_numerical_seed(self.initial_composition.clone())
+            }
+        }?;
+        Ok(match &self.candidate_selection {
+            Some(selection) => request.with_candidate_selection(selection.clone()),
+            None => request,
+        })
+    }
+
+    /// Retains the immutable catalog-selection transaction in every inner
+    /// fixed-`P,T` bridge report.
+    pub fn with_candidate_selection(
+        mut self,
+        selection: EquilibriumCandidateSelectionReport,
+    ) -> Self {
+        self.candidate_selection = Some(selection);
+        self
     }
 
     /// Validates the complete `P,H` request before any inner equilibrium solve.
@@ -1378,6 +1478,15 @@ impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
         &self.initial_composition
     }
 
+    /// Returns the closed elemental inventory when this request is
+    /// element-defined. `None` means the legacy explicit-composition mode.
+    pub fn element_inventory(&self) -> Option<&ElementInventory> {
+        match &self.physical_input {
+            PhPhysicalInput::Composition => None,
+            PhPhysicalInput::ElementInventory(inventory) => Some(inventory),
+        }
+    }
+
     /// Returns the `P,H` constraint.
     pub fn constraint(&self) -> EquilibriumConstraint {
         self.constraint
@@ -1398,6 +1507,7 @@ impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
     pub(crate) fn cloned_with_ph_solve_mode(&self, mode: PhSolveMode) -> Self {
         Self {
             resolved: self.resolved.clone(),
+            physical_input: self.physical_input.clone(),
             initial_composition: self.initial_composition.clone(),
             constraint: self.constraint,
             temperature_bounds: self.temperature_bounds,
@@ -1407,6 +1517,7 @@ impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
             ph_solve_mode: mode,
             temperature_options: self.temperature_options.clone(),
             thermochemistry: self.thermochemistry.clone(),
+            candidate_selection: self.candidate_selection.clone(),
         }
     }
 
@@ -1521,13 +1632,7 @@ impl PreparedPhContinuationState {
         )?;
         let conditions = request.constraint.conditions_at(initial_temperature)?;
         let bundle = build_phase_equilibrium_problem_with_timing(
-            PhaseEquilibriumBuildRequest::new(
-                &request.resolved,
-                conditions,
-                request.initial_composition.clone(),
-                request.solve_options.trace_seed_policy(),
-                SupportedPhaseModelPolicy::default(),
-            )?,
+            request.build_pt_request(conditions)?,
             request.solve_options.timing_mode(),
         )?;
         let prepared = bundle.into_prepared_fixed_active_problem()?;
@@ -1828,8 +1933,14 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
         return Err(physical_error);
     }
 
-    let normalization =
-        ExtensiveNormalization::from_physical_moles(request.initial_composition.moles())?;
+    let normalization = match &request.physical_input {
+        PhPhysicalInput::Composition => {
+            ExtensiveNormalization::from_physical_moles(request.initial_composition.moles())?
+        }
+        PhPhysicalInput::ElementInventory(inventory) => {
+            ExtensiveNormalization::from_element_inventory(inventory)?
+        }
+    };
     if !normalization.physical_inventory_scale().is_finite()
         || normalization.physical_inventory_scale() <= 0.0
         || normalization.physical_inventory_scale().ln().abs() <= 10.0_f64.ln()
@@ -1842,6 +1953,12 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
     let layout = MultiphaseEquilibriumLayout::new(request.resolved.phase_specs().to_vec())?;
     let normalized_composition =
         normalization.normalize_initial_composition(&layout, &request.initial_composition)?;
+    let normalized_physical_input = match &request.physical_input {
+        PhPhysicalInput::Composition => PhPhysicalInput::Composition,
+        PhPhysicalInput::ElementInventory(inventory) => {
+            PhPhysicalInput::ElementInventory(normalization.normalize_element_inventory(inventory)?)
+        }
+    };
     let (target, seed) = validated_ph_parameters(request.constraint)?;
     let normalized_target = normalization.normalize_total_enthalpy(
         crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::TotalEnthalpyJoules::new(
@@ -1872,6 +1989,7 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
         );
     let normalized_request = ResolvedPhaseEnthalpyRequest {
         resolved: request.resolved.clone(),
+        physical_input: normalized_physical_input,
         initial_composition: normalized_composition,
         constraint: normalized_constraint,
         temperature_bounds: request.temperature_bounds,
@@ -1881,6 +1999,7 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
         ph_solve_mode: request.ph_solve_mode,
         temperature_options: normalized_temperature_options,
         thermochemistry: request.thermochemistry.clone(),
+        candidate_selection: request.candidate_selection.clone(),
     };
     let normalized_solution = solve_resolved_ph(normalized_request).map_err(|recovery| {
         ReactionExtentError::ExtensiveNormalizationRecoveryFailed {
@@ -1943,13 +2062,7 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
         Err(error) => Some(error.to_string()),
     };
     let physical_build_report = build_phase_equilibrium_problem_with_timing(
-        PhaseEquilibriumBuildRequest::new(
-            &request.resolved,
-            accepted_conditions,
-            request.initial_composition.clone(),
-            request.solve_options.trace_seed_policy(),
-            SupportedPhaseModelPolicy::default(),
-        )?,
+        request.build_pt_request(accepted_conditions)?,
         request.solve_options.timing_mode(),
     )?
     .report()
@@ -1998,13 +2111,7 @@ fn solve_resolved_ph_monolithic_phase_control(
     let initial_conditions = request.constraint.conditions_at(initial_temperature)?;
     let timing_mode = request.solve_options.timing_mode();
     let bundle = build_phase_equilibrium_problem_with_timing(
-        PhaseEquilibriumBuildRequest::new(
-            &request.resolved,
-            initial_conditions,
-            request.initial_composition.clone(),
-            request.solve_options.trace_seed_policy(),
-            SupportedPhaseModelPolicy::default(),
-        )?,
+        request.build_pt_request(initial_conditions)?,
         timing_mode,
     )?;
     let policy = match request.solve_mode {
@@ -2182,13 +2289,7 @@ fn solve_resolved_ph_monolithic(
     let initial_conditions = request.constraint.conditions_at(initial_temperature)?;
     let timing_mode = request.solve_options.timing_mode();
     let bundle = build_phase_equilibrium_problem_with_timing(
-        PhaseEquilibriumBuildRequest::new(
-            &request.resolved,
-            initial_conditions,
-            request.initial_composition.clone(),
-            request.solve_options.trace_seed_policy(),
-            SupportedPhaseModelPolicy::default(),
-        )?,
+        request.build_pt_request(initial_conditions)?,
         timing_mode,
     )?;
     let prepared = bundle.into_prepared_fixed_active_problem()?;
@@ -2346,10 +2447,12 @@ fn solve_resolved_ph_nested_with_template(
     let options = request.temperature_options;
     let resolved = &request.resolved;
     let initial_composition = request.initial_composition.clone();
+    let physical_input = request.physical_input.clone();
     let enthalpy = request.enthalpy.clone();
     let solve_options = request.solve_options.clone();
     let solve_mode = request.solve_mode.clone();
     let thermochemistry = request.thermochemistry.clone();
+    let candidate_selection = request.candidate_selection.clone();
     let timing_enabled = solve_options.timing_mode() == EquilibriumTimingMode::Enabled;
     let execution_control = options.execution_control().cloned();
     // The evaluator owns one clone; the outer publication boundary keeps a
@@ -2426,6 +2529,7 @@ fn solve_resolved_ph_nested_with_template(
         }
         let trial_evaluator = PhTrialEvaluator {
             resolved,
+            physical_input: &physical_input,
             initial_composition: &initial_composition,
             constraint,
             enthalpy: &enthalpy,
@@ -2433,6 +2537,7 @@ fn solve_resolved_ph_nested_with_template(
             solve_mode: &solve_mode,
             fixed_template: fixed_template.as_deref(),
             execution_control: execution_control.as_ref(),
+            candidate_selection: candidate_selection.as_ref(),
             timing_enabled,
         };
         let trial_continuation_seed = use_continuation.then(|| continuation_seed.take()).flatten();
@@ -2735,6 +2840,7 @@ struct PhTrialOutcome {
 /// progress notifications, and transactional result publication.
 struct PhTrialEvaluator<'request, 'enthalpy> {
     resolved: &'request ResolvedPhaseSystem,
+    physical_input: &'request PhPhysicalInput,
     initial_composition: &'request MultiphaseInitialComposition,
     constraint: EquilibriumConstraint,
     enthalpy: &'request EnthalpyModel<'enthalpy>,
@@ -2742,10 +2848,43 @@ struct PhTrialEvaluator<'request, 'enthalpy> {
     solve_mode: &'request PhaseEquilibriumSolveMode,
     fixed_template: Option<&'request RefCell<Option<PreparedPhaseEquilibriumTemplate>>>,
     execution_control: Option<&'request EquilibriumExecutionControl>,
+    candidate_selection: Option<&'request EquilibriumCandidateSelectionReport>,
     timing_enabled: bool,
 }
 
 impl<'request, 'enthalpy> PhTrialEvaluator<'request, 'enthalpy> {
+    /// Builds a P,T request for the current trial.  For an element-defined
+    /// P,H problem, `initial_composition` is an accepted-only numerical seed;
+    /// the original element inventory remains the conservation contract.
+    fn build_pt_request(
+        &self,
+        conditions: crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumConditions,
+    ) -> Result<PhaseEquilibriumBuildRequest<'request>, ReactionExtentError> {
+        let request = match self.physical_input {
+            PhPhysicalInput::Composition => PhaseEquilibriumBuildRequest::new(
+                self.resolved,
+                conditions,
+                self.initial_composition.clone(),
+                self.solve_options.trace_seed_policy(),
+                SupportedPhaseModelPolicy::default(),
+            ),
+            PhPhysicalInput::ElementInventory(inventory) => {
+                PhaseEquilibriumBuildRequest::from_element_inventory(
+                    self.resolved,
+                    conditions,
+                    inventory.clone(),
+                    self.solve_options.trace_seed_policy(),
+                    SupportedPhaseModelPolicy::default(),
+                )?
+                .with_numerical_seed(self.initial_composition.clone())
+            }
+        }?;
+        Ok(match self.candidate_selection {
+            Some(selection) => request.with_candidate_selection(selection.clone()),
+            None => request,
+        })
+    }
+
     /// Evaluates `H(solution_of_P_T(T), T)` without mutating the request or
     /// publishing a partial result.
     ///
@@ -2787,13 +2926,7 @@ impl<'request, 'enthalpy> PhTrialEvaluator<'request, 'enthalpy> {
                 let mut template = template.borrow_mut();
                 let reused = template.is_some();
                 if template.is_none() {
-                    let build_request = PhaseEquilibriumBuildRequest::new(
-                        self.resolved,
-                        conditions,
-                        self.initial_composition.clone(),
-                        self.solve_options.trace_seed_policy(),
-                        SupportedPhaseModelPolicy::default(),
-                    )?;
+                    let build_request = self.build_pt_request(conditions)?;
                     let bundle = build_phase_equilibrium_problem_with_timing(
                         build_request,
                         self.solve_options.timing_mode(),
@@ -2825,17 +2958,28 @@ impl<'request, 'enthalpy> PhTrialEvaluator<'request, 'enthalpy> {
                 )
             }
             PhaseEquilibriumSolveMode::BoundedPhaseControl(policy) => {
-                let inner = ResolvedPhaseEquilibriumRequest::new(
-                    self.resolved,
-                    conditions,
-                    self.initial_composition.clone(),
-                )
-                .with_solve_options(trial_solve_options)
-                .with_phase_control_policy(policy.clone());
-                (
-                    solve_resolved_pt(inner)?,
-                    PhTrialPreparation::BoundedPhaseControlIsolated,
-                )
+                let solution = match self.physical_input {
+                    PhPhysicalInput::Composition => {
+                        let inner = ResolvedPhaseEquilibriumRequest::new(
+                            self.resolved,
+                            conditions,
+                            self.initial_composition.clone(),
+                        )
+                        .with_solve_options(trial_solve_options)
+                        .with_phase_control_policy(policy.clone());
+                        solve_resolved_pt(inner)?
+                    }
+                    PhPhysicalInput::ElementInventory(inventory) => crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::
+                        solve_resolved_pt_from_element_inventory_with_numerical_seed(
+                            self.resolved,
+                            conditions,
+                            inventory.clone(),
+                            Some(self.initial_composition.clone()),
+                            trial_solve_options,
+                            Some(policy.clone()),
+                        )?,
+                };
+                (solution, PhTrialPreparation::BoundedPhaseControlIsolated)
             }
         };
         let enthalpy_started = self.timing_enabled.then(Instant::now);

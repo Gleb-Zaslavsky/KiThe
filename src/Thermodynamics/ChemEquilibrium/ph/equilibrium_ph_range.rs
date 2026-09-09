@@ -10,10 +10,12 @@ use std::error::Error;
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::EquilibriumCandidateSelectionReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
     EquilibriumConstraint, TemperatureBounds, TotalEnthalpyJoules,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumRangeDiagnosticsPolicy;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventory;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
 };
@@ -432,9 +434,68 @@ impl<'a> PhRangeRequest<'a> {
         Ok(Self { prototype, targets })
     }
 
+    /// Builds an element-defined P,H continuation range.
+    ///
+    /// The inventory is retained as the closed physical `b` vector. Each
+    /// point uses only accepted prior state as its numerical continuation
+    /// seed; no temporary formula-like carrier is introduced as a species.
+    pub fn from_element_inventory(
+        resolved: &'a ResolvedPhaseSystem,
+        element_inventory: ElementInventory,
+        pressure: f64,
+        reference_pressure: f64,
+        targets: PhEnthalpyGrid,
+        temperature_bounds: TemperatureBounds,
+        initial_temperature: f64,
+        thermochemistry: ResolvedThermochemistry,
+    ) -> Result<Self, PhRangeError> {
+        let first_target = targets.values()[0];
+        let constraint = EquilibriumConstraint::ph_joules(
+            pressure,
+            reference_pressure,
+            first_target,
+            initial_temperature,
+        )
+        .map_err(PhRangeError::InvalidProblem)?;
+        let prototype = ResolvedPhaseEnthalpyRequest::from_element_inventory(
+            resolved,
+            element_inventory,
+            constraint,
+            temperature_bounds,
+            thermochemistry,
+        )
+        .map_err(PhRangeError::InvalidProblem)?;
+        Ok(Self { prototype, targets })
+    }
+
+    /// Replaces only the first numerical seed of an element-defined range.
+    ///
+    /// The closed elemental inventory remains the physical conservation
+    /// source; the composition is retained solely as the first solver seed.
+    pub fn with_initial_composition(
+        mut self,
+        composition: MultiphaseInitialComposition,
+    ) -> Result<Self, PhRangeError> {
+        self.prototype = self
+            .prototype
+            .with_initial_composition(composition)
+            .map_err(PhRangeError::InvalidProblem)?;
+        Ok(self)
+    }
+
     /// Selects the inner fixed-`P,T` backend policy for every point.
     pub fn with_solve_options(mut self, options: EquilibriumSolveOptions) -> Self {
         self.prototype = self.prototype.with_solve_options(options);
+        self
+    }
+
+    /// Retains the catalog-selection transaction in every point's inner
+    /// equilibrium build report.
+    pub fn with_candidate_selection(
+        mut self,
+        selection: EquilibriumCandidateSelectionReport,
+    ) -> Self {
+        self.prototype = self.prototype.with_candidate_selection(selection);
         self
     }
 

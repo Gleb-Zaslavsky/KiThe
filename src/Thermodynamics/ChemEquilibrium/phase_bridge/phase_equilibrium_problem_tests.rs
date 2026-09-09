@@ -8,13 +8,25 @@
 use std::collections::HashMap;
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
+    EquilibriumConstraint, TemperatureBounds, TotalEnthalpyJoules,
+};
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::{
+    ElementInventory, ElementInventoryError,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     equilibrium_logmole_jacobian, equilibrium_logmole_residual,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
+    EquilibriumPreparationError, ReactionExtentError,
+};
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::{
+    PhSolveMode, PhSolvePath, PhTemperatureSolveOptions, ResolvedPhaseEnthalpyRequest,
+    ResolvedThermochemistry, solve_resolved_ph,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
@@ -27,9 +39,9 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::multiphase_equilibrium_residual_generator_sym;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-    PhaseEquilibriumBuildRequest, PhaseEquilibriumMetadata, PhaseEquilibriumProblemBundle,
-    SupportedPhaseModelPolicy, build_phase_equilibrium_problem,
-    build_phase_equilibrium_problem_with_timing,
+    PhaseEquilibriumBuildRequest, PhaseEquilibriumInputKind, PhaseEquilibriumMetadata,
+    PhaseEquilibriumProblemBundle, PhaseEquilibriumSeedSource, SupportedPhaseModelPolicy,
+    build_phase_equilibrium_problem, build_phase_equilibrium_problem_with_timing,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
     ResolvedPhaseEquilibriumRequest, solve_resolved_pt,
@@ -467,7 +479,10 @@ fn build_request_keeps_physical_zeroes_separate_from_trace_seed_policy() {
     )
     .unwrap();
 
-    assert_eq!(request.initial_composition().moles(), [2.0, 1.0, 0.0]);
+    assert_eq!(
+        request.initial_composition().unwrap().moles(),
+        [2.0, 1.0, 0.0]
+    );
     assert_eq!(request.trace_seed_policy(), trace_policy);
     assert_eq!(request.conditions(), conditions);
     assert_eq!(
@@ -528,6 +543,665 @@ fn local_nasa_gas_builds_a_complete_problem_and_retains_provenance() {
         .collect::<HashMap<_, _>>();
     assert_eq!(totals.get("H"), Some(&4.0));
     assert_eq!(totals.get("O"), Some(&2.0));
+}
+
+#[test]
+fn element_inventory_builds_a_feasible_real_species_seed_and_preserves_b() {
+    let resolved = resolved_local_nasa_gas();
+    let inventory = ElementInventory::from_formal_carriers([
+        crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::FormalElementCarrier::new("H2", 2.0).unwrap(),
+        crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::FormalElementCarrier::new("O2", 1.0).unwrap(),
+    ])
+    .unwrap();
+    let request = PhaseEquilibriumBuildRequest::from_element_inventory(
+        &resolved,
+        EquilibriumConditions::new(1200.0, 101_325.0, 101_325.0).unwrap(),
+        inventory,
+        TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 },
+        Default::default(),
+    )
+    .unwrap();
+
+    assert!(request.initial_composition().is_none());
+    assert!(request.element_inventory().is_some());
+
+    let bundle = build_phase_equilibrium_problem(request).unwrap();
+    let problem = bundle.problem();
+    let report = bundle.report();
+
+    assert_eq!(problem.species(), ["gas::H2", "gas::O2", "gas::H2O"]);
+    assert!(problem.initial_moles().iter().all(|moles| *moles > 0.0));
+    assert_eq!(report.element_labels(), ["H", "O"]);
+    assert_eq!(report.element_totals(), [4.0, 2.0]);
+    assert_eq!(
+        report.input_kind(),
+        PhaseEquilibriumInputKind::ElementInventory
+    );
+    assert_eq!(
+        report.seed_evidence().source(),
+        PhaseEquilibriumSeedSource::ElementFeasibleProjection
+    );
+    assert!(report.seed_evidence().achieved_minimum_fraction().is_some());
+    assert!(report.seed_evidence().max_element_balance_error() < 1.0e-8);
+    assert_eq!(problem.conserved_element_totals(), Some(&[4.0, 2.0][..]));
+
+    let reconstructed = problem.element_composition().transpose()
+        * nalgebra::DVector::from_column_slice(problem.initial_moles());
+    for (actual, expected) in reconstructed
+        .iter()
+        .zip(problem.conserved_element_totals().unwrap())
+    {
+        assert!((actual - expected).abs() < 1e-8);
+    }
+}
+
+#[test]
+fn element_inventory_rejects_an_element_missing_from_the_selected_universe() {
+    let resolved = resolved_local_nasa_gas();
+    let inventory = ElementInventory::from_amounts([("C", 1.0), ("H", 2.0)]).unwrap();
+    let request = PhaseEquilibriumBuildRequest::from_element_inventory(
+        &resolved,
+        EquilibriumConditions::new(1200.0, 101_325.0, 101_325.0).unwrap(),
+        inventory,
+        TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 },
+        Default::default(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        build_phase_equilibrium_problem(request),
+        Err(ReactionExtentError::Preparation(
+            EquilibriumPreparationError::ElementInventory(
+                ElementInventoryError::ElementMissingFromLayout { .. }
+            )
+        ))
+    ));
+}
+
+#[test]
+fn element_inventory_rejects_ch_inventory_against_an_h2_only_universe() {
+    let spec = PhaseSpec::ideal_gas(
+        PhaseId::new(Some("gas".to_string())),
+        vec!["H2".to_string()],
+    )
+    .unwrap();
+    let mut data = phase_data(&["H2"]);
+    data.set_multiple_library_priorities(vec!["NASA_gas".to_string()], LibraryPriority::Priority);
+    data.search_substances().unwrap();
+    data.parse_all_thermal_coeffs().unwrap();
+    let resolved =
+        ResolvedPhaseSystem::new(vec![spec], HashMap::from([(Some("gas".to_string()), data)]))
+            .unwrap();
+    let request = PhaseEquilibriumBuildRequest::from_element_inventory(
+        &resolved,
+        EquilibriumConditions::new(1_200.0, 101_325.0, 101_325.0).unwrap(),
+        ElementInventory::from_amounts([("C", 1.0), ("H", 4.0)]).unwrap(),
+        TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 },
+        Default::default(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        build_phase_equilibrium_problem(request),
+        Err(ReactionExtentError::Preparation(
+            EquilibriumPreparationError::ElementInventory(
+                ElementInventoryError::ElementMissingFromLayout { .. }
+            )
+        ))
+    ));
+}
+
+#[test]
+fn element_inventory_continuation_seed_is_checked_but_does_not_replace_b() {
+    let resolved = resolved_local_nasa_gas();
+    let conditions = EquilibriumConditions::new(1200.0, 101_325.0, 101_325.0).unwrap();
+    let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
+    let inventory = ElementInventory::from_amounts([("H", 4.0), ("O", 2.0)]).unwrap();
+
+    let bundle = build_phase_equilibrium_problem(
+        PhaseEquilibriumBuildRequest::from_element_inventory(
+            &resolved,
+            conditions,
+            inventory.clone(),
+            TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 },
+            Default::default(),
+        )
+        .unwrap()
+        .with_numerical_seed(
+            MultiphaseInitialComposition::from_dense(&layout, vec![1.0, 0.5, 1.0]).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(bundle.problem().initial_moles(), [1.0, 0.5, 1.0]);
+    assert_eq!(
+        bundle.problem().conserved_element_totals(),
+        Some(&[4.0, 2.0][..])
+    );
+    assert_eq!(
+        bundle.report().seed_evidence().source(),
+        PhaseEquilibriumSeedSource::SuppliedNumericalSeed
+    );
+    assert_eq!(
+        bundle.report().seed_evidence().achieved_minimum_fraction(),
+        None
+    );
+    assert!(bundle.report().seed_evidence().max_element_balance_error() < 1.0e-8);
+
+    let invalid_request = PhaseEquilibriumBuildRequest::from_element_inventory(
+        &resolved,
+        conditions,
+        inventory,
+        TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 },
+        Default::default(),
+    )
+    .unwrap()
+    .with_numerical_seed(
+        MultiphaseInitialComposition::from_dense(&layout, vec![1.0, 0.5, 0.0]).unwrap(),
+    )
+    .unwrap();
+    let error = match build_phase_equilibrium_problem(invalid_request) {
+        Ok(_) => panic!("a seed with different element totals must be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        ReactionExtentError::InvalidProblem {
+            field: "numerical_seed",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn elemental_and_species_feeds_with_the_same_b_share_the_fixed_pt_solution() {
+    let resolved = resolved_local_nasa_gas();
+    let conditions = EquilibriumConditions::new(1200.0, 101_325.0, 101_325.0).unwrap();
+    let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
+    let species_bundle = build_phase_equilibrium_problem(
+        PhaseEquilibriumBuildRequest::new(
+            &resolved,
+            conditions,
+            MultiphaseInitialComposition::from_dense(&layout, vec![2.0, 1.0, 0.0]).unwrap(),
+            TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 },
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let elemental_bundle = build_phase_equilibrium_problem(
+        PhaseEquilibriumBuildRequest::from_element_inventory(
+            &resolved,
+            conditions,
+            ElementInventory::from_amounts([("H", 4.0), ("O", 2.0)]).unwrap(),
+            TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 },
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        species_bundle.problem().species(),
+        elemental_bundle.problem().species()
+    );
+    assert_eq!(
+        species_bundle.problem().element_composition(),
+        elemental_bundle.problem().element_composition()
+    );
+    assert_eq!(
+        species_bundle.problem().conserved_element_totals(),
+        elemental_bundle.problem().conserved_element_totals()
+    );
+    let species_prepared = PreparedEquilibriumProblem::new(species_bundle.problem().clone())
+        .expect("species-origin formulation must prepare");
+    let elemental_prepared = PreparedEquilibriumProblem::new(elemental_bundle.problem().clone())
+        .expect("element-origin formulation must prepare");
+    assert_eq!(
+        species_prepared.reaction_basis().rank,
+        elemental_prepared.reaction_basis().rank
+    );
+    assert_eq!(
+        species_prepared.reaction_basis().reactions,
+        elemental_prepared.reaction_basis().reactions
+    );
+    assert_eq!(
+        species_bundle.report().input_kind(),
+        PhaseEquilibriumInputKind::ExplicitComposition
+    );
+    assert_eq!(
+        elemental_bundle.report().input_kind(),
+        PhaseEquilibriumInputKind::ElementInventory
+    );
+    assert_eq!(
+        species_bundle.report().element_totals(),
+        elemental_bundle.report().element_totals()
+    );
+    assert_eq!(
+        species_bundle.report().seed_evidence().source(),
+        PhaseEquilibriumSeedSource::ExplicitComposition
+    );
+    assert_eq!(
+        elemental_bundle.report().seed_evidence().source(),
+        PhaseEquilibriumSeedSource::ElementFeasibleProjection
+    );
+
+    let species_solution = species_bundle.solve().unwrap();
+    let elemental_solution = elemental_bundle.solve().unwrap();
+
+    assert_eq!(
+        species_solution.solution().moles().len(),
+        elemental_solution.solution().moles().len()
+    );
+    for (species, elemental) in species_solution
+        .solution()
+        .moles()
+        .iter()
+        .zip(elemental_solution.solution().moles())
+    {
+        assert!((species - elemental).abs() < 1.0e-8);
+    }
+    assert_eq!(
+        species_solution.solution().conditions(),
+        elemental_solution.solution().conditions()
+    );
+    assert!(
+        (species_solution.solution().validation().residual_l2_norm
+            - elemental_solution.solution().validation().residual_l2_norm)
+            .abs()
+            < 1.0e-10
+    );
+    assert!(
+        elemental_solution
+            .solution()
+            .validation()
+            .max_abs_element_balance_error
+            < 1.0e-8
+    );
+}
+
+#[test]
+fn equivalent_molecular_feeds_are_order_invariant_and_extensively_scalable() {
+    let resolved = resolved_local_nasa_gas();
+    let conditions = EquilibriumConditions::new(1200.0, 101_325.0, 101_325.0).unwrap();
+    let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
+    let gas = PhaseId::new(Some("gas".to_string()));
+    let h2 = PhaseComponentId::new(gas.clone(), "H2");
+    let o2 = PhaseComponentId::new(gas.clone(), "O2");
+    let h2o = PhaseComponentId::new(gas, "H2O");
+    let trace_policy = TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 };
+
+    let reactant_feed = MultiphaseInitialComposition::from_sparse(
+        &layout,
+        vec![(h2.clone(), 2.0), (o2.clone(), 1.0)],
+    )
+    .unwrap();
+    let reversed_reactant_feed = MultiphaseInitialComposition::from_sparse(
+        &layout,
+        vec![(o2.clone(), 1.0), (h2.clone(), 2.0)],
+    )
+    .unwrap();
+    let mixed_feed = MultiphaseInitialComposition::from_sparse(
+        &layout,
+        vec![(h2o, 1.0), (o2.clone(), 0.5), (h2.clone(), 1.0)],
+    )
+    .unwrap();
+
+    let reactant_bundle = build_phase_equilibrium_problem(
+        PhaseEquilibriumBuildRequest::new(
+            &resolved,
+            conditions,
+            reactant_feed,
+            trace_policy,
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let reversed_bundle = build_phase_equilibrium_problem(
+        PhaseEquilibriumBuildRequest::new(
+            &resolved,
+            conditions,
+            reversed_reactant_feed,
+            trace_policy,
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let product_bundle = build_phase_equilibrium_problem(
+        PhaseEquilibriumBuildRequest::new(
+            &resolved,
+            conditions,
+            mixed_feed,
+            trace_policy,
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    for bundle in [&reactant_bundle, &reversed_bundle, &product_bundle] {
+        assert_eq!(
+            bundle.problem().species(),
+            reactant_bundle.problem().species()
+        );
+        assert_eq!(
+            bundle.problem().element_composition(),
+            reactant_bundle.problem().element_composition()
+        );
+        assert_eq!(
+            bundle.problem().conserved_element_totals(),
+            reactant_bundle.problem().conserved_element_totals()
+        );
+    }
+    assert_eq!(
+        reactant_bundle.problem().initial_moles(),
+        reversed_bundle.problem().initial_moles()
+    );
+
+    let solve_canonically = |name: &str, bundle: PhaseEquilibriumProblemBundle| {
+        bundle
+            .solve()
+            .unwrap_or_else(|error| panic!("{name} feed failed: {error:?}"))
+    };
+    let reactant_solution = solve_canonically("reactant", reactant_bundle);
+    let reversed_solution = solve_canonically("reversed", reversed_bundle);
+    let product_solution = solve_canonically("mixed", product_bundle);
+    let reference_moles = reactant_solution.solution().moles().to_vec();
+
+    for (solution_name, solution) in [
+        ("reversed", &reversed_solution),
+        ("mixed", &product_solution),
+    ] {
+        for (index, (actual, expected)) in solution
+            .solution()
+            .moles()
+            .iter()
+            .zip(&reference_moles)
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < 1.0e-8,
+                "{solution_name} component {index}: actual={actual:?}, expected={expected:?}, residual={}",
+                solution.solution().validation().residual_l2_norm
+            );
+        }
+        assert!(
+            solution
+                .solution()
+                .validation()
+                .max_abs_element_balance_error
+                < 1.0e-8
+        );
+    }
+
+    for scale in [1.0e-6, 1.0, 1.0e6] {
+        let scaled =
+            MultiphaseInitialComposition::from_dense(&layout, vec![2.0 * scale, scale, 0.0])
+                .unwrap();
+        let scaled_bundle = build_phase_equilibrium_problem(
+            PhaseEquilibriumBuildRequest::new(
+                &resolved,
+                conditions,
+                scaled.clone(),
+                trace_policy,
+                Default::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let scaled_totals = scaled_bundle
+            .problem()
+            .conserved_element_totals()
+            .map(|totals| totals.to_vec());
+        let scaled_solution = solve_resolved_pt(
+            ResolvedPhaseEquilibriumRequest::new(&resolved, conditions, scaled)
+                .with_trace_seed_policy(trace_policy),
+        )
+        .unwrap_or_else(|error| panic!("scaled feed failed: {error:?}"));
+
+        assert_eq!(scaled_totals, Some(vec![4.0 * scale, 2.0 * scale]));
+        for (actual, expected) in scaled_solution
+            .component_moles()
+            .iter()
+            .zip(&reference_moles)
+        {
+            assert!((actual / scale - expected).abs() < 1.0e-7);
+        }
+        assert!(
+            scaled_solution
+                .accepted_solution()
+                .validation()
+                .max_abs_element_balance_error
+                < 1.0e-7 * scale.max(1.0)
+        );
+    }
+}
+
+#[test]
+fn equivalent_molecular_feeds_share_the_ph_state_and_route() {
+    let resolved = resolved_local_nasa_gas();
+    let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
+    let conditions = EquilibriumConditions::new(2500.0, 101_325.0, 101_325.0).unwrap();
+    let reactant_feed =
+        MultiphaseInitialComposition::from_dense(&layout, vec![2.0, 1.0, 0.0]).unwrap();
+    let mixed_feed =
+        MultiphaseInitialComposition::from_dense(&layout, vec![1.0, 0.5, 1.0]).unwrap();
+    let reference = solve_resolved_pt(ResolvedPhaseEquilibriumRequest::new(
+        &resolved,
+        conditions,
+        reactant_feed.clone(),
+    ))
+    .unwrap();
+    let thermochemistry = ResolvedThermochemistry::from_resolved_system(&resolved).unwrap();
+    let target_enthalpy = thermochemistry
+        .enthalpy_model()
+        .evaluate_total(reference.component_moles(), conditions.temperature())
+        .unwrap();
+    let constraint = EquilibriumConstraint::ph_joules(
+        conditions.pressure(),
+        conditions.reference_pressure(),
+        TotalEnthalpyJoules::new(target_enthalpy).unwrap(),
+        2200.0,
+    )
+    .unwrap();
+    let bounds = TemperatureBounds::new(1900.0, 2900.0).unwrap();
+    let mut temperature_options = PhTemperatureSolveOptions::default();
+    temperature_options.scaled_enthalpy_tolerance = 1.0e-7;
+
+    let solve_ph = |composition| {
+        solve_resolved_ph(
+            ResolvedPhaseEnthalpyRequest::from_resolved_thermochemistry(
+                &resolved,
+                composition,
+                constraint,
+                bounds,
+                thermochemistry.clone(),
+            )
+            .unwrap()
+            .with_ph_solve_mode(PhSolveMode::NestedTemperature)
+            .with_temperature_options(temperature_options.clone())
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let reactant_solution = solve_ph(reactant_feed);
+    let mixed_solution = solve_ph(mixed_feed);
+
+    assert_eq!(
+        reactant_solution.report().solve_path(),
+        mixed_solution.report().solve_path()
+    );
+    assert_eq!(
+        reactant_solution.report().solve_path(),
+        PhSolvePath::NestedTemperature
+    );
+    assert_eq!(reactant_solution.report().fallback_reason(), None);
+    assert_eq!(mixed_solution.report().fallback_reason(), None);
+    assert_eq!(
+        reactant_solution.report().route_decisions(),
+        mixed_solution.report().route_decisions()
+    );
+    assert!((reactant_solution.temperature() - mixed_solution.temperature()).abs() < 1.0e-5);
+    assert!(
+        reactant_solution.enthalpy_error().abs() <= reactant_solution.enthalpy_error_limit_joules()
+    );
+    assert!(mixed_solution.enthalpy_error().abs() <= mixed_solution.enthalpy_error_limit_joules());
+    assert!(reactant_solution.scaled_enthalpy_error().abs() <= 1.0e-7);
+    assert!(mixed_solution.scaled_enthalpy_error().abs() <= 1.0e-7);
+    for (index, (reactant, mixed)) in reactant_solution
+        .equilibrium()
+        .component_moles()
+        .iter()
+        .zip(mixed_solution.equilibrium().component_moles())
+        .enumerate()
+    {
+        assert!(
+            (reactant - mixed).abs() < 1.0e-6,
+            "component {index}: reactant={reactant:?}, mixed={mixed:?}"
+        );
+    }
+    assert_eq!(
+        reactant_solution
+            .equilibrium()
+            .build_report()
+            .element_totals(),
+        mixed_solution.equilibrium().build_report().element_totals()
+    );
+    assert_eq!(
+        reactant_solution.equilibrium().phases(),
+        mixed_solution.equilibrium().phases()
+    );
+    assert!(
+        reactant_solution
+            .equilibrium()
+            .accepted_solution()
+            .validation()
+            .max_abs_element_balance_error
+            < 1.0e-6
+    );
+    assert!(
+        mixed_solution
+            .equilibrium()
+            .accepted_solution()
+            .validation()
+            .max_abs_element_balance_error
+            < 1.0e-6
+    );
+}
+
+#[test]
+fn distinct_ph_targets_produce_distinct_states_and_missing_target_is_rejected() {
+    let resolved = resolved_local_nasa_gas();
+    let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
+    let composition =
+        MultiphaseInitialComposition::from_dense(&layout, vec![2.0, 1.0, 0.0]).unwrap();
+    let thermochemistry = ResolvedThermochemistry::from_resolved_system(&resolved).unwrap();
+    let pressure = 101_325.0;
+    let reference_pressure = 101_325.0;
+    let low_temperature = 2200.0;
+    let high_temperature = 2600.0;
+    let low_conditions =
+        EquilibriumConditions::new(low_temperature, pressure, reference_pressure).unwrap();
+    let high_conditions =
+        EquilibriumConditions::new(high_temperature, pressure, reference_pressure).unwrap();
+    let low_reference = solve_resolved_pt(ResolvedPhaseEquilibriumRequest::new(
+        &resolved,
+        low_conditions,
+        composition.clone(),
+    ))
+    .unwrap();
+    let high_reference = solve_resolved_pt(ResolvedPhaseEquilibriumRequest::new(
+        &resolved,
+        high_conditions,
+        composition.clone(),
+    ))
+    .unwrap();
+    let low_target = thermochemistry
+        .enthalpy_model()
+        .evaluate_total(low_reference.component_moles(), low_temperature)
+        .unwrap();
+    let high_target = thermochemistry
+        .enthalpy_model()
+        .evaluate_total(high_reference.component_moles(), high_temperature)
+        .unwrap();
+    assert!((high_target - low_target).abs() > 1.0e4);
+
+    let bounds = TemperatureBounds::new(1900.0, 2900.0).unwrap();
+    let mut temperature_options = PhTemperatureSolveOptions::default();
+    temperature_options.scaled_enthalpy_tolerance = 1.0e-7;
+    let solve_target = |target: f64, initial_temperature: f64| {
+        let constraint = EquilibriumConstraint::ph_joules(
+            pressure,
+            reference_pressure,
+            TotalEnthalpyJoules::new(target).unwrap(),
+            initial_temperature,
+        )
+        .unwrap();
+        solve_resolved_ph(
+            ResolvedPhaseEnthalpyRequest::from_resolved_thermochemistry(
+                &resolved,
+                composition.clone(),
+                constraint,
+                bounds,
+                thermochemistry.clone(),
+            )
+            .unwrap()
+            .with_ph_solve_mode(PhSolveMode::NestedTemperature)
+            .with_temperature_options(temperature_options.clone())
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let low_solution = solve_target(low_target, 2100.0);
+    let high_solution = solve_target(high_target, 2500.0);
+
+    assert_eq!(
+        low_solution.report().solve_path(),
+        PhSolvePath::NestedTemperature
+    );
+    assert_eq!(
+        high_solution.report().solve_path(),
+        PhSolvePath::NestedTemperature
+    );
+    assert!(low_solution.report().fallback_reason().is_none());
+    assert!(high_solution.report().fallback_reason().is_none());
+    assert!((high_solution.temperature() - low_solution.temperature()).abs() > 100.0);
+    for solution in [&low_solution, &high_solution] {
+        assert!(solution.enthalpy_error().abs() <= solution.enthalpy_error_limit_joules());
+        assert!(solution.scaled_enthalpy_error().abs() <= 1.0e-7);
+        assert_eq!(
+            solution.equilibrium().build_report().element_totals(),
+            low_solution.equilibrium().build_report().element_totals()
+        );
+        assert!(
+            solution
+                .equilibrium()
+                .accepted_solution()
+                .validation()
+                .max_abs_element_balance_error
+                < 1.0e-6
+        );
+    }
+
+    let missing_target = match ResolvedPhaseEnthalpyRequest::from_resolved_thermochemistry(
+        &resolved,
+        composition,
+        EquilibriumConstraint::pt(low_conditions),
+        bounds,
+        thermochemistry,
+    ) {
+        Ok(_) => panic!("a P,H request without H_target must be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        missing_target,
+        ReactionExtentError::InvalidProblem {
+            field: "constraint",
+            ..
+        }
+    ));
 }
 
 #[test]

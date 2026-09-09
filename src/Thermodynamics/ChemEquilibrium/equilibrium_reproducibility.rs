@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::EquilibriumCandidateSelectionReport;
+use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::PhaseEquilibriumInputKind;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
     EquilibriumSolveOptions, EquilibriumSolveOptionsSnapshot, ResolvedPhaseEquilibriumOutcome,
 };
@@ -25,6 +26,16 @@ pub const EQUILIBRIUM_REPRODUCIBILITY_SCHEMA_VERSION: u32 = 2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PhaseStabilitySemantics {
     CanonicalTpdV1,
+}
+
+/// Stable symbolic representation of the physical input origin.
+///
+/// This is intentionally a capsule-local type so the JSON contract does not
+/// depend on the internal bridge enum layout or derives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EquilibriumReproducibilityInputKind {
+    ExplicitComposition,
+    ElementInventory,
 }
 
 /// Typed failure while loading a reproducibility artifact.
@@ -127,6 +138,21 @@ pub struct EquilibriumCandidateSelectionSnapshot {
     pub selected_records: Vec<EquilibriumCandidateRecordSnapshot>,
     /// Number of candidates rejected during selection.
     pub rejected_record_count: usize,
+    /// Full deterministic rejection evidence retained for replay/audit.
+    pub rejected_records: Vec<EquilibriumCandidateRejectionSnapshot>,
+    /// Whether the candidate limit excluded otherwise eligible records.
+    pub truncated: bool,
+}
+
+/// Portable rejection evidence for one candidate-selection record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EquilibriumCandidateRejectionSnapshot {
+    /// Bare substance name considered by the selector.
+    pub substance: String,
+    /// Library containing the considered record.
+    pub library: String,
+    /// Stable selector reason label.
+    pub reason: String,
 }
 
 /// Candidate record identity retained before phase-plan construction.
@@ -158,6 +184,16 @@ pub struct EquilibriumCandidateRecordSnapshot {
 pub struct EquilibriumReproducibilityCapsule {
     pub schema_version: u32,
     pub phase_stability_semantics: PhaseStabilitySemantics,
+    /// Physical input origin. Optional for compatibility with older schema v2
+    /// artifacts written before input provenance was exported.
+    #[serde(default)]
+    pub input_kind: Option<EquilibriumReproducibilityInputKind>,
+    /// Full canonical element order paired by index with `canonical_b`.
+    #[serde(default)]
+    pub canonical_element_labels: Vec<String>,
+    /// Physical conserved elemental totals, before numerical trace seeding.
+    #[serde(default)]
+    pub canonical_b: Vec<f64>,
     pub temperature_kelvin: f64,
     pub pressure_pa: f64,
     pub reference_pressure_pa: f64,
@@ -226,9 +262,21 @@ impl EquilibriumReproducibilityCapsule {
             .collect();
         let validation = solution.accepted_solution().validation();
         let conditions = solution.conditions();
+        let build_report = solution.build_report();
+        let input_kind = Some(match build_report.input_kind() {
+            PhaseEquilibriumInputKind::ExplicitComposition => {
+                EquilibriumReproducibilityInputKind::ExplicitComposition
+            }
+            PhaseEquilibriumInputKind::ElementInventory => {
+                EquilibriumReproducibilityInputKind::ElementInventory
+            }
+        });
         Self {
             schema_version: EQUILIBRIUM_REPRODUCIBILITY_SCHEMA_VERSION,
             phase_stability_semantics: PhaseStabilitySemantics::CanonicalTpdV1,
+            input_kind,
+            canonical_element_labels: build_report.element_labels().to_vec(),
+            canonical_b: build_report.element_totals().to_vec(),
             temperature_kelvin: conditions.temperature(),
             pressure_pa: conditions.pressure(),
             reference_pressure_pa: conditions.reference_pressure(),
@@ -243,7 +291,9 @@ impl EquilibriumReproducibilityCapsule {
             max_abs_element_balance_error: validation.max_abs_element_balance_error,
             data_release_label: None,
             catalog: None,
-            candidate_selection: None,
+            candidate_selection: build_report
+                .candidate_selection()
+                .map(EquilibriumCandidateSelectionSnapshot::from_report),
         }
     }
 
@@ -398,6 +448,16 @@ impl EquilibriumCandidateSelectionSnapshot {
                 })
                 .collect(),
             rejected_record_count: report.rejected().len(),
+            rejected_records: report
+                .rejected()
+                .iter()
+                .map(|rejection| EquilibriumCandidateRejectionSnapshot {
+                    substance: rejection.substance().to_string(),
+                    library: rejection.library().to_string(),
+                    reason: format!("{:?}", rejection.reason()),
+                })
+                .collect(),
+            truncated: report.is_truncated(),
         }
     }
 }
@@ -427,6 +487,7 @@ fn stable_fingerprint<'a>(parts: impl IntoIterator<Item = &'a str>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventory;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumConditions;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
@@ -475,6 +536,12 @@ mod tests {
         );
         assert_eq!(capsule.selected_records.len(), 2);
         assert_eq!(
+            capsule.input_kind,
+            Some(EquilibriumReproducibilityInputKind::ExplicitComposition)
+        );
+        assert_eq!(capsule.canonical_element_labels, ["N", "O"]);
+        assert_eq!(capsule.canonical_b, [1.58, 0.42]);
+        assert_eq!(
             capsule.solve_options.effective_backend_order,
             vec!["Legacy(NR)"]
         );
@@ -503,6 +570,62 @@ mod tests {
             round_trip.phase_stability_semantics,
             PhaseStabilitySemantics::CanonicalTpdV1
         );
+    }
+
+    #[test]
+    fn elemental_outcome_exports_input_kind_and_canonical_b() {
+        let repository = ThermoData::try_default_repository().unwrap();
+        let spec = SubstanceSystemSpecBuilder::new(SubstancesContainer::SinglePhase(vec![
+            "H2".to_string(),
+            "O2".to_string(),
+            "H2O".to_string(),
+        ]))
+        .with_library_priorities(vec!["NASA_gas".to_string()])
+        .with_search_in_nist(false)
+        .build()
+        .unwrap();
+        let options = EquilibriumSolveOptions::new()
+            .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+            .unwrap();
+        let outcome = PhaseEquilibriumPipelineRequest::from_element_inventory(
+            spec,
+            ElementInventory::from_amounts([("H", 4.0), ("O", 2.0)]).unwrap(),
+            EquilibriumConditions::new(1_200.0, 101_325.0, 101_325.0).unwrap(),
+        )
+        .with_repository(repository)
+        .with_solve_options(options.clone())
+        .solve()
+        .unwrap();
+
+        let capsule = EquilibriumReproducibilityCapsule::from_outcome(&outcome, &options);
+        assert_eq!(
+            capsule.input_kind,
+            Some(EquilibriumReproducibilityInputKind::ElementInventory)
+        );
+        assert_eq!(capsule.canonical_element_labels, ["H", "O"]);
+        assert_eq!(capsule.canonical_b, [4.0, 2.0]);
+        assert!(capsule.candidate_selection.is_none());
+
+        let json = capsule.to_pretty_json().unwrap();
+        assert!(json.contains("ElementInventory"));
+        assert!(json.contains("canonical_b"));
+        assert_eq!(
+            EquilibriumReproducibilityCapsule::from_json(&json).unwrap(),
+            capsule
+        );
+
+        let mut legacy_value = serde_json::to_value(&capsule).unwrap();
+        let legacy_object = legacy_value.as_object_mut().unwrap();
+        legacy_object.remove("input_kind");
+        legacy_object.remove("canonical_element_labels");
+        legacy_object.remove("canonical_b");
+        let legacy = EquilibriumReproducibilityCapsule::from_json(
+            &serde_json::to_string(&legacy_value).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(legacy.input_kind, None);
+        assert!(legacy.canonical_element_labels.is_empty());
+        assert!(legacy.canonical_b.is_empty());
     }
 
     #[test]

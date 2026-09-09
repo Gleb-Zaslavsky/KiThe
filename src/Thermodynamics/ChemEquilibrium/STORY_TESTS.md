@@ -246,6 +246,167 @@ Result: **passed as a characterization matrix, 6/9 backends successful**.
 The failed backends are retained as explicit evidence and are not treated as
 test failure when another backend succeeds.
 
+## 3a. Production default at upper ElementInventory scale
+
+### Story name
+
+Real TP-1907 P,T production default must retain a scale-robust backend at
+inventory scale `1e8`.
+
+### Tests
+
+`Thermodynamics::ChemEquilibrium::equilibrium_multiphase_story_tests::production_default_retains_a_scale_robust_backend_on_real_tp1907_story`
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_upper_inventory_is_backend_invariant`
+
+### What it checks
+
+- the real offline NASA TP-1907 CHON + graphite system at inventory scale
+  `1e8`;
+- the production default cascade publishes an accepted result from the
+  scale-robust backend set;
+- an explicit `Single` policy cannot hide backend-specific outcomes behind a
+  fallback;
+- accepted states preserve topology, finite physical moles, element totals,
+  residuals, relative conservation, and the molecular oracle;
+- default solver selection remains protected against promoting a currently
+  fragile isolated RST method to the only nonlinear backend.
+
+### Hypothesis / question
+
+Does the production default cascade still publish a valid physical result for
+a real `ElementInventory` problem at `1e8`, even when an individual nonlinear
+backend is not robust at that scale?
+
+### Acceptance criteria
+
+- the accepted backend belongs to the qualified robust set;
+- the published physical state remains finite and conserves the elemental
+  inventory within the scale-aware contract;
+- an isolated backend failure does not invalidate the complete production
+  cascade.
+
+### Release commands
+
+```powershell
+cargo test --release --lib Thermodynamics::ChemEquilibrium::equilibrium_multiphase_story_tests::production_default_retains_a_scale_robust_backend_on_real_tp1907_story `
+  --no-default-features -- --include-ignored --exact --nocapture
+
+cargo test --release --lib Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_upper_inventory_is_backend_invariant `
+  --no-default-features -- --include-ignored --exact --nocapture
+```
+
+### Recorded release result
+
+```text
+TP-1907 backend/default story: test ...::production_default_retains_a_scale_robust_backend_on_real_tp1907_story ... ok
+
+TP-1907 backend matrix at scale=1e8:
+  rst-lm: FAILED, normalized basin discovery, candidate residual 5.12501771773085e1
+  rst-minpack-lm: residual=3.545e-14, balance=3.998e-8
+  rst-nielsen-lm: FAILED, normalized basin discovery, candidate residual 1.6277711838251489e2
+  rst-trust-region-lm: residual=3.519e-14, balance=3.998e-8
+  rst-damped-newton: FAILED, normalized basin discovery, candidate residual 8.859999596823666e1
+  legacy-lm: residual=2.588e-14, balance=1.999e-8
+  legacy-nr: residual=1.848e-14, balance=3.498e-6
+  legacy-tr: residual=1.772e-14, balance=3.998e-8
+  accepted: rst-minpack-lm, rst-trust-region-lm, legacy-lm, legacy-nr, legacy-tr
+  failed in isolated Single mode: rst-lm, rst-nielsen-lm, rst-damped-newton
+test ...::production_default_retains_a_scale_robust_backend_on_real_tp1907_story ... ok
+test ...::tp1907_upper_inventory_is_backend_invariant ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2520 filtered out
+```
+
+The three isolated RST failures are strict normalized-recovery outcomes, not
+evidence that the thermodynamic equations or the complete production cascade
+are invalid. RST Minpack/Trust-Region and all retained legacy methods pass the
+same real fixture. Legacy NR reports a physical absolute balance of about
+`3.50e-6` at this scale, while its scale-aware relative balance remains within
+the matrix guard. The production default must therefore remain a cascade, not
+an isolated RST LM/Nielsen/Damped Newton selection.
+
+### Conclusion
+
+The hypothesis is supported. The production default remains valid at `1e8`
+because it retains a scale-robust backend in its cascade. The explicit matrix
+also records which isolated methods are currently unsuitable as the sole
+default backend.
+
+## 3b. ElementInventory route equivalence at production scale
+
+### Story name
+
+The molecular, elemental, and formal routes must describe the same physical
+equilibrium, including through the public facade and under extensive P,H
+scaling.
+
+### Tests
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_frozen_pt_molecular_elemental_and_formal_routes_match`
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_frozen_facade_upper_inventory_matches_the_same_oracle`
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_frozen_ph_molecular_elemental_and_formal_routes_reuse_target`
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_real_ph_solution_is_extensive_when_inventory_and_target_scale_together`
+
+### Hypothesis / question
+
+Does `ElementInventory` preserve the molecular equilibrium state through the
+P,T and P,H facades, and does joint scaling of inventory and total enthalpy
+preserve the intensive P,H solution?
+
+### Acceptance criteria
+
+- `ElementInventory` and formal elemental input reach the same physical state
+  as the molecular TP-1907/TP-1906 route;
+- the public P,T facade preserves that equivalence at inventory scale `1e8`;
+- P,H preserves the recovered temperature and target enthalpy when inventory
+  and total enthalpy are scaled together;
+- route comparisons are made against the same molecular oracle, with residual,
+  conservation, topology, and target-enthalpy assertions.
+
+### Release commands
+
+```powershell
+cargo test --release --lib Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_frozen_pt_molecular_elemental_and_formal_routes_match --no-default-features -- --include-ignored --exact --nocapture
+
+cargo test --release --lib Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_frozen_facade_upper_inventory_matches_the_same_oracle --no-default-features -- --include-ignored --exact --nocapture
+
+cargo test --release --lib Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_frozen_ph_molecular_elemental_and_formal_routes_reuse_target --no-default-features -- --include-ignored --exact --nocapture
+
+cargo test --release --lib Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_real_ph_solution_is_extensive_when_inventory_and_target_scale_together --no-default-features -- --include-ignored --exact --nocapture
+```
+
+### Recorded release result
+
+```text
+TP-1907 P,T elemental/formal routes at T=700 K:
+  b=[0.05364815999999999, 1.00182736, 2.0, 8.9462088, 2.4036547199999996]
+  max external absolute discrepancy=4.187077292968633e-4
+  residual=9.793148882444655e-14 balance=9.547918011776346e-14
+  test result: ok; 1 passed; 0 failed; finished in 0.27s
+
+TP-1907 public facade scale=1e8:
+  elemental: total_b=1.440534e9 residual=3.545e-14 balance=3.998e-8
+  formal:    total_b=1.440534e9 residual=3.545e-14 balance=3.998e-8
+  test result: ok; 1 passed; 0 failed; finished in 0.33s
+
+TP-1906 P,H elemental/formal routes:
+  recovered_T=699.508902431 K H_target=-4.200392761e5 J
+  H_error=-8.119e-4 residual=1.842e-8 balance=6.242e-9
+  test result: ok; 1 passed; 0 failed; finished in 2.72s
+
+TP-1906 P,H extensive inventory and target scaling:
+  test result: ok; 1 passed; 0 failed; finished in 2.93s
+```
+
+### Conclusion
+
+The hypothesis is supported. All four route/facade stories passed in release;
+the elemental and formal routes remain pinned to the molecular oracle, and the
+P,H state remains extensive under joint inventory and target scaling.
+
 ## 4. Real P,H Backend Matrix
 
 ### Test
@@ -2432,6 +2593,9 @@ P,H extensive-normalization matrix: factor=1.0e4
 T source K  T normalized K  delta T K  graphite  max n/base err  H internal J  H physical J  status
 700.000      699.508908       0.000e0    true        1.462e-9       4.395e-5       2.737e0  OK
 720.000      719.309220       0.000e0   false        1.263e-11      -3.590e-5      -2.236e0  OK
+test Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::i5_tp1906_extensive_ph_normalization_recovery_matrix ... ok
+
+test result: ok; 1 passed; 0 failed; finished in 3.14s
 ```
 
 ## 45. Production extensive-normalization recovery
@@ -2610,7 +2774,7 @@ cargo test --release --lib Thermodynamics::ChemEquilibrium::frozen_reference_nas
 
 ### Recorded release characterization
 
-The release run completed successfully in `8.69 s`:
+The release run completed successfully in `8.92 s`:
 
 ```text
 NASA TP-1906/1907 transactional P,H range normalization recovery
@@ -2619,7 +2783,7 @@ factor=1.0e4 points=2 recoveries=1
     -4.123551e9 Continued T=719.309221 recovery=false transitions=28
 test Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::i5_tp1906_extensive_ph_target_range_recovery_is_transactional ... ok
 
-test result: ok; finished in 8.69s
+test result: ok; finished in 8.92s
 ```
 
 This confirms the same transactional claim under the release build: one

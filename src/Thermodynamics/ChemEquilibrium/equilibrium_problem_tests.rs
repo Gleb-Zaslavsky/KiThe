@@ -1146,3 +1146,32 @@ fn equilibrium_problem_rejects_invalid_phase_index_before_phase_mapping() {
         })
     ));
 }
+
+#[test]
+fn explicit_element_totals_are_preserved_independently_from_the_seed_moles() {
+    let problem = two_species_problem()
+        .with_conserved_element_totals(vec![3.0])
+        .expect("aligned finite elemental inventory must validate");
+    let prepared = PreparedEquilibriumProblem::new(problem).unwrap();
+
+    assert_eq!(prepared.element_totals(), [3.0]);
+    assert_eq!(prepared.problem().initial_moles(), [1.0, 0.0]);
+}
+
+#[test]
+fn explicit_element_totals_reject_shape_and_value_errors_at_problem_boundary() {
+    assert!(matches!(
+        two_species_problem().with_conserved_element_totals(vec![1.0, 2.0]),
+        Err(ReactionExtentError::InvalidProblem {
+            field: "element_totals",
+            ..
+        })
+    ));
+    assert!(matches!(
+        two_species_problem().with_conserved_element_totals(vec![f64::NAN]),
+        Err(ReactionExtentError::InvalidProblem {
+            field: "element_totals",
+            ..
+        })
+    ));
+}

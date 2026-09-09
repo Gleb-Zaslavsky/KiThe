@@ -30,6 +30,10 @@ mod frozen_reference_argonne_stanjan_chon;
 #[cfg(test)]
 #[path = "ChemEquilibrium/frozen_reference/argonne_stanjan_chon_tests.rs"]
 mod frozen_reference_argonne_stanjan_chon_tests;
+/// Test-only log-moles dynamic-range and vanishing-species evidence.
+#[cfg(test)]
+#[path = "ChemEquilibrium/frozen_reference/extreme_dynamic_range.rs"]
+mod frozen_reference_extreme_dynamic_range;
 /// Test-only feasibility preflight for competing liquid/ice water candidates.
 #[cfg(test)]
 #[path = "ChemEquilibrium/frozen_reference/iapws_competing_water_preflight.rs"]
@@ -38,10 +42,6 @@ mod frozen_reference_iapws_competing_water_preflight;
 #[cfg(test)]
 #[path = "ChemEquilibrium/frozen_reference/iapws_exclusive_competing_candidates.rs"]
 mod frozen_reference_iapws_exclusive_competing_candidates;
-/// Test-only log-moles dynamic-range and vanishing-species evidence.
-#[cfg(test)]
-#[path = "ChemEquilibrium/frozen_reference/extreme_dynamic_range.rs"]
-mod frozen_reference_extreme_dynamic_range;
 #[cfg(test)]
 #[path = "ChemEquilibrium/frozen_reference/iapws_ice_sublimation.rs"]
 mod frozen_reference_iapws_ice_sublimation;
@@ -205,6 +205,8 @@ pub mod equilibrium_activity;
 /// Internal bridge between solver policy and concrete backend execution.
 #[path = "ChemEquilibrium/nonlinear_solvers/equilibrium_backend_adapter.rs"]
 pub(crate) mod equilibrium_backend_adapter;
+/// Application-facing builder over canonical resolved P,T/P,H workflows.
+pub mod equilibrium_calculator;
 /// Deterministic element-to-record candidate selection and provenance reports.
 pub mod equilibrium_candidate_selection;
 /// Strict read-only comparison of two accepted equilibrium solutions.
@@ -241,6 +243,10 @@ pub mod equilibrium_diagnostics_display;
 /// Presentation-only display filtering, units, and numeric formatting.
 #[path = "ChemEquilibrium/postprocessing_and_logging/equilibrium_display.rs"]
 pub mod equilibrium_display;
+/// Validated elemental-inventory input, independent from real species selection.
+pub mod equilibrium_element_inventory;
+/// Answer-independent element-conserving seed construction for elemental input.
+pub mod equilibrium_element_seed;
 /// Cooperative cancellation and progress events for typed workflows.
 pub mod equilibrium_execution;
 /// Explicit physical-to-normalized representation mapping for extensive data.
@@ -400,12 +406,31 @@ pub mod legacy {
     pub use super::equilibrium_workflows::*;
 }
 
-/// Narrow re-export set for the production equilibrium path.
+/// Curated public surface for production chemical-equilibrium applications.
+///
+/// Start new integrations with [`EquilibriumCalculator`]. It owns only typed
+/// request assembly and delegates to the canonical resolved `P,T`/`P,H`
+/// workflows. The same prelude also exposes phase declarations, repository and
+/// lookup policy, solver/phase-control options, immutable reports, and
+/// presentation helpers needed by an application to configure and explain an
+/// accepted solve.
+///
+/// Advanced resolved-request types remain available here for integrations that
+/// deliberately need to control every construction boundary. Mutable legacy
+/// workflows and solver implementation modules are not the intended entry
+/// point for new code.
 pub mod prelude {
+    // Application facade and its typed outcomes.
+    pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_calculator::{
+        EquilibriumCalculationMode, EquilibriumCalculator, EquilibriumCalculatorBuilder,
+        EquilibriumCalculatorError, EquilibriumCalculatorOutcome, EquilibriumCalculatorPhPoint,
+        EquilibriumCalculatorPhRange, EquilibriumCalculatorPoint, EquilibriumCalculatorPreset,
+        EquilibriumCalculatorTemperatureRange, EquilibriumSpeciesUniversePolicy,
+    };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::{
         CandidateRejection, CandidateRejectionReason, CandidateSelectionError,
-        CandidateTemperatureRange, CandidateTemperatureSupport, EquilibriumCandidate,
-        EquilibriumCandidatePhaseAssignment, EquilibriumCandidatePhasePlan,
+        CandidateTemperatureRange, CandidateTemperatureSupport, ElementInventoryCandidateSelection,
+        EquilibriumCandidate, EquilibriumCandidatePhaseAssignment, EquilibriumCandidatePhasePlan,
         EquilibriumCandidatePolicy, EquilibriumCandidateSelectionReport,
         EquilibriumCandidateSelector,
     };
@@ -413,6 +438,11 @@ pub mod prelude {
         EquilibriumComparisonReport, EquilibriumComparisonSummary,
         EquilibriumComponentComparisonRow, EquilibriumPhaseComparisonRow,
     };
+    pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::{
+        ElementInventory, ElementInventoryError, FormalElementCarrier,
+    };
+    // Candidate selection is optional: use it when the application starts
+    // from elements rather than an explicit phase/component list.
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
         EnthalpyScale, EquilibriumConstraint, TemperatureBounds, TotalEnthalpyJoules,
@@ -424,10 +454,9 @@ pub mod prelude {
         EquilibriumRangeDiagnosticsPolicy, PhDiagnosticRoute, PhaseStabilityDiagnostic,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics_display::{
-        format_diagnostics, format_ph_solution_execution_summary,
-        format_solution_diagnostics, format_solution_execution_summary,
-        log_ph_solution_execution_summary, log_solution_diagnostics,
-        log_solution_execution_summary,
+        format_diagnostics, format_ph_solution_execution_summary, format_solution_diagnostics,
+        format_solution_execution_summary, log_ph_solution_execution_summary,
+        log_solution_diagnostics, log_solution_execution_summary,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_display::{
         DisplayPolicyError, EquilibriumDisplayPolicy, EquilibriumFormattedComponentRow,
@@ -444,7 +473,8 @@ pub mod prelude {
         MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
-        PhMonolithicSeedFailure, ReactionExtentError, ReactionExtentErrorKind,
+        EquilibriumPreparationError, PhMonolithicSeedFailure, ReactionExtentError,
+        ReactionExtentErrorKind,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_options::{
         PhAcceptanceOptions, PhMonolithicOptions, PhMonolithicSeedAttemptReport,
@@ -482,9 +512,9 @@ pub mod prelude {
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_reproducibility::{
         EQUILIBRIUM_REPRODUCIBILITY_SCHEMA_VERSION, EquilibriumCandidateRecordSnapshot,
-        EquilibriumCandidateSelectionSnapshot, EquilibriumPhaseSpecSnapshot,
-        EquilibriumRecordIdentity, EquilibriumReproducibilityCapsule, PhaseStabilitySemantics,
-        ReproducibilityCapsuleError, ThermoCatalogSnapshot,
+        EquilibriumCandidateRejectionSnapshot, EquilibriumCandidateSelectionSnapshot,
+        EquilibriumPhaseSpecSnapshot, EquilibriumRecordIdentity, EquilibriumReproducibilityCapsule,
+        PhaseStabilitySemantics, ReproducibilityCapsuleError, ThermoCatalogSnapshot,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RustedSciTheSolver;
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
@@ -523,7 +553,8 @@ pub mod prelude {
         InitialPhaseSet, Solvers as LegacyEquilibriumSolver,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-        PhaseEquilibriumBuildReport, PhaseEquilibriumBuildRequest, PhaseEquilibriumProblemBundle,
+        PhaseEquilibriumBuildReport, PhaseEquilibriumBuildRequest, PhaseEquilibriumInputKind,
+        PhaseEquilibriumProblemBundle, PhaseEquilibriumSeedEvidence, PhaseEquilibriumSeedSource,
         PhaseEquilibriumSolutionBundle, SupportedPhaseModelPolicy,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::{
@@ -535,15 +566,21 @@ pub mod prelude {
         ExtensiveNormalizationPolicy, PhaseControlPolicy, PhaseEquilibriumPipelineError,
         PhaseEquilibriumPipelineRequest, PhaseEquilibriumSolveMode,
         ResolvedPhaseEquilibriumOutcome, ResolvedPhaseEquilibriumRequest, solve_resolved_pt,
+        solve_resolved_pt_from_element_inventory,
     };
+    // Phase declarations and resolved lookup provenance.
     pub use crate::Thermodynamics::User_PhaseOrSolution::{
-        PhaseModel, PhaseSpec, ResolvedPhaseSystem, ResolvedPhaseSystemReport,
-        SubstanceSystemFactory, SubstanceSystemFactoryError, SubstanceSystemSpec,
-        SubstanceSystemSpecBuilder, SubstancesContainer,
+        PhaseModel, PhaseResolutionSummary, PhaseSpec, ResolvedPhaseSystem,
+        ResolvedPhaseSystemReport, SubstanceSystemFactory, SubstanceSystemFactoryError,
+        SubstanceSystemSpec, SubstanceSystemSpecBuilder, SubstancesContainer,
     };
+    pub use crate::Thermodynamics::User_substances2::{SearchSummaryReport, SearchSummaryRow};
     pub use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
-    pub use crate::Thermodynamics::physical_state::PhysicalState;
+    pub use crate::Thermodynamics::physical_state::{NistFallbackPolicy, PhysicalState};
+    // Shared local-data lifecycle and typed library identity. `NistFallbackPolicy`
+    // is intentionally explicit: no facade defaults to network lookup.
     pub use crate::Thermodynamics::thermo_lib_api::{
-        ElementSearchMode, ThermoCatalogConsistencyReport, ThermoRepository,
+        ElementSearchMode, LibraryCapability, LibraryId, ThermoCatalogConsistencyReport,
+        ThermoLibraryError, ThermoRepository,
     };
 }

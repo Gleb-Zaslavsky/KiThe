@@ -26,11 +26,16 @@ use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::EquilibriumCandidateSelectionReport;
 pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_component::{
     EquilibriumComponentDescriptor, EquilibriumPhaseDescriptor,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumDiagnosticsOptions;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventory;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_seed::{
+    ElementFeasibleSeedSettings, build_element_feasible_seed,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     EquilibriumSolverSettings, GibbsFn,
@@ -38,7 +43,9 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
+    EquilibriumPreparationError, ReactionExtentError,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::PreparedEquilibriumRunner;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, EquilibriumProblem, EquilibriumSolution, LogMolesInitialGuess,
@@ -244,10 +251,28 @@ impl PhaseEquilibriumMetadata {
 pub struct PhaseEquilibriumBuildRequest<'a> {
     resolved: &'a ResolvedPhaseSystem,
     conditions: EquilibriumConditions,
-    initial_composition: MultiphaseInitialComposition,
+    physical_input: PhaseEquilibriumPhysicalInput,
     trace_seed_policy: TraceSpeciesSeedPolicy,
     model_policy: SupportedPhaseModelPolicy,
     metadata: PhaseEquilibriumMetadata,
+    candidate_selection: Option<EquilibriumCandidateSelectionReport>,
+}
+
+/// Physical information from which a bridge request derives conserved totals.
+///
+/// This distinction exists only at the application/phase bridge boundary.
+/// Numerical solvers receive the same resolved species matrix `A`, conserved
+/// vector `b`, and log-mole seed regardless of whether `b` originated from
+/// explicitly entered phase-qualified moles or from an elemental inventory.
+#[derive(Debug, Clone)]
+enum PhaseEquilibriumPhysicalInput {
+    Composition(MultiphaseInitialComposition),
+    ElementInventory {
+        inventory: ElementInventory,
+        /// An optional numerical starting point.  It never replaces the
+        /// inventory-derived conservation vector `b`.
+        numerical_seed: Option<MultiphaseInitialComposition>,
+    },
 }
 
 impl<'a> PhaseEquilibriumBuildRequest<'a> {
@@ -266,10 +291,45 @@ impl<'a> PhaseEquilibriumBuildRequest<'a> {
         Ok(Self {
             resolved,
             conditions,
-            initial_composition,
+            physical_input: PhaseEquilibriumPhysicalInput::Composition(initial_composition),
             trace_seed_policy,
             model_policy,
             metadata,
+            candidate_selection: None,
+        })
+    }
+
+    /// Creates a request from a closed elemental inventory rather than a
+    /// physical initial composition.
+    ///
+    /// The inventory is aligned to the resolved real-component matrix during
+    /// build. A deterministic element-feasible seed is then created from
+    /// those real components; formula-like inventory carriers never become
+    /// thermochemical species or artificial phase members.
+    pub fn from_element_inventory(
+        resolved: &'a ResolvedPhaseSystem,
+        conditions: EquilibriumConditions,
+        element_inventory: ElementInventory,
+        trace_seed_policy: TraceSpeciesSeedPolicy,
+        model_policy: SupportedPhaseModelPolicy,
+    ) -> Result<Self, ReactionExtentError> {
+        let metadata = PhaseEquilibriumMetadata::from_resolved(resolved, model_policy)?;
+        if metadata.layout().component_count() == 0 {
+            return Err(ReactionExtentError::Preparation(
+                EquilibriumPreparationError::EmptySpeciesUniverse,
+            ));
+        }
+        Ok(Self {
+            resolved,
+            conditions,
+            physical_input: PhaseEquilibriumPhysicalInput::ElementInventory {
+                inventory: element_inventory,
+                numerical_seed: None,
+            },
+            trace_seed_policy,
+            model_policy,
+            metadata,
+            candidate_selection: None,
         })
     }
 
@@ -283,9 +343,53 @@ impl<'a> PhaseEquilibriumBuildRequest<'a> {
         self.conditions
     }
 
-    /// Validated physical mole numbers before trace seeding.
-    pub fn initial_composition(&self) -> &MultiphaseInitialComposition {
-        &self.initial_composition
+    /// Explicit physical composition, when the request originated from one.
+    ///
+    /// Element-inventory requests intentionally return `None`: their seed is
+    /// numerical and must not be reported as a user-specified physical feed.
+    pub fn initial_composition(&self) -> Option<&MultiphaseInitialComposition> {
+        match &self.physical_input {
+            PhaseEquilibriumPhysicalInput::Composition(composition) => Some(composition),
+            PhaseEquilibriumPhysicalInput::ElementInventory { .. } => None,
+        }
+    }
+
+    /// Closed elemental inventory, when this is an element-defined request.
+    pub fn element_inventory(&self) -> Option<&ElementInventory> {
+        match &self.physical_input {
+            PhaseEquilibriumPhysicalInput::Composition(_) => None,
+            PhaseEquilibriumPhysicalInput::ElementInventory { inventory, .. } => Some(inventory),
+        }
+    }
+
+    /// Attaches a numerical seed to an element-defined request.
+    ///
+    /// The composition is deliberately not promoted to a physical feed: the
+    /// bridge continues to build `b` from [`ElementInventory`]. This is the
+    /// continuation boundary used by higher-level P,H workflows.
+    pub fn with_numerical_seed(
+        mut self,
+        numerical_seed: MultiphaseInitialComposition,
+    ) -> Result<Self, ReactionExtentError> {
+        let layout = MultiphaseEquilibriumLayout::new(self.resolved.phase_specs().to_vec())?;
+        numerical_seed.validate_for(&layout)?;
+        match &mut self.physical_input {
+            PhaseEquilibriumPhysicalInput::Composition(_) => {
+                Err(ReactionExtentError::InvalidProblem {
+                    field: "numerical_seed",
+                    message:
+                        "a separate numerical seed is valid only for an element-inventory request"
+                            .to_string(),
+                })
+            }
+            PhaseEquilibriumPhysicalInput::ElementInventory {
+                numerical_seed: stored,
+                ..
+            } => {
+                *stored = Some(numerical_seed);
+                Ok(self)
+            }
+        }
     }
 
     /// Explicit numerical policy for zero-mole log-coordinate seeds.
@@ -301,6 +405,22 @@ impl<'a> PhaseEquilibriumBuildRequest<'a> {
     /// Immutable structural projection prepared transactionally at construction.
     pub fn metadata(&self) -> &PhaseEquilibriumMetadata {
         &self.metadata
+    }
+
+    /// Attaches immutable automatic-selection evidence to the preparation
+    /// transaction. The report does not alter the selected phase universe.
+    pub fn with_candidate_selection(
+        mut self,
+        selection: EquilibriumCandidateSelectionReport,
+    ) -> Self {
+        self.candidate_selection = Some(selection);
+        self
+    }
+
+    /// Candidate-selection evidence, when this request came from an element
+    /// search followed by an explicit phase plan.
+    pub fn candidate_selection(&self) -> Option<&EquilibriumCandidateSelectionReport> {
+        self.candidate_selection.as_ref()
     }
 }
 
@@ -340,6 +460,56 @@ impl EquilibriumBridgeComponentReport {
 }
 
 /// Read-only evidence emitted when a phase system becomes a solver problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseEquilibriumInputKind {
+    /// Conserved totals were derived from an explicitly supplied composition.
+    ExplicitComposition,
+    /// Conserved totals came directly from a closed elemental inventory.
+    ElementInventory,
+}
+
+/// Provenance for the numerical state used to enter log-mole coordinates.
+///
+/// This is deliberately separate from [`PhaseEquilibriumInputKind`]: an
+/// accepted continuation may provide a seed for an element-defined problem,
+/// but it never becomes that problem's physical feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseEquilibriumSeedSource {
+    /// The explicit physical composition was used as the first numerical seed.
+    ExplicitComposition,
+    /// An answer-independent bounded affine projection built a real-species seed.
+    ElementFeasibleProjection,
+    /// A caller supplied an already element-conserving numerical continuation seed.
+    SuppliedNumericalSeed,
+}
+
+/// Immutable feasibility evidence for the initial numerical state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhaseEquilibriumSeedEvidence {
+    source: PhaseEquilibriumSeedSource,
+    inventory_scale: f64,
+    achieved_minimum_fraction: Option<f64>,
+    max_element_balance_error: f64,
+}
+
+impl PhaseEquilibriumSeedEvidence {
+    pub fn source(&self) -> PhaseEquilibriumSeedSource {
+        self.source
+    }
+
+    pub fn inventory_scale(&self) -> f64 {
+        self.inventory_scale
+    }
+
+    pub fn achieved_minimum_fraction(&self) -> Option<f64> {
+        self.achieved_minimum_fraction
+    }
+
+    pub fn max_element_balance_error(&self) -> f64 {
+        self.max_element_balance_error
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PhaseEquilibriumBuildReport {
     /// Fixed pressure-temperature conditions used for standard-state checks.
@@ -348,6 +518,12 @@ pub struct PhaseEquilibriumBuildReport {
     lookup_report: ResolvedPhaseSystemReport,
     /// Layout fingerprint shared by the input composition and bridge metadata.
     layout_fingerprint: u64,
+    /// Origin of the immutable physical conservation vector.
+    input_kind: PhaseEquilibriumInputKind,
+    /// Numerical trace-coordinate policy, kept separate from physical moles.
+    trace_seed_policy: TraceSpeciesSeedPolicy,
+    /// Evidence for the seed used before the first backend evaluation.
+    seed_evidence: PhaseEquilibriumSeedEvidence,
     /// Full physical element names in deterministic provenance order.
     ///
     /// The solver may remove linearly dependent columns, but the bridge retains
@@ -360,6 +536,8 @@ pub struct PhaseEquilibriumBuildReport {
     solver_element_labels: Vec<String>,
     /// Component reports in exact `SystemLayout` order.
     components: Vec<EquilibriumBridgeComponentReport>,
+    /// Immutable selection evidence that produced this resolved universe.
+    candidate_selection: Option<EquilibriumCandidateSelectionReport>,
 }
 
 impl PhaseEquilibriumBuildReport {
@@ -376,6 +554,21 @@ impl PhaseEquilibriumBuildReport {
     /// Layout fingerprint shared by the input composition and bridge metadata.
     pub fn layout_fingerprint(&self) -> u64 {
         self.layout_fingerprint
+    }
+
+    /// Origin of the immutable conservation vector retained by this build.
+    pub fn input_kind(&self) -> PhaseEquilibriumInputKind {
+        self.input_kind
+    }
+
+    /// Numerical zero/trace policy used only for log-coordinate initialization.
+    pub fn trace_seed_policy(&self) -> TraceSpeciesSeedPolicy {
+        self.trace_seed_policy
+    }
+
+    /// Feasibility evidence for the initial numerical state.
+    pub fn seed_evidence(&self) -> &PhaseEquilibriumSeedEvidence {
+        &self.seed_evidence
     }
 
     /// Full physical element names in deterministic provenance order.
@@ -399,6 +592,12 @@ impl PhaseEquilibriumBuildReport {
     /// Component reports in exact `SystemLayout` order.
     pub fn components(&self) -> &[EquilibriumBridgeComponentReport] {
         &self.components
+    }
+
+    /// Automatic candidate-selection evidence, when the universe was selected
+    /// from an elemental query. Explicit phase declarations return `None`.
+    pub fn candidate_selection(&self) -> Option<&EquilibriumCandidateSelectionReport> {
+        self.candidate_selection.as_ref()
     }
 
     /// Re-evaluates only temperature-dependent standard-state values while
@@ -436,10 +635,14 @@ impl PhaseEquilibriumBuildReport {
             conditions,
             lookup_report: self.lookup_report.clone(),
             layout_fingerprint: self.layout_fingerprint,
+            input_kind: self.input_kind,
+            trace_seed_policy: self.trace_seed_policy,
+            seed_evidence: self.seed_evidence.clone(),
             element_labels: self.element_labels.clone(),
             element_totals: self.element_totals.clone(),
             solver_element_labels: self.solver_element_labels.clone(),
             components,
+            candidate_selection: self.candidate_selection.clone(),
         })
     }
 }
@@ -1473,16 +1676,97 @@ pub(crate) fn build_phase_equilibrium_problem_with_timing(
         symbolic_standard_gibbs.push(symbolic.clone());
         component_reports.push(EquilibriumBridgeComponentReport {
             component: component.clone(),
-            initial_moles: request.initial_composition.moles()[index],
+            // Filled after the complete real-component matrix has been built.
+            // Element-defined inputs require that matrix before a feasible
+            // numerical seed can be constructed.
+            initial_moles: 0.0,
             standard_gibbs_at_conditions,
             thermo_source,
         });
     }
 
-    let initial_moles = request.initial_composition.moles().to_vec();
+    let (initial_moles, element_totals, input_kind, seed_evidence) = match &request.physical_input {
+        PhaseEquilibriumPhysicalInput::Composition(composition) => {
+            let initial_moles = composition.moles().to_vec();
+            let totals = element_totals(&initial_moles, &element_composition);
+            let inventory_scale = totals.iter().copied().fold(0.0_f64, f64::max);
+            let balance = max_element_balance_error(&element_composition, &initial_moles, &totals);
+            (
+                initial_moles,
+                totals,
+                PhaseEquilibriumInputKind::ExplicitComposition,
+                PhaseEquilibriumSeedEvidence {
+                    source: PhaseEquilibriumSeedSource::ExplicitComposition,
+                    inventory_scale,
+                    achieved_minimum_fraction: None,
+                    max_element_balance_error: balance,
+                },
+            )
+        }
+        PhaseEquilibriumPhysicalInput::ElementInventory {
+            inventory,
+            numerical_seed,
+        } => {
+            let totals = inventory.aligned_to(&element_labels)?;
+            let (seed, source, achieved_minimum_fraction, max_element_balance_error) =
+                match numerical_seed {
+                    Some(seed) => {
+                        let seed_moles = seed.moles().to_vec();
+                        let reconstructed = element_totals(&seed_moles, &element_composition);
+                        for (element, (actual, expected)) in
+                            reconstructed.iter().zip(totals.iter()).enumerate()
+                        {
+                            let tolerance = 1.0e-8 * expected.abs().max(1.0);
+                            if (actual - expected).abs() > tolerance {
+                                return Err(ReactionExtentError::InvalidProblem {
+                                    field: "numerical_seed",
+                                    message: format!(
+                                        "seed does not preserve element '{}' (expected {expected:e}, got {actual:e})",
+                                        element_labels[element]
+                                    ),
+                                });
+                            }
+                        }
+                        (
+                            seed_moles,
+                            PhaseEquilibriumSeedSource::SuppliedNumericalSeed,
+                            None,
+                            max_element_balance_error(&element_composition, seed.moles(), &totals),
+                        )
+                    }
+                    None => {
+                        let seed = build_element_feasible_seed(
+                            &element_composition,
+                            &totals,
+                            ElementFeasibleSeedSettings::default(),
+                        )?;
+                        (
+                            seed.physical_moles().to_vec(),
+                            PhaseEquilibriumSeedSource::ElementFeasibleProjection,
+                            Some(seed.achieved_minimum_fraction()),
+                            seed.max_element_balance_error(),
+                        )
+                    }
+                };
+            let inventory_scale = totals.iter().copied().fold(0.0_f64, f64::max);
+            (
+                seed,
+                totals,
+                PhaseEquilibriumInputKind::ElementInventory,
+                PhaseEquilibriumSeedEvidence {
+                    source,
+                    inventory_scale,
+                    achieved_minimum_fraction,
+                    max_element_balance_error,
+                },
+            )
+        }
+    };
     let initial_log_moles =
         LogMolesInitialGuess::from_moles_with_policy(&initial_moles, request.trace_seed_policy)?;
-    let element_totals = element_totals(&initial_moles, &element_composition);
+    for (report, initial_moles) in component_reports.iter_mut().zip(&initial_moles) {
+        report.initial_moles = *initial_moles;
+    }
     let independent_element_columns = deterministic_element_basis(&element_composition, 1e-6)?;
     let solver_element_labels = independent_element_columns
         .iter()
@@ -1493,6 +1777,10 @@ pub(crate) fn build_phase_equilibrium_problem_with_timing(
         independent_element_columns.len(),
         |row, column| element_composition[(row, independent_element_columns[column])],
     );
+    let solver_element_totals = independent_element_columns
+        .iter()
+        .map(|&column| element_totals[column])
+        .collect::<Vec<_>>();
     let problem = timing.measure(EquilibriumTimingStage::EquationConstruction, || {
         EquilibriumProblem::new_with_phase_descriptors(
             metadata.components().to_vec(),
@@ -1503,15 +1791,20 @@ pub(crate) fn build_phase_equilibrium_problem_with_timing(
             metadata.phases().to_vec(),
             conditions,
         )
+        .and_then(|problem| problem.with_conserved_element_totals(solver_element_totals))
     })?;
     let report = PhaseEquilibriumBuildReport {
         conditions,
         lookup_report: metadata.provenance().clone(),
         layout_fingerprint: metadata.layout_fingerprint(),
+        input_kind,
+        trace_seed_policy: request.trace_seed_policy,
+        seed_evidence,
         element_labels,
         element_totals,
         solver_element_labels,
         components: component_reports,
+        candidate_selection: request.candidate_selection.clone(),
     };
 
     timing.set_total(started.elapsed());
@@ -1629,6 +1922,23 @@ fn element_totals(initial_moles: &[f64], element_composition: &DMatrix<f64>) -> 
                 .sum()
         })
         .collect()
+}
+
+/// Largest absolute conservation residual for one physical mole vector.
+///
+/// Kept beside bridge construction rather than the nonlinear validation layer:
+/// it characterizes a pre-solver seed and must not imply that the seed itself
+/// was accepted equilibrium output.
+fn max_element_balance_error(
+    element_composition: &DMatrix<f64>,
+    moles: &[f64],
+    totals: &[f64],
+) -> f64 {
+    element_totals(moles, element_composition)
+        .iter()
+        .zip(totals)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0_f64, f64::max)
 }
 
 /// Selects a deterministic independent element-column basis for fixed-phase

@@ -7,6 +7,7 @@
 //! decisions explicit and returns an auditable report instead of mutating
 //! `SubsData` or the repository.
 
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventory;
 use crate::Thermodynamics::User_PhaseOrSolution::{
     PhaseModel, PhaseSpec, SubstanceSystemFactoryError, SubstanceSystemSpec,
 };
@@ -220,6 +221,33 @@ pub struct EquilibriumCandidateSelectionReport {
     policy: EquilibriumCandidatePolicy,
     selected: Vec<EquilibriumCandidate>,
     rejected: Vec<CandidateRejection>,
+    truncated: bool,
+}
+
+/// Immutable automatic-selection evidence tied to the closed elemental
+/// inventory that initiated it.
+///
+/// The nested report remains reusable for ordinary catalog queries, while this
+/// wrapper preserves the physical `b` required to reproduce an element-defined
+/// equilibrium problem after candidate selection is complete.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElementInventoryCandidateSelection {
+    inventory: ElementInventory,
+    report: EquilibriumCandidateSelectionReport,
+}
+
+impl ElementInventoryCandidateSelection {
+    pub fn inventory(&self) -> &ElementInventory {
+        &self.inventory
+    }
+
+    pub fn report(&self) -> &EquilibriumCandidateSelectionReport {
+        &self.report
+    }
+
+    pub fn into_parts(self) -> (ElementInventory, EquilibriumCandidateSelectionReport) {
+        (self.inventory, self.report)
+    }
 }
 
 impl EquilibriumCandidateSelectionReport {
@@ -237,6 +265,11 @@ impl EquilibriumCandidateSelectionReport {
 
     pub fn rejected(&self) -> &[CandidateRejection] {
         &self.rejected
+    }
+
+    /// Whether `max_candidates` excluded otherwise eligible records.
+    pub fn is_truncated(&self) -> bool {
+        self.truncated
     }
 }
 
@@ -476,6 +509,34 @@ impl EquilibriumCandidateSelector {
         &self.repository
     }
 
+    /// Selects records for a validated closed elemental inventory.
+    ///
+    /// Only the nonzero element directions in the inventory are used for the
+    /// catalog query. Amounts remain physical conservation data for the later
+    /// bridge and are never interpreted as species amounts by this selector.
+    pub fn select_inventory(
+        &self,
+        inventory: &ElementInventory,
+        policy: EquilibriumCandidatePolicy,
+    ) -> Result<EquilibriumCandidateSelectionReport, CandidateSelectionError> {
+        let elements = inventory
+            .element_labels()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        self.select(&elements, policy)
+    }
+
+    /// Performs typed selection while retaining both the immutable physical
+    /// inventory and the full catalog selected/rejected report.
+    pub fn select_inventory_with_provenance(
+        &self,
+        inventory: ElementInventory,
+        policy: EquilibriumCandidatePolicy,
+    ) -> Result<ElementInventoryCandidateSelection, CandidateSelectionError> {
+        let report = self.select_inventory(&inventory, policy)?;
+        Ok(ElementInventoryCandidateSelection { inventory, report })
+    }
+
     /// Performs one deterministic, auditable selection transaction.
     pub fn select(
         &self,
@@ -516,6 +577,7 @@ impl EquilibriumCandidateSelector {
 
         let mut selected = Vec::new();
         let mut rejected = Vec::new();
+        let mut truncated = false;
         let mut selected_substances = HashSet::new();
         for (library, substance) in keys {
             let elements = &element_sets[&(library.clone(), substance.clone())];
@@ -577,6 +639,7 @@ impl EquilibriumCandidateSelector {
                 .max_candidates()
                 .is_some_and(|limit| selected.len() >= limit)
             {
+                truncated = true;
                 rejected.push(rejection(
                     &substance,
                     &library,
@@ -612,6 +675,7 @@ impl EquilibriumCandidateSelector {
             policy,
             selected,
             rejected,
+            truncated,
         })
     }
 }
@@ -870,6 +934,201 @@ mod tests {
     }
 
     #[test]
+    fn typed_element_inventory_uses_the_same_deterministic_catalog_query() {
+        let repository = Arc::new(ThermoRepository::from_parts(
+            vec![("NASA_gas".into(), "H2O".into())],
+            HashMap::from([(
+                "NASA_gas".into(),
+                HashMap::from([(
+                    "H2O".into(),
+                    json!({"T": [[200.0, 6000.0]], "model": "NASA"}),
+                )]),
+            )]),
+            HashMap::from([
+                ("H".into(), vec![vec!["H2O".into(), "NASA_gas".into()]]),
+                ("O".into(), vec![vec!["H2O".into(), "NASA_gas".into()]]),
+            ]),
+            vec!["NASA_gas".into()],
+            HashMap::new(),
+            HashMap::new(),
+            vec!["NASA_gas".into()],
+            Vec::new(),
+        ));
+        let selector = EquilibriumCandidateSelector::new(repository);
+        let inventory = ElementInventory::from_amounts([("O", 1.0), ("H", 2.0)]).unwrap();
+        let typed = selector
+            .select_inventory(&inventory, EquilibriumCandidatePolicy::default())
+            .unwrap();
+        let strings = selector
+            .select(
+                &["H".into(), "O".into()],
+                EquilibriumCandidatePolicy::default(),
+            )
+            .unwrap();
+
+        assert_eq!(typed, strings);
+        assert_eq!(typed.requested_elements(), ["H", "O"]);
+        assert_eq!(typed.selected()[0].substance(), "H2O");
+
+        let provenance = selector
+            .select_inventory_with_provenance(
+                inventory.clone(),
+                EquilibriumCandidatePolicy::default(),
+            )
+            .unwrap();
+        assert_eq!(provenance.inventory(), &inventory);
+        assert_eq!(provenance.report(), &typed);
+    }
+
+    #[test]
+    fn subset_inventory_selection_is_deterministic_and_excludes_absent_elements() {
+        fn repository() -> Arc<ThermoRepository> {
+            let records = ["H2", "O2", "H2O", "OH", "CO", "CO2", "N2"];
+            Arc::new(ThermoRepository::from_parts(
+                records
+                    .iter()
+                    .map(|substance| ("NASA_gas".into(), (*substance).into()))
+                    .collect(),
+                HashMap::from([(
+                    "NASA_gas".into(),
+                    records
+                        .iter()
+                        .map(|substance| ((*substance).into(), json!({"T": [[200.0, 6000.0]]})))
+                        .collect(),
+                )]),
+                HashMap::from([
+                    (
+                        "H".into(),
+                        vec![
+                            vec!["H2".into(), "NASA_gas".into()],
+                            vec!["H2O".into(), "NASA_gas".into()],
+                            vec!["OH".into(), "NASA_gas".into()],
+                            vec!["CO".into(), "NASA_gas".into()],
+                            vec!["CO2".into(), "NASA_gas".into()],
+                        ],
+                    ),
+                    (
+                        "O".into(),
+                        vec![
+                            vec!["O2".into(), "NASA_gas".into()],
+                            vec!["H2O".into(), "NASA_gas".into()],
+                            vec!["OH".into(), "NASA_gas".into()],
+                            vec!["CO".into(), "NASA_gas".into()],
+                            vec!["CO2".into(), "NASA_gas".into()],
+                        ],
+                    ),
+                    (
+                        "C".into(),
+                        vec![
+                            vec!["CO".into(), "NASA_gas".into()],
+                            vec!["CO2".into(), "NASA_gas".into()],
+                        ],
+                    ),
+                    ("N".into(), vec![vec!["N2".into(), "NASA_gas".into()]]),
+                ]),
+                vec!["NASA_gas".into()],
+                HashMap::new(),
+                HashMap::new(),
+                vec!["NASA_gas".into()],
+                Vec::new(),
+            ))
+        }
+
+        let policy = EquilibriumCandidatePolicy::default()
+            .with_temperature_range(300.0, 1200.0)
+            .unwrap();
+        let inventory = ElementInventory::from_amounts([("O", 2.0), ("H", 4.0)]).unwrap();
+        let first = EquilibriumCandidateSelector::new(repository())
+            .select_inventory(&inventory, policy.clone())
+            .unwrap();
+        let second = EquilibriumCandidateSelector::new(repository())
+            .select_inventory(&inventory, policy.clone())
+            .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first
+                .selected()
+                .iter()
+                .map(|candidate| candidate.substance())
+                .collect::<Vec<_>>(),
+            vec!["H2", "H2O", "O2", "OH"]
+        );
+        assert!(first.selected().iter().all(|candidate| {
+            candidate
+                .elements()
+                .iter()
+                .all(|element| element == "H" || element == "O")
+        }));
+        assert!(first.rejected().iter().any(|rejection| {
+            rejection.substance() == "CO"
+                && rejection.reason() == &CandidateRejectionReason::ElementSetMismatch
+        }));
+        assert!(first.rejected().iter().any(|rejection| {
+            rejection.substance() == "N2"
+                && rejection.reason() == &CandidateRejectionReason::ElementSetMismatch
+        }));
+
+        let limited = EquilibriumCandidateSelector::new(repository())
+            .select_inventory(&inventory, policy.with_max_candidates(2).unwrap())
+            .unwrap();
+        assert_eq!(limited.selected().len(), 2);
+        assert!(limited.is_truncated());
+        assert!(
+            limited
+                .rejected()
+                .iter()
+                .any(|rejection| rejection.reason() == &CandidateRejectionReason::CandidateLimit)
+        );
+    }
+
+    #[test]
+    fn distinct_state_qualified_records_survive_candidate_selection() {
+        let repository = Arc::new(ThermoRepository::from_parts(
+            vec![
+                ("NASA_cond".into(), "Fe(a)".into()),
+                ("NASA_cond".into(), "Fe(c)".into()),
+            ],
+            HashMap::from([(
+                "NASA_cond".into(),
+                HashMap::from([
+                    ("Fe(a)".into(), json!({"T": [[200.0, 1800.0]]})),
+                    ("Fe(c)".into(), json!({"T": [[200.0, 1800.0]]})),
+                ]),
+            )]),
+            HashMap::from([(
+                "Fe".into(),
+                vec![
+                    vec!["Fe(a)".into(), "NASA_cond".into()],
+                    vec!["Fe(c)".into(), "NASA_cond".into()],
+                ],
+            )]),
+            vec!["NASA_cond".into()],
+            HashMap::new(),
+            HashMap::new(),
+            vec!["NASA_cond".into()],
+            Vec::new(),
+        ));
+
+        let report = EquilibriumCandidateSelector::new(repository)
+            .select(
+                &["Fe".into()],
+                EquilibriumCandidatePolicy::new(ElementSearchMode::SubsetOf)
+                    .with_physical_states(vec![PhysicalState::Solid]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            report
+                .selected()
+                .iter()
+                .map(|candidate| candidate.record_key())
+                .collect::<Vec<_>>(),
+            vec!["Fe(a)", "Fe(c)"]
+        );
+    }
+
+    #[test]
     fn phase_plan_preserves_exact_record_and_library_provenance() {
         let repository = Arc::new(ThermoRepository::from_parts(
             vec![("NASA_cond".into(), "CO2(s)".into())],
@@ -937,6 +1196,7 @@ mod tests {
                 library_rank: 0,
             }],
             rejected: Vec::new(),
+            truncated: false,
         };
 
         let omitted = EquilibriumCandidatePhasePlan::new(Vec::new());

@@ -10,23 +10,23 @@ repository = "https://github.com/Gleb-Zaslavsky/KiThe"
 
 [dependencies]
 regex = "1.12.4"
-serde = { version = "1.0.228", features = ["derive"] }
-tabled = "0.21.0"
+serde = { version = "1.0.229", features = ["derive"] }
+tabled = "0.22.0"
 strum = "0.28.0"
 strum_macros = "0.28.0"
-serde_json = "1.0.150"
+serde_json = "1.0.151"
 loc = "0.5.0"
 RustedSciThe = "0.4.15"
 rayon = "1.11.0"
 nalgebra = { version = "0.35.0", features = ["serde"] }
 prettytable-rs = "0.10.0"
 simplelog = "0.12.2"
-log = "0.4.32"
+log = "0.4.34"
 approx = "0.5.1"
 reqwest = { version = "0.13.4", features = ["blocking"] }
 scraper = "0.27.0"
 url = "2.5.8"
-thiserror = "2.0.18"
+thiserror = "2.0.20"
 enum_dispatch = "0.3.13"
 tempfile = "3.26.0"
 reborrow = "0.5.5"
@@ -44,13 +44,13 @@ polars ={ version = "0.53.0", features = ["lazy", "csv", "parquet", "rolling_win
 ndarray = "0.17.2"
 
 ndarray-stats = "0.7.0"
-rand = "0.10.1"
+rand = "0.10.2"
 rand_distr = "0.6.0"
 splines = "5.0.0"
 bspline = "1.1.0"
 
 
-lstsq = "0.7.0"
+lstsq = "0.8.0"
 KiThePlot = "0.6.0"
 
 [build-dependencies]

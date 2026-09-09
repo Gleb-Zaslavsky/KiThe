@@ -393,12 +393,34 @@ pub enum EquilibriumPhaseModeDraft {
         dg_create: String,
         dg_keep: String,
         max_phase_iterations: String,
+        /// Semantic initial-state policy. The GUI intentionally does not
+        /// expose index-based explicit inclusion/exclusion because phase
+        /// indices are an engine layout detail, not stable document data.
+        #[serde(default)]
+        initial_phase_policy: GuiInitialPhasePolicyDraft,
     },
 }
 
 impl Default for EquilibriumPhaseModeDraft {
     fn default() -> Self {
         Self::FixedDeclared
+    }
+}
+
+/// User-facing initial-state policy for bounded phase control.
+///
+/// Both choices preserve the declared phase set. `AllDeclaredCandidates` is
+/// useful when a zero-inventory liquid or solid must still be available for a
+/// TPD-driven appearance check on the first outer iteration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuiInitialPhasePolicyDraft {
+    FromInitialMoles,
+    AllDeclaredCandidates,
+}
+
+impl Default for GuiInitialPhasePolicyDraft {
+    fn default() -> Self {
+        Self::FromInitialMoles
     }
 }
 
@@ -526,6 +548,10 @@ pub enum GuiTraceSeedPolicyDraft {
 pub struct EquilibriumSolverConfigDraft {
     pub selection: EquilibriumSolverDraft,
     pub overrides: EquilibriumSolverOverridesDraft,
+    /// P,H orchestration route. `Auto` retains the production fallback policy;
+    /// explicit routes are advanced diagnostic choices.
+    #[serde(default)]
+    pub ph_solve_mode: GuiPhSolveMode,
 }
 
 impl Default for EquilibriumSolverConfigDraft {
@@ -533,23 +559,45 @@ impl Default for EquilibriumSolverConfigDraft {
         Self {
             selection: EquilibriumSolverDraft::default(),
             overrides: EquilibriumSolverOverridesDraft::default(),
+            ph_solve_mode: GuiPhSolveMode::Auto,
         }
     }
 }
 
-/// A compact diagnostics policy; these flags control retained report detail,
-/// not process-global logger configuration.
+/// Typed UI representation of the P,H orchestration policy.
+///
+/// This remains separate from the engine enum so saved GUI documents do not
+/// expose internal module paths or inherit engine serialization details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuiPhSolveMode {
+    Auto,
+    Monolithic,
+    NestedTemperature,
+}
+
+impl Default for GuiPhSolveMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+/// A compact diagnostics policy for engine-supported observation modes.
+///
+/// Accepted snapshots always retain their validation, backend, conservation,
+/// and provenance evidence. The document therefore stores only choices that
+/// actually change engine work or the bounded lifecycle trace payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EquilibriumDiagnosticsDraft {
     pub collect_timing: bool,
-    pub retain_backend_attempts: bool,
-    pub retain_conservation_report: bool,
-    pub retain_phase_transitions: bool,
     /// Optional bounded, immutable phase-control trace for accepted results.
     /// This remains opt-in because a detailed trace for a long range can be
     /// much larger than the numerical result itself.
     #[serde(default)]
     pub phase_lifecycle_trace: GuiPhaseLifecycleTrace,
+    /// Empty preserves the engine's bounded default. A positive override
+    /// limits immutable result evidence, never the live GUI sink.
+    #[serde(default)]
+    pub max_lifecycle_events: String,
     /// Selects which range points retain lifecycle evidence when tracing is
     /// enabled. Point solves always keep their one trace.
     #[serde(default)]
@@ -561,10 +609,8 @@ impl Default for EquilibriumDiagnosticsDraft {
     fn default() -> Self {
         Self {
             collect_timing: false,
-            retain_backend_attempts: true,
-            retain_conservation_report: true,
-            retain_phase_transitions: true,
             phase_lifecycle_trace: GuiPhaseLifecycleTrace::Off,
+            max_lifecycle_events: String::new(),
             range_lifecycle_trace: GuiRangeLifecycleTrace::Endpoints,
             keq_validation: GuiKeqValidationMode::WhenApplicable,
         }
@@ -620,6 +666,18 @@ pub struct EquilibriumPostprocessingDraft {
     pub resampling: GuiResamplingDraft,
     #[serde(default)]
     pub y_scale: GuiPlotScale,
+    /// Presentation-only density for accepted point tables. It never changes
+    /// the physical values retained by an immutable result snapshot.
+    #[serde(default)]
+    pub table_density: GuiResultTableDensity,
+    /// Components below this mole-fraction threshold are hidden in the GUI
+    /// table only. Zero keeps the table exhaustive.
+    #[serde(default = "default_display_fraction_cutoff")]
+    pub display_fraction_cutoff: String,
+}
+
+fn default_display_fraction_cutoff() -> String {
+    "0".into()
 }
 
 impl Default for EquilibriumPostprocessingDraft {
@@ -629,6 +687,8 @@ impl Default for EquilibriumPostprocessingDraft {
             result_basis: GuiResultBasis::ComponentMoles,
             resampling: GuiResamplingDraft::None,
             y_scale: GuiPlotScale::Linear,
+            table_density: GuiResultTableDensity::Detailed,
+            display_fraction_cutoff: default_display_fraction_cutoff(),
         }
     }
 }
@@ -655,6 +715,22 @@ pub enum GuiResultBasis {
 pub enum GuiPlotScale {
     Linear,
     Log10,
+}
+
+/// Amount of per-component evidence shown in the accepted-result table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuiResultTableDensity {
+    /// Show both physical moles and mole fractions for each component.
+    Detailed,
+    /// Keep scanning focused on physical amounts; fractions remain available
+    /// through the detailed view and plots.
+    Compact,
+}
+
+impl Default for GuiResultTableDensity {
+    fn default() -> Self {
+        Self::Detailed
+    }
 }
 
 impl Default for GuiPlotScale {
@@ -822,12 +898,14 @@ pub enum ValidatedPhaseMode {
         dg_create: f64,
         dg_keep: f64,
         max_phase_iterations: usize,
+        initial_phase_policy: GuiInitialPhasePolicyDraft,
     },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatedSolver {
     pub selection: EquilibriumSolverDraft,
+    pub ph_solve_mode: GuiPhSolveMode,
     pub tolerance: Option<f64>,
     pub max_iterations: Option<usize>,
     pub scaling_enabled: bool,
@@ -844,10 +922,8 @@ pub enum ValidatedTraceSeedPolicy {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatedDiagnostics {
     pub collect_timing: bool,
-    pub retain_backend_attempts: bool,
-    pub retain_conservation_report: bool,
-    pub retain_phase_transitions: bool,
     pub phase_lifecycle_trace: GuiPhaseLifecycleTrace,
+    pub max_lifecycle_events: Option<usize>,
     pub range_lifecycle_trace: GuiRangeLifecycleTrace,
     pub keq_validation: GuiKeqValidationMode,
 }
@@ -858,6 +934,7 @@ pub struct ValidatedPostprocessing {
     pub result_basis: GuiResultBasis,
     pub resampling: Option<usize>,
     pub y_scale: GuiPlotScale,
+    pub display_fraction_cutoff: Option<f64>,
 }
 
 /// Severity/category of one pure validation finding.
@@ -1388,6 +1465,7 @@ impl EquilibriumPhaseModeDraft {
                 dg_create,
                 dg_keep,
                 max_phase_iterations,
+                initial_phase_policy,
             } => {
                 let epsilon = parse_positive(phase_epsilon, "phase_mode.phase_epsilon", report);
                 let create = parse_finite(dg_create, "phase_mode.dg_create", report);
@@ -1409,6 +1487,7 @@ impl EquilibriumPhaseModeDraft {
                         dg_create,
                         dg_keep,
                         max_phase_iterations,
+                        initial_phase_policy: *initial_phase_policy,
                     }),
                     _ => None,
                 }
@@ -1468,6 +1547,7 @@ impl EquilibriumSolverConfigDraft {
         }
         Some(ValidatedSolver {
             selection: self.selection.clone(),
+            ph_solve_mode: self.ph_solve_mode,
             tolerance,
             max_iterations,
             scaling_enabled: self.overrides.scaling_enabled,
@@ -1567,14 +1647,21 @@ impl GuiTraceSeedPolicyDraft {
 impl EquilibriumDiagnosticsDraft {
     fn validate(
         &self,
-        _report: &mut EquilibriumGuiValidationReport,
+        report: &mut EquilibriumGuiValidationReport,
     ) -> Option<ValidatedDiagnostics> {
+        let max_lifecycle_events = parse_optional_usize_at_least(
+            &self.max_lifecycle_events,
+            "diagnostics.max_lifecycle_events",
+            1,
+            report,
+        );
+        if !self.max_lifecycle_events.trim().is_empty() && max_lifecycle_events.is_none() {
+            return None;
+        }
         Some(ValidatedDiagnostics {
             collect_timing: self.collect_timing,
-            retain_backend_attempts: self.retain_backend_attempts,
-            retain_conservation_report: self.retain_conservation_report,
-            retain_phase_transitions: self.retain_phase_transitions,
             phase_lifecycle_trace: self.phase_lifecycle_trace,
+            max_lifecycle_events,
             range_lifecycle_trace: self.range_lifecycle_trace,
             keq_validation: self.keq_validation,
         })
@@ -1600,6 +1687,11 @@ impl EquilibriumPostprocessingDraft {
             result_basis: self.result_basis,
             resampling,
             y_scale: self.y_scale,
+            display_fraction_cutoff: parse_non_negative(
+                &self.display_fraction_cutoff,
+                "postprocessing.display_fraction_cutoff",
+                report,
+            ),
         })
     }
 }
@@ -1755,6 +1847,110 @@ mod tests {
             GuiKeqValidationMode::WhenApplicable
         );
         assert!(!diagnostics.collect_timing);
+        assert!(diagnostics.max_lifecycle_events.is_empty());
+    }
+
+    #[test]
+    fn diagnostics_reject_zero_retained_lifecycle_events() {
+        let mut document = EquilibriumGuiDocument::new();
+        document.config.diagnostics.max_lifecycle_events = "0".into();
+        let report = document
+            .validate_for_run()
+            .expect_err("zero retained lifecycle events must be rejected");
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.field == "diagnostics.max_lifecycle_events")
+        );
+    }
+
+    #[test]
+    fn bounded_phase_policy_preserves_the_semantic_initial_phase_choice() {
+        let mut document = EquilibriumGuiDocument::new();
+        document.config.phase_mode = EquilibriumPhaseModeDraft::Bounded {
+            phase_epsilon: "1e-12".into(),
+            dg_create: "-1e-6".into(),
+            dg_keep: "1e-8".into(),
+            max_phase_iterations: "20".into(),
+            initial_phase_policy: GuiInitialPhasePolicyDraft::AllDeclaredCandidates,
+        };
+
+        let validated = document
+            .validate_for_run()
+            .expect("bounded policy with all candidates is valid");
+        assert!(matches!(
+            validated.phase_mode,
+            ValidatedPhaseMode::Bounded {
+                initial_phase_policy: GuiInitialPhasePolicyDraft::AllDeclaredCandidates,
+                ..
+            }
+        ));
+        let restored =
+            EquilibriumGuiDocument::from_json(&document.to_json().expect("document serializes"))
+                .expect("document restores");
+        assert_eq!(document, restored);
+    }
+
+    #[test]
+    fn legacy_inert_diagnostic_fields_are_accepted_but_not_reserialized() {
+        let document = EquilibriumGuiDocument::new();
+        let mut json: serde_json::Value =
+            serde_json::to_value(&document).expect("default document serializes to JSON");
+        let diagnostics = json["config"]["diagnostics"]
+            .as_object_mut()
+            .expect("diagnostics must remain an object");
+        diagnostics.insert(
+            "retain_backend_attempts".into(),
+            serde_json::Value::Bool(false),
+        );
+        diagnostics.insert(
+            "retain_conservation_report".into(),
+            serde_json::Value::Bool(false),
+        );
+        diagnostics.insert(
+            "retain_phase_transitions".into(),
+            serde_json::Value::Bool(false),
+        );
+
+        let restored = EquilibriumGuiDocument::from_json(
+            &serde_json::to_string(&json).expect("legacy-shaped document serializes"),
+        )
+        .expect("inert legacy diagnostic fields must not block document loading");
+        assert!(restored.validate_for_run().is_ok());
+
+        let canonical: serde_json::Value = serde_json::from_str(
+            &restored
+                .to_json()
+                .expect("restored document serializes canonically"),
+        )
+        .expect("canonical document remains JSON");
+        let diagnostics = canonical["config"]["diagnostics"]
+            .as_object()
+            .expect("canonical diagnostics must remain an object");
+        assert!(!diagnostics.contains_key("retain_backend_attempts"));
+        assert!(!diagnostics.contains_key("retain_conservation_report"));
+        assert!(!diagnostics.contains_key("retain_phase_transitions"));
+    }
+
+    #[test]
+    fn legacy_postprocessing_documents_default_to_detailed_result_tables() {
+        let document = EquilibriumGuiDocument::new();
+        let mut json: serde_json::Value =
+            serde_json::to_value(&document).expect("default document serializes to JSON");
+        json["config"]["postprocessing"]
+            .as_object_mut()
+            .expect("postprocessing serializes as an object")
+            .remove("table_density");
+
+        let restored = EquilibriumGuiDocument::from_json(
+            &serde_json::to_string(&json).expect("legacy-shaped document serializes"),
+        )
+        .expect("legacy document without table density must load");
+        assert_eq!(
+            restored.config.postprocessing.table_density,
+            GuiResultTableDensity::Detailed
+        );
     }
 
     #[test]

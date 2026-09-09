@@ -24,11 +24,19 @@
 //! An equilibrium problem is defined by:
 //!
 //! - **Components**: species identities with their thermodynamic phases.
-//! - **Initial moles**: `n_i^0` — the starting composition.
+//! - **Initial moles**: `n_i^0` — a physical starting composition or feasible
+//!   numerical seed, depending on the input route.
 //! - **Element composition**: `A_{ij}` — atoms of element `j` in species `i`.
 //! - **Gibbs functions**: `g_i(T)` — standard Gibbs free energy of each species.
 //! - **Phases**: phase assignments and activity models.
 //! - **Conditions**: temperature `T`, pressure `P`, reference pressure `P0`.
+//!
+//! For a closed elemental-input problem, the conserved physical inventory is
+//! the separate vector `b`. The usual composition route derives `b = A^T n^0`;
+//! the elemental route supplies `b` directly and uses a feasible real-species
+//! composition only to initialize the numerical solve. In both routes,
+//! `initial_log_moles` is a numerical coordinate seed, not an alternative
+//! conservation law.
 //!
 //! ## Scaling
 //!
@@ -373,6 +381,10 @@ pub struct EquilibriumProblem {
     /// Element composition matrix `A` of shape `(species × elements)`.
     /// `A[i, j]` = number of atoms of element `j` in species `i`.
     element_composition: DMatrix<f64>,
+    /// Optional physical closed inventory supplied independently from the
+    /// numerical starting composition. The traditional species-feed path
+    /// leaves this unset and preparation derives `A^T n_initial`.
+    conserved_element_totals: Option<Vec<f64>>,
     /// Standard Gibbs free energy functions `g_i(T)` for each species, in J/mol.
     gibbs: Vec<GibbsFn>,
     /// Phase descriptors: activity model and species indices for each phase.
@@ -395,7 +407,12 @@ pub struct PreparedEquilibriumProblem {
     problem: EquilibriumProblem,
     /// SVD-derived reaction basis (stoichiometric nullspace matrix `ν`).
     reaction_basis: ReactionBasis,
-    /// Conserved element totals `b_0 = A^T · n0` — total moles of each element.
+    /// Conserved element totals `b` in element-matrix column order.
+    ///
+    /// For a composition input this is `A^T * initial_moles`. For an
+    /// elemental-input problem it is the independently supplied physical
+    /// inventory and may differ from `A^T * initial_moles`, because the latter
+    /// is only the feasible numerical seed.
     element_totals: Vec<f64>,
     /// Maps each species index to its phase index: `species_phase[i]` = phase of species i.
     species_phase: Vec<usize>,
@@ -763,16 +780,19 @@ impl fmt::Display for EquilibriumProblemPreview {
 }
 
 impl PreparedEquilibriumProblem {
-    /// Validates and derives the deterministic matrices used by the log-moles formulation.
+    /// Validates and derives the deterministic matrices used by the log-moles
+    /// formulation. The prepared `element_totals` are the physical conserved
+    /// vector `b`; they are distinct from the problem's numerical initial
+    /// moles and log-moles seed.
     pub fn new(problem: EquilibriumProblem) -> Result<Self, ReactionExtentError> {
         Self::new_with_element_totals(problem, None)
     }
 
     /// Prepares a problem while retaining an explicitly supplied conserved
-    /// inventory. This is used by active-set reductions: the reduced matrix
-    /// contains only an independent elemental basis, but its totals still
-    /// describe the original closed system rather than a trace-seeded local
-    /// problem.
+    /// inventory `b`. This is used by elemental-input and active-set routes:
+    /// the reduced matrix contains only an independent elemental basis, but
+    /// its totals still describe the original closed system rather than a
+    /// trace-seeded local problem.
     pub(crate) fn new_with_element_totals(
         problem: EquilibriumProblem,
         explicit_element_totals: Option<Vec<f64>>,
@@ -792,7 +812,9 @@ impl PreparedEquilibriumProblem {
         let species_phase = species_to_phase_map(problem.phases(), species_count)?;
         let phase_stoichiometry =
             reaction_phase_stoichiometry(&reaction_basis.reactions, problem.phases());
-        let element_totals = match explicit_element_totals {
+        let element_totals = match explicit_element_totals
+            .or_else(|| problem.conserved_element_totals.clone())
+        {
             Some(totals) => {
                 if totals.len() != problem.element_composition().ncols() {
                     return Err(ReactionExtentError::DimensionMismatch(format!(
@@ -1298,7 +1320,11 @@ impl PreparedEquilibriumProblem {
         &self.reaction_basis
     }
 
-    /// Conserved elemental totals in the element-matrix column order.
+    /// Conserved physical elemental totals `b` in element-matrix column order.
+    ///
+    /// This is the authoritative conservation vector for the prepared solve;
+    /// it is not necessarily the elemental content of the numerical seed when
+    /// the problem came from a direct elemental inventory.
     pub fn element_totals(&self) -> &[f64] {
         &self.element_totals
     }
@@ -1373,6 +1399,13 @@ impl PreparedEquilibriumProblem {
 
 impl EquilibriumProblem {
     /// Validates all input data before it is handed to a nonlinear backend.
+    ///
+    /// `initial_moles` is the physical component composition used as the
+    /// starting point, and `initial_log_moles` is its numerical log-coordinate
+    /// seed. This constructor derives the conserved elemental vector as
+    /// `b = A^T * initial_moles`; callers with a separately supplied closed
+    /// inventory must attach it through [`Self::with_conserved_element_totals`]
+    /// after providing a feasible numerical seed.
     #[allow(clippy::too_many_arguments)]
     pub fn new<C>(
         components: Vec<C>,
@@ -1404,6 +1437,10 @@ impl EquilibriumProblem {
 
     /// Builds a problem from phase-qualified descriptors and derives the
     /// legacy numerical projection exactly once.
+    ///
+    /// `initial_moles` and `initial_log_moles` describe the numerical starting
+    /// point. They do not independently declare a conserved elemental
+    /// inventory; this constructor derives `b` from `A^T * initial_moles`.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_phase_descriptors<C>(
         components: Vec<C>,
@@ -1453,6 +1490,7 @@ impl EquilibriumProblem {
             initial_moles,
             initial_log_moles,
             element_composition,
+            conserved_element_totals: None,
             gibbs,
             phase_descriptors,
             phases,
@@ -1460,6 +1498,28 @@ impl EquilibriumProblem {
         };
         problem.validate()?;
         Ok(problem)
+    }
+
+    /// Replaces the conserved physical inventory without changing the real
+    /// component universe or numerical seed.
+    ///
+    /// Elemental-input callers use this only after constructing a feasible
+    /// seed from actual selected components. The supplied vector is the
+    /// physical conservation vector `b`; it is intentionally independent of
+    /// the seed's `A^T * initial_moles`. It never bypasses the later
+    /// representability and acceptance checks.
+    pub fn with_conserved_element_totals(
+        mut self,
+        element_totals: Vec<f64>,
+    ) -> Result<Self, ReactionExtentError> {
+        self.conserved_element_totals = Some(element_totals);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Returns the independent physical inventory when one was supplied.
+    pub fn conserved_element_totals(&self) -> Option<&[f64]> {
+        self.conserved_element_totals.as_deref()
     }
 
     /// Validates structural and numerical invariants without mutating the problem.
@@ -1509,6 +1569,18 @@ impl EquilibriumProblem {
             return Err(ReactionExtentError::DimensionMismatch(format!(
                 "element composition must have {species_count} rows and at least one element column"
             )));
+        }
+        if let Some(totals) = &self.conserved_element_totals {
+            if totals.len() != self.element_composition.ncols()
+                || totals
+                    .iter()
+                    .any(|total| !total.is_finite() || *total < 0.0)
+            {
+                return Err(ReactionExtentError::InvalidProblem {
+                    field: "element_totals",
+                    message: "explicit element totals must be finite, non-negative, and aligned to the element matrix".to_string(),
+                });
+            }
         }
         if self
             .initial_moles
@@ -1620,12 +1692,19 @@ impl EquilibriumProblem {
         &self.components
     }
 
-    /// Physical initial mole numbers in species order.
+    /// Physical component amounts used as the numerical starting composition.
+    ///
+    /// For a direct elemental-input problem these amounts are a feasible seed;
+    /// they are not authoritative for conservation because `b` is retained
+    /// separately in the prepared problem.
     pub fn initial_moles(&self) -> &[f64] {
         &self.initial_moles
     }
 
-    /// Initial iterate in log-mole coordinates.
+    /// Numerical initial iterate in log-mole coordinates.
+    ///
+    /// Trace floors and related policies affect this coordinate seed only;
+    /// they do not change the physical conserved elemental vector `b`.
     pub fn initial_log_moles(&self) -> &LogMolesInitialGuess {
         &self.initial_log_moles
     }

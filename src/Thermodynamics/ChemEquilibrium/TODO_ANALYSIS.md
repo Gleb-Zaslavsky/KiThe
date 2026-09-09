@@ -6762,3 +6762,979 @@ was changed.
   candidate TPDs, oracle values, transition histories, and the command in
   `STORY_TESTS.md`. Release characterization was completed and recorded; the
   release result agrees with the debug result.
+
+### Application calculator facade
+
+- [x] Introduce `EquilibriumCalculator` as the small application-facing entry
+  point above the canonical resolved `P,T` and `P,H` workflows. Its builder
+  owns phase declarations, lookup/repository policy, `P0`, point/range
+  conditions, solver cascade/options, phase-control policy, timing, and
+  diagnostics, then returns typed point/range outcomes retaining immutable
+  resolved-data provenance. The facade orchestrates existing production paths;
+  it does not introduce another solver or mutable workflow.
+- [x] Keep the explicit low-level examples as architecture guides and add a
+  concise `P,H` facade example. The former explains the underlying request
+  assembly; the latter is the intended application integration style.
+- [x] Add a phase-qualified named-inventory builder. Dense mole vectors remain
+  appropriate for solver internals, while `initial_phase_moles` accepts
+  `(PhaseId, component, moles)` entries and delegates exact-layout, duplicate,
+  unknown-component, finite-value, and nonnegative validation to the existing
+  sparse composition contract before solving.
+- [x] Add validated presentation presets for common application modes:
+  `Silent`, `Timed`, `LifecycleDiagnostics`, and `RangeCharacterization`.
+  Presets configure existing immutable timing/diagnostic reports rather than
+  create a second logging or result model; explicit builder methods can still
+  override a preset.
+- [x] Migrate the equilibrium GUI controller and new application examples to
+  `EquilibriumCalculator` after the named-inventory path is available; retain
+  explicit request construction only for advanced and explanatory examples.
+  `equilibrium_gui_request` now builds the calculator facade for the worker
+  path; the calculator example uses the facade, while the reactive-gas example
+  remains an intentional low-level architecture guide.
+- [x] Consider a typed P,H range postprocessing contract. Do not reuse the
+  `P,T` temperature-axis interpolation policy blindly: the independent axis is
+  target enthalpy and phase-transition/failure gaps require the same strict
+  segmentation guarantees. `PhRangePresentationReport` and
+  `EnthalpySweepSeries` provide the target-enthalpy axis, stable layout checks,
+  route/fallback evidence, raw solver metrics, and monotonicity validation.
+
+---
+
+## Element-inventory problem definition and explicit species universe
+
+This section records the elemental-input production work. It is a new physical
+problem-definition boundary, not a second equilibrium solver and not merely a
+GUI convenience.
+
+### Current-code verdict
+
+- [x] Confirm that the canonical solver already operates on an element matrix
+  and conserved totals after preparation. `PreparedEquilibriumProblem` owns
+  `element_totals`, and active-set reductions can already preserve explicitly
+  supplied totals through `new_with_element_totals`.
+- [x] Establish the first public boundary: `PhaseEquilibriumBuildRequest` now
+  accepts either a physical composition or an `ElementInventory`. The latter
+  is aligned to resolved `element_labels`, rejected before any solver when an
+  element is absent, and converted to an element-feasible seed over real
+  components only. Typed P,T and P,H workflow requests, including calculator
+  point/range facades, use that boundary.
+- [x] Confirm that `MultiphaseInitialComposition` correctly distinguishes
+  physical zeroes from positive log-coordinate trace seeds, but still combines
+  two roles at request assembly: source of the physical inventory and source
+  of the initial numerical state.
+- [x] Reuse the existing deterministic `EquilibriumCandidateSelector` and its
+  immutable selection report. `ElementSearchMode::SubsetOf` already expresses
+  `Elements(species) subset_of Elements(b)`; physical-state, temperature,
+  library, provenance, and candidate-limit filters already exist.
+- [x] Reuse the existing chemical formula parser in
+  `Kinetics::molmass::parse_formula` where its grammar is suitable. Do not add a
+  second formula parser. Add a narrow typed error adapter at the equilibrium
+  facade rather than exposing kinetics errors as the elemental-input contract.
+- [x] Connect the validated inventory to the existing selector through
+  `EquilibriumCandidateSelector::select_inventory`. It queries only the
+  inventory's nonzero canonical element directions and produces exactly the
+  existing deterministic selected/rejected provenance report; amounts remain
+  exclusively conservation data for bridge construction.
+- [x] Provide a reviewed production seed constructor:
+  `build_element_feasible_seed(A, b)` performs an answer-independent bounded
+  affine projection over resolved real components, including deterministic
+  boundary-only handling. Its seed source and residual are retained in the
+  bridge build report.
+
+### Non-negotiable semantic boundaries
+
+- [x] Introduce a minimal validated element-inventory value object representing
+  `ElementId/element label -> non-negative amount`. Require finite values,
+  reject negative and all-zero inventories, merge duplicate elements, remove
+  exact zero entries, and canonicalize ordering deterministically.
+- [x] Treat formal input such as `C5H6N7: 1` only as syntax for adding
+  `{C: 5, H: 6, N: 7}` to `b`. Never create a `SpeciesId`, phase, catalog
+  lookup, thermochemical closure, trace species, or decomposition reaction for
+  the formal carrier. Multiple formal carriers must combine through the pure
+  operation `b = sum(q_k a_k)`.
+- [x] Keep `b` and `A` independently owned and documented:
+  `b` answers how much of each element the closed system contains; `A` answers
+  among which resolved real species those elements may be distributed.
+- [x] Keep the origin of `b` outside solver internals. Species amounts and
+  elemental input may be distinct facade entry points or a small boundary enum,
+  but both must converge before prepared-problem construction. Do not propagate
+  `Feed::Species | Feed::Elements` matches through P,T, P,H, phase control,
+  residuals, Jacobians, normalization, continuation, or nonlinear backends.
+- [x] Treat an explicit allowed-species list as a first-class physical mode.
+  Excluding `CH4`, graphite, a polymorph, or any other real component changes
+  the mathematical problem; it is not a debug filter or numerical hint. Never
+  supplement the explicit list silently from the catalog. The explicit-universe
+  workflow regression verifies this boundary with a favorable `H2O` component.
+
+### Species-universe policy at the facade boundary
+
+- [x] Add one small explicit policy type, conceptually
+  `FromElements(policy)` versus `Explicit(resolved species/phase plan)`. Keep it
+  at request assembly only; after it produces an ordered resolved phase system,
+  downstream code must not know which branch selected the species.
+  `EquilibriumSpeciesUniversePolicy` now owns this boundary; the calculator
+  resolves to the same `ResolvedPhaseSystem` before entering any point/range
+  workflow.
+- [x] In automatic mode, select only records whose nonzero element set is a
+  subset of the nonzero elements in `b`, then apply the existing library,
+  physical-state, phase-model, temperature-domain, offline/NIST, duplicate,
+  and candidate-limit policies. A zero inventory entry must not admit species
+  containing that element. `FromElements` invokes the existing deterministic
+  selector with the closed inventory and retains its full selection report.
+- [x] Preserve the existing separation between catalog selection and physical
+  phase assignment. Element matching alone must not infer ideal gas, pure
+  condensed, or ideal-solution semantics. Define how automatic mode receives a
+  reviewed phase plan, and reject selected records left unassigned or assigned
+  more than once. `EquilibriumCandidatePhasePlan` remains mandatory in automatic
+  mode, and mixed automatic/explicit declarations are rejected.
+- [x] Audit candidate identity deduplication before reuse. Library preference
+  still suppresses duplicate base records from lower-priority libraries, while
+  exact state-qualified records such as `Fe(a)` and `Fe(c)` remain separate
+  candidates and can be assigned to distinct physical phases.
+- [x] Make automatic selection deterministic across repository/`HashMap`
+  iteration order. The report retains the final canonical order plus every
+  rejection reason, selected record key, library, physical state, temperature
+  support, and phase assignment. Mixed-catalog coverage now proves `{H,O}`
+  selects only `H2`, `O2`, `H2O`, and `OH`, while rejecting carbon/nitrogen
+  records.
+- [x] In explicit mode, resolve exactly the declared real phase-qualified
+  species, preserve declaration/defined canonical ordering, and reject empty,
+  duplicate, unknown, ambiguous, state-incompatible, or thermochemically
+  unsupported entries transactionally. The existing explicit resolver remains
+  the `Explicit` policy branch and is covered by the phase-universe tests.
+- [x] Ensure candidate limits are explicit in selection evidence: a
+  `CandidateLimit` rejection now sets `EquilibriumCandidateSelectionReport::is_truncated()`.
+- [x] Prevent truncation from turning a representable problem into a different
+  accepted problem by running the representability gate after the final species
+  universe is known.
+  `truncated_catalog_selection_cannot_bypass_inventory_representability` proves
+  that a capped selection which cannot represent `b` is rejected before solve.
+
+### Common `(A, b) -> prepared problem` boundary
+
+- [x] Refactor preparation so it accepts a resolved layout, explicit conserved
+  element totals, and a separate numerical initial state. Keep one reaction
+  basis, residual/Jacobian implementation, phase-control loop, TPD criterion,
+  solver policy, normalization path, and candidate-acceptance contract for both
+  species-origin and elemental-origin requests. `PhaseEquilibriumBuildRequest`
+  is the common bridge and the equivalence/phase-lifecycle tests exercise both
+  origins through the same prepared workflow.
+- [x] Promote the existing explicit-total capability from the reduced-active-set
+  special case into a validated common bridge constructor. `EquilibriumProblem`
+  now stores an optional independently supplied `b`, and preparation preserves
+  it instead of deriving `A^T n_initial`; bridge/facade alignment to canonical
+  `element_labels` and reports now retain the full physical totals. Typed P,T,
+  P,H, and prepared-range requests now use this bridge.
+- [x] Validate representability before constructing log coordinates or calling
+  any nonlinear backend: require a finite non-negative solution of `A^T n = b`
+  under the selected real species/phase universe. Return a typed preparation
+  error for missing elements, empty universes, rank/shape mismatch, and
+  nonrepresentable inventories. `ElementInventoryError` is preserved as a
+  nested cause, while empty universes and failed feasible projections use
+  `EquilibriumPreparationError`.
+- [x] Build the numerical seed from actual selected components only. The
+  production `build_element_feasible_seed` is an answer-independent bounded
+  affine projection of real component rows onto `A^T n=b`; it neither inspects
+  thermochemistry nor creates a formal carrier. P,T/P,H facade integration,
+  continuation, and numerical recovery now retain the same physical `b`.
+- [x] Keep seed and physical constraints separate in bridge reports. The
+  immutable build report now records input origin, trace policy, seed source,
+  inventory scale, feasible-projection interior fraction where applicable, and
+  pre-solver conservation residual; element totals remain the physical
+  contract. Active-phase lifecycle and recovery evidence stay on their existing
+  solve reports rather than being duplicated at the bridge boundary.
+- [x] Define deterministic handling for feasible states that lie only on a
+  boundary (some species exactly zero). `build_element_feasible_seed` fixes
+  every species containing a zero-total element at an exact physical zero,
+  then delegates only its log-coordinate representation to the existing trace
+  policy. The unit test covers `b={H:2,O:0}` over `{H2,O2}` and proves that
+  `O2` cannot acquire a tolerance-sized physical amount.
+- [x] Apply extensive normalization to `b`, physical thresholds, target
+  enthalpy, and feasible seeds through one exact representation mapping. On
+  publication, denormalize moles and validate them against the original `b`.
+  `ExtensiveNormalization` now maps typed `ElementInventory`, component/phase
+  moles, log seeds, enthalpy, thresholds, and recovery reports with one exact
+  scale; elemental P,T and P,H requests use the inventory-derived scale and
+  validate the physical publication boundary.
+
+### P,T and P,H facade contracts
+
+- [x] Add clear application-facing P,T point and range entry points for elemental
+  inventory plus an explicit resolved species universe. The calculator,
+  `solve_resolved_pt_from_element_inventory`, and
+  `PhaseEquilibriumPipelineRequest::from_element_inventory` all converge on
+  the same bridge; the pipeline also accepts a deterministic candidate
+  selection plus explicit phase plan. Species-based point input still derives
+  the same `b` through the ordinary bridge. Prepared temperature ranges validate
+  the initial projected seed and retain immutable `b` through continuation and
+  numerical recovery.
+- [x] Add corresponding resolved P,H point and target-range entry points
+  without a new P,H algorithm. `ResolvedPhaseEnthalpyRequest::from_element_inventory`
+  and `PhRangeRequest::from_element_inventory` derive an initial real-species
+  seed while retaining `ElementInventory` as the physical source of `b`.
+  Elemental P,H input must require an explicit extensive `H_target`, pressure,
+  reference pressure, temperature seed/bounds, and the same species universe;
+  `b` alone cannot define reactant enthalpy or thermodynamic state.
+- [x] Route elemental P,H through the existing canonical monolithic/nested/Auto
+  policy, bounded phase control, and extensive-normalization recovery. The
+  bridge accepts a separate numerical seed only after it reconstructs the same
+  `b`; therefore neither recovery nor an accepted-only continuation seed can
+  silently redefine the physical inventory.
+- [x] For P,H ranges, continuation reuses only the previously accepted
+  composition and temperature. The bridge validates every injected seed against
+  immutable elemental totals, so a failed or foreign candidate cannot
+  contaminate the next target's physical constraint.
+- [x] Add element inventory as a first-class `EquilibriumCalculatorBuilder`
+  physical-input mode for P,H point and target-range requests. The facade
+  reuses the resolved P,H constructors, keeps composition/inventory conflict
+  validation, and never rebuilds `b` or manufactures a molecular carrier.
+  End-to-end coverage proves both point solving and accepted continuation.
+- [x] Extend the small public prelude with only the validated inventory and
+  species-selection policy plus facade entry points. Do not expose internal
+  matrix ordering, projection types, or a second request hierarchy. The
+  projection seed implementation is now kept behind the facade/bridge rather
+  than re-exported from `ChemEquilibrium::prelude`.
+
+### Typed errors and evidence
+
+- [x] Add typed errors for malformed formal formula, unknown element, invalid
+  amount, all-zero inventory, empty explicit universe, unresolved/ambiguous
+  species, unsupported state/temperature, unassigned phase candidate,
+  nonrepresentable `(A, b)`, and feasible-seed construction failure. Inventory
+  validation remains `ElementInventoryError`; preparation boundaries preserve
+  it through `ReactionExtentError::Preparation` and classify seed failures with
+  `EquilibriumPreparationError`.
+- [x] Distinguish selection/build failures from nonlinear solve failures. No
+  invalid elemental request may reach a backend or publish a partial resolved
+  system, seed, solution, or range point.
+  - [x] The application facade now maps typed bridge preparation failures to
+    `EquilibriumCalculatorError::Preparation`; numerical backend and accepted
+    candidate failures remain `Solve`. Candidate catalog failures use the
+    separate `CandidateSelection` variant, range errors preserve this mapping,
+    and element-inventory alignment/representability failures are rejected
+    before backend execution. Automatic policy declaration failures are also
+    rejected before resolution.
+- [x] Extend immutable reports/reproducibility snapshots with input kind,
+  canonical `b`, species-selection policy, ordered selected universe,
+  provenance/rejections, representability evidence, and seed evidence. Input
+  kind is report provenance only after preparation, never a solver branch.
+  `PhaseEquilibriumBuildReport` now retains the full selection transaction;
+  reproducibility snapshots additionally serialize selected records, rejection
+  reasons, and candidate-limit truncation.
+
+### Required unit and integration evidence
+
+- [x] Test pure elemental aggregation: `C5H6N7:1`, multiple carriers such as
+  `C2H4:2 + O2:3`, duplicate element accumulation, input-order invariance,
+  zero removal, and rejection of negative, non-finite, malformed, unknown, and
+  all-zero input.
+- [x] Prove formal carriers never enter the resolved species list, `A`, phase
+  layout, thermochemistry lookup report, trace mask, or reaction basis. The
+  bridge test checks a formal `H2 + O2` carrier inventory against a resolved
+  `H2/O2/H2O` universe and asserts the real-only species layout, independent
+  totals, feasible seed, and pre-solver rejection of an absent `C` direction.
+- [x] Test automatic selection with `{H,O}` against a mixed catalog: include
+  `H2`, `O2`, `H2O`, and `OH`; exclude `CO`, `CO2`, `N2`, and every record with
+  an absent element. Repeat with permuted repository iteration and require the
+  same ordered report and matrix.
+  `subset_inventory_selection_is_deterministic_and_excludes_absent_elements`
+  covers the mixed catalog, deterministic order, absent-element rejections, and
+  the explicit candidate-limit/truncation report.
+- [x] Test explicit selection with a controlled species universe and assert that
+  `A` contains exactly those real phase-qualified rows. Then omit a favorable
+  species and prove the accepted equilibrium changes without that species ever
+  reappearing through lookup, trace seeding, phase activation, or fallback.
+  `subset_inventory_selection_is_deterministic_and_excludes_absent_elements`
+  covers the mixed-catalog report; the workflow regression
+  `explicit_species_universe_changes_the_problem_without_catalog_supplementation`
+  proves that omitting favorable `H2O` changes the accepted universe and cannot
+  be supplemented by the repository.
+- [x] Test representability before solve, including `{C:1,H:4}` with only `H2`,
+  empty explicit selection, rank-deficient-but-representable inventories,
+  boundary-only feasible seeds, and one molecule represented in multiple
+  physical phases.
+  Coverage is distributed across `equilibrium_element_seed` (empty and
+  boundary-only), `phase_equilibrium_problem_tests` (the `{C:1,H:4}`/`H2`
+  rejection, rank-deficient water phases, and duplicate phase-qualified
+  molecule), and `equilibrium_candidate_selection` (empty phase plan).
+- [x] Add P,T equivalence tests: species-based input and direct `b` with the
+  same explicit species universe must produce the same `A`, reaction basis,
+  element totals, accepted moles, residual, conservation, topology, and report
+  provenance except for input origin.
+  The `elemental_and_species_feeds_with_the_same_b_share_the_fixed_pt_solution`
+  test now checks the canonical species universe, `A`, `b`, reaction basis,
+  input and seed provenance, accepted state, residual, and conservation.
+- [x] Repeat P,T equivalence with two different molecular feeds yielding the
+  same `b`; add input-order invariance and extensive scaling over several
+  decades.
+  The `equivalent_molecular_feeds_are_order_invariant_and_extensively_scalable`
+  test covers distinct molecular feeds with identical `b`, reversed sparse
+  entry order, and `10^-6`, `1`, and `10^6` physical inventory scales through
+  the public workflow recovery path.
+- [x] Add P,H equivalence using the same `b`, explicit species universe, and
+  identical `H_target`. Require the same route, temperature, composition,
+  conservation, enthalpy residual, fallback evidence, and accepted topology.
+  The `equivalent_molecular_feeds_share_the_ph_state_and_route` test exercises
+  the resolved NASA thermochemistry workflow with an explicit nested route and
+  verifies all of those invariants within the accepted inner-solver tolerance.
+- [x] Prove that the same `b` with different `H_target` values produces
+  different valid P,H states, and that same `b` alone is rejected as an
+  incomplete P,H request.
+  The `distinct_ph_targets_produce_distinct_states_and_missing_target_is_rejected`
+  test verifies distinct accepted temperatures, enthalpy/conservation validity,
+  and pre-solve rejection of a non-PH constraint.
+- [x] Add a real offline multiphase elemental fixture exercising gas plus a
+  condensed candidate, phase appearance/disappearance, full-inventory
+  conservation, candidate provenance, and explicit-versus-automatic species
+  universe semantics without mutating JSON libraries.
+- [x] Add transactional tests for lookup failure, nonrepresentability, seed
+  failure, backend failure, P,H trial failure, cancellation, and range rollback.
+  Verify no partial cache/result publication and no drift of `b`.
+  Existing evidence is split across `phase_equilibrium_problem_tests`,
+  `equilibrium_workflow_tests`, `equilibrium_ph_workflow`, and the real-data
+  rollback scenarios in `equilibrium_live_data_tests`.
+- [x] Add release story evidence for a nontrivial automatic catalog problem and
+  a reproducible explicit benchmark. Print canonical `b`, selected species,
+  exclusions, matrix/rank summary, seed feasibility, backend/iterations,
+  residuals, balances, phase transitions, provenance, and timings.
+  The `real_offline_multiphase_fixture_tracks_phase_lifecycle_inventory_and_universe_provenance`
+  workflow test prints the complete automatic-vs-explicit release summary.
+
+### Definition of done
+
+- [x] Both physical inputs converge to one internal dataflow:
+  `validated b -> resolved real species/phase universe -> A -> representability
+  -> feasible numerical seed -> existing prepared P,T/P,H workflow`.
+- [x] No solver, residual, Jacobian, phase-control, TPD, normalization, or range
+  module matches on the origin of `b`.
+- [x] The explicit species universe is documented and tested as part of the
+  physical mathematical problem, while numerical seed policy remains a
+  separate replaceable numerical concern.
+- [x] Existing species-based, frozen-reference, extensive-normalization,
+  continuation, diagnostics, and GUI facade tests remain green without changing
+  thermochemistry, phase physics, tolerances, or solver cascade semantics.
+  The focused release command
+  `cargo test Thermodynamics::ChemEquilibrium --lib --no-default-features --
+  --include-ignored --nocapture` completed with `1004 passed, 0 failed`.
+
+---
+
+## Reconciliation of the attached ChatGPT review (2026-09-09)
+
+The 37-point review from the attached text was checked against the current
+working tree, public facades, and focused tests. The entries below distinguish
+implemented behavior from evidence that is still missing. This is an audit
+update, not a request to introduce a second elemental solver or to loosen
+existing numerical contracts.
+
+### Already confirmed by code and tests
+
+- [x] The dataflow is shared after input normalization: physical `b` is
+  resolved to a real species/phase universe, `A` is built, representability is
+  checked, a numerical seed is constructed, and the existing P,T/P,H workflow
+  solves the problem.
+- [x] Physical `b` and numerical `A`/seed are separate concerns. The seed
+  builder is pure linear feasibility preparation and does not call Gibbs,
+  TPD, or an equilibrium solver.
+- [x] `ElementSearchMode::SubsetOf` is applied in the intended direction:
+  selected species must be representable using the requested inventory labels;
+  absent inventory elements are not silently added.
+- [x] Elemental representability is a nonnegative-cone problem, not a rank
+  check. Boundary-only inventories and forced zero species are covered before
+  logarithmic seed tracing.
+- [x] `ElementInventory` canonicalizes labels, merges duplicate carriers, and
+  rejects invalid amounts. Post-aggregation non-finite values are rejected by
+  the canonical constructor.
+- [x] Explicit and automatic species-universe policies are distinct, and
+  automatic selection publishes candidate and library provenance. The resolved
+  problem then uses the same prepared solver path as a molecular request.
+- [x] Typed calculator errors preserve the candidate-selection, preparation,
+  and solve boundaries. Preparation failures do not get reported as backend
+  solve failures.
+- [x] No new solver, residual/Jacobian family, tolerance relaxation, or
+  implicit catalog/network behavior is needed for the reviewed architecture.
+
+### Existing coverage to retain
+
+- [x] PT equivalence for elemental and molecular feeds with the same `b`,
+  molecular-history/order invariance, extensive PT scaling, P,H equivalence,
+  distinct `H_target` behavior, normalization round trips, continuation,
+  rollback, phase control, and provenance are already represented in the
+  phase-bridge, workflow, range, frozen-reference, and live-data suites.
+- [x] Candidate phase plans validate exact record/library provenance and reject
+  duplicate, unknown, or unassigned records.
+- [x] Reproducibility schema version 2 already carries selected candidate and
+  policy provenance. Do not bump it merely because this review exists.
+
+### Confirmed open follow-up items
+
+- [x] Add a focused regression for duplicate formal carriers whose aggregate
+  amount overflows to infinity. `duplicate_formal_carriers_reject_overflow_after_aggregation`
+  locks the post-merge finite-value invariant.
+- [x] Add direct seed-builder tests for element-row permutation invariance and
+  scales around `1e-8` and `1e8` (plus an extreme element-ratio case). Existing
+  workflow scaling tests do not isolate this preparation contract;
+  `feasible_seed_is_row_permutation_invariant_and_handles_extreme_scales` now
+  covers the isolated builder behavior.
+- [x] Add paired facade tests for explicit versus `FromElements` policy: one
+  where automatic selection adds a favorable species absent from the explicit
+  universe, and one where both resolve to exactly the same universe and state.
+  The two `explicit_and_from_elements_policies_*` calculator tests cover both
+  branches and compare resolved phase specs, inventories, and accepted moles.
+- [x] Define temperature applicability for `FromElements` selection. The
+  selector honors a caller-provided temperature range; the calculator now
+  derives the point/grid/PH mode interval when omitted and rejects a narrower
+  configured interval before candidate selection. Coverage is locked by
+  `from_elements_facade_derives_point_temperature_screening_when_policy_omits_range`
+  and `automatic_candidate_temperature_policy_covers_ranges_and_rejects_narrow_ph_bounds`.
+- [x] Add public PT and P,H equivalence coverage at `P != p0`, confirming that
+  standard-state handling remains independent of the input representation.
+  `molecular_and_elemental_facade_inputs_match_at_pressure_distinct_from_reference_pressure`
+  compares resolved phases, conserved totals, PT composition, PH temperature,
+  and PH composition with `P=101325 Pa` and `p0=100000 Pa`.
+- [x] Decide whether the reproducibility capsule should serialize an explicit
+  `input_kind` and/or canonical elemental `b`. The capsule now exports a
+  symbolic input kind plus `canonical_element_labels`/`canonical_b` for both
+  molecular and direct elemental outcomes. New fields use `serde(default)` so
+  existing schema v2 artifacts remain readable; no version bump is needed.
+- [x] Clarify `ExtensiveNormalization` naming and documentation: its
+  `physical_inventory_scale` is explicitly documented as a representation-
+  dependent numerical coordinate scale. For elemental input it is the sum of
+  elemental amounts, not generally the total system mole count. The public
+  name is retained until broader API semantics justify a coordinated rename.
+- [x] Update `equilibrium_problem.rs` module and constructor documentation to
+  distinguish physical elemental inventory `b` from the numerical initial
+  moles/log-moles seed retained by the solver API. The prepared problem and
+  `with_conserved_element_totals` docs now make the independent elemental
+  input path explicit.
+- [x] Measure repeated preparation/SVD/seed work in elemental point solves and
+  initial P,H/range construction. The typed facade timing assertions now show
+  one fixed formulation build and repeated safe reuse across the two-point
+  elemental P,H range, while the point exposes both outer and inner timing
+  reports. No optimization is justified by this bounded characterization yet;
+  accepted state and rollback semantics remain unchanged.
+- [x] Add direct typed-calculator assertions that P,T and P,H ranges preserve
+  the same canonical `b`, target enthalpy, and accepted-only rollback state at
+  every point, including a failure after continuation. The facade tests now
+  check `ElementInventory` provenance and `[H, O] -> [4, 2]` at every accepted
+  point, target/error limits for every P,H point, and a point-indexed failure
+  at target 1 with no partial range publication.
+
+### Final invariant checklist
+
+- [x] `ElementInventory` is the physical source of elemental `b`.
+- [x] `A` contains only real selected species and uses canonical element order.
+- [x] Explicit and `FromElements` requests resolve their universe first, then
+  enter the common solver pipeline; their provenance remains distinguishable.
+- [x] Elemental P,H requests require `TotalEnthalpyJoules` through the typed
+  facade/constraint validation and cannot silently fall back to a P,T solve.
+
+### Evidence
+
+The focused release command remains green after the reviewed implementation:
+`cargo test Thermodynamics::ChemEquilibrium --lib --no-default-features --
+--include-ignored --nocapture` -> `1017 passed, 0 failed`.
+
+---
+
+## Reconciliation of the elemental-input completion instruction (2026-09-09)
+
+The attached instruction was checked against the current production facades,
+bridge tests, frozen references, and the focused ChemEquilibrium run. Its scope
+is accepted: this is a test-specification pass, not permission to change solver
+mathematics, tolerances, TPD, phase-control policy, thermochemistry, or input
+selection algorithms.
+
+### Covered without duplicate tests
+
+- [x] Review existing tests by behavior before adding coverage. The existing
+  lower-level bridge tests already cover equivalent molecular decompositions,
+  elemental-vs-species feeds, continuation, phase lifecycle, scaling, and
+  P,H target semantics. New tests should extend an existing test only when an
+  assertion is genuinely absent.
+- [x] Explicit and `FromElements` can be compared when selection resolves the
+  same universe. `explicit_and_from_elements_policies_match_when_the_resolved_universe_matches`
+  checks phase specs, component order/identity, conserved totals, and accepted
+  moles; `elemental_and_species_feeds_with_the_same_b_share_the_fixed_pt_solution`
+  also checks the element matrix and reaction basis at the bridge boundary.
+  Provenance remains `None` for Explicit and `Some(...)` for `FromElements`.
+- [x] PT range inventory conservation is already asserted at every accepted
+  elemental calculator point by `facade_accepts_element_inventory_for_pt_temperature_range`.
+  Phase-control transitions and their unchanged inventory are covered by
+  `real_offline_multiphase_fixture_tracks_phase_lifecycle_inventory_and_universe_provenance`.
+- [x] Elemental P,H range coverage already checks canonical `b`, target
+  enthalpy, enthalpy error, continuation/formulation evidence, and an
+  accepted-first/failed-later transactional rollback through
+  `facade_solves_pt_then_ph_without_manual_resolved_request_assembly` and
+  `elemental_ph_range_preserves_transactional_rollback_after_continuation_failure`.
+  No second rollback test is justified by the instruction.
+- [x] FromElements reproducibility already has bridge-level coverage in
+  `candidate_selection_provenance_survives_bridge_and_reproducibility`.
+  The capsule implementation exports `ElementInventory`, canonical labels/b,
+  selected records, rejected count, and `truncated`; the direct elemental
+  capsule test covers the input fields, while the candidate-selection test
+  covers the typed selection snapshot. JSON assertions do not rely on fragile
+  string searches for individual fields.
+- [x] Schema v2 compatibility is already explicit in the capsule fields'
+  `serde(default)` attributes and the legacy-schema round-trip test. Optional
+  additive fields remain in v2; the version changes only for incompatible
+  serialized-contract changes. No schema bump is required.
+- [x] The scope restriction is satisfied. No production bug was found during
+  this review, and no solver equations, tolerances, thermochemistry, backend
+  order, candidate policy, normalization design, or compatibility adapter was
+  changed for this instruction.
+- [x] The requested relevant suites are included in the focused command below;
+  the optional repository-wide `cargo test -r -j 6` is deliberately not made a
+  prerequisite for closing this narrow elemental-input test specification.
+
+### Remaining test-specification gaps
+
+- [x] Add one public-calculator P,T metamorphic test with three inputs sharing
+  the same explicit species universe, thermochemistry, phase model, P, T, and
+  P0: two different molecular decompositions plus direct `ElementInventory`.
+  Compare typed canonical `b`, resolved universe/A, component fractions,
+  component moles, residual, and element-balance evidence. Existing tests cover
+  the pairwise pieces; `calculator_three_way_pt_metamorphic_inputs_with_same_b_match`
+  now covers the single three-way end-to-end relation.
+- [x] Add one elemental public-calculator P,H semantic test for the same
+  physical `b`, P, P0, universe, thermochemistry, and bounds with two distinct
+  physically valid `H_target` values. Assert distinct recovered temperatures;
+  assert the direction only in a fixture with proven monotone total enthalpy.
+  `elemental_calculator_ph_distinct_targets_recover_distinct_temperatures` now
+  covers the elemental route with a monotone local gas fixture.
+- [x] Add a bounded production-facade P,T extensive metamorphic test for
+  elemental `b` and `s*b` (for example `s=10` or `100`) at identical intensive
+  conditions. Assert equal mole fractions and topology, component moles scaled
+  by `s`, and comparable normalized balance quality. Lower-level and frozen
+  scaling tests existed, and `elemental_calculator_pt_is_extensive_under_inventory_scaling`
+  now covers the public `EquilibriumCalculator` route.
+- [x] Add the corresponding bounded production-facade P,H extensive test for
+  `(b,H)` and `(s*b,s*H)`. Assert intensive temperature and fractions,
+  component moles scaled by `s`, and unchanged PH acceptance without loosening
+  PH tolerances. `elemental_calculator_ph_is_extensive_under_inventory_and_enthalpy_scaling`
+  now covers the elemental-input calculator facade with one shared tolerance.
+
+### Short review report
+
+| Property | Existing test / next test | Result |
+| --- | --- | --- |
+| Equivalent molecular feeds and direct elemental feed | `calculator_three_way_pt_metamorphic_inputs_with_same_b_match` | PASS |
+| Explicit vs FromElements same universe | `explicit_and_from_elements_policies_match_when_the_resolved_universe_matches` | PASS |
+| Same b, distinct H targets through elemental input | `elemental_calculator_ph_distinct_targets_recover_distinct_temperatures` | PASS |
+| Elemental production P,T scaling | `elemental_calculator_pt_is_extensive_under_inventory_scaling` | PASS |
+| Elemental production P,H scaling | `elemental_calculator_ph_is_extensive_under_inventory_and_enthalpy_scaling` | PASS |
+| PT/P,H range b, continuation, rollback | Existing typed calculator and bridge tests | PASS |
+| FromElements reproducibility and schema v2 | Existing bridge/capsule tests with typed snapshots | PASS |
+| Production bug / production mathematics | No defect found; no mathematics changed | PASS |
+
+### Evidence
+
+The focused release command remains green after this review:
+`cargo test Thermodynamics::ChemEquilibrium --lib --no-default-features --
+--include-ignored --nocapture` -> `1017 passed, 0 failed`.
+
+Files changed for this instruction: `equilibrium_calculator.rs` and this TODO
+file. Four focused public-facade tests were added; no production bug was found,
+and no production mathematics was changed. The four listed test-specification
+gaps are now closed.
+
+---
+
+## Reconciliation of the frozen-reference elemental-input instruction (2026-09-09)
+
+The next instruction was checked against the existing
+`frozen_reference` apparatus and the current elemental-input implementation.
+Its scope is accepted as a frozen-oracle integration task: do not create new
+artificial equilibrium benchmarks, alter frozen values, change thermodynamics,
+species universes, phase models, solver mathematics, tolerances, or production
+input-selection behavior.
+
+### Confirmed existing foundation
+
+- [x] Real frozen P,T and P,H candidates already exist. The preferred pair is
+  the CHON+graphite NASA TP-1907 P,T fixture and its TP-1906 P,H fixture;
+  NASA CEA H2/O2 and Argonne STANJAN CHON remain secondary real references.
+- [x] Existing frozen tests already cover the important extensive laws and
+  transactional behavior. In particular, TP-1907 has real P,T inventory
+  scaling and TP-1906 has real P,H inventory-plus-target scaling. These tests
+  should be reused and extended only where the elemental route is absent.
+- [x] Reference elemental totals can be derived through existing machinery:
+  `element_totals_from_molecular_basis` in the frozen fixtures reconstructs
+  `reference_b = A^T n_initial`; this must remain the source of the adapted
+  benchmark values rather than hand-written totals.
+- [x] `ElementInventory::from_formal_carriers` is already the canonical
+  formal-carrier boundary. Its parser, element validation, aggregation, and
+  overflow/error tests exist, so the formal carrier is an input adapter and
+  not a thermodynamic species.
+- [x] The primary comparisons can remain `Explicit` with one resolved species
+  universe. Existing bridge/calculator tests keep `FromElements` as a separate
+  optional policy comparison and do not make automatic candidate selection part
+  of the main equivalence contract.
+- [x] No irrational benchmark composition needs a giant integer pseudoformula.
+  Direct `(element, amount)` entries are already supported and preserve the
+  exact fixture totals at the inventory boundary.
+- [x] The frozen values and production solver path remain unchanged by this
+  review. The focused ChemEquilibrium run is `1019 passed, 0 failed`.
+
+### Frozen-reference integration completed
+
+- [x] Adapt one existing real fixed P,T fixture, TP-1907, into a
+  three-route frozen-oracle test: (A) the existing molecular feed, (B) direct
+  `ElementInventory` built from the fixture-derived `reference_b`, and (C)
+  formal carriers only where the benchmark coefficients are representable
+  without distorting them. Keep the same `Explicit` universe, P, T, P0,
+  thermochemistry, phase model, and solver settings for all comparable routes.
+  Implemented by `tp1907_frozen_pt_molecular_elemental_and_formal_routes_match`.
+- [x] Adapt one existing real fixed P,H fixture, TP-1906, using its
+  frozen `H_target` unchanged. Compare the existing molecular route with the
+  direct elemental route (and a formal-carrier route when valid); never derive
+  the P,H target from a formal carrier, an arbitrary seed, or a newly chosen
+  decomposition. `tp1906_frozen_ph_molecular_elemental_and_formal_routes_reuse_target`
+  reuses the source target and uses the molecular feed only as an explicit
+  numerical seed for the elemental physical input.
+- [x] Record the exact fixture-derived `reference_b` and the molecular/formal
+  representations in the test report. For every route compare canonical labels
+  and `b`, component identity/order, component moles and fractions, phase
+  topology/status, residual quality, and element-balance evidence using the
+  existing comparison helpers and one acceptance contract. The TP-1907 report
+  records `b=[0.05364816, 1.00182736, 2.0, 8.9462088, 2.40365472]` and maximum
+  external absolute discrepancy `4.1871e-4`; the TP-1906 report records the
+  same `b`, reused `H_target=-4.200392761e5 J`, and recovered `T=699.508902431 K`.
+- [x] Add the frozen-specific formal-carrier disappearance assertions: after
+  inventory construction the carrier must not appear in component labels,
+  selected records, the element matrix, phases, the solution, or the
+  reproducibility capsule. The adapted explicit frozen routes retain only the
+  declared thermodynamic components and publish `input_kind=ElementInventory`;
+  generic inventory tests cover the parser/aggregation boundary.
+- [x] Reuse the existing TP-1907/PT and TP-1906/PH extensive checks as the
+  oracle for scale metamorphism. If the adapted elemental routes include a
+  scale factor `s`, verify P,T composition scaling by `s` and P,H target
+  enthalpy scaling by `s`; do not invent a second normalization rule.
+- [x] Produce a short per-benchmark report containing the test name, mode,
+  original composition, derived `reference_b`, elemental/formal inputs,
+  resolved universe, frozen source, comparison result, and maximum observed
+  discrepancies. Explicitly state that frozen values are unchanged, `H_target`
+  was reused, and the formal carrier was not admitted as a thermodynamic
+  species. The report is emitted by both adapted tests and the source snapshots
+  are checked before and after each run.
+
+### Acceptance boundary
+
+The frozen-reference item is complete: both real fixed-condition benchmarks
+pass through the adapted elemental route and agree with their existing frozen
+molecular oracle. Generic bridge, calculator, scaling, and formal-carrier tests
+remain supporting evidence, while the two frozen tests close the integration
+contract itself.
+
+### Implementation note
+
+The public calculator now exposes `element_numerical_seed` as a separate
+numerical starting point for an element-defined request. It is validated
+against the resolved layout, is rejected without an `ElementInventory`, and is
+propagated through point and range requests without changing the physical
+conservation source or the reported input kind. This was required by the
+multiphase TP-1906 basin and does not change solver equations or tolerances.
+
+### Evidence
+
+Focused checks after the implementation:
+
+- `tp1907_frozen_pt_molecular_elemental_and_formal_routes_match`: PASS;
+- `tp1906_frozen_ph_molecular_elemental_and_formal_routes_reuse_target`: PASS;
+- `equilibrium_calculator::tests`: `21 passed, 0 failed`;
+- the full focused suite with ignored tests is `1019 passed, 0 failed`.
+
+### Scale witnesses and application surface (2026-09-09)
+
+- [x] Add four more facade comparisons on the same real TP-1907 frozen feed,
+  preserving the published 700 K row and deriving every inventory from its
+  molecular source: `1e-3` (small), `1e-1` (medium), `1e1` (large), and `1e2`
+  (very large). Each case compares molecular, direct elemental, and formal
+  carrier routes; the latter two retain `input_kind=ElementInventory`, the
+  same phase/component identity and status, the same normalized composition,
+  and the frozen external envelope. These are scale/metamorphic witnesses of
+  one frozen benchmark, not new artificial equilibrium reference data.
+- [x] Verify the new elemental-input features at the curated
+  `ChemEquilibrium::prelude` boundary. The compile-time public API test now
+  names `ElementInventory`, `FormalElementCarrier`, `MultiphaseInitialComposition`,
+  `element_numerical_seed`, and the range seed methods. The result is positive:
+  no additional facade/prelude forwarding gap was found.
+- [x] Propagate the already-validated facade path into the GUI surface. The
+  GUI request builder and worker continue to use `EquilibriumCalculator`; the
+  Setup tab now places both `P,T`/`P,H` and explicit/elements selectors in
+  visually distinct grouped frames. The selection remains request-invalidating
+  and each selector retains localized hover help.
+- [x] Extend GUI widget-census coverage for the visible `Calculation mode` and
+  `Inventory input` groups. Help resources now explain the public facade,
+  physical elemental inventory, candidate selection boundary, and the selected
+  mode's effect on canonical request preparation in English and Russian.
+
+Focused follow-up evidence: the four added scale tests pass, the prelude
+contract test passes, and all 39 equilibrium GUI story tests pass. The current
+full focused run is `1024 passed, 0 failed`; earlier `1019` counts in this
+document remain historical stage evidence.
+
+---
+
+## External GPT-6 Architecture Audit (2026-09-07, isolated checklist)
+
+This section transcribes the actionable recommendations from the independent
+read-only audit in repository-root `TODO_EQUILIBRIUM_ARCHITECTURE.md`. It is
+deliberately isolated from the main equilibrium roadmap: every item must be
+re-verified against the current working tree and its callers before changing
+code. An unchecked item means "audit hypothesis/action still to investigate",
+not an established production defect.
+
+### Audit baseline and non-negotiable guards
+
+- [ ] Before every deletion/consolidation substage, record focused baseline
+  results for the affected P,T/P,H, phase-control, continuation, backend, and
+  offline frozen-reference suites. Preserve a list of pre-existing failures
+  separately from regressions.
+- [ ] Transfer any behavior evidence that still lives only in a mutable-host
+  test into a prepared/typed regression before removing the host path.
+- [ ] Preserve without semantic changes: reaction basis/rank/ordering,
+  standard-state and coefficient-interval selection, scaling, log-mole
+  positivity, physical inventory conservation, active-set feasibility/TPD,
+  complementarity, accepted-only publication, rollback, solver cascade order,
+  and backend candidate acceptance.
+- [ ] Keep the live handwritten `LMSolver`/`NRSolver`/`TrustRegionSolver`
+  fallback family distinct from the disconnected standalone `NR_Legacy.rs`.
+  Never delete a numerical backend merely because its name includes `legacy`.
+- [ ] Do not add a replacement generic solver framework, fallback hierarchy,
+  implicit network lookup, automatic recovery policy, dependency, or
+  parallelism as part of this cleanup.
+
+### Audit P0: remove or simplify after focused characterization
+
+- [ ] **Remove the prepared-runner dependency on the mutable host.** Recheck
+  `equilibrium_prepared_runner.rs` and `equilibrium_log_moles.rs`; point
+  prepared execution directly at the existing free backend cascade, then
+  delete crate-private `EquilibriumLogMoles::solve_backend_cascade*`
+  forwarding methods. Preserve attempt order, budgets, error classification,
+  progress/cancellation, retries, seed reuse, and fake-backend tests.
+- [ ] **Retire disconnected standalone legacy islands deliberately.** After a
+  fresh caller/API search, remove `nonlinear_solvers/NR_Legacy.rs`,
+  `easy_equilibrium.rs`, their tests and `ChemEquilibrium.rs` compatibility
+  exports if no supported consumer remains. Record this as an intentional
+  public compatibility removal; do not replace invalid equations with adapters.
+- [ ] **Delete obsolete threshold residual/Jacobian kernels.** Verify that
+  `equilibrium_logmole_residual2`, `equilibrium_logmole_jacobian2`, and their
+  exclusive species/phase-active predicates have no supported caller; migrate
+  useful coverage to explicit active-set projection, then delete them. Do not
+  introduce threshold-based species removal inside canonical residual/Jacobian
+  evaluation.
+- [ ] **Remove unused fixed-P,T symbolic-Gibbs payload plumbing.** Reconfirm
+  that parameterized RST P,T construction uses symbolic standard Gibbs only as
+  a length/capability witness. If so, remove the payload from RST preparation,
+  bridge bundles, prepared runner, and phase-control runner while retaining
+  numeric P,T values, effective policy/defaults, real P,H symbols, and all
+  numeric-versus-RST Jacobian/residual tests.
+- [ ] **Make phase-control lifecycle evidence single-owned.** In
+  `phase_equilibrium_solution.rs::from_fixed_active_bundle` and related
+  storage, move consumed bundle data where possible and retain one
+  authoritative `PhaseControlledSolveReport`. Preserve public getter types
+  and prove `phase_control_report()` and acceptance evidence remain identical.
+
+### Audit P1: structural consolidation with unchanged mathematics
+
+- [ ] **Retire the duplicate mutable orchestration progressively.** Once
+  shared primitives/settings have an explicit nonlegacy owner, migrate useful
+  fixed-point, phase-control and range behavior coverage from
+  `EquilibriumLogMoles` and `phase_control/equilibrium_workflows.rs`, then
+  delete host-only worker/setup/conversion/publication state in small changes.
+  Do not preserve it through a new forwarding facade.
+- [ ] **Consolidate duplicated Gibbs refresh.** Recheck the two
+  `refresh_gibbs` template implementations in `phase_equilibrium_problem.rs`;
+  share one implementation and remove redundant callback wrappers without
+  changing interval selection, ordering, errors, or timing attribution.
+- [ ] **Reduce owned-runner and scaling churn.** Make single-start execution
+  borrow prepared structure, move cache-miss-only construction into the miss
+  branch, and preserve validated row scaling for callbacks. Test multi-start
+  order/ties, cancellation, dimensions, accepted reports, and finite
+  difference Jacobians with scaling on/off.
+- [ ] **Unify independent element-column selection.** Compare
+  `deterministic_element_basis` with active-set `independent_column_basis`;
+  extract one concrete helper only if wrapper-specific validation remains
+  explicit. Guard zero/full/reduced rank, original-total representability,
+  deterministic columns, near-singular thresholds, and water-only H/O cases.
+- [ ] **Simplify nested P,H local bookkeeping.** Replace unnecessary local
+  evidence/timing `Rc`/`RefCell` in
+  `solve_resolved_ph_nested_with_template` with scoped mutable borrowing.
+  Preserve template reuse, trial ordering/counts, budgets, progress,
+  cancellation and accepted enthalpy evidence.
+- [ ] **Remove numeric-Gibbs to constant-function round trips at stability.**
+  Recheck `gibbs_snapshot_for_legacy_boundary`, monolithic P,H, and
+  `CanonicalPhaseState`; pass validated Gibbs values at the candidate's own
+  conditions directly into stability construction. Preserve finite/order
+  checks, solved-temperature semantics, full/reduced candidate ordering, TPD
+  feasibility, and error propagation.
+- [ ] **Delete unused physical-mole step helper and stale comments.** After a
+  final caller search, remove `max_step_moles_nonnegative` and obsolete
+  commented Newton/assembly code. Do not wire physical-mole bounds into
+  log-coordinate solving.
+- [ ] **Synchronize behavioral documentation.** Reconcile solver dispatch,
+  scaling, lifecycle semantics, `behavior_inventory.md`, module docs and
+  public examples with actual execution after each relevant cleanup.
+- [ ] **Measure and localize repeated P,H property evaluation.** Instrument
+  `evaluate_context`/`property_function` for source-backed G/H/Cp calls and
+  unused context columns. Simplify only measured repetition; do not redesign
+  ownership around insignificant once-per-request coefficient copies.
+
+### Audit P2: investigate and decide before changing
+
+- [ ] **Backend seam.** Retain `EquilibriumNonlinearBackend` unless a simpler
+  design demonstrably preserves deterministic fault-injection, retry, failure
+  and cancellation tests.
+- [ ] **Inventory representation.** Inventory semantic/numeric conversions in
+  `equilibrium_component`, `equilibrium_problem`, multiphase domain and bridge
+  metadata before choosing a single authoritative phase representation.
+- [ ] **P,H request ownership.** Establish real users of borrowed callbacks,
+  `EnthalpyModel`, `ResolvedPhaseEnthalpyRequest`, and retained nested
+  continuation templates before simplifying their input/lifetime paths.
+- [ ] **Resolved-data copying and locks.** Measure `ResolvedPhaseSystem`,
+  `ResolvedThermochemistry`, and P,H range cloning/locking; document actual
+  cross-thread requirements before changing `Arc`/`Mutex`/`Rc` ownership.
+- [ ] **Range implementation.** Inventory concrete repeated work in P,T and
+  P,H ranges before any shared generic range abstraction; no generic engine is
+  justified by superficial similarity alone.
+- [ ] **All-seeds-failed evidence.** Specify cascade-budget behavior first,
+  then ensure prepared-runner all-seeds-failed paths preserve complete failed
+  work through existing typed errors/reports rather than local counters.
+- [ ] **Reaction-basis invariants.** Establish nullspace completeness,
+  conservation, ordering and normalization invariants for
+  `compute_reaction_basis`/`ValidatedReactionBasis` before type or algorithm
+  consolidation.
+- [ ] **Public-surface compatibility.** Review actual consumer requirements
+  for `prelude`, `legacy`, and phase interfaces before broad API/module
+  reorganization. Local cleanup must not wait on this decision, but public
+  removals must be explicit.
+- [ ] **Measured performance/parallelism.** Benchmark bounded independent
+  typed jobs/chains and explicit P,T multi-start preparation amortization
+  before parallelizing anything. Do not parallelize ordered fallback, bracket
+  trials, dependent continuation, or small 100-200-element loops by default.
+
+### Audit completion evidence
+
+- [ ] After each completed audit item, record changed symbols, removed public
+  surface, retained numerical contracts, focused tests and any measured timing
+  in this isolated section or its linked story evidence.
+- [ ] At audit completion, run the final focused offline P,T/P,H, multiphase,
+  continuation, public-facade and frozen-reference matrix; update architecture
+  documentation without removing scientific derivations or provenance.
+
+---
+
+## Final technical debt after the elemental-inventory pass (2026-09-09)
+
+The elemental-input production contract is complete and must not be reopened
+under the name of this follow-up. `ElementInventory` is the physical source of
+`b`; formal carriers are syntax-only adapters; the facade and curated prelude
+expose the validated public boundary; and the frozen TP-1907 P,T / TP-1906 P,H
+routes agree with their molecular oracles. The TP-1907 scale cases are
+scale/metamorphic witnesses, not new artificial equilibrium benchmarks.
+
+The remaining items below are adjacent product, evidence, and numerical
+hardening work. They are deliberately separated from solver mathematics and
+from the already accepted elemental-input definition of done.
+
+### P0 - Investigate extensive-scaling robustness
+
+- [x] Characterize the public elemental facade over the bounded scale envelope
+  through `1e8`. The real TP-1907 witness passes at `1e-3`, `1e-1`, `1e1`,
+  `1e2`, `1e3`, `1e4`, `1e6`, and `1e8`; the pre-hardening `1e3`
+  strict component-level oracle discrepancy was approximately `9.17e-4`.
+  The frozen regressions retain the same molecular oracle and strict checks;
+  at `1e8` both elemental/formal routes report residual `3.55e-14` and
+  physical element-balance error `4.00e-8`.
+- [x] Reproduce the `1e3` boundary with diagnostics for normalized `b`, seed,
+  log-moles, backend attempts, phase activity, residuals, and publication
+  denormalization. The first discrepancy was isolated to the post-activation
+  graphite amount: both routes had the same active topology, but ordinary
+  recovery stopped at different residual/TPD accuracy. A physical retry also
+  exposed a separate ULP-sized initial log-mole bound rejection.
+- [x] Compare the elemental and molecular routes through `1e3` using intensive
+  invariants (topology, phase status, mole fractions, residual/balance) and
+  extensive invariants (component moles and `b`). The first failing invariant
+  was the graphite component amount; tighter normalized recovery now keeps it
+  below the existing strict facade oracle threshold.
+- [x] Run an explicit `Single`-backend matrix at the `1e8` inventory scale.
+  Legacy LM/TR and RST Minpack/Trust-Region pass the same molecular oracle;
+  RST LM/Nielsen/Damped Newton still fail strict normalized basin discovery
+  when isolated, so the production cascade must retain its RST fallback order.
+  Legacy NR accepts the state with a physical absolute balance of `3.50e-6`,
+  but its relative error against the `1e8` inventory is below the matrix guard.
+  The matrix test asserts every accepted route and pins these isolated-method
+  outcomes instead of treating a cascade fallback as backend equivalence. The
+  story `production_default_retains_a_scale_robust_backend_on_real_tp1907_story`
+  additionally asserts that the default production cascade publishes only from
+  this scale-robust set.
+- [ ] Decide the supported scale contract from measured evidence. The current
+  hardened evidence reaches `1e8`, but the contract beyond that point is still
+  open. Extend the real frozen envelope or document a typed preparation/solve
+  diagnostic if a boundary is found. Do not hide the issue by changing frozen
+  values or broadly relaxing tolerances.
+- [ ] Repeat the bounded characterization for elemental P,H with `(b, H)` and
+  `(s*b, s*H)`, including accepted temperature, enthalpy error, composition,
+  and recovery evidence. P,H scaling must remain an extensive transformation,
+  not a second normalization rule.
+
+The implementation hardening is intentionally narrow. Extensive recovery now
+uses an internal normalized-solve tolerance capped at `1e-12`, while ordinary
+caller-selected tolerance remains unchanged. The RST adapter also clamps only
+roundoff-sized initial log-mole excursions at finite capacity bounds; materially
+infeasible seeds are still rejected. The resulting PT frozen tests pass through
+`1e8`, but larger public PT scales and elemental P,H scales still require
+characterization before this P0 is complete. The `1e4` failure before the
+tighter cap was a physical balance error of `2.68e-6`; with the internal `1e-12`
+cap it is `4.00e-12`, confirming that strict recovery accuracy, rather than a
+changed frozen value, is the relevant control.
+
+The backend matrix adds an important qualification: scaling is not an
+RST-only report issue and not an all-backend failure. It is method-sensitive
+inside RST, while the legacy family remains usable at `1e8` under the
+scale-aware conservation contract. A future hardening pass should improve the
+three isolated RST methods or narrow their documented single-backend envelope;
+the current production cascade is covered because successful RST fallbacks and
+legacy fallbacks are explicitly asserted.
+
+### P1 - Decide the GUI meaning of elemental input
+
+- [ ] Decide whether GUI `ElementCandidates` remains a candidate-discovery
+  workflow (`elements -> real species/phases -> confirmed initial amounts`) or
+  becomes a literal editor for arbitrary elemental amounts `b`. The current GUI
+  path is the former: it reaches the facade through confirmed phase assignments
+  and initial moles, while the public facade already supports direct
+  `ElementInventory`.
+- [ ] If direct GUI `b` editing is required, add a typed serialized draft for
+  element amounts, field-local validation, conversion to `ElementInventory`,
+  candidate/phase representability feedback, document migration, and stories
+  proving that formal carriers never become species. Keep candidate search and
+  physical inventory as separate concepts.
+- [ ] Add the missing GUI P,H target-range stories: ascending/descending
+  targets, continuation, formulation reuse, normalization recovery,
+  per-point diagnostics, and accepted-only publication/rollback.
+- [ ] Finish rendered hover/help coverage for every interactive control and
+  content-aware assertions for each Help section. The current baseline covers
+  the main mode selectors and conditional states, but not every actual hover
+  path or unavailable-action decision.
+
+### P2 - Independent frozen evidence and API finishing
+
+- [ ] Decide whether the release gate requires three or four independent real
+  frozen fixtures in addition to the TP-1907 scale witnesses. If yes, adapt
+  existing NASA CEA H2/O2 and Argonne/STANJAN CHON references without changing
+  their source values, species universe, or thermodynamic conditions.
+- [ ] Add concise public-facade examples documenting that inventory amounts are
+  mol-atom quantities, formal carrier formulas are input syntax only, and
+  `element_numerical_seed` changes only the numerical start, never physical
+  `b` or reported input provenance.
+- [ ] Remove the deprecated GUI `legacy_tooltip` compatibility shim only after
+  an external-consumer audit; this is cleanup, not an elemental-input defect.
+
+### Priority decision
+
+The next implementation pass is the P0 scaling investigation. GUI semantics,
+additional frozen fixtures, and tooltip/help completeness remain valid debt,
+but they do not currently threaten the demonstrated engine contract as much as
+the first strict-equivalence failure at the larger extensive scale.

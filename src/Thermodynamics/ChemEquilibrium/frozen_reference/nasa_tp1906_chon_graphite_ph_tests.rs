@@ -7,7 +7,15 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::TotalEnthalpyJoules;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_calculator::{
+        EquilibriumCalculator, EquilibriumCalculatorOutcome,
+    };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
+        TemperatureBounds, TotalEnthalpyJoules,
+    };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::{
+        ElementInventory, FormalElementCarrier,
+    };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_extensive_normalization::ExtensiveNormalization;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
         MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
@@ -25,10 +33,13 @@ mod tests {
     use crate::Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph::{
         ResolvedNasaTp1906ChonGraphitePhFixture, load_nasa_tp1906_chon_graphite_enthalpy_dataset,
     };
+    use crate::Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite::TP1907_REFERENCE_PRESSURE_PA;
+    use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::PhaseEquilibriumInputKind;
     use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
         EquilibriumSolveOptions, ExtensiveNormalizationPolicy,
     };
     use crate::Thermodynamics::ChemEquilibrium::prelude::PhaseControlPolicy;
+    use crate::Thermodynamics::User_PhaseOrSolution::element_composition_and_molar_mass;
     use crate::Thermodynamics::thermo_lib_api::{ThermoData, ThermoRepository};
     use crate::library_manager::with_library_manager;
 
@@ -238,6 +249,79 @@ mod tests {
             .normalize_initial_composition(&layout, physical)
             .expect("TP-1906/1907 normalized inventory must validate");
         (normalized, normalization)
+    }
+
+    fn frozen_element_inventory(
+        fixture: &ResolvedNasaTp1906ChonGraphitePhFixture,
+        initial: &MultiphaseInitialComposition,
+    ) -> (ElementInventory, Vec<String>, Vec<f64>) {
+        let layout =
+            MultiphaseEquilibriumLayout::new(fixture.tp1907().resolved().phase_specs().to_vec())
+                .expect("TP-1906/1907 calculator layout must remain valid");
+        let (element_matrix, _, element_labels) = element_composition_and_molar_mass(
+            fixture.tp1907().resolved().phase_data(),
+            fixture.tp1907().resolved().layout(),
+            None,
+        )
+        .expect("TP-1906/1907 element matrix must remain available");
+        let totals = initial
+            .element_totals(&layout, &element_matrix)
+            .expect("TP-1906/1907 reference b must be derivable as A^T n_initial");
+        let inventory = ElementInventory::from_amounts(
+            element_labels.iter().cloned().zip(totals.iter().copied()),
+        )
+        .expect("TP-1906/1907 reference elemental inventory must validate");
+        (inventory, element_labels, totals)
+    }
+
+    fn calculator_tp1906_builder(
+        fixture: &ResolvedNasaTp1906ChonGraphitePhFixture,
+        repository: Arc<ThermoRepository>,
+    ) -> crate::Thermodynamics::ChemEquilibrium::equilibrium_calculator::EquilibriumCalculatorBuilder
+    {
+        EquilibriumCalculator::from_phases(
+            fixture.tp1907().resolved().phase_specs().iter().cloned(),
+        )
+        .with_repository(repository)
+        .prefer_libraries(["NASA_gas", "NASA_cond"])
+        .offline_only()
+        .pressure_pa(TP1907_REFERENCE_PRESSURE_PA)
+        .reference_pressure_pa(TP1907_REFERENCE_PRESSURE_PA)
+        .phase_control(PhaseControlPolicy::default())
+        .ph_solve_mode(PhSolveMode::NestedTemperature)
+        .production_cascade()
+    }
+
+    fn calculator_tp1906_ph(
+        fixture: &ResolvedNasaTp1906ChonGraphitePhFixture,
+        repository: Arc<ThermoRepository>,
+        target_enthalpy_j: f64,
+        initial: Option<Vec<f64>>,
+        inventory: Option<ElementInventory>,
+        numerical_seed: Option<MultiphaseInitialComposition>,
+    ) -> crate::Thermodynamics::ChemEquilibrium::equilibrium_calculator::EquilibriumCalculatorPhPoint
+    {
+        let bounds = fixture.tp1907().thermochemistry().temperature_bounds();
+        let builder = calculator_tp1906_builder(fixture, repository).at_total_enthalpy(
+            TotalEnthalpyJoules::new(target_enthalpy_j)
+                .expect("TP-1906 frozen target enthalpy must be finite"),
+            700.0,
+            TemperatureBounds::new(bounds.lower(), bounds.upper())
+                .expect("TP-1906 frozen temperature bounds must validate"),
+        );
+        let outcome = match (initial, inventory, numerical_seed) {
+            (Some(moles), None, None) => builder.initial_moles(moles).solve(),
+            (None, Some(inventory), Some(seed)) => builder
+                .element_inventory(inventory)
+                .element_numerical_seed(seed)
+                .solve(),
+            _ => panic!("TP-1906 calculator test requires exactly one physical input"),
+        }
+        .expect("TP-1906 calculator P,H route must solve");
+        match outcome {
+            EquilibriumCalculatorOutcome::PhPoint(point) => point,
+            other => panic!("expected TP-1906 calculator P,H point, got {other:?}"),
+        }
     }
 
     /// The canonical production P,H tolerances scale with extensive enthalpy.
@@ -573,6 +657,208 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn tp1906_frozen_ph_molecular_elemental_and_formal_routes_reuse_target() {
+        let before_local = local_library_snapshot();
+        let before_frozen = frozen_snapshot();
+        let fixture = fixture();
+        let case = fixture
+            .cases()
+            .unwrap()
+            .into_iter()
+            .find(|case| (case.enthalpy.temperature_k - 700.0).abs() <= f64::EPSILON)
+            .expect("TP-1906 frozen P,H row at 700 K must remain available");
+        let initial = fixture
+            .tp1907()
+            .initial_composition()
+            .expect("TP-1906 molecular source feed must validate");
+        let (inventory, element_labels, reference_b) = frozen_element_inventory(&fixture, &initial);
+        let formal_carriers = element_labels
+            .iter()
+            .zip(reference_b.iter().copied())
+            .map(|(element, amount)| {
+                FormalElementCarrier::new(element.clone(), amount)
+                    .expect("TP-1906 formal element carrier must validate")
+            })
+            .collect::<Vec<_>>();
+        let formal_inventory = ElementInventory::from_formal_carriers(formal_carriers)
+            .expect("TP-1906 formal carriers must reconstruct reference b");
+
+        let molecular = calculator_tp1906_ph(
+            &fixture,
+            repository(),
+            case.target_enthalpy_j,
+            Some(initial.moles().to_vec()),
+            None,
+            None,
+        );
+        let elemental = calculator_tp1906_ph(
+            &fixture,
+            repository(),
+            case.target_enthalpy_j,
+            None,
+            Some(inventory),
+            Some(initial.clone()),
+        );
+        let formal = calculator_tp1906_ph(
+            &fixture,
+            repository(),
+            case.target_enthalpy_j,
+            None,
+            Some(formal_inventory),
+            Some(initial.clone()),
+        );
+
+        let expected_components = molecular
+            .solution()
+            .equilibrium()
+            .metadata()
+            .components()
+            .iter()
+            .map(|component| component.id().clone())
+            .collect::<Vec<_>>();
+        let expected_phases = molecular
+            .solution()
+            .equilibrium()
+            .metadata()
+            .phases()
+            .iter()
+            .map(|phase| phase.id().clone())
+            .collect::<Vec<_>>();
+        let expected_topology = expected_phases
+            .iter()
+            .map(|phase| {
+                (
+                    phase.clone(),
+                    molecular.solution().equilibrium().phase_status(phase),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (route, point) in [("elemental", &elemental), ("formal", &formal)] {
+            assert_eq!(
+                point.resolved().phase_specs(),
+                molecular.resolved().phase_specs(),
+                "{route} route changed the explicit frozen universe"
+            );
+            let solution = point.solution();
+            let equilibrium = solution.equilibrium();
+            assert_eq!(
+                equilibrium
+                    .metadata()
+                    .components()
+                    .iter()
+                    .map(|component| component.id().clone())
+                    .collect::<Vec<_>>(),
+                expected_components,
+                "{route} route changed component identity/order"
+            );
+            assert_eq!(
+                equilibrium
+                    .metadata()
+                    .phases()
+                    .iter()
+                    .map(|phase| phase.id().clone())
+                    .collect::<Vec<_>>(),
+                expected_phases,
+                "{route} route changed phase topology layout"
+            );
+            assert_eq!(
+                equilibrium.build_report().input_kind(),
+                PhaseEquilibriumInputKind::ElementInventory
+            );
+            assert_eq!(equilibrium.build_report().element_labels(), &element_labels);
+            assert_eq!(solution.target_enthalpy(), case.target_enthalpy_j);
+            assert!(solution.enthalpy_error().abs() <= solution.enthalpy_error_limit_joules());
+            for (index, (&expected, &actual)) in equilibrium
+                .build_report()
+                .element_totals()
+                .iter()
+                .zip(reference_b.iter())
+                .enumerate()
+            {
+                assert!(
+                    (expected - actual).abs() <= 1.0e-12,
+                    "{route} reference b mismatch at element {index}: actual={actual:e}, expected={expected:e}"
+                );
+            }
+            for (phase, expected_status) in &expected_topology {
+                assert_eq!(
+                    equilibrium.phase_status(phase),
+                    *expected_status,
+                    "{route} phase status changed for {phase:?}"
+                );
+            }
+            for component in equilibrium.metadata().components() {
+                assert!(
+                    !element_labels.iter().any(|element| {
+                        component.id().substance == *element
+                            && component.id().phase.as_option().is_none()
+                    }),
+                    "formal elemental carriers must not become bare thermodynamic components"
+                );
+            }
+            for (index, (&expected, &actual)) in molecular
+                .solution()
+                .equilibrium()
+                .component_moles()
+                .iter()
+                .zip(equilibrium.component_moles())
+                .enumerate()
+            {
+                let relative =
+                    (expected - actual).abs() / expected.abs().max(actual.abs()).max(1.0e-12);
+                assert!(
+                    relative <= 1.0e-5 || (expected - actual).abs() <= 1.0e-10,
+                    "{route} component {index} mismatch: molecular={expected:e}, actual={actual:e}, relative={relative:e}"
+                );
+            }
+            for component in molecular.solution().equilibrium().metadata().components() {
+                let expected_fraction = molecular
+                    .solution()
+                    .equilibrium()
+                    .mole_fraction_for(component.id())
+                    .expect("molecular component fraction must exist");
+                let actual_fraction = equilibrium
+                    .mole_fraction_for(component.id())
+                    .expect("elemental component fraction must exist");
+                assert!(
+                    (expected_fraction - actual_fraction).abs() <= 1.0e-7,
+                    "{route} fraction mismatch for {}: molecular={expected_fraction:e}, actual={actual_fraction:e}",
+                    component.id().label()
+                );
+            }
+            let expected_validation = molecular
+                .solution()
+                .equilibrium()
+                .accepted_solution()
+                .validation();
+            let actual_validation = equilibrium.accepted_solution().validation();
+            assert!(actual_validation.residual_l2_norm < 1.0e-5);
+            assert!(actual_validation.max_abs_element_balance_error <= 1.0e-6);
+            assert!(
+                (expected_validation.residual_l2_norm - actual_validation.residual_l2_norm).abs()
+                    <= 1.0e-5,
+                "{route} residual quality changed: molecular={:e}, actual={:e}",
+                expected_validation.residual_l2_norm,
+                actual_validation.residual_l2_norm
+            );
+            println!(
+                "TP-1906 frozen P,H route={route} source_T={} K recovered_T={:.9} K H_target={:.9e} J b={reference_b:?} H_error={:.3e} residual={:.3e} balance={:.3e}",
+                case.enthalpy.temperature_k,
+                solution.temperature(),
+                case.target_enthalpy_j,
+                solution.enthalpy_error(),
+                actual_validation.residual_l2_norm,
+                actual_validation.max_abs_element_balance_error,
+            );
+            assert_ph_matches_pt_witness(&fixture, solution);
+        }
+
+        assert_eq!(before_local, local_library_snapshot());
+        assert_eq!(before_frozen, frozen_snapshot());
     }
 
     #[test]

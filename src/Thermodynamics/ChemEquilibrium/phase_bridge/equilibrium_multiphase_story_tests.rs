@@ -40,6 +40,8 @@ use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
 use crate::Thermodynamics::ChemEquilibrium::real_pure_phase_fixtures::{
     RealPurePhaseFamily, RealPurePhaseInventory,
 };
+use crate::Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite::
+    ResolvedNasaTp1907ChonGraphiteFixture;
 use crate::Thermodynamics::User_PhaseOrSolution::{PhaseSpec, ResolvedPhaseSystem};
 use crate::Thermodynamics::User_substances::{LibraryPriority, SubsData};
 use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
@@ -547,6 +549,59 @@ fn gas_fixture_preserves_component_order_and_solution_across_legacy_and_rst_poli
             .filter(|row| row.section != "backend" && row.section != "validation")
             .map(|row| (row.section, row.label.as_str()))
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn production_default_retains_a_scale_robust_backend_on_real_tp1907_story() {
+    let repository = ThermoData::try_default_repository()
+        .expect("the bundled offline thermochemistry repository must be available");
+    let fixture = ResolvedNasaTp1907ChonGraphiteFixture::resolve_offline(repository)
+        .expect("the reviewed TP-1907 story fixture must resolve offline");
+    let layout = MultiphaseEquilibriumLayout::new(fixture.resolved().phase_specs().to_vec())
+        .expect("the TP-1907 story layout must remain valid");
+    let base = fixture
+        .initial_composition()
+        .expect("the TP-1907 story inventory must remain representable");
+    let scale = 1.0e8;
+    let scaled = MultiphaseInitialComposition::from_dense(
+        &layout,
+        base.moles().iter().map(|amount| amount * scale).collect(),
+    )
+    .expect("the scaled TP-1907 story composition must remain valid");
+    let conditions = fixture
+        .conditions_at(700.0, 101_325.0)
+        .expect("the TP-1907 story temperature must remain supported");
+
+    let result = solve_resolved_pt(
+        ResolvedPhaseEquilibriumRequest::new(&fixture.resolved(), conditions, scaled)
+            .with_solve_options(EquilibriumSolveOptions::default().with_production_cascade())
+            .with_phase_control_policy(PhaseControlPolicy::default()),
+    )
+    .expect("the production cascade must solve the scaled TP-1907 story");
+
+    let accepted_backend = result.solve_report().accepted_backend;
+    assert!(
+        matches!(
+            accepted_backend,
+            SolverBackend::RustedSciThe(
+                RustedSciTheSolver::MinpackLevenbergMarquardt
+                    | RustedSciTheSolver::TrustRegionLevenbergMarquardt
+            ) | SolverBackend::Legacy(Solvers::LM | Solvers::NR | Solvers::TR)
+        ),
+        "production default selected a backend outside the scale-robust set: {accepted_backend:?}"
+    );
+    assert!(
+        result
+            .component_moles()
+            .iter()
+            .all(|amount| amount.is_finite() && *amount >= 0.0)
+    );
+    let validation = result.accepted_solution().validation();
+    assert!(validation.residual_l2_norm < 1.0e-5);
+    assert!(
+        validation.max_abs_element_balance_error
+            <= 1.0e-12 * base.moles().iter().sum::<f64>() * scale
     );
 }
 

@@ -139,6 +139,49 @@ mod tests {
     }
 
     #[test]
+    fn production_prelude_exposes_the_application_facade_and_lookup_contract() {
+        // This is intentionally a names-and-semantics contract rather than a
+        // second end-to-end solve. An application using only `prelude` can
+        // construct the facade and preserve its phase lookup provenance.
+        let _: EquilibriumCalculatorBuilder = EquilibriumCalculator::builder();
+        let policy = NistFallbackPolicy::ExactRequestedState;
+        assert!(policy.enabled());
+        assert_eq!(LibraryId::NasaGas.canonical_name(), "NASA_gas");
+        assert_eq!(LibraryId::NasaGas.capability(), LibraryCapability::Thermo);
+
+        fn phase_lookup(summary: &PhaseResolutionSummary) -> usize {
+            summary.search().total_substances()
+        }
+        fn resolved_lookup(report: &ResolvedPhaseSystemReport) -> usize {
+            report.phases().iter().map(phase_lookup).sum()
+        }
+        fn calculator_outcome(_: &EquilibriumCalculatorOutcome) {}
+
+        let _: fn(&ResolvedPhaseSystemReport) -> usize = resolved_lookup;
+        let _: fn(&EquilibriumCalculatorOutcome) = calculator_outcome;
+    }
+
+    #[test]
+    fn production_prelude_exposes_element_inventory_and_seed_contract() {
+        // Keep the elemental-input additions nameable from the curated public
+        // surface. This catches an implementation that works internally but
+        // cannot be consumed by the GUI or an external application.
+        let inventory = ElementInventory::from_amounts([("H", 2.0), ("O", 1.0)])
+            .expect("public elemental inventory must validate");
+        let carrier = FormalElementCarrier::new("H", 2.0)
+            .expect("public formal carrier must validate");
+        let _: ElementInventoryError = ElementInventoryError::EmptyInventory;
+        let _: MultiphaseInitialComposition;
+        let _: fn(EquilibriumCalculatorBuilder, MultiphaseInitialComposition)
+            -> EquilibriumCalculatorBuilder = |builder, seed| builder.element_numerical_seed(seed);
+        let _ph_range_seed = PhRangeRequest::with_initial_composition;
+        let _temperature_range_seed = TemperatureRangeRequest::with_initial_composition;
+
+        assert_eq!(inventory.amount("H"), Some(2.0));
+        assert_eq!(carrier.formula(), "H");
+    }
+
+    #[test]
     fn production_prelude_names_immutable_phase_stability_evidence() {
         // This is a compile-time facade contract. The report builders remain
         // crate-private; external callers receive these values only through

@@ -15,6 +15,8 @@ application.
 | One `P,T` point | `chem_equilibrium_pt_point_guide.rs` | Accepted composition with lookup provenance. |
 | `P,T` temperature range | `chem_equilibrium_pt_temperature_range_guide.rs` | Transactional range with accepted-state continuation. |
 | One `P,H` point | `chem_equilibrium_ph_point_guide.rs` | Equilibrium composition and solved temperature. |
+| Reactive-gas `P,H` point | `chem_equilibrium_reactive_gas_ph_example.rs` | Wider candidate universe, explicit gas standard state, and route-aware execution evidence. |
+| Facade reactive-gas `P,H` point | `chem_equilibrium_calculator_facade_example.rs` | Application-facing builder over the same canonical workflow. |
 | `P,H` enthalpy range | `chem_equilibrium_ph_enthalpy_range_guide.rs` | Continued target-enthalpy sweep with per-point evidence. |
 
 Run an example with `cargo run --example <example_name>`, for example:
@@ -22,6 +24,35 @@ Run an example with `cargo run --example <example_name>`, for example:
 ```text
 cargo run --example chem_equilibrium_ph_enthalpy_range_guide --no-default-features
 ```
+
+## GUI calculator
+
+The equilibrium window is an application client of `EquilibriumCalculator`; it
+does not own a second solver path. Its **Setup** tab is enough for the normal
+workflow: select `P,T` or `P,H`, enter pressure and temperature/enthalpy,
+declare phases and initial amounts, then prepare and run the request.
+
+Advanced choices are deliberately separated from that first surface:
+
+- **Phase control** enables bounded phase lifecycle and its explicit
+  hysteresis policy.
+- **Libraries** selects local lookup policy and makes the online exact-state
+  NIST fallback an explicit opt-in. The tab reports catalog health; the
+  accepted result owns the actual per-component provenance.
+- **Numerics** exposes the production cascade, a selected backend/custom
+  cascade, and the P,H route policy.
+- **Output** controls timing, bounded lifecycle evidence, P,T display
+  resampling, and plot presentation.
+- **Results** is read-only accepted evidence: composition, validation,
+  backend attempts, phase transitions, timing, and provenance.
+
+Edits invalidate a prepared request and cancel an in-flight worker before it
+can publish an obsolete result. The GUI therefore shares the calculator's
+transactional result contract rather than preserving a partial solution.
+
+`chem_equilibrium_reactive_gas_ph_example.rs` is intentionally a low-level
+explanatory example. It shows the pieces beneath the facade; applications and
+the GUI should use `EquilibriumCalculator` instead.
 
 ## What lives where
 

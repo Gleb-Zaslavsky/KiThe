@@ -6,132 +6,154 @@
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumDiagnosticEvent;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::EquilibriumExecutionControl;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_range::PhRangeSolution;
 use crate::Thermodynamics::ChemEquilibrium::prelude::{
-    CandidateSelectionError, ElementSearchMode, EquilibriumCandidatePolicy,
-    EquilibriumCandidateSelectionReport, EquilibriumCandidateSelector, EquilibriumConditions,
-    EquilibriumConstantValidationMode, EquilibriumConstraint, EquilibriumDiagnosticsMode,
-    EquilibriumDiagnosticsOptions, EquilibriumRangeDiagnosticsPolicy, EquilibriumSolveOptions,
-    EquilibriumTimingMode, FixedPressureEnthalpySolution, LegacyEquilibriumSolver,
-    MultiphaseEquilibriumLayout, MultiphaseInitialComposition, PhSolveMode, PhaseComponentId,
-    PhaseControlPolicy, PhaseEquilibriumPipelineError, PhaseEquilibriumPipelineRequest, PhaseId,
-    PhaseModel, PhaseSpec, ResolvedPhaseEnthalpyRequest, ResolvedPhaseEquilibriumOutcome,
-    ResolvedThermochemistry, RustedSciTheSolver, SolverBackend, SolverCascadeBudget, SolverPolicy,
-    SubstanceSystemFactory, SubstanceSystemFactoryError, SubstanceSystemSpec, TemperatureBounds,
-    TemperatureGrid, TemperatureRangeSolution, ThermoRepository, TraceSpeciesSeedPolicy,
+    CandidateSelectionError, ElementSearchMode, EquilibriumCalculator,
+    EquilibriumCalculatorBuilder, EquilibriumCalculatorError, EquilibriumCandidatePolicy,
+    EquilibriumCandidateSelectionReport, EquilibriumCandidateSelector,
+    EquilibriumConstantValidationMode, EquilibriumDiagnosticsMode, EquilibriumDiagnosticsOptions,
+    EquilibriumRangeDiagnosticsPolicy, EquilibriumSolveOptions, EquilibriumTimingMode,
+    FixedPressureEnthalpySolution, InitialPhaseSet, LegacyEquilibriumSolver, PhSolveMode,
+    PhaseComponentId, PhaseControlPolicy, PhaseId, PhaseModel, PhaseSpec,
+    ResolvedPhaseEquilibriumOutcome, RustedSciTheSolver, SolverBackend, SolverCascadeBudget,
+    SolverPolicy, SubstanceSystemFactoryError, TemperatureBounds, TemperatureRangeSolution,
+    ThermoRepository, TraceSpeciesSeedPolicy,
 };
 use crate::gui::equilibrium_gui_model::{
-    EquilibriumSolverDraft, GuiKeqValidationMode, GuiPhaseLifecycleTrace, GuiPhaseModel,
-    GuiPhysicalState, GuiRangeLifecycleTrace, GuiSolverBackend, ValidatedCandidatePolicy,
-    ValidatedEquilibriumGuiConfig, ValidatedInventory, ValidatedLookup, ValidatedPhaseMode,
-    ValidatedProblem, ValidatedSolver, ValidatedTemperature, ValidatedTraceSeedPolicy,
+    EquilibriumSolverDraft, GuiInitialPhasePolicyDraft, GuiKeqValidationMode, GuiPhSolveMode,
+    GuiPhaseLifecycleTrace, GuiPhaseModel, GuiPhysicalState, GuiRangeLifecycleTrace,
+    GuiSolverBackend, ValidatedCandidatePolicy, ValidatedEquilibriumGuiConfig, ValidatedInventory,
+    ValidatedLookup, ValidatedPhaseMode, ValidatedProblem, ValidatedSolver, ValidatedTemperature,
+    ValidatedTraceSeedPolicy,
 };
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
 /// A validated request ready for the production point or range facade.
-pub enum EquilibriumGuiSolveRequest {
-    /// One fixed-pressure, fixed-temperature solve.
-    Point(PhaseEquilibriumPipelineRequest),
-    /// One resolved policy plus a typed continuation grid.
-    Range {
-        request: PhaseEquilibriumPipelineRequest,
-        temperatures: TemperatureGrid,
-    },
-    /// Fixed-pressure, fixed-total-enthalpy request. Resolution is delayed
-    /// until the worker executes it, just like the ordinary PT request.
-    Ph(EquilibriumGuiPhRequest),
+pub(crate) enum EquilibriumGuiSolveRequest {
+    /// Application-facade request used by the migrated worker path.
+    Facade(EquilibriumCalculatorBuilder),
 }
 
-/// GUI-owned P,H request payload.
+/// Builds the new application facade from validated GUI state.
 ///
-/// Keeping the unresolved `SubstanceSystemSpec` here is important: preparing
-/// a document remains a pure editor operation, while the worker performs the
-/// repository lookup and captures one immutable thermochemistry bundle.
-pub struct EquilibriumGuiPhRequest {
-    spec: SubstanceSystemSpec,
-    sparse_initial_moles: Vec<(PhaseComponentId, f64)>,
-    pressure_pa: f64,
-    reference_pressure_pa: f64,
-    target_enthalpy_j: f64,
-    temperature_bounds: TemperatureBounds,
-    seed_temperature_k: f64,
-    options: EquilibriumSolveOptions,
-    phase_control_policy: Option<PhaseControlPolicy>,
+/// This is the only production conversion path from validated GUI state to
+/// the equilibrium engine.
+pub fn build_equilibrium_calculator(
+    config: ValidatedEquilibriumGuiConfig,
     repository: Option<Arc<ThermoRepository>>,
+) -> Result<EquilibriumCalculatorBuilder, EquilibriumGuiRequestError> {
+    let ValidatedEquilibriumGuiConfig {
+        problem,
+        inventory,
+        lookup,
+        phase_mode,
+        solver,
+        diagnostics,
+        ..
+    } = config;
+    let (phases, sparse_initial_moles, component_libraries) = phases_and_inventory(&inventory)?;
+    let mut builder =
+        EquilibriumCalculator::from_phases(phases).initial_phase_moles(sparse_initial_moles);
+    if let Some(repository) = repository {
+        builder = builder.with_repository(repository);
+    }
+    match lookup {
+        ValidatedLookup::Default => {
+            if !component_libraries.is_empty() {
+                builder = builder.component_library_instructions(component_libraries);
+            }
+        }
+        ValidatedLookup::Explicit {
+            priority_libraries,
+            permitted_libraries,
+            explicit_search_instructions,
+            search_in_nist,
+        } => {
+            let mut instructions = explicit_search_instructions;
+            instructions.extend(component_libraries);
+            builder = builder
+                .prefer_libraries(priority_libraries)
+                .permit_libraries(permitted_libraries);
+            if !instructions.is_empty() {
+                builder = builder.component_library_instructions(instructions);
+            }
+            if search_in_nist {
+                builder = builder.with_exact_state_nist_fallback();
+            } else {
+                builder = builder.offline_only();
+            }
+        }
+    }
+    builder = builder
+        .solve_options(build_solve_options(&solver, &diagnostics)?)
+        .ph_solve_mode(map_ph_solve_mode(solver.ph_solve_mode));
+    if let ValidatedPhaseMode::Bounded {
+        phase_epsilon,
+        dg_create,
+        dg_keep,
+        max_phase_iterations,
+        initial_phase_policy,
+    } = phase_mode
+    {
+        let policy =
+            PhaseControlPolicy::with_explicit_hysteresis(phase_epsilon, dg_create, dg_keep)?
+                .with_max_phase_iterations(max_phase_iterations)?
+                .with_initial_phase_set(match initial_phase_policy {
+                    GuiInitialPhasePolicyDraft::FromInitialMoles => {
+                        InitialPhaseSet::FromInitialMoles
+                    }
+                    GuiInitialPhasePolicyDraft::AllDeclaredCandidates => {
+                        InitialPhaseSet::AllCandidatePhases
+                    }
+                })?;
+        builder = builder.phase_control(policy);
+    }
+    match problem {
+        ValidatedProblem::FixedPt {
+            pressure_pa,
+            reference_pressure_pa,
+            temperature,
+        } => {
+            builder = builder
+                .pressure_pa(pressure_pa)
+                .reference_pressure_pa(reference_pressure_pa);
+            match temperature {
+                ValidatedTemperature::Point(value) => Ok(builder.at_temperature(value)),
+                ValidatedTemperature::Range {
+                    start_k,
+                    end_k,
+                    point_count,
+                } => Ok(builder.over_temperature_range(linspace(start_k, end_k, point_count))?),
+            }
+        }
+        ValidatedProblem::FixedPh {
+            pressure_pa,
+            reference_pressure_pa,
+            target_enthalpy_j,
+            temperature_bounds,
+        } => Ok(builder
+            .pressure_pa(pressure_pa)
+            .reference_pressure_pa(reference_pressure_pa)
+            .at_total_enthalpy(
+                crate::Thermodynamics::ChemEquilibrium::prelude::TotalEnthalpyJoules::new(
+                    target_enthalpy_j,
+                )?,
+                temperature_bounds.seed_k,
+                TemperatureBounds::new(temperature_bounds.lower_k, temperature_bounds.upper_k)?,
+            )),
+    }
 }
 
-impl EquilibriumGuiPhRequest {
-    fn with_execution_control(mut self, control: EquilibriumExecutionControl) -> Self {
-        self.options = self.options.with_execution_control(control);
-        self
-    }
-
-    fn with_diagnostic_sink<F>(mut self, sink: F) -> Self
-    where
-        F: Fn(EquilibriumDiagnosticEvent) + Send + Sync + 'static,
-    {
-        let diagnostics = self.options.diagnostics_options().clone().with_sink(sink);
-        self.options = self.options.with_diagnostics(diagnostics);
-        self
-    }
-
-    fn solve(self) -> Result<FixedPressureEnthalpySolution, PhaseEquilibriumPipelineError> {
-        let Self {
-            spec,
-            sparse_initial_moles,
-            pressure_pa,
-            reference_pressure_pa,
-            target_enthalpy_j,
-            temperature_bounds,
-            seed_temperature_k,
-            options,
-            phase_control_policy,
-            repository,
-        } = self;
-        let resolved = match repository {
-            Some(repository) => {
-                SubstanceSystemFactory::resolve_phase_system_with_repository(spec, repository)?
-            }
-            None => SubstanceSystemFactory::resolve_phase_system(spec)?,
-        };
-        let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
-        let composition = MultiphaseInitialComposition::from_sparse(&layout, sparse_initial_moles)?;
-        let thermochemistry = ResolvedThermochemistry::from_resolved_system(&resolved)?;
-        let constraint = EquilibriumConstraint::ph(
-            pressure_pa,
-            reference_pressure_pa,
-            target_enthalpy_j,
-            seed_temperature_k,
-        )?;
-        let ph_solve_mode = match thermochemistry.symbolic_for_bounds(temperature_bounds) {
-            Ok(Some(_)) => PhSolveMode::Monolithic,
-            // A broad bracket may cross a native NASA/NIST coefficient switch.
-            // The GUI must keep such a valid numeric request usable, while
-            // never pretending that RST can differentiate a piecewise source
-            // as one smooth symbolic expression.
-            Ok(None) | Err(_) => PhSolveMode::NestedTemperature,
-        };
-        let mut request = ResolvedPhaseEnthalpyRequest::from_resolved_thermochemistry(
-            &resolved,
-            composition,
-            constraint,
-            temperature_bounds,
-            thermochemistry,
-        )?
-        // Prefer the coupled route when the resolved data expose one exact
-        // symbolic coefficient interval. A bracket crossing a native source
-        // boundary remains a valid numeric request, but uses the safeguarded
-        // nested reference route instead of hiding a symbolic capability
-        // error from the GUI user.
-        .with_ph_solve_mode(ph_solve_mode)
-        .with_solve_options(options);
-        if let Some(policy) = phase_control_policy {
-            request = request.with_phase_control_policy(policy);
-        }
-        crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::solve_resolved_ph(request)
-            .map_err(Into::into)
-    }
+/// Wraps the migrated builder in the worker request boundary.
+pub(crate) fn build_equilibrium_facade_request(
+    config: ValidatedEquilibriumGuiConfig,
+    repository: Option<Arc<ThermoRepository>>,
+) -> Result<EquilibriumGuiSolveRequest, EquilibriumGuiRequestError> {
+    Ok(EquilibriumGuiSolveRequest::Facade(
+        build_equilibrium_calculator(config, repository)?,
+    ))
 }
 
 impl EquilibriumGuiSolveRequest {
@@ -139,27 +161,7 @@ impl EquilibriumGuiSolveRequest {
     /// payload or its document fingerprint.
     pub fn with_execution_control(self, control: EquilibriumExecutionControl) -> Self {
         match self {
-            Self::Point(request) => {
-                let options = request
-                    .solve_options()
-                    .clone()
-                    .with_execution_control(control);
-                Self::Point(request.with_solve_options(options))
-            }
-            Self::Range {
-                request,
-                temperatures,
-            } => {
-                let options = request
-                    .solve_options()
-                    .clone()
-                    .with_execution_control(control);
-                Self::Range {
-                    request: request.with_solve_options(options),
-                    temperatures,
-                }
-            }
-            Self::Ph(request) => Self::Ph(request.with_execution_control(control)),
+            Self::Facade(builder) => Self::Facade(builder.execution_control(control)),
         }
     }
 
@@ -174,63 +176,21 @@ impl EquilibriumGuiSolveRequest {
     {
         let sink: Arc<dyn Fn(EquilibriumDiagnosticEvent) + Send + Sync> = Arc::new(sink);
         match self {
-            Self::Point(request) => {
-                let diagnostics = request
-                    .solve_options()
-                    .diagnostics_options()
-                    .clone()
-                    .with_sink({
-                        let sink = Arc::clone(&sink);
-                        move |event| sink(event)
-                    });
-                let options = request
-                    .solve_options()
-                    .clone()
-                    .with_diagnostics(diagnostics);
-                Self::Point(request.with_solve_options(options))
+            Self::Facade(builder) => {
+                Self::Facade(builder.diagnostic_sink(move |event| sink(event)))
             }
-            Self::Range {
-                request,
-                temperatures,
-            } => {
-                let diagnostics = request
-                    .solve_options()
-                    .diagnostics_options()
-                    .clone()
-                    .with_sink({
-                        let sink = Arc::clone(&sink);
-                        move |event| sink(event)
-                    });
-                let options = request
-                    .solve_options()
-                    .clone()
-                    .with_diagnostics(diagnostics);
-                Self::Range {
-                    request: request.with_solve_options(options),
-                    temperatures,
-                }
-            }
-            Self::Ph(request) => Self::Ph(request.with_diagnostic_sink(move |event| sink(event))),
         }
     }
 
     /// Executes through the canonical production orchestration boundary.
-    pub fn solve(self) -> Result<EquilibriumGuiSolveOutcome, PhaseEquilibriumPipelineError> {
+    pub fn solve(self) -> Result<EquilibriumGuiSolveOutcome, EquilibriumGuiRequestError> {
         match self {
-            Self::Point(request) => request.solve().map(EquilibriumGuiSolveOutcome::Point),
-            Self::Range {
-                request,
-                temperatures,
-            } => request
-                .solve_temperature_range(temperatures)
-                .map(EquilibriumGuiSolveOutcome::Range),
-            Self::Ph(request) => request.solve().map(EquilibriumGuiSolveOutcome::Ph),
+            Self::Facade(builder) => {
+                let outcome = builder.solve().map_err(EquilibriumGuiRequestError::from)?;
+                EquilibriumGuiSolveOutcome::from_calculator_outcome(outcome)
+                    .map_err(EquilibriumGuiRequestError::FeatureUnavailable)
+            }
         }
-    }
-
-    /// Whether this request is a temperature continuation.
-    pub const fn is_range(&self) -> bool {
-        matches!(self, Self::Range { .. })
     }
 }
 
@@ -240,6 +200,41 @@ pub enum EquilibriumGuiSolveOutcome {
     Point(ResolvedPhaseEquilibriumOutcome),
     Range(TemperatureRangeSolution),
     Ph(FixedPressureEnthalpySolution),
+    PhRange(PhRangeSolution),
+}
+
+impl EquilibriumGuiSolveOutcome {
+    /// Converts a facade outcome at the GUI boundary without rebuilding or
+    /// copying accepted numerical results. P,T postprocessing is presentation
+    /// data and remains owned by the facade result until the GUI range snapshot
+    /// consumes a dedicated presentation adapter.
+    pub fn from_calculator_outcome(
+        outcome: crate::Thermodynamics::ChemEquilibrium::prelude::EquilibriumCalculatorOutcome,
+    ) -> Result<Self, &'static str> {
+        use crate::Thermodynamics::ChemEquilibrium::prelude::EquilibriumCalculatorOutcome;
+        match outcome {
+            EquilibriumCalculatorOutcome::PtPoint(point) => {
+                let (resolved, solution) = point.into_parts();
+                Ok(Self::Point(
+                    crate::Thermodynamics::ChemEquilibrium::prelude::ResolvedPhaseEquilibriumOutcome::from_parts(
+                        resolved, solution,
+                    ),
+                ))
+            }
+            EquilibriumCalculatorOutcome::PtRange(range) => {
+                let (_, solution, _) = range.into_parts();
+                Ok(Self::Range(solution))
+            }
+            EquilibriumCalculatorOutcome::PhPoint(point) => {
+                let (_, solution) = point.into_parts();
+                Ok(Self::Ph(solution))
+            }
+            EquilibriumCalculatorOutcome::PhRange(range) => {
+                let (_, solution) = range.into_parts();
+                Ok(Self::PhRange(solution))
+            }
+        }
+    }
 }
 
 /// Errors specific to converting an already validated GUI model into an
@@ -252,6 +247,8 @@ pub enum EquilibriumGuiRequestError {
     PhaseSpecification(SubstanceSystemFactoryError),
     /// The production request rejected a typed condition or policy.
     EngineInput(crate::Thermodynamics::ChemEquilibrium::prelude::ReactionExtentError),
+    /// The application facade rejected a typed builder input.
+    Calculator(EquilibriumCalculatorError),
     /// Candidate discovery failed before a solver request could be built.
     CandidateSelection(CandidateSelectionError),
 }
@@ -262,12 +259,19 @@ impl fmt::Display for EquilibriumGuiRequestError {
             Self::FeatureUnavailable(feature) => write!(f, "feature is unavailable: {feature}"),
             Self::PhaseSpecification(error) => write!(f, "phase specification failed: {error}"),
             Self::EngineInput(error) => write!(f, "equilibrium request failed validation: {error}"),
+            Self::Calculator(error) => write!(f, "calculator request failed validation: {error}"),
             Self::CandidateSelection(error) => write!(f, "candidate selection failed: {error}"),
         }
     }
 }
 
 impl std::error::Error for EquilibriumGuiRequestError {}
+
+impl From<EquilibriumCalculatorError> for EquilibriumGuiRequestError {
+    fn from(value: EquilibriumCalculatorError) -> Self {
+        Self::Calculator(value)
+    }
+}
 
 impl From<SubstanceSystemFactoryError> for EquilibriumGuiRequestError {
     fn from(value: SubstanceSystemFactoryError) -> Self {
@@ -371,110 +375,6 @@ fn build_candidate_policy(
     Ok(policy)
 }
 
-/// Builds the canonical production request from a validated GUI config.
-///
-/// No repository lookup occurs here. The request retains an optional shared
-/// repository handle and resolves transactionally only when the worker calls
-/// `solve()`.
-pub fn build_equilibrium_request(
-    config: ValidatedEquilibriumGuiConfig,
-    repository: Option<Arc<ThermoRepository>>,
-) -> Result<EquilibriumGuiSolveRequest, EquilibriumGuiRequestError> {
-    let ValidatedEquilibriumGuiConfig {
-        problem,
-        inventory,
-        lookup,
-        phase_mode,
-        solver,
-        diagnostics,
-        ..
-    } = config;
-
-    let (phases, sparse_initial_moles, component_libraries) = phases_and_inventory(&inventory)?;
-    let mut spec = SubstanceSystemSpec::from_phases(phases)?;
-    apply_lookup_policy(&mut spec, lookup, component_libraries);
-
-    if let ValidatedProblem::FixedPh {
-        pressure_pa,
-        reference_pressure_pa,
-        target_enthalpy_j,
-        temperature_bounds,
-    } = problem
-    {
-        let policy = match phase_mode {
-            ValidatedPhaseMode::FixedDeclared => None,
-            ValidatedPhaseMode::Bounded {
-                phase_epsilon,
-                dg_create,
-                dg_keep,
-                max_phase_iterations,
-            } => Some(
-                PhaseControlPolicy::with_explicit_hysteresis(phase_epsilon, dg_create, dg_keep)?
-                    .with_max_phase_iterations(max_phase_iterations)?,
-            ),
-        };
-        return Ok(EquilibriumGuiSolveRequest::Ph(EquilibriumGuiPhRequest {
-            spec,
-            sparse_initial_moles,
-            pressure_pa,
-            reference_pressure_pa,
-            target_enthalpy_j,
-            temperature_bounds: TemperatureBounds::new(
-                temperature_bounds.lower_k,
-                temperature_bounds.upper_k,
-            )?,
-            seed_temperature_k: temperature_bounds.seed_k,
-            options: build_solve_options(&solver, &diagnostics)?,
-            phase_control_policy: policy,
-            repository,
-        }));
-    }
-
-    let ValidatedProblem::FixedPt {
-        pressure_pa,
-        reference_pressure_pa,
-        temperature,
-    } = problem
-    else {
-        unreachable!("validated equilibrium problem has an unsupported variant")
-    };
-
-    let first_temperature = match &temperature {
-        ValidatedTemperature::Point(value) => *value,
-        ValidatedTemperature::Range { start_k, .. } => *start_k,
-    };
-    let conditions =
-        EquilibriumConditions::new(first_temperature, pressure_pa, reference_pressure_pa)?;
-    let mut request = PhaseEquilibriumPipelineRequest::new_with_sparse_initial_composition(
-        spec,
-        sparse_initial_moles,
-        conditions,
-    );
-    if let Some(repository) = repository {
-        request = request.with_repository(repository);
-    }
-
-    let options = build_solve_options(&solver, &diagnostics)?;
-    request = request.with_solve_options(options);
-    request = apply_phase_mode(request, phase_mode)?;
-
-    match temperature {
-        ValidatedTemperature::Point(_) => Ok(EquilibriumGuiSolveRequest::Point(request)),
-        ValidatedTemperature::Range {
-            start_k,
-            end_k,
-            point_count,
-        } => {
-            let values = linspace(start_k, end_k, point_count);
-            let grid = TemperatureGrid::new(values)?;
-            Ok(EquilibriumGuiSolveRequest::Range {
-                request,
-                temperatures: grid,
-            })
-        }
-    }
-}
-
 fn phases_and_inventory(
     inventory: &ValidatedInventory,
 ) -> Result<
@@ -523,48 +423,6 @@ fn phases_and_inventory(
         specs.push(spec);
     }
     Ok((specs, initial, component_libraries))
-}
-
-fn apply_lookup_policy(
-    spec: &mut SubstanceSystemSpec,
-    lookup: ValidatedLookup,
-    component_libraries: HashMap<String, String>,
-) {
-    match lookup {
-        ValidatedLookup::Default => {
-            if !component_libraries.is_empty() {
-                *spec = spec.clone().with_lookup_policy(
-                    Vec::new(),
-                    Vec::new(),
-                    Some(component_libraries),
-                    false,
-                );
-            }
-        }
-        ValidatedLookup::Explicit {
-            priority_libraries,
-            permitted_libraries,
-            explicit_search_instructions,
-            search_in_nist,
-        } => {
-            let mut instructions = explicit_search_instructions
-                .into_iter()
-                .collect::<HashMap<_, _>>();
-            // A candidate preview is an explicit user confirmation. Its
-            // provenance therefore takes precedence over a broad policy.
-            instructions.extend(component_libraries);
-            let instructions = (!instructions.is_empty()).then_some(instructions);
-            let phases = spec.phases().to_vec();
-            *spec = SubstanceSystemSpec::from_phases(phases)
-                .expect("validated phase specification remains valid")
-                .with_lookup_policy(
-                    priority_libraries,
-                    permitted_libraries,
-                    instructions,
-                    search_in_nist,
-                );
-        }
-    }
 }
 
 fn build_solve_options(
@@ -632,35 +490,18 @@ fn build_solve_options(
         }
         GuiRangeLifecycleTrace::EveryPoint => EquilibriumRangeDiagnosticsPolicy::EveryPoint,
     };
-    options = options.with_diagnostics(
-        EquilibriumDiagnosticsOptions::enabled(diagnostics_mode).with_range_policy(range_policy),
-    );
+    let mut diagnostic_options =
+        EquilibriumDiagnosticsOptions::enabled(diagnostics_mode).with_range_policy(range_policy);
+    if let Some(max_events) = diagnostics.max_lifecycle_events {
+        diagnostic_options = diagnostic_options.with_max_events(max_events);
+    }
+    options = options.with_diagnostics(diagnostic_options);
     options = options.with_keq_validation_mode(match diagnostics.keq_validation {
         GuiKeqValidationMode::Off => EquilibriumConstantValidationMode::Off,
         GuiKeqValidationMode::WhenApplicable => EquilibriumConstantValidationMode::WhenApplicable,
         GuiKeqValidationMode::Required => EquilibriumConstantValidationMode::Required,
     });
     Ok(options)
-}
-
-fn apply_phase_mode(
-    request: PhaseEquilibriumPipelineRequest,
-    phase_mode: ValidatedPhaseMode,
-) -> Result<PhaseEquilibriumPipelineRequest, EquilibriumGuiRequestError> {
-    match phase_mode {
-        ValidatedPhaseMode::FixedDeclared => Ok(request.with_fixed_declared_phases()),
-        ValidatedPhaseMode::Bounded {
-            phase_epsilon,
-            dg_create,
-            dg_keep,
-            max_phase_iterations,
-        } => {
-            let policy =
-                PhaseControlPolicy::with_explicit_hysteresis(phase_epsilon, dg_create, dg_keep)?
-                    .with_max_phase_iterations(max_phase_iterations)?;
-            Ok(request.with_phase_control_policy(policy))
-        }
-    }
 }
 
 fn map_physical_state(
@@ -681,6 +522,14 @@ fn map_phase_model(model: GuiPhaseModel) -> PhaseModel {
         GuiPhaseModel::IdealGas => PhaseModel::IdealGas,
         GuiPhaseModel::IdealSolution => PhaseModel::IdealSolution,
         GuiPhaseModel::PureCondensed => PhaseModel::PureCondensed,
+    }
+}
+
+fn map_ph_solve_mode(mode: GuiPhSolveMode) -> PhSolveMode {
+    match mode {
+        GuiPhSolveMode::Auto => PhSolveMode::Auto,
+        GuiPhSolveMode::Monolithic => PhSolveMode::Monolithic,
+        GuiPhSolveMode::NestedTemperature => PhSolveMode::NestedTemperature,
     }
 }
 
@@ -723,19 +572,54 @@ fn linspace(start: f64, end: f64, count: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::equilibrium_gui_model::{EquilibriumGuiDocument, EquilibriumProblemDraft};
+    use crate::gui::equilibrium_gui_model::{
+        EquilibriumGuiDocument, EquilibriumLookupDraft, EquilibriumProblemDraft,
+    };
 
     #[test]
-    fn default_document_builds_a_point_request_without_opening_the_repository() {
+    fn default_document_builds_a_facade_request_without_opening_the_repository() {
         let validated = EquilibriumGuiDocument::new()
             .validate_for_run()
             .expect("default document is runnable");
-        let request = build_equilibrium_request(validated, None).expect("request builds");
-        assert!(!request.is_range());
+        let request =
+            build_equilibrium_facade_request(validated, None).expect("facade request builds");
+        assert!(matches!(request, EquilibriumGuiSolveRequest::Facade(_)));
     }
 
     #[test]
-    fn descending_range_becomes_a_typed_range_request() {
+    fn validated_document_also_builds_the_application_facade_request() {
+        let validated = EquilibriumGuiDocument::new()
+            .validate_for_run()
+            .expect("default document is runnable");
+        let _builder = build_equilibrium_calculator(validated, None)
+            .expect("validated GUI state must map to the calculator facade");
+    }
+
+    #[test]
+    fn facade_request_executes_and_returns_the_existing_gui_outcome_shape() {
+        // A solve needs a concrete local-library policy. `Default` deliberately
+        // preserves repository defaults and is not itself a promise that every
+        // installation has a searchable catalog configured.
+        let mut document = EquilibriumGuiDocument::new();
+        document.config.lookup = EquilibriumLookupDraft::Explicit {
+            priority_libraries: vec!["NASA_gas".into()],
+            permitted_libraries: vec!["NASA_gas".into()],
+            explicit_search_instructions: Default::default(),
+            search_in_nist: false,
+        };
+        let validated = document
+            .validate_for_run()
+            .expect("default document is runnable");
+        let request = build_equilibrium_facade_request(validated, None)
+            .expect("validated GUI state must build a facade request");
+        let outcome = request
+            .solve()
+            .expect("facade-backed GUI request must solve");
+        assert!(matches!(outcome, EquilibriumGuiSolveOutcome::Point(_)));
+    }
+
+    #[test]
+    fn descending_range_becomes_a_facade_request() {
         let mut document = EquilibriumGuiDocument::new();
         let EquilibriumProblemDraft::FixedPt { temperature, .. } = &mut document.config.problem
         else {
@@ -747,12 +631,13 @@ mod tests {
             point_count: "4".into(),
         };
         let validated = document.validate_for_run().expect("range validates");
-        let request = build_equilibrium_request(validated, None).expect("range request builds");
-        assert!(request.is_range());
+        let request =
+            build_equilibrium_facade_request(validated, None).expect("range facade request builds");
+        assert!(matches!(request, EquilibriumGuiSolveRequest::Facade(_)));
     }
 
     #[test]
-    fn fixed_ph_crosses_the_request_boundary_as_a_typed_request() {
+    fn fixed_ph_crosses_the_facade_request_boundary() {
         let mut document = EquilibriumGuiDocument::new();
         document.config.problem = EquilibriumProblemDraft::FixedPh {
             pressure_pa: "101325".into(),
@@ -762,8 +647,9 @@ mod tests {
                 crate::gui::equilibrium_gui_model::PhTemperatureBoundsDraft::default(),
         };
         let validated = document.validate_for_run().expect("P,H validates");
-        let request = build_equilibrium_request(validated, None).expect("P,H request builds");
-        assert!(matches!(request, EquilibriumGuiSolveRequest::Ph(_)));
+        let request =
+            build_equilibrium_facade_request(validated, None).expect("P,H facade request builds");
+        assert!(matches!(request, EquilibriumGuiSolveRequest::Facade(_)));
     }
 
     #[test]
@@ -783,6 +669,7 @@ mod tests {
         let mut document = EquilibriumGuiDocument::new();
         document.config.diagnostics.phase_lifecycle_trace =
             crate::gui::equilibrium_gui_model::GuiPhaseLifecycleTrace::Detailed;
+        document.config.diagnostics.max_lifecycle_events = "17".into();
         document.config.diagnostics.range_lifecycle_trace =
             crate::gui::equilibrium_gui_model::GuiRangeLifecycleTrace::TransitionsOnly;
         let validated = document.validate_for_run().expect("document validates");
@@ -796,6 +683,7 @@ mod tests {
             options.diagnostics_options().range_policy(),
             EquilibriumRangeDiagnosticsPolicy::TransitionsOnly
         );
+        assert_eq!(options.diagnostics_options().max_events(), 17);
     }
 
     #[test]

@@ -7,8 +7,14 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_calculator::{
+        EquilibriumCalculator, EquilibriumCalculatorOutcome,
+    };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::{
         EquilibriumDiagnosticEvent, EquilibriumDiagnosticsMode, EquilibriumDiagnosticsOptions,
+    };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::{
+        ElementInventory, FormalElementCarrier,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
         EquilibriumExecutionControl, EquilibriumProgressStage,
@@ -46,26 +52,31 @@ mod tests {
     };
     use crate::Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite::{
         ResolvedNasaTp1907ChonGraphiteFixture, TP1907_GAS_PHASE, TP1907_GRAPHITE_PHASE,
-        TP1907_LOCAL_GAS_SPECIES, graphite_component, load_nasa_tp1907_chon_graphite_dataset,
-        reconstructed_source_feed, validate_published_feed_diagnostics,
-        verify_element_equivalent_feed,
+        TP1907_LOCAL_GAS_SPECIES, TP1907_REFERENCE_PRESSURE_PA, graphite_component,
+        load_nasa_tp1907_chon_graphite_dataset, reconstructed_source_feed,
+        validate_published_feed_diagnostics, verify_element_equivalent_feed,
     };
     use crate::Thermodynamics::ChemEquilibrium::phase_boundary_production_adapter::{
         PurePhaseProductionEvidenceRequest, activation_evidence_from_solution,
         stable_inactive_evidence_from_solution,
     };
     use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-        PhaseEquilibriumBuildRequest, build_phase_equilibrium_problem,
+        PhaseEquilibriumBuildRequest, PhaseEquilibriumInputKind, build_phase_equilibrium_problem,
     };
     use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::MultiphaseEquilibriumSolution;
     use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
         EquilibriumSolveOptions, ExtensiveNormalizationPolicy, ResolvedPhaseEquilibriumRequest,
         solve_resolved_pt,
     };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RustedSciTheSolver;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
+        SolverBackend, SolverPolicy,
+    };
     use crate::Thermodynamics::ChemEquilibrium::prelude::PhaseControlPolicy;
     use crate::Thermodynamics::ChemEquilibrium::prepared_phase_control_runner::{
         PreparedPhaseControlOutcome, PreparedPhaseControlRunner,
     };
+    use crate::Thermodynamics::User_PhaseOrSolution::element_composition_and_molar_mass;
     use crate::Thermodynamics::phase_layout::PhaseId;
     use crate::Thermodynamics::thermo_lib_api::{ThermoData, ThermoRepository};
     use crate::library_manager::with_library_manager;
@@ -854,6 +865,84 @@ mod tests {
             / total
     }
 
+    fn frozen_element_inventory(
+        fixture: &ResolvedNasaTp1907ChonGraphiteFixture,
+        initial: &MultiphaseInitialComposition,
+    ) -> (ElementInventory, Vec<String>, Vec<f64>) {
+        let layout = MultiphaseEquilibriumLayout::new(fixture.resolved().phase_specs().to_vec())
+            .expect("TP-1907 calculator layout must remain valid");
+        let (element_matrix, _, element_labels) = element_composition_and_molar_mass(
+            fixture.resolved().phase_data(),
+            fixture.resolved().layout(),
+            None,
+        )
+        .expect("TP-1907 element matrix must remain available");
+        let totals = initial
+            .element_totals(&layout, &element_matrix)
+            .expect("TP-1907 reference b must be derivable as A^T n_initial");
+        let inventory = ElementInventory::from_amounts(
+            element_labels.iter().cloned().zip(totals.iter().copied()),
+        )
+        .expect("TP-1907 reference elemental inventory must validate");
+        (inventory, element_labels, totals)
+    }
+
+    fn calculator_tp1907_builder(
+        fixture: &ResolvedNasaTp1907ChonGraphiteFixture,
+        repository: Arc<ThermoRepository>,
+    ) -> crate::Thermodynamics::ChemEquilibrium::equilibrium_calculator::EquilibriumCalculatorBuilder
+    {
+        EquilibriumCalculator::from_phases(fixture.resolved().phase_specs().iter().cloned())
+            .with_repository(repository)
+            .prefer_libraries(["NASA_gas", "NASA_cond"])
+            .offline_only()
+            .pressure_pa(TP1907_REFERENCE_PRESSURE_PA)
+            .reference_pressure_pa(TP1907_REFERENCE_PRESSURE_PA)
+            .phase_control(PhaseControlPolicy::default())
+            .production_cascade()
+    }
+
+    fn calculator_tp1907_pt(
+        fixture: &ResolvedNasaTp1907ChonGraphiteFixture,
+        repository: Arc<ThermoRepository>,
+        temperature_k: f64,
+        initial: Option<Vec<f64>>,
+        inventory: Option<ElementInventory>,
+    ) -> crate::Thermodynamics::ChemEquilibrium::equilibrium_calculator::EquilibriumCalculatorPoint
+    {
+        let builder = calculator_tp1907_builder(fixture, repository).at_temperature(temperature_k);
+        let outcome = match (initial, inventory) {
+            (Some(moles), None) => builder.initial_moles(moles).solve(),
+            (None, Some(inventory)) => builder.element_inventory(inventory).solve(),
+            _ => panic!("TP-1907 calculator test requires exactly one physical input"),
+        }
+        .expect("TP-1907 calculator P,T route must solve");
+        match outcome {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected TP-1907 calculator P,T point, got {other:?}"),
+        }
+    }
+
+    fn calculator_tp1907_pt_with_element_seed(
+        fixture: &ResolvedNasaTp1907ChonGraphiteFixture,
+        repository: Arc<ThermoRepository>,
+        temperature_k: f64,
+        inventory: ElementInventory,
+        seed: MultiphaseInitialComposition,
+    ) -> crate::Thermodynamics::ChemEquilibrium::equilibrium_calculator::EquilibriumCalculatorPoint
+    {
+        let outcome = calculator_tp1907_builder(fixture, repository)
+            .at_temperature(temperature_k)
+            .element_inventory(inventory)
+            .element_numerical_seed(seed)
+            .solve()
+            .expect("TP-1907 seeded elemental calculator P,T route must solve");
+        match outcome {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected seeded TP-1907 calculator P,T point, got {other:?}"),
+        }
+    }
+
     fn assert_tp1907_external_regression_envelope(
         fixture: &ResolvedNasaTp1907ChonGraphiteFixture,
         reference: &NasaTp1907MultiphaseReference,
@@ -976,6 +1065,550 @@ mod tests {
         );
         assert_eq!(before_local, local_library_snapshot());
         assert_eq!(before_frozen, frozen_snapshot());
+    }
+
+    #[test]
+    fn tp1907_frozen_pt_molecular_elemental_and_formal_routes_match() {
+        let before_local = local_library_snapshot();
+        let before_frozen = frozen_snapshot();
+        let fixture = fixture();
+        let frozen_dataset = dataset();
+        let reference = frozen_dataset
+            .rows()
+            .iter()
+            .find(|row| row.temperature_k == 700.0)
+            .expect("TP-1907 frozen P,T row at 700 K must remain available");
+        let initial = fixture
+            .initial_composition()
+            .expect("TP-1907 molecular source feed must validate");
+        let (inventory, element_labels, reference_b) = frozen_element_inventory(&fixture, &initial);
+        let formal_carriers = element_labels
+            .iter()
+            .zip(reference_b.iter().copied())
+            .map(|(element, amount)| {
+                FormalElementCarrier::new(element.clone(), amount)
+                    .expect("TP-1907 formal element carrier must validate")
+            })
+            .collect::<Vec<_>>();
+        let formal_inventory = ElementInventory::from_formal_carriers(formal_carriers)
+            .expect("TP-1907 formal carriers must reconstruct reference b");
+
+        let molecular = calculator_tp1907_pt(
+            &fixture,
+            repository(),
+            reference.temperature_k,
+            Some(initial.moles().to_vec()),
+            None,
+        );
+        let elemental = calculator_tp1907_pt(
+            &fixture,
+            repository(),
+            reference.temperature_k,
+            None,
+            Some(inventory),
+        );
+        let formal = calculator_tp1907_pt(
+            &fixture,
+            repository(),
+            reference.temperature_k,
+            None,
+            Some(formal_inventory),
+        );
+
+        let expected_components = molecular
+            .solution()
+            .metadata()
+            .components()
+            .iter()
+            .map(|component| component.id().clone())
+            .collect::<Vec<_>>();
+        let expected_phases = molecular
+            .solution()
+            .metadata()
+            .phases()
+            .iter()
+            .map(|phase| phase.id().clone())
+            .collect::<Vec<_>>();
+        let expected_topology = expected_phases
+            .iter()
+            .map(|phase| (phase.clone(), molecular.solution().phase_status(phase)))
+            .collect::<Vec<_>>();
+
+        for (route, point) in [("elemental", &elemental), ("formal", &formal)] {
+            assert_eq!(
+                point.resolved().phase_specs(),
+                molecular.resolved().phase_specs(),
+                "{route} route changed the explicit frozen universe"
+            );
+            let solution = point.solution();
+            assert_eq!(
+                solution
+                    .metadata()
+                    .components()
+                    .iter()
+                    .map(|component| component.id().clone())
+                    .collect::<Vec<_>>(),
+                expected_components,
+                "{route} route changed component identity/order"
+            );
+            assert_eq!(
+                solution
+                    .metadata()
+                    .phases()
+                    .iter()
+                    .map(|phase| phase.id().clone())
+                    .collect::<Vec<_>>(),
+                expected_phases,
+                "{route} route changed phase topology layout"
+            );
+            assert_eq!(
+                solution.build_report().input_kind(),
+                PhaseEquilibriumInputKind::ElementInventory
+            );
+            assert_eq!(solution.build_report().element_labels(), &element_labels);
+            for (index, (&expected, &actual)) in solution
+                .build_report()
+                .element_totals()
+                .iter()
+                .zip(reference_b.iter())
+                .enumerate()
+            {
+                assert!(
+                    (expected - actual).abs() <= 1.0e-12,
+                    "{route} reference b mismatch at element {index}: actual={actual:e}, expected={expected:e}"
+                );
+            }
+            for (phase, expected_status) in &expected_topology {
+                assert_eq!(
+                    solution.phase_status(phase),
+                    *expected_status,
+                    "{route} phase status changed for {phase:?}"
+                );
+            }
+            for component in solution.metadata().components() {
+                assert!(
+                    !element_labels.iter().any(|element| {
+                        component.id().substance == *element
+                            && component.id().phase.as_option().is_none()
+                    }),
+                    "formal elemental carriers must not become bare thermodynamic components"
+                );
+            }
+            for (index, (&expected, &actual)) in molecular
+                .solution()
+                .component_moles()
+                .iter()
+                .zip(solution.component_moles())
+                .enumerate()
+            {
+                let relative =
+                    (expected - actual).abs() / expected.abs().max(actual.abs()).max(1.0e-12);
+                assert!(
+                    relative <= 1.0e-6 || (expected - actual).abs() <= 1.0e-10,
+                    "{route} component {index} mismatch: molecular={expected:e}, actual={actual:e}, relative={relative:e}"
+                );
+            }
+            for component in molecular.solution().metadata().components() {
+                let expected_fraction = molecular
+                    .solution()
+                    .mole_fraction_for(component.id())
+                    .expect("molecular component fraction must exist");
+                let actual_fraction = solution
+                    .mole_fraction_for(component.id())
+                    .expect("elemental component fraction must exist");
+                assert!(
+                    (expected_fraction - actual_fraction).abs() <= 1.0e-8,
+                    "{route} fraction mismatch for {}: molecular={expected_fraction:e}, actual={actual_fraction:e}",
+                    component.id().label()
+                );
+            }
+            let expected_validation = molecular.solution().accepted_solution().validation();
+            let actual_validation = solution.accepted_solution().validation();
+            assert!(actual_validation.residual_l2_norm < 1.0e-5);
+            assert!(
+                (expected_validation.residual_l2_norm - actual_validation.residual_l2_norm).abs()
+                    <= 1.0e-5,
+                "{route} residual quality changed: molecular={:e}, actual={:e}",
+                expected_validation.residual_l2_norm,
+                actual_validation.residual_l2_norm
+            );
+            assert!(actual_validation.max_abs_element_balance_error <= 1.0e-6);
+
+            let rows = fixture
+                .compare_system_composition(reference, solution)
+                .expect("{route} result must align with frozen TP-1907 identities");
+            let max_external_discrepancy = rows
+                .iter()
+                .filter_map(|row| row.absolute_error.map(f64::abs))
+                .fold(0.0_f64, f64::max);
+            println!(
+                "TP-1907 frozen P,T route={route} T={} K b={reference_b:?} max_external_absolute_discrepancy={max_external_discrepancy:e} residual={:e} balance={:e}",
+                reference.temperature_k,
+                actual_validation.residual_l2_norm,
+                actual_validation.max_abs_element_balance_error,
+            );
+            assert_tp1907_external_regression_envelope(&fixture, reference, solution);
+        }
+
+        assert_eq!(before_local, local_library_snapshot());
+        assert_eq!(before_frozen, frozen_snapshot());
+    }
+
+    fn assert_tp1907_facade_inventory_scale(scale: f64, class: &str) {
+        let before_local = local_library_snapshot();
+        let before_frozen = frozen_snapshot();
+        let fixture = fixture();
+        let frozen_dataset = dataset();
+        let reference = frozen_dataset
+            .rows()
+            .iter()
+            .find(|row| row.temperature_k == 700.0)
+            .expect("TP-1907 frozen P,T row at 700 K must remain available");
+        let initial = scaled_initial_composition(&fixture, scale);
+        let (inventory, element_labels, reference_b) = frozen_element_inventory(&fixture, &initial);
+        let formal_inventory = ElementInventory::from_formal_carriers(
+            element_labels
+                .iter()
+                .zip(reference_b.iter().copied())
+                .map(|(element, amount)| {
+                    FormalElementCarrier::new(element.clone(), amount)
+                        .expect("scaled TP-1907 formal carrier must validate")
+                }),
+        )
+        .expect("scaled TP-1907 formal carriers must reconstruct b");
+
+        let molecular = calculator_tp1907_pt(
+            &fixture,
+            repository(),
+            reference.temperature_k,
+            Some(initial.moles().to_vec()),
+            None,
+        );
+        let elemental = calculator_tp1907_pt_with_element_seed(
+            &fixture,
+            repository(),
+            reference.temperature_k,
+            inventory,
+            initial.clone(),
+        );
+        let formal = calculator_tp1907_pt_with_element_seed(
+            &fixture,
+            repository(),
+            reference.temperature_k,
+            formal_inventory,
+            initial,
+        );
+
+        let expected_components = molecular
+            .solution()
+            .metadata()
+            .components()
+            .iter()
+            .map(|component| component.id().clone())
+            .collect::<Vec<_>>();
+        let expected_phases = molecular
+            .solution()
+            .metadata()
+            .phases()
+            .iter()
+            .map(|phase| phase.id().clone())
+            .collect::<Vec<_>>();
+        let expected_topology = expected_phases
+            .iter()
+            .map(|phase| (phase.clone(), molecular.solution().phase_status(phase)))
+            .collect::<Vec<_>>();
+
+        for (route, point) in [("elemental", &elemental), ("formal", &formal)] {
+            let solution = point.solution();
+            assert_eq!(
+                point.resolved().phase_specs(),
+                molecular.resolved().phase_specs(),
+                "{class} {route} route changed the frozen universe"
+            );
+            assert_eq!(
+                solution
+                    .metadata()
+                    .components()
+                    .iter()
+                    .map(|component| component.id().clone())
+                    .collect::<Vec<_>>(),
+                expected_components,
+                "{class} {route} route changed component identity/order"
+            );
+            assert_eq!(
+                solution
+                    .metadata()
+                    .phases()
+                    .iter()
+                    .map(|phase| phase.id().clone())
+                    .collect::<Vec<_>>(),
+                expected_phases,
+                "{class} {route} route changed phase order"
+            );
+            assert_eq!(
+                solution.build_report().input_kind(),
+                PhaseEquilibriumInputKind::ElementInventory
+            );
+            assert_eq!(solution.build_report().element_labels(), &element_labels);
+            for (index, (&expected, &actual)) in solution
+                .build_report()
+                .element_totals()
+                .iter()
+                .zip(reference_b.iter())
+                .enumerate()
+            {
+                assert!(
+                    (expected - actual).abs() <= 1.0e-10 * expected.abs().max(1.0),
+                    "{class} {route} b mismatch at element {index}: actual={actual:e}, expected={expected:e}"
+                );
+            }
+            for (phase, expected_status) in &expected_topology {
+                assert_eq!(
+                    solution.phase_status(phase),
+                    *expected_status,
+                    "{class} {route} phase status changed for {phase:?}"
+                );
+            }
+            for (index, (&expected, &actual)) in molecular
+                .solution()
+                .component_moles()
+                .iter()
+                .zip(solution.component_moles())
+                .enumerate()
+            {
+                let relative =
+                    (expected - actual).abs() / expected.abs().max(actual.abs()).max(1.0e-12);
+                assert!(
+                    relative <= 1.0e-5 || (expected - actual).abs() <= 1.0e-10,
+                    "{class} {route} component {index} mismatch: molecular={expected:e}, actual={actual:e}, relative={relative:e}"
+                );
+            }
+            for component in molecular.solution().metadata().components() {
+                let expected_fraction = molecular
+                    .solution()
+                    .mole_fraction_for(component.id())
+                    .expect("molecular fraction must exist");
+                let actual_fraction = solution
+                    .mole_fraction_for(component.id())
+                    .expect("elemental fraction must exist");
+                assert!(
+                    (expected_fraction - actual_fraction).abs() <= 1.0e-8,
+                    "{class} {route} fraction mismatch for {}",
+                    component.id().label()
+                );
+            }
+            let validation = solution.accepted_solution().validation();
+            assert!(
+                validation.residual_l2_norm < 1.0e-5,
+                "{class} {route} residual={:e}",
+                validation.residual_l2_norm
+            );
+            assert!(
+                validation.max_abs_element_balance_error <= 1.0e-6,
+                "{class} {route} balance={:e}",
+                validation.max_abs_element_balance_error
+            );
+            assert_tp1907_external_regression_envelope(&fixture, reference, solution);
+            println!(
+                "TP-1907 frozen facade scale={scale:e} class={class} route={route} total_b={:.6e} residual={:.3e} balance={:.3e}",
+                reference_b.iter().sum::<f64>(),
+                validation.residual_l2_norm,
+                validation.max_abs_element_balance_error,
+            );
+        }
+
+        assert_eq!(before_local, local_library_snapshot());
+        assert_eq!(before_frozen, frozen_snapshot());
+    }
+
+    #[test]
+    fn tp1907_frozen_facade_small_inventory_matches_the_same_oracle() {
+        assert_tp1907_facade_inventory_scale(1.0e-3, "small");
+    }
+
+    #[test]
+    fn tp1907_frozen_facade_medium_inventory_matches_the_same_oracle() {
+        assert_tp1907_facade_inventory_scale(1.0e-1, "medium");
+    }
+
+    #[test]
+    fn tp1907_frozen_facade_large_inventory_matches_the_same_oracle() {
+        assert_tp1907_facade_inventory_scale(1.0e1, "large");
+    }
+
+    #[test]
+    fn tp1907_frozen_facade_very_large_inventory_matches_the_same_oracle() {
+        assert_tp1907_facade_inventory_scale(1.0e2, "very-large");
+    }
+
+    #[test]
+    fn tp1907_frozen_facade_extreme_inventory_matches_the_same_oracle() {
+        assert_tp1907_facade_inventory_scale(1.0e3, "extreme");
+    }
+
+    #[test]
+    fn tp1907_frozen_facade_beyond_extreme_inventory_matches_the_same_oracle() {
+        assert_tp1907_facade_inventory_scale(1.0e4, "beyond-extreme");
+    }
+
+    #[test]
+    fn tp1907_frozen_facade_high_inventory_matches_the_same_oracle() {
+        assert_tp1907_facade_inventory_scale(1.0e6, "high");
+    }
+
+    #[test]
+    fn tp1907_frozen_facade_upper_inventory_matches_the_same_oracle() {
+        assert_tp1907_facade_inventory_scale(1.0e8, "upper");
+    }
+
+    #[test]
+    fn tp1907_upper_inventory_is_backend_invariant() {
+        let fixture = fixture();
+        let repository = repository();
+        let frozen_dataset = dataset();
+        let reference = frozen_dataset
+            .rows()
+            .iter()
+            .find(|row| row.temperature_k == 700.0)
+            .expect("TP-1907 frozen P,T row at 700 K must remain available");
+        let initial = scaled_initial_composition(&fixture, 1.0e8);
+        let (inventory, element_labels, reference_b) = frozen_element_inventory(&fixture, &initial);
+        let molecular = calculator_tp1907_pt(
+            &fixture,
+            repository.clone(),
+            reference.temperature_k,
+            Some(initial.moles().to_vec()),
+            None,
+        );
+        let backends = [
+            ("rst-lm", SolverBackend::RustedSciThe(RustedSciTheSolver::LevenbergMarquardt)),
+            (
+                "rst-minpack-lm",
+                SolverBackend::RustedSciThe(RustedSciTheSolver::MinpackLevenbergMarquardt),
+            ),
+            (
+                "rst-nielsen-lm",
+                SolverBackend::RustedSciThe(RustedSciTheSolver::NielsenLevenbergMarquardt),
+            ),
+            (
+                "rst-trust-region-lm",
+                SolverBackend::RustedSciThe(RustedSciTheSolver::TrustRegionLevenbergMarquardt),
+            ),
+            ("rst-damped-newton", SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton)),
+            ("legacy-lm", SolverBackend::Legacy(Solvers::LM)),
+            ("legacy-nr", SolverBackend::Legacy(Solvers::NR)),
+            ("legacy-tr", SolverBackend::Legacy(Solvers::TR)),
+        ];
+        let mut failures = Vec::new();
+        let mut successes = Vec::new();
+
+        for (name, backend) in backends {
+            let options = EquilibriumSolveOptions::default()
+                .with_max_iterations(500)
+                .expect("backend invariant iteration budget must validate")
+                .with_tolerance(1.0e-12)
+                .expect("backend invariant tolerance must validate");
+            let outcome = match calculator_tp1907_builder(&fixture, repository.clone())
+                .solve_options(options)
+                .solver_policy(SolverPolicy::Single(backend))
+                .expect("single backend policy must validate")
+                .at_temperature(reference.temperature_k)
+                .element_inventory(inventory.clone())
+                .element_numerical_seed(initial.clone())
+                .solve()
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    println!(
+                        "TP-1907 backend={name} scale=1e8 FAILED error={error:?}",
+                    );
+                    failures.push(name);
+                    continue;
+                }
+            };
+            let point = match outcome {
+                EquilibriumCalculatorOutcome::PtPoint(point) => point,
+                other => panic!("{name} returned unexpected outcome: {other:?}"),
+            };
+            let solution = point.solution();
+            assert_eq!(
+                solution.build_report().element_labels(),
+                &element_labels,
+                "{name} changed the canonical element order"
+            );
+            for (index, (&expected, &actual)) in solution
+                .build_report()
+                .element_totals()
+                .iter()
+                .zip(reference_b.iter())
+                .enumerate()
+            {
+                assert!(
+                    (expected - actual).abs() <= 1.0e-10 * expected.abs().max(1.0),
+                    "{name} changed b at element {index}: actual={actual:e}, expected={expected:e}"
+                );
+            }
+            assert_eq!(
+                active_phase_topology(solution),
+                active_phase_topology(molecular.solution()),
+                "{name} changed the accepted phase topology"
+            );
+            assert!(
+                solution
+                    .component_moles()
+                    .iter()
+                    .all(|amount| amount.is_finite() && *amount >= 0.0),
+                "{name} published invalid physical moles"
+            );
+            let validation = solution.accepted_solution().validation();
+            assert!(
+                validation.residual_l2_norm < 1.0e-5,
+                "{name} residual={:e}",
+                validation.residual_l2_norm
+            );
+            assert!(
+                validation.max_abs_element_balance_error
+                    <= 1.0e-12 * reference_b.iter().sum::<f64>(),
+                "{name} relative balance={:e}",
+                validation.max_abs_element_balance_error / reference_b.iter().sum::<f64>()
+            );
+            for (index, (&expected, &actual)) in molecular
+                .solution()
+                .component_moles()
+                .iter()
+                .zip(solution.component_moles())
+                .enumerate()
+            {
+                let relative =
+                    (expected - actual).abs() / expected.abs().max(actual.abs()).max(1.0e-12);
+                assert!(
+                    relative <= 1.0e-5 || (expected - actual).abs() <= 1.0e-10,
+                    "{name} component {index} differs from molecular oracle: relative={relative:e}"
+                );
+            }
+            println!(
+                "TP-1907 backend={name} scale=1e8 residual={:.3e} balance={:.3e}",
+                validation.residual_l2_norm,
+                validation.max_abs_element_balance_error,
+            );
+            successes.push(name);
+        }
+        assert_eq!(
+            successes,
+            vec![
+                "rst-minpack-lm",
+                "rst-trust-region-lm",
+                "legacy-lm",
+                "legacy-nr",
+                "legacy-tr",
+            ],
+            "accepted backend matrix changed at inventory scale 1e8"
+        );
+        assert_eq!(
+            failures,
+            vec!["rst-lm", "rst-nielsen-lm", "rst-damped-newton"],
+            "isolated backend failure matrix changed at inventory scale 1e8"
+        );
     }
 
     #[test]

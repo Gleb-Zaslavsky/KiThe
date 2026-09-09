@@ -7,6 +7,7 @@
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::{
     EquilibriumDiagnosticEvent, PhaseStabilityDiagnostic,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_range::PhRangeSolveReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::{
     FixedPressureEnthalpySolution, PhRouteDecision,
 };
@@ -728,6 +729,7 @@ pub struct EquilibriumGuiResultSnapshot {
     phase_labels: Vec<String>,
     points: Vec<EquilibriumGuiPointSnapshot>,
     range_report: Option<TemperatureRangeSolveReport>,
+    ph_range_report: Option<PhRangeSolveReport>,
     enthalpy: Option<EquilibriumGuiEnthalpySnapshot>,
     ph_diagnostics: Option<EquilibriumGuiPhDiagnosticsSnapshot>,
 }
@@ -743,7 +745,7 @@ impl EquilibriumGuiResultSnapshot {
         match outcome {
             EquilibriumGuiSolveOutcome::Point(solution) => {
                 let source = Arc::new(solution.solution().clone());
-                Self::from_sources(vec![source], None, None, None)
+                Self::from_sources(vec![source], None, None, None, None)
             }
             EquilibriumGuiSolveOutcome::Range(range) => {
                 let sources = range
@@ -751,7 +753,7 @@ impl EquilibriumGuiResultSnapshot {
                     .iter()
                     .map(|point| Arc::new(point.solution().clone()))
                     .collect();
-                Self::from_sources(sources, Some(range.report().clone()), None, None)
+                Self::from_sources(sources, Some(range.report().clone()), None, None, None)
             }
             EquilibriumGuiSolveOutcome::Ph(solution) => {
                 let source = Arc::new(solution.equilibrium().clone());
@@ -763,7 +765,21 @@ impl EquilibriumGuiResultSnapshot {
                     relative_enthalpy_error: solution.enthalpy_error().abs()
                         / solution.target_enthalpy().abs().max(1.0),
                 };
-                Self::from_sources(vec![source], None, Some(enthalpy), Some(ph_diagnostics))
+                Self::from_sources(
+                    vec![source],
+                    None,
+                    Some(enthalpy),
+                    Some(ph_diagnostics),
+                    None,
+                )
+            }
+            EquilibriumGuiSolveOutcome::PhRange(range) => {
+                let sources = range
+                    .points()
+                    .iter()
+                    .map(|point| Arc::new(point.solution().equilibrium().clone()))
+                    .collect();
+                Self::from_sources(sources, None, None, None, Some(range.report().clone()))
             }
         }
     }
@@ -773,6 +789,7 @@ impl EquilibriumGuiResultSnapshot {
         range_report: Option<TemperatureRangeSolveReport>,
         enthalpy: Option<EquilibriumGuiEnthalpySnapshot>,
         ph_diagnostics: Option<EquilibriumGuiPhDiagnosticsSnapshot>,
+        ph_range_report: Option<PhRangeSolveReport>,
     ) -> Result<Self, String> {
         let first = sources
             .first()
@@ -904,6 +921,7 @@ impl EquilibriumGuiResultSnapshot {
             phase_labels,
             points,
             range_report,
+            ph_range_report,
             enthalpy,
             ph_diagnostics,
         })
@@ -927,7 +945,12 @@ impl EquilibriumGuiResultSnapshot {
     }
 
     pub fn is_range(&self) -> bool {
-        self.range_report.is_some()
+        self.range_report.is_some() || self.ph_range_report.is_some()
+    }
+
+    /// P,H range continuation and timing evidence, when applicable.
+    pub fn ph_range_report(&self) -> Option<&PhRangeSolveReport> {
+        self.ph_range_report.as_ref()
     }
 
     /// Returns the energy contract for a `P,H` result, if this snapshot came
@@ -1081,7 +1104,7 @@ mod tests {
 
     #[test]
     fn source_snapshot_requires_an_accepted_point() {
-        let error = EquilibriumGuiResultSnapshot::from_sources(Vec::new(), None, None, None)
+        let error = EquilibriumGuiResultSnapshot::from_sources(Vec::new(), None, None, None, None)
             .expect_err("an empty worker outcome must be rejected");
         assert!(error.contains("contains no points"));
     }
@@ -1093,7 +1116,7 @@ mod tests {
         let second = accepted_real_solution(&["H2", "O2"], vec![0.1, 0.05]);
 
         let error =
-            EquilibriumGuiResultSnapshot::from_sources(vec![first, second], None, None, None)
+            EquilibriumGuiResultSnapshot::from_sources(vec![first, second], None, None, None, None)
                 .expect_err("a range with incompatible accepted layouts must be rejected");
         assert!(
             error.contains("different layout fingerprint"),
@@ -1109,8 +1132,9 @@ mod tests {
         validation.min_moles *= 2.0;
         let malformed = Arc::new(source.as_ref().clone().with_validation_for_test(validation));
 
-        let error = EquilibriumGuiResultSnapshot::from_sources(vec![malformed], None, None, None)
-            .expect_err("a candidate with mismatched validation must not publish");
+        let error =
+            EquilibriumGuiResultSnapshot::from_sources(vec![malformed], None, None, None, None)
+                .expect_err("a candidate with mismatched validation must not publish");
         assert!(
             error.contains("validation evidence inconsistent with physical moles"),
             "unexpected validation mismatch error: {error}"
