@@ -1670,7 +1670,7 @@ impl TGADataset {
         let mut decreasing_pairs = Vec::new();
         let mut prev_valid: Option<(usize, f64)> = None;
 
-        for (idx, maybe_t) in time.into_iter().enumerate() {
+        for (idx, maybe_t) in time.iter().enumerate() {
             match maybe_t {
                 None => null_indices.push(idx),
                 Some(t) if t.is_nan() => nan_indices.push(idx),

@@ -392,7 +392,7 @@ impl TGADataset {
         let mut df = self.frame.clone().collect()?;
         let s = df.column(col)?.f64()?;
 
-        let values: Vec<Option<f64>> = s.into_iter().collect();
+        let values: Vec<Option<f64>> = s.iter().collect();
         let raw_values: Vec<f64> = values.iter().filter_map(|v| *v).collect();
         let is_drop = matches!(&strategy, HampelStrategy::Drop);
         let n = values.len();

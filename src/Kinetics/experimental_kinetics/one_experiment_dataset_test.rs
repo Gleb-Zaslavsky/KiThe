@@ -833,7 +833,7 @@ pub mod tests {
             .unwrap()
             .f64()
             .unwrap()
-            .into_iter()
+            .iter()
             .flatten()
             .collect();
         let deta_dt: Vec<f64> = ds_eta
@@ -845,7 +845,7 @@ pub mod tests {
             .unwrap()
             .f64()
             .unwrap()
-            .into_iter()
+            .iter()
             .flatten()
             .collect();
 

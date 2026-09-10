@@ -391,7 +391,7 @@ impl TGADataset {
         let y = df.column(&y_col)?.f64()?;
 
         let mut best: Option<f64> = None;
-        for (ox, oy) in x.into_iter().zip(y.into_iter()) {
+        for (ox, oy) in x.iter().zip(y.iter()) {
             if let (Some(px), Some(py)) = (ox, oy) {
                 let dx = px - point.0;
                 let dy = py - point.1;
@@ -422,7 +422,7 @@ impl TGADataset {
         let y = df.column(&y_col)?.f64()?;
 
         let (x_min, x_max) = x
-            .into_iter()
+            .iter()
             .flatten()
             .fold(None, |acc: Option<(f64, f64)>, v| {
                 Some(match acc {
@@ -437,7 +437,7 @@ impl TGADataset {
                 ))
             })?;
         let (y_min, y_max) = y
-            .into_iter()
+            .iter()
             .flatten()
             .fold(None, |acc: Option<(f64, f64)>, v| {
                 Some(match acc {
@@ -550,7 +550,7 @@ impl TGADataset {
         let col = df.column(col_name)?.f64()?;
 
         let indices: Vec<usize> = col
-            .into_iter()
+            .iter()
             .enumerate()
             .filter_map(|(i, val)| {
                 val.and_then(|v| {

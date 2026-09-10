@@ -78,8 +78,8 @@ mod tests {
         let mut filtered = Vec::new();
 
         for (reference_value, candidate_value) in reference_values
-            .into_iter()
-            .zip(candidate_values.into_iter())
+            .iter()
+            .zip(candidate_values.iter())
         {
             if let (Some(raw_value), Some(filtered_value)) = (reference_value, candidate_value) {
                 raw.push(raw_value);
@@ -1002,7 +1002,7 @@ mod tests {
         );
 
         let time_splined = df.column("time_splined").unwrap().f64().unwrap();
-        let non_null: Vec<f64> = time_splined.into_iter().flatten().collect();
+        let non_null: Vec<f64> = time_splined.iter().flatten().collect();
         assert!(!non_null.is_empty());
         assert!(non_null.iter().all(|v| v.is_finite()));
         assert!(non_null.windows(2).all(|pair| pair[1] > pair[0]));
@@ -1043,7 +1043,7 @@ mod tests {
         let (ds2, _) = ds.apply_golden_pipeline(cfg).unwrap();
         let df = ds2.frame.collect().unwrap();
         let time_splined = df.column("time_splined").unwrap().f64().unwrap();
-        let non_null: Vec<f64> = time_splined.into_iter().flatten().collect();
+        let non_null: Vec<f64> = time_splined.iter().flatten().collect();
         assert!(non_null.windows(2).all(|pair| pair[1] > pair[0]));
     }
 
@@ -1096,7 +1096,7 @@ mod tests {
             .unwrap()
             .f64()
             .unwrap()
-            .into_iter()
+            .iter()
             .flatten()
             .collect();
         let time_vals: Vec<f64> = df
@@ -1104,7 +1104,7 @@ mod tests {
             .unwrap()
             .f64()
             .unwrap()
-            .into_iter()
+            .iter()
             .flatten()
             .collect();
         assert!(!mass_vals.is_empty());
@@ -1140,8 +1140,8 @@ mod tests {
         assert_eq!(mass_lsq.null_count(), 700);
         assert_eq!(time_lsq.null_count(), 700);
 
-        let mass_vals: Vec<f64> = mass_lsq.f64().unwrap().into_iter().flatten().collect();
-        let time_vals: Vec<f64> = time_lsq.f64().unwrap().into_iter().flatten().collect();
+        let mass_vals: Vec<f64> = mass_lsq.f64().unwrap().iter().flatten().collect();
+        let time_vals: Vec<f64> = time_lsq.f64().unwrap().iter().flatten().collect();
         assert_eq!(mass_vals.len(), 300);
         assert_eq!(time_vals.len(), 300);
         assert!(mass_vals.iter().all(|v| v.is_finite()));

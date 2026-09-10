@@ -705,7 +705,7 @@ fn materialize_fit_columns(
     let mut x_data = Vec::with_capacity(df.height());
     let mut y_data = Vec::with_capacity(df.height());
 
-    for (idx, (x_i, y_i)) in x.into_iter().zip(y.into_iter()).enumerate() {
+    for (idx, (x_i, y_i)) in x.iter().zip(y.iter()).enumerate() {
         let x_i = x_i.ok_or_else(|| {
             TGADomainError::InvalidOperation(format!(
                 "Fit input column '{}' contains null at row {}",
