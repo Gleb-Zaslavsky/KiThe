@@ -174,7 +174,7 @@ mod tests {
             EquilibriumConditions::new(temperature_k, pressure_pa, P0_PA).unwrap(),
         )
         .unwrap();
-        let mut runner = PreparedPhaseControlRunner::new(problem, Vec::new(), false).unwrap();
+        let mut runner = PreparedPhaseControlRunner::new(problem, false).unwrap();
         let settings = runner.configure_solver();
         settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
         settings.solver_params.tol = 1e-11;
@@ -208,12 +208,18 @@ mod tests {
             )
             .unwrap();
         runner
-            .set_continuation_phase_set(previous.phase_control_report.final_phase_set.clone())
+            .set_continuation_phase_set(
+                previous
+                    .acceptance_report
+                    .phase_control
+                    .final_phase_set
+                    .clone(),
+            )
             .unwrap();
     }
 
     fn assert_transition_evidence(outcome: &PreparedPhaseControlOutcome) {
-        for transition in &outcome.phase_control_report.transitions {
+        for transition in &outcome.acceptance_report.phase_control.transitions {
             assert!(
                 !transition.activated.is_empty() || !transition.deactivated.is_empty(),
                 "accepted transition must change the active set"
@@ -245,7 +251,11 @@ mod tests {
         _water: f64,
         _co2: f64,
     ) {
-        let mask = outcome.phase_control_report.final_phase_set.active_mask();
+        let mask = outcome
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask();
         assert_eq!(
             mask,
             vec![true, expected.ice_active, expected.dry_ice_active]
@@ -291,7 +301,11 @@ mod tests {
             );
         }
         assert!(outcome.acceptance_report.complementarity.satisfied);
-        let mask = outcome.phase_control_report.final_phase_set.active_mask();
+        let mask = outcome
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask();
         let expected_mask = if ice_before_dry_ice {
             vec![true, expected.ice_active, expected.dry_ice_active]
         } else {
@@ -411,7 +425,11 @@ mod tests {
             water,
             co2,
         );
-        let mut forward_transitions = forward_outcome.phase_control_report.transitions.len();
+        let mut forward_transitions = forward_outcome
+            .acceptance_report
+            .phase_control
+            .transitions
+            .len();
         for temperature in cooling.into_iter().skip(1) {
             continue_at(&mut forward, &forward_outcome, temperature, pressure);
             forward_outcome = forward.solve().unwrap();
@@ -423,7 +441,11 @@ mod tests {
                 water,
                 co2,
             );
-            forward_transitions += forward_outcome.phase_control_report.transitions.len();
+            forward_transitions += forward_outcome
+                .acceptance_report
+                .phase_control
+                .transitions
+                .len();
         }
 
         // Reverse heating starts from the physical three-phase state, then
@@ -443,7 +465,11 @@ mod tests {
         let mut reverse_outcome = reverse.solve().unwrap();
         assert_transition_evidence(&reverse_outcome);
         assert_matches_oracle(&reverse_outcome, initial, ar, water, co2);
-        let mut reverse_transitions = reverse_outcome.phase_control_report.transitions.len();
+        let mut reverse_transitions = reverse_outcome
+            .acceptance_report
+            .phase_control
+            .transitions
+            .len();
         for temperature in heating.into_iter().skip(1) {
             continue_at(&mut reverse, &reverse_outcome, temperature, pressure);
             reverse_outcome = reverse.solve().unwrap();
@@ -455,7 +481,11 @@ mod tests {
                 water,
                 co2,
             );
-            reverse_transitions += reverse_outcome.phase_control_report.transitions.len();
+            reverse_transitions += reverse_outcome
+                .acceptance_report
+                .phase_control
+                .transitions
+                .len();
         }
 
         assert_eq!(

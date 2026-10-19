@@ -8,7 +8,8 @@ their attempts.
 
 - `equilibrium_nonlinear.rs`: retained hand-written LM, NR, and trust-region
   implementations plus shared solver errors;
-- `NR_Legacy.rs`: older compatibility solver implementation;
+- `NR_Legacy.rs`: deprecated standalone compatibility solver, not selected by
+  `equilibrium_legacy_backend`;
 - `equilibrium_legacy_backend.rs`: adapter for the retained legacy backends;
 - `equilibrium_rst_backend.rs`: RustedSciThe wrapper and symbolic prepared
   problems;

@@ -146,6 +146,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::{
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::EquilibriumConstantValidationMode;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumDiagnosticsOptions;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     EquilibriumLogMoles, EquilibriumSolveCandidate, GibbsFn, Phase, R, Solvers,
@@ -155,7 +156,9 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExten
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_phase_stability::{
     CanonicalPhaseState, IdealTpdProblem, PhaseStabilityGeometryCache,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::PreparedEquilibriumRunner;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::{
+    PreparedEquilibriumDefaultRoute, PreparedEquilibriumRunner,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, EquilibriumProblem, LogMolesInitialGuess, PreparedEquilibriumProblem,
 };
@@ -163,6 +166,9 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, SolverPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
+use crate::Thermodynamics::ChemEquilibrium::prepared_phase_control_runner::{
+    PreparedPhaseControlOutcome, PreparedPhaseControlRunner,
+};
 use crate::Thermodynamics::User_substances::{LibraryPriority, Phases, SubsData};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use log::info;
@@ -586,16 +592,53 @@ pub(crate) fn compute_phase_stability_reports_with_geometry_cache(
     phase_set: &PhaseSet,
     geometry_cache: &mut PhaseStabilityGeometryCache,
 ) -> Result<Vec<PhaseStabilityReport>, ReactionExtentError> {
+    let standard_gibbs = gibbs
+        .iter()
+        .map(|gibbs| gibbs(temperature))
+        .collect::<Vec<_>>();
+    compute_phase_stability_reports_with_standard_gibbs_and_geometry_cache(
+        log_moles,
+        &standard_gibbs,
+        phases,
+        species_phase,
+        element_composition,
+        temperature,
+        pressure,
+        p0,
+        phase_set,
+        geometry_cache,
+    )
+}
+
+/// Cache-aware stability evaluation from standard-state Gibbs energies that
+/// were already evaluated at the candidate's temperature.
+///
+/// P,H production candidates use this path directly. The closure-based
+/// function above remains as a compatibility boundary for existing P,T and
+/// legacy callers.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_phase_stability_reports_with_standard_gibbs_and_geometry_cache(
+    log_moles: &[f64],
+    standard_gibbs: &[f64],
+    phases: &[Phase],
+    species_phase: &[usize],
+    element_composition: &DMatrix<f64>,
+    temperature: f64,
+    pressure: f64,
+    p0: f64,
+    phase_set: &PhaseSet,
+    geometry_cache: &mut PhaseStabilityGeometryCache,
+) -> Result<Vec<PhaseStabilityReport>, ReactionExtentError> {
     let active = phase_set.active_mask();
     let species_count = log_moles.len();
-    if gibbs.len() != species_count
+    if standard_gibbs.len() != species_count
         || species_phase.len() != species_count
         || element_composition.nrows() != species_count
         || active.len() != phases.len()
     {
         return Err(ReactionExtentError::DimensionMismatch(format!(
-            "phase stability has {species_count} log-moles, {} Gibbs functions, {} phase labels, {} element rows, {} phases, and {} active flags",
-            gibbs.len(),
+            "phase stability has {species_count} log-moles, {} standard Gibbs values, {} phase labels, {} element rows, {} phases, and {} active flags",
+            standard_gibbs.len(),
             species_phase.len(),
             element_composition.nrows(),
             phases.len(),
@@ -614,9 +657,9 @@ pub(crate) fn compute_phase_stability_reports_with_geometry_cache(
     let candidate_mask = (0..phases.len())
         .map(|phase| phase_set.is_candidate(phase))
         .collect::<Vec<_>>();
-    let state = CanonicalPhaseState::from_log_moles(
+    let state = CanonicalPhaseState::from_standard_gibbs(
         log_moles,
-        gibbs,
+        standard_gibbs,
         phases,
         species_phase,
         element_composition,
@@ -1842,6 +1885,105 @@ pub(crate) fn validate_phase_set_candidate(
 
 */
 impl EquilibriumLogMoles {
+    /// Attempts the canonical immutable active-set lifecycle for a legacy
+    /// mutable host. The host remains responsible only for adapting its
+    /// fields into a typed problem and publishing the accepted snapshot.
+    ///
+    /// Historical callers may provide a non-square full phase layout. Such a
+    /// layout cannot enter `PreparedEquilibriumProblem`; returning `None`
+    /// preserves the old reduced active-set compatibility loop for that case.
+    pub(crate) fn try_build_prepared_phase_control_runner(
+        &mut self,
+    ) -> Result<Option<PreparedPhaseControlRunner>, ReactionExtentError> {
+        let (seed, _) = self.resolved_initial_guess()?;
+        let conditions = EquilibriumConditions::new(self.T, self.P, self.p0)?;
+        let problem = EquilibriumProblem::new(
+            self.subs_data.substances.clone(),
+            self.n0.clone(),
+            LogMolesInitialGuess::new(seed)?,
+            self.elem_composition.clone(),
+            self.gibbs.clone(),
+            self.phases.clone(),
+            conditions,
+        )?;
+        let mut runner = match PreparedPhaseControlRunner::new_with_diagnostics(
+            problem,
+            false,
+            EquilibriumDiagnosticsOptions::disabled(),
+            PreparedEquilibriumDefaultRoute::LegacyDefault,
+        ) {
+            Ok(runner) => runner,
+            Err(ReactionExtentError::DimensionMismatch(message))
+                if message.starts_with("prepared log-moles system has") =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+
+        let has_legacy_continuation = !self.phase_active_mask.is_empty();
+        *runner.configure_solver() = self.solver_settings.clone();
+        *runner.configure_phase_control() = self.phase_manager.clone();
+        runner.set_boundary_recovery_enabled(!has_legacy_continuation);
+        if has_legacy_continuation && self.phase_active_mask.len() == self.phases.len() {
+            let derived_activity = self.phase_active_mask.clone();
+            let mut phase_set =
+                PhaseSet::from_policy(&self.phase_manager.initial_phase_set, &derived_activity)?;
+            phase_set.normalize_for_positive_solver(&derived_activity)?;
+            runner.set_continuation_phase_set(phase_set)?;
+        }
+
+        Ok(Some(runner))
+    }
+
+    fn try_solve_prepared_phase_control(
+        &mut self,
+    ) -> Result<Option<PreparedPhaseControlOutcome>, ReactionExtentError> {
+        let Some(mut runner) = self.try_build_prepared_phase_control_runner()? else {
+            return Ok(None);
+        };
+        Ok(Some(runner.solve()?))
+    }
+
+    /// Publishes an immutable prepared-runner outcome into the historical
+    /// mutable compatibility fields in one operation.
+    pub(crate) fn publish_prepared_phase_control_outcome(
+        &mut self,
+        outcome: PreparedPhaseControlOutcome,
+    ) -> Result<(), ReactionExtentError> {
+        let PreparedPhaseControlOutcome {
+            solution,
+            solve_report,
+            keq_validation_status,
+            acceptance_report,
+            ..
+        } = outcome;
+        let phase_control_report = acceptance_report.phase_control;
+        let log_moles = solution.log_moles().to_vec();
+        let moles = solution.moles().to_vec();
+        let mole_table = self
+            .subs_data
+            .substances
+            .iter()
+            .cloned()
+            .zip(moles.iter().copied())
+            .map(|(species, moles)| (species, vec![moles]))
+            .collect();
+        let candidate = EquilibriumSolveCandidate {
+            log_moles: log_moles.clone(),
+            moles,
+            mole_table,
+            validation_report: solution.validation().clone(),
+            solve_report,
+            keq_validation_status,
+        };
+        self.phase_active_mask = phase_control_report.final_phase_set.active_mask();
+        self.initial_guess = Some(log_moles);
+        self.publish_solve_candidate(candidate);
+        self.last_phase_control_report = Some(phase_control_report);
+        Ok(())
+    }
+
     /// Solves exactly one fixed active set and expands it back to the declared
     /// species ordering without publishing intermediate state.
     fn solve_fixed_active_set_candidate(
@@ -1892,15 +2034,6 @@ impl EquilibriumLogMoles {
             .iter()
             .map(|species| self.gibbs[species.index()].clone())
             .collect();
-        let reduced_gibbs_sym = if self.gibbs_sym.len() == self.n0.len() {
-            projection
-                .active_species
-                .iter()
-                .map(|species| self.gibbs_sym[species.index()].clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
         let conditions = EquilibriumConditions::new(self.T, self.P, self.p0)?;
         let reduced_problem = EquilibriumProblem::new(
             reduced_components,
@@ -1916,7 +2049,7 @@ impl EquilibriumLogMoles {
             reduced_problem,
             Some(reduced_totals),
         )?;
-        let mut runner = PreparedEquilibriumRunner::new(prepared, reduced_gibbs_sym)?;
+        let mut runner = PreparedEquilibriumRunner::new(prepared)?;
         runner.configure().clone_from(&self.solver_settings);
         // Independent K_eq validation is applied to canonical fixed-species
         // problems. It must not silently reinterpret an active-set projection.
@@ -1952,6 +2085,11 @@ impl EquilibriumLogMoles {
         note = "use phase_equilibrium_workflow::solve_resolved_pt; this mutable method is compatibility-only"
     )]
     pub fn solve_with_phase_control(&mut self) -> Result<(), ReactionExtentError> {
+        if self.phase_manager.max_phase_iterations > 0 {
+            if let Some(outcome) = self.try_solve_prepared_phase_control()? {
+                return self.publish_prepared_phase_control_outcome(outcome);
+            }
+        }
         let keq_applicable =
             self.phases.len() == 1 && matches!(self.phases[0].kind, PhaseActivityModel::IdealGas);
         if self.solver_settings.keq_validation_mode == EquilibriumConstantValidationMode::Required
@@ -2189,7 +2327,7 @@ pub fn multiphase_equilibrium_residual_generator_sym(
     pressure: f64,
     p0: f64,
 ) -> Result<Vec<Expr>, ReactionExtentError> {
-    multiphase_equilibrium_residual_generator_sym_at_temperature(
+    multiphase_equilibrium_residual_generator_sym_at_temperature_with_timing(
         reactions,
         elements,
         element_totals,
@@ -2198,17 +2336,12 @@ pub fn multiphase_equilibrium_residual_generator_sym(
         pressure,
         p0,
         Expr::Var("T".to_string()),
+        true,
+        None,
     )
 }
 
-/// Builds the same symbolic fixed-phase residual at an explicit temperature
-/// expression.
-///
-/// Fixed-`P,T` uses the `T` equation parameter through the public wrapper
-/// above. Coupled `P,H` instead supplies its bounded temperature expression,
-/// so RST can differentiate the full system with respect to the additional
-/// temperature coordinate rather than receiving a fixed-`P,T` Jacobian.
-pub(crate) fn multiphase_equilibrium_residual_generator_sym_at_temperature(
+pub(crate) fn multiphase_equilibrium_residual_generator_sym_at_temperature_with_timing(
     reactions: DMatrix<f64>,
     elements: DMatrix<f64>,
     element_totals: Vec<f64>,
@@ -2217,11 +2350,18 @@ pub(crate) fn multiphase_equilibrium_residual_generator_sym_at_temperature(
     pressure: f64,
     p0: f64,
     temperature: Expr,
+    simplify_residuals: bool,
+    mut timing: Option<&mut crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::RstPreparationTimingCollector>,
 ) -> Result<Vec<Expr>, ReactionExtentError> {
     let m = reactions.nrows();
     let r = reactions.ncols();
     let e = elements.ncols();
 
+    measure_symbolic_stage(
+        &mut timing,
+        crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::RstPreparationTimingStage::SymbolicInputValidation,
+        || (),
+    );
     if gibbs_sym.len() != m || element_totals.len() != e {
         return Err(ReactionExtentError::DimensionMismatch(format!(
             "symbolic residual generator has {m} species, {} Gibbs expressions, and {} element totals for {e} elements",
@@ -2230,12 +2370,23 @@ pub(crate) fn multiphase_equilibrium_residual_generator_sym_at_temperature(
         )));
     }
 
-    let species_phase = species_to_phase_map(&phases, m)?;
-    let delta_n = reaction_phase_stoichiometry(&reactions, &phases);
+    let (species_phase, delta_n) = measure_symbolic_stage(
+        &mut timing,
+        crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::RstPreparationTimingStage::SymbolicPhaseTopology,
+        || {
+            let species_phase = species_to_phase_map(&phases, m)?;
+            let delta_n = reaction_phase_stoichiometry(&reactions, &phases);
+            Ok::<_, ReactionExtentError>((species_phase, delta_n))
+        },
+    )?;
     let rt = Expr::Const(R) * temperature;
 
     // log-mole symbolic variables (y_i = ln n_i)
-    let y = Expr::IndexedVars(m, "y").0;
+    let y = measure_symbolic_stage(
+        &mut timing,
+        crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::RstPreparationTimingStage::SymbolicVariableExpansion,
+        || Expr::IndexedVars(m, "y").0,
+    );
     if y.len() != m {
         return Err(ReactionExtentError::ResidualEvaluation(
             "y length mismatch".to_string(),
@@ -2243,27 +2394,43 @@ pub(crate) fn multiphase_equilibrium_residual_generator_sym_at_temperature(
     }
 
     // --- species mole numbers as n_i = exp(y_i) ---
-    let mut n: Vec<Expr> = Vec::with_capacity(m);
-    for i in 0..m {
-        n.push(y[i].clone().exp());
-    }
+    let n: Vec<Expr> = measure_symbolic_stage(
+        &mut timing,
+        crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::RstPreparationTimingStage::SymbolicVariableExpansion,
+        || (0..m).map(|i| y[i].clone().exp()).collect(),
+    );
 
     // --- phase mole totals ---
-    let mut n_phase: Vec<Expr> = vec![Expr::Const(0.0); phases.len()];
-    for i in 0..m {
-        let j = species_phase[i];
-        n_phase[j] += n[i].clone();
-    }
+    let n_phase: Vec<Expr> = measure_symbolic_stage(
+        &mut timing,
+        crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::RstPreparationTimingStage::SymbolicPhaseTotals,
+        || {
+            let mut n_phase: Vec<Expr> = vec![Expr::Const(0.0); phases.len()];
+            for i in 0..m {
+                let j = species_phase[i];
+                n_phase[j] += n[i].clone();
+            }
+            n_phase
+        },
+    );
 
     // --- phase offsets from the same activity contract as numeric residuals ---
-    let phi = phase_activity_models(&phases)
-        .into_iter()
-        .map(|model| model.log_phase_offset(pressure, p0).map(Expr::Const))
-        .collect::<Result<Vec<_>, _>>()?;
+    let phi = measure_symbolic_stage(
+        &mut timing,
+        crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::RstPreparationTimingStage::SymbolicActivityOffsets,
+        || {
+            phase_activity_models(&phases)
+                .into_iter()
+                .map(|model| model.log_phase_offset(pressure, p0).map(Expr::Const))
+                .collect::<Result<Vec<_>, _>>()
+        },
+    )?;
 
     // Build residuals: r reaction eqs followed by e element balance eqs
     let mut f: Vec<Expr> = vec![Expr::Const(0.0); r + e];
 
+    let timed = timing.is_some();
+    let reaction_started = timed.then(Instant::now);
     for k in 0..r {
         let mut sum_ln_n = Expr::Const(0.0);
         let mut sum_ln_n_phase = Expr::Const(0.0);
@@ -2294,19 +2461,74 @@ pub(crate) fn multiphase_equilibrium_residual_generator_sym_at_temperature(
         }
 
         let ln_k = -dg0 / rt.clone();
-        f[k] = (sum_ln_n - sum_ln_n_phase + sum_phi - ln_k).simplify();
+        let residual = sum_ln_n - sum_ln_n_phase + sum_phi - ln_k;
+        f[k] = if simplify_residuals {
+            let started = timed.then(Instant::now);
+            let simplified = residual.simplify();
+            if let (Some(started), Some(timing)) = (started, timing.as_deref_mut()) {
+                timing.record(
+                    crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::RstPreparationTimingStage::SymbolicResidualSimplification,
+                    started.elapsed(),
+                );
+            }
+            simplified
+        } else {
+            residual
+        };
+    }
+    if let (Some(started), Some(timing)) = (reaction_started, timing.as_deref_mut()) {
+        timing.record(
+            crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::RstPreparationTimingStage::SymbolicReactionAssembly,
+            started.elapsed(),
+        );
     }
 
     // element balance equations: sum_i a_{i,el} * n_i - element_totals[el]
+    let element_started = timed.then(Instant::now);
     for el in 0..e {
         let mut sum_el = Expr::Const(0.0);
         for i in 0..m {
             sum_el += Expr::Const(elements[(i, el)]) * n[i].clone();
         }
-        f[r + el] = (sum_el - Expr::Const(element_totals[el])).simplify();
+        let residual = sum_el - Expr::Const(element_totals[el]);
+        f[r + el] = if simplify_residuals {
+            let started = timed.then(Instant::now);
+            let simplified = residual.simplify();
+            if let (Some(started), Some(timing)) = (started, timing.as_deref_mut()) {
+                timing.record(
+                    crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::RstPreparationTimingStage::SymbolicResidualSimplification,
+                    started.elapsed(),
+                );
+            }
+            simplified
+        } else {
+            residual
+        };
+    }
+    if let (Some(started), Some(timing)) = (element_started, timing.as_deref_mut()) {
+        timing.record(
+            crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::RstPreparationTimingStage::SymbolicElementBalanceAssembly,
+            started.elapsed(),
+        );
     }
 
     Ok(f)
+}
+
+fn measure_symbolic_stage<T, F>(
+    timing: &mut Option<
+        &mut crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::RstPreparationTimingCollector,
+    >,
+    stage: crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::RstPreparationTimingStage,
+    operation: F,
+) -> T
+where
+    F: FnOnce() -> T,
+{
+    match timing.as_deref_mut() {
+        Some(timing) => timing.measure(stage, operation),
+        None => operation(),
+    }
 }
 
 ////////////////////////CONVENIENCE FUNCTIONS////////////////////////////////

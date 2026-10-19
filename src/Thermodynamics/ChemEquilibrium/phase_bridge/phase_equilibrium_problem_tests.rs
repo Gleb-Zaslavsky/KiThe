@@ -14,8 +14,9 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::{
     ElementInventory, ElementInventoryError,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::EquilibriumExecutionControl;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-    equilibrium_logmole_jacobian, equilibrium_logmole_residual,
+    Solvers, equilibrium_logmole_jacobian, equilibrium_logmole_residual,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
@@ -28,7 +29,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::{
     ResolvedThermochemistry, solve_resolved_ph,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
-    EquilibriumConditions, PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
+    EquilibriumConditions, LogMolesInitialGuess, PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
     RustedSciTheSolver, prepare_rst_symbolic_problem_from_prepared,
@@ -543,6 +544,177 @@ fn local_nasa_gas_builds_a_complete_problem_and_retains_provenance() {
         .collect::<HashMap<_, _>>();
     assert_eq!(totals.get("H"), Some(&4.0));
     assert_eq!(totals.get("O"), Some(&2.0));
+}
+
+#[test]
+fn prepared_multi_start_preserves_order_and_first_equal_candidate() {
+    let resolved = resolved_local_nasa_gas();
+    let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
+    let composition =
+        MultiphaseInitialComposition::from_dense(&layout, vec![2.0, 1.0, 0.0]).unwrap();
+    let conditions = EquilibriumConditions::new(1200.0, 101_325.0, 101_325.0).unwrap();
+    let bundle = build_phase_equilibrium_problem(
+        PhaseEquilibriumBuildRequest::new(
+            &resolved,
+            conditions,
+            composition,
+            TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 },
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let seed = bundle.problem().initial_log_moles().clone();
+
+    let solution = bundle
+        .solve_with_initial_guesses(vec![seed.clone(), seed], |settings| {
+            settings.solver_policy = Some(SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)));
+        })
+        .expect("identical local-NASA seeds must both produce an accepted candidate");
+    let report = solution
+        .multi_start_report()
+        .expect("explicit multi-start must publish per-seed evidence");
+
+    assert_eq!(
+        report
+            .attempts
+            .iter()
+            .map(|attempt| attempt.start_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(report.attempts.iter().all(|attempt| attempt.accepted));
+    assert_eq!(report.selected_start, 0);
+    assert_eq!(report.started_backend_attempts(), 2);
+    assert!(
+        solution
+            .solution()
+            .validation()
+            .max_abs_element_balance_error
+            < 1e-8
+    );
+}
+
+#[test]
+fn prepared_legacy_lm_scaling_preserves_the_accepted_physical_state() {
+    let solve = |scaling_flag| {
+        let resolved = resolved_local_nasa_gas();
+        let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
+        let composition =
+            MultiphaseInitialComposition::from_dense(&layout, vec![2.0, 1.0, 0.0]).unwrap();
+        let bundle = build_phase_equilibrium_problem(
+            PhaseEquilibriumBuildRequest::new(
+                &resolved,
+                EquilibriumConditions::new(1200.0, 101_325.0, 101_325.0).unwrap(),
+                composition,
+                TraceSpeciesSeedPolicy::Absolute { floor: 1e-30 },
+                Default::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        bundle
+            .solve_with(|settings| {
+                settings.scaling_flag = scaling_flag;
+                settings.solver_policy =
+                    Some(SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)));
+            })
+            .expect("local-NASA legacy LM solve must accept both scaling modes")
+    };
+
+    let unscaled = solve(false);
+    let scaled = solve(true);
+    assert_eq!(
+        unscaled.solution().conditions(),
+        scaled.solution().conditions()
+    );
+    for (left, right) in unscaled
+        .solution()
+        .moles()
+        .iter()
+        .zip(scaled.solution().moles())
+    {
+        assert!((left - right).abs() < 1e-8);
+    }
+    assert!(
+        unscaled
+            .solution()
+            .validation()
+            .max_abs_element_balance_error
+            < 1e-8
+    );
+    assert!(scaled.solution().validation().max_abs_element_balance_error < 1e-8);
+}
+
+#[test]
+fn prepared_runner_honours_cancellation_before_starting_a_backend() {
+    let control = EquilibriumExecutionControl::new();
+    control.request_cancel();
+    let result = prepared_local_nasa_gas().solve_with(|settings| {
+        settings.execution_control = Some(control.clone());
+        settings.solver_policy = Some(SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)));
+    });
+
+    assert!(matches!(result, Err(ReactionExtentError::Cancelled)));
+}
+
+#[test]
+fn prepared_multi_start_rejects_a_seed_with_the_wrong_dimension() {
+    let result = prepared_local_nasa_gas().solve_with_initial_guesses(
+        vec![LogMolesInitialGuess::new(vec![0.0, 0.0]).unwrap()],
+        |_| {},
+    );
+
+    assert!(matches!(
+        result,
+        Err(ReactionExtentError::InvalidProblem {
+            field: "multi_start_seed_dimension",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn prepared_scaled_jacobian_matches_finite_difference_of_the_scaled_residual() {
+    let bundle = prepared_local_nasa_gas();
+    let prepared = PreparedEquilibriumProblem::new(bundle.into_problem()).unwrap();
+    let point = prepared.problem().initial_log_moles().as_slice().to_vec();
+    let step = 1e-6;
+
+    for scaling_enabled in [false, true] {
+        let scaling = prepared.residual_scaling_contract().unwrap();
+        let evaluate = |values: &[f64]| {
+            let residual = prepared.residual(values)?;
+            if scaling_enabled {
+                scaling.apply_residual(residual)
+            } else {
+                Ok(residual)
+            }
+        };
+        let analytic = if scaling_enabled {
+            prepared
+                .scaled_jacobian(&point, scaling.as_slice())
+                .unwrap()
+        } else {
+            prepared.jacobian(&point).unwrap()
+        };
+        let mut finite_difference = analytic.clone();
+        let base = evaluate(&point).unwrap();
+        for column in 0..point.len() {
+            let mut perturbed = point.clone();
+            perturbed[column] += step;
+            let shifted = evaluate(&perturbed).unwrap();
+            for row in 0..base.len() {
+                finite_difference[(row, column)] = (shifted[row] - base[row]) / step;
+                assert!(
+                    (analytic[(row, column)] - finite_difference[(row, column)]).abs() < 1e-5,
+                    "scaled={scaling_enabled} Jacobian entry ({row}, {column}) diverged: analytic={} finite_difference={}",
+                    analytic[(row, column)],
+                    finite_difference[(row, column)]
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -1767,13 +1939,11 @@ fn parameterized_rst_graph_matches_the_canonical_real_nasa_formulation() {
     // The reusable temperature-range graph replaces baked `G0(T)` expressions
     // with parameters. This must be algebraically invisible to a backend.
     let bundle = prepared_local_nasa_gas();
-    let symbolic_standard_gibbs = bundle.symbolic_standard_gibbs().to_vec();
     let prepared = PreparedEquilibriumProblem::new(bundle.into_problem()).unwrap();
     let log_moles = prepared.problem().initial_log_moles().as_slice().to_vec();
     let expected_residual = prepared.residual(&log_moles).unwrap();
     let expected_jacobian = prepared.jacobian(&log_moles).unwrap();
-    let parameterized =
-        prepare_rst_symbolic_problem_from_prepared(&prepared, &symbolic_standard_gibbs).unwrap();
+    let parameterized = prepare_rst_symbolic_problem_from_prepared(&prepared).unwrap();
 
     let actual_residual = parameterized.residual_for_test(&log_moles).unwrap();
     assert_eq!(actual_residual.len(), expected_residual.len());

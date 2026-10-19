@@ -28,7 +28,7 @@
 //! # Dataflow
 //!
 //! ```text
-//!   EquilibriumLogMoles::solve_backend_cascade()
+//!   equilibrium_backend_adapter::solve_backend_cascade_with_control()
 //!     │
 //!     ├── Selects SolverBackend::Legacy(Solvers::LM/NR/TR)
 //!     │

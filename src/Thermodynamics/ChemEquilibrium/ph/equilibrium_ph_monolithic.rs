@@ -11,18 +11,24 @@
 //! analytical Jacobian from `equilibrium_ph_formulation`, which remains a
 //! valuable validation and fallback route.
 
+use std::cell::Cell;
+#[cfg(not(feature = "equilibrium-benchmark-no-trial-cache"))]
+use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use nalgebra::DMatrix;
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_active_set::ActiveSetProjection;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::{
-    EquilibriumNonlinearBackend, solve_backend_cascade_with_control,
+    EquilibriumNonlinearBackend, solve_backend_cascade_with_control_and_telemetry,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
     EnthalpyScale, TemperatureBounds,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
+#[cfg(not(feature = "equilibrium-benchmark-no-trial-cache"))]
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::record_residual_evaluation;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::rst_solver_telemetry_mode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::EquilibriumSolverSettings;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::PhMonolithicSeedFailure;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
@@ -40,9 +46,12 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_thermochemistry::Reso
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, EquilibriumProblem, LogMolesInitialGuess, PreparedEquilibriumProblem,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::prepare_rst_symbolic_ph_problem;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::prepare_rst_symbolic_ph_problem_with_timing;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, SolverBackend, SolverCascadeBudget, SolverPolicy,
+};
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
+    EquilibriumTimingMode, RstPreparationTimingReport,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::{
     EquilibriumAcceptanceCriteria, EquilibriumCandidateReport, EquilibriumCandidateResiduals,
@@ -52,7 +61,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     PhaseTotalSeedPolicy, seed_activated_phase_with_composition,
 };
 use crate::Thermodynamics::ChemEquilibrium::prepared_phase_control_runner::{
-    PreparedActiveSetCandidate, PreparedPhaseControlRunner,
+    PreparedActiveSetCandidate, PreparedPhaseControlRunner, PreparedStabilityGibbs,
 };
 
 /// Accepted fixed-active-set monolithic P,H candidate.
@@ -72,6 +81,15 @@ pub(crate) struct MonolithicPhSolveOutcome {
     pub(crate) solve_report: EquilibriumSolveReport,
     /// Ordered physical-temperature starts attempted before acceptance.
     pub(crate) temperature_seed_report: PhMonolithicSeedRecoveryReport,
+    /// Time spent materializing an RST symbolic payload for this accepted
+    /// seed. Zero when the selected policy does not need RST or timing is off.
+    pub(crate) rst_preparation: Duration,
+    /// Fine-grained RST symbolic/problem preparation evidence.
+    pub(crate) rst_preparation_timing: RstPreparationTimingReport,
+    /// Wall-clock time spent in the backend cascade after payload preparation.
+    pub(crate) backend_execution: Duration,
+    /// Time spent validating candidate snapshots produced by the cascade.
+    pub(crate) validation_duration: Duration,
 }
 
 /// Immutable numerical runner for one already fixed active phase set.
@@ -80,6 +98,7 @@ pub(crate) struct PreparedMonolithicPhRunner {
     formulation: PreparedPhFormulation,
     settings: EquilibriumSolverSettings,
     options: PhMonolithicOptions,
+    timing_enabled: bool,
 }
 
 impl PreparedMonolithicPhRunner {
@@ -94,7 +113,15 @@ impl PreparedMonolithicPhRunner {
             formulation,
             settings,
             options,
+            timing_enabled: false,
         })
+    }
+
+    /// Enables optional substage timing without changing the default runner
+    /// contract or adding clock reads to ordinary production solves.
+    pub(crate) fn with_timing_enabled(mut self, enabled: bool) -> Self {
+        self.timing_enabled = enabled;
+        self
     }
 
     /// Solves the coupled composition-temperature equations from one physical
@@ -230,64 +257,127 @@ impl PreparedMonolithicPhRunner {
                 .iter()
                 .any(|backend| matches!(backend, SolverBackend::RustedSciThe(_)))
         {
-            Some(prepare_rst_symbolic_ph_problem(&self.formulation)?)
+            let started = self.timing_enabled.then(Instant::now);
+            let timing_mode = if self.timing_enabled {
+                EquilibriumTimingMode::Enabled
+            } else {
+                EquilibriumTimingMode::Disabled
+            };
+            let (problem, preparation_report) = prepare_rst_symbolic_ph_problem_with_timing(
+                &self.formulation,
+                timing_mode,
+                self.settings.rst_symbolic_frontend,
+            )?;
+            let elapsed = started.map_or(Duration::ZERO, |started| started.elapsed());
+            Some((
+                problem,
+                elapsed,
+                preparation_report.rst_preparation_timing(),
+            ))
         } else {
             None
         };
+        let rst_preparation = owned_rst_problem
+            .as_ref()
+            .map_or(Duration::ZERO, |(_, elapsed, _)| *elapsed);
+        let rst_preparation_timing = owned_rst_problem
+            .as_ref()
+            .map_or_else(RstPreparationTimingReport::default, |(_, _, timing)| {
+                *timing
+            });
+        let owned_rst_problem = owned_rst_problem.map(|(problem, _, _)| problem);
         let rst_problem = prepared_rst_problem.or(owned_rst_problem.as_ref());
+        #[cfg(not(feature = "equilibrium-benchmark-no-trial-cache"))]
+        let feasible_trial_snapshot = RefCell::new(None::<(Vec<f64>, PhCandidateSnapshot)>);
+        #[cfg(not(feature = "equilibrium-benchmark-no-trial-cache"))]
+        let residual = |unknowns: &[f64]| {
+            let cached = feasible_trial_snapshot.borrow_mut().take();
+            if let Some((cached_unknowns, snapshot)) = cached {
+                if cached_unknowns.as_slice() == unknowns {
+                    record_residual_evaluation();
+                    let mut residual = snapshot.scaled_pt_residual;
+                    residual.push(snapshot.scaled_enthalpy_error);
+                    return Ok(residual);
+                }
+            }
+            self.formulation.residual(unknowns)
+        };
+        #[cfg(feature = "equilibrium-benchmark-no-trial-cache")]
         let residual = |unknowns: &[f64]| self.formulation.residual(unknowns);
         let jacobian = |unknowns: &[f64]| self.formulation.jacobian(unknowns);
+        #[cfg(not(feature = "equilibrium-benchmark-no-trial-cache"))]
+        let feasible = |unknowns: &[f64]| {
+            let Some(snapshot) = self.formulation.feasible_candidate_snapshot(unknowns) else {
+                feasible_trial_snapshot.borrow_mut().take();
+                return false;
+            };
+            *feasible_trial_snapshot.borrow_mut() = Some((unknowns.to_vec(), snapshot));
+            true
+        };
+        #[cfg(feature = "equilibrium-benchmark-no-trial-cache")]
         let feasible = |unknowns: &[f64]| self.formulation.is_feasible(unknowns);
         let solver_tolerance = self.settings.solver_params.tol;
         let element_tolerance = 10.0 * solver_tolerance.max(1.0e-8);
+        let candidate_validation_duration = Cell::new(Duration::ZERO);
         let validate_candidate = |unknowns: &[f64]| {
-            let snapshot = self.formulation.candidate_snapshot(unknowns)?;
-            let validation = validate_equilibrium_candidate(
-                EquilibriumCandidateResiduals {
-                    log_moles: &snapshot.log_moles,
-                    raw_residual: &snapshot.raw_pt_residual,
-                    acceptance_residual: &snapshot.scaled_pt_residual,
-                },
-                EquilibriumAcceptanceCriteria::new(
-                    solver_tolerance,
-                    element_tolerance,
-                    solver_tolerance,
-                )?
-                .with_element_balance_relative_tolerance(element_tolerance)?,
-                self.formulation
-                    .prepared_pt()
-                    .problem()
-                    .element_composition(),
-                self.formulation.prepared_pt().element_totals(),
-            )?;
-            if !self
-                .options
-                .acceptance()
-                .accepts_enthalpy_error(snapshot.enthalpy_error, self.formulation.enthalpy_scale())
-            {
-                return Err(ReactionExtentError::InvalidCandidate {
-                    field: "candidate_enthalpy",
-                    message: format!(
-                        "enthalpy error {} J exceeds the P,H acceptance limit",
-                        snapshot.enthalpy_error
-                    ),
-                });
+            let started = self.timing_enabled.then(Instant::now);
+            let result = (|| {
+                let snapshot = self.formulation.candidate_snapshot(unknowns)?;
+                let validation = validate_equilibrium_candidate(
+                    EquilibriumCandidateResiduals {
+                        log_moles: &snapshot.log_moles,
+                        raw_residual: &snapshot.raw_pt_residual,
+                        acceptance_residual: &snapshot.scaled_pt_residual,
+                    },
+                    EquilibriumAcceptanceCriteria::new(
+                        solver_tolerance,
+                        element_tolerance,
+                        solver_tolerance,
+                    )?
+                    .with_element_balance_relative_tolerance(element_tolerance)?,
+                    self.formulation
+                        .prepared_pt()
+                        .problem()
+                        .element_composition(),
+                    self.formulation.prepared_pt().element_totals(),
+                )?;
+                if !self.options.acceptance().accepts_enthalpy_error(
+                    snapshot.enthalpy_error,
+                    self.formulation.enthalpy_scale(),
+                ) {
+                    return Err(ReactionExtentError::InvalidCandidate {
+                        field: "candidate_enthalpy",
+                        message: format!(
+                            "enthalpy error {} J exceeds the P,H acceptance limit",
+                            snapshot.enthalpy_error
+                        ),
+                    });
+                }
+                Ok(validation)
+            })();
+            if let Some(started) = started {
+                candidate_validation_duration
+                    .set(candidate_validation_duration.get() + started.elapsed());
             }
-            Ok(validation)
+            result
         };
-        let (unknowns, pt_validation, solve_report) = solve_backend_cascade_with_control(
-            &backend_refs,
-            initial_unknowns,
-            &residual,
-            Some(&jacobian as &dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError>),
-            &feasible,
-            &validate_candidate,
-            policy,
-            budget,
-            &self.settings.solver_params,
-            rst_problem,
-            None,
-        )?;
+        let backend_started = self.timing_enabled.then(Instant::now);
+        let (unknowns, pt_validation, solve_report) =
+            solve_backend_cascade_with_control_and_telemetry(
+                &backend_refs,
+                initial_unknowns,
+                &residual,
+                Some(&jacobian as &dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError>),
+                &feasible,
+                &validate_candidate,
+                policy,
+                budget,
+                &self.settings.solver_params,
+                rst_problem,
+                None,
+                rst_solver_telemetry_mode(self.timing_enabled),
+            )?;
+        let backend_execution = backend_started.map_or(Duration::ZERO, |started| started.elapsed());
         let snapshot = self.formulation.candidate_snapshot(&unknowns)?;
         Ok(MonolithicPhSolveOutcome {
             unknowns,
@@ -299,6 +389,10 @@ impl PreparedMonolithicPhRunner {
                 attempts: Vec::new(),
                 selected_attempt: 0,
             },
+            rst_preparation,
+            rst_preparation_timing,
+            backend_execution,
+            validation_duration: candidate_validation_duration.get(),
         })
     }
 
@@ -632,10 +726,9 @@ fn solve_monolithic_active_set_candidate_inner(
             .ln(),
     )?;
     // Stability is evaluated at `outcome.snapshot.temperature` by the phase
-    // lifecycle.  The snapshot adapter validates that exact point before the
-    // legacy infallible callback is published to phase-control.
-    let stability_gibbs =
-        thermochemistry.gibbs_snapshot_for_legacy_boundary(outcome.snapshot.temperature)?;
+    // lifecycle. Keep the validated numeric values at that exact point so the
+    // stability boundary does not rebuild constant Gibbs callbacks.
+    let stability_gibbs = thermochemistry.evaluate_gibbs(outcome.snapshot.temperature)?;
     Ok((
         PreparedActiveSetCandidate {
             log_moles,
@@ -643,10 +736,12 @@ fn solve_monolithic_active_set_candidate_inner(
             validation_report: outcome.pt_validation,
             solve_report: outcome.solve_report,
             keq_validation_status: None,
-            stability_gibbs,
+            stability_gibbs: PreparedStabilityGibbs::StandardValues(stability_gibbs),
             conditions: solved_conditions,
             projection_build: started.elapsed(),
             formulation_build: Duration::ZERO,
+            rst_preparation: Duration::ZERO,
+            rst_preparation_timing: RstPreparationTimingReport::default(),
             validation_duration: Duration::ZERO,
             rst_symbolic_reused: false,
         },

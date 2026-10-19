@@ -21,6 +21,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimin
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     MultiphaseAcceptanceReport, PhaseControlledSolveReport, PhaseStatus,
 };
+use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::ExtensiveNormalizationRecoveryEvidence;
 use crate::Thermodynamics::phase_layout::PhaseId;
 
 /// Final lifecycle state of one semantic phase at an accepted temperature
@@ -90,6 +91,7 @@ pub struct PhTrialInnerEvidence {
     pub(crate) multi_start_report: Option<MultiStartSolveReport>,
     pub(crate) phase_control_report: Option<PhaseControlledSolveReport>,
     pub(crate) acceptance_report: Option<MultiphaseAcceptanceReport>,
+    pub(crate) extensive_normalization_recovery: Option<ExtensiveNormalizationRecoveryEvidence>,
 }
 
 impl PhTrialInnerEvidence {
@@ -111,6 +113,14 @@ impl PhTrialInnerEvidence {
     /// Final complementarity and numerical acceptance evidence, when present.
     pub fn acceptance_report(&self) -> Option<&MultiphaseAcceptanceReport> {
         self.acceptance_report.as_ref()
+    }
+
+    /// Full attempt evidence for an extensive-normalization recovery, when
+    /// this trial's accepted solution crossed that recovery boundary.
+    pub fn extensive_normalization_recovery(
+        &self,
+    ) -> Option<&ExtensiveNormalizationRecoveryEvidence> {
+        self.extensive_normalization_recovery.as_ref()
     }
 
     /// Sum of residual evaluations reported by all inner backend attempts.
@@ -229,15 +239,22 @@ impl PhTemperatureTrial {
 /// Per-temperature timing evidence published with one `P,H` trial.
 ///
 /// `inner_equilibrium` is the immutable timing report returned by the nested
-/// fixed-`P,T` solve. `total` includes scalar-trial preparation, that solve,
-/// and the enthalpy evaluation; the fields are intentionally not additive
-/// wall-clock partitions because nested reports may include inclusive stages.
+/// fixed-`P,T` solve. `inner_execution` is the wall clock around the complete
+/// inner request, including work not represented by the accepted inner timing
+/// report. `postprocessing` covers evidence extraction/publication after the
+/// inner request and enthalpy evaluation. `total` covers the trial's inner
+/// request and enthalpy evaluation. The one-time fixed-template build is
+/// exposed separately as `template_preparation`, so an expensive first build
+/// is not confused with repeated trial execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PhTrialTimingReport {
     pub(crate) enabled: bool,
     pub(crate) total: Duration,
+    pub(crate) inner_execution: Duration,
     pub(crate) inner_equilibrium: Duration,
     pub(crate) enthalpy_evaluation: Duration,
+    pub(crate) postprocessing: Duration,
+    pub(crate) template_preparation: EquilibriumTimingReport,
 }
 
 impl PhTrialTimingReport {
@@ -251,6 +268,12 @@ impl PhTrialTimingReport {
         self.total
     }
 
+    /// Wall-clock duration of the inner P,T request, including its local
+    /// request/formulation work and the accepted solver call.
+    pub fn inner_execution(&self) -> Duration {
+        self.inner_execution
+    }
+
     /// Wall-clock duration reported by the nested fixed-`P,T` solve.
     pub fn inner_equilibrium(&self) -> Duration {
         self.inner_equilibrium
@@ -260,6 +283,18 @@ impl PhTrialTimingReport {
     /// composition.
     pub fn enthalpy_evaluation(&self) -> Duration {
         self.enthalpy_evaluation
+    }
+
+    /// Time spent extracting phase/lifecycle evidence after the numerical
+    /// trial and additive enthalpy evaluation have completed.
+    pub fn postprocessing(&self) -> Duration {
+        self.postprocessing
+    }
+
+    /// Detailed preparation report for the fixed-layout template, when this
+    /// trial initialized one. Reused trials return an empty report.
+    pub fn template_preparation(&self) -> EquilibriumTimingReport {
+        self.template_preparation
     }
 }
 

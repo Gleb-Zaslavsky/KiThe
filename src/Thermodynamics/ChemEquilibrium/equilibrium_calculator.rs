@@ -23,9 +23,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::{
-    CandidateSelectionError, CandidateTemperatureRange, EquilibriumCandidatePhaseAssignment,
-    EquilibriumCandidatePhasePlan, EquilibriumCandidatePolicy, EquilibriumCandidateSelectionReport,
-    EquilibriumCandidateSelector,
+    CandidateSelectionError, CandidateTemperatureRange, EquilibriumCandidatePhasePlan,
+    EquilibriumCandidatePolicy, EquilibriumCandidateSelectionReport, EquilibriumCandidateSelector,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
     EquilibriumConstraint, TemperatureBounds, TotalEnthalpyJoules,
@@ -35,6 +34,9 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::{
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventory;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::EquilibriumExecutionControl;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::{
+    EquilibriumInstrumentationMode, EquilibriumInstrumentationReport, capture_if_enabled,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
 };
@@ -44,9 +46,12 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_range::{
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::{
     FixedPressureEnthalpySolution, PhSolveMode, PhTemperatureSolveOptions,
-    ResolvedPhaseEnthalpyRequest, ResolvedThermochemistry, solve_resolved_ph,
+    PreparedPhContinuationState, ResolvedPhaseEnthalpyRequest, ResolvedThermochemistry,
+    solve_resolved_ph_transaction,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumConditions;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
+    EquilibriumConditions, LogMolesInitialGuess,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverPolicy;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_postprocessing::{
     TemperaturePostprocessingPolicy, TemperaturePostprocessingResult,
@@ -55,14 +60,20 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_postprocessi
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_range::{
     TemperatureGrid, TemperatureRangeRequest, TemperatureRangeSolution,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingMode;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
+    EquilibriumTimingCollector, EquilibriumTimingStage,
+};
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
+    EquilibriumTimingMode, EquilibriumTimingReport,
+};
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
-    SupportedPhaseModelPolicy, build_phase_equilibrium_problem,
+    PhaseEquilibriumBuildRequest, PreparedPhaseEquilibriumTemplate, SupportedPhaseModelPolicy,
+    build_phase_equilibrium_problem, build_phase_equilibrium_problem_with_timing,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::MultiphaseEquilibriumSolution;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
     EquilibriumSolveOptions, PhaseControlPolicy, ResolvedPhaseEquilibriumRequest,
-    solve_resolved_pt, solve_resolved_pt_transaction,
+    solve_resolved_pt, solve_resolved_pt_transaction_with_bundle,
 };
 use crate::Thermodynamics::User_PhaseOrSolution::{
     PhaseSpec, ResolvedPhaseSystem, SubstanceSystemFactoryError, SubstanceSystemSpec,
@@ -209,6 +220,51 @@ impl Default for EquilibriumCalculatorBuilder {
 }
 
 impl EquilibriumCalculatorBuilder {
+    /// Validates an elemental physical input against the resolved species
+    /// universe without starting a nonlinear solver.
+    ///
+    /// Applications can use this as a preflight step to report a
+    /// non-representable `b` beside the inventory editor rather than waiting
+    /// for the solve worker to reject the request.
+    pub fn validate_element_inventory(&self) -> Result<(), EquilibriumCalculatorError> {
+        let Some(inventory) = self.element_inventory.clone() else {
+            return Ok(());
+        };
+        let mode = self
+            .mode
+            .clone()
+            .ok_or(EquilibriumCalculatorError::MissingMode)?;
+        let pressure_pa = self
+            .pressure_pa
+            .ok_or(EquilibriumCalculatorError::MissingPressure)?;
+        let reference_pressure_pa = self
+            .reference_pressure_pa
+            .ok_or(EquilibriumCalculatorError::MissingReferencePressure)?;
+        let temperature_kelvin = match &mode {
+            EquilibriumCalculationMode::PtPoint { temperature_kelvin }
+            | EquilibriumCalculationMode::PhPoint {
+                initial_temperature_kelvin: temperature_kelvin,
+                ..
+            } => *temperature_kelvin,
+            EquilibriumCalculationMode::PtRange { temperatures } => temperatures.values()[0],
+            EquilibriumCalculationMode::PhRange {
+                initial_temperature_kelvin: temperature_kelvin,
+                ..
+            } => *temperature_kelvin,
+        };
+        let conditions =
+            EquilibriumConditions::new(temperature_kelvin, pressure_pa, reference_pressure_pa)?;
+        let (resolved, _) = self.resolve_system_with_selection(Some(&mode))?;
+        build_phase_equilibrium_problem(PhaseEquilibriumBuildRequest::from_element_inventory(
+            &resolved,
+            conditions,
+            inventory,
+            self.solve_options.trace_seed_policy(),
+            SupportedPhaseModelPolicy::default(),
+        )?)?;
+        Ok(())
+    }
+
     /// Applies a named observation preset. Numerical and physical policies are
     /// intentionally left untouched.
     pub fn preset(mut self, preset: EquilibriumCalculatorPreset) -> Self {
@@ -503,6 +559,16 @@ impl EquilibriumCalculatorBuilder {
         Ok(self)
     }
 
+    /// Selects the symbolic frontend used when an RST backend is prepared.
+    /// ExprLegacy remains the default; AtomView is an explicit opt-in.
+    pub fn rst_symbolic_frontend(
+        mut self,
+        frontend: crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RstSymbolicFrontend,
+    ) -> Self {
+        self.solve_options = self.solve_options.with_rst_symbolic_frontend(frontend);
+        self
+    }
+
     /// Replaces the shared canonical solve options.
     pub fn solve_options(mut self, options: EquilibriumSolveOptions) -> Self {
         self.solve_options = options;
@@ -512,6 +578,13 @@ impl EquilibriumCalculatorBuilder {
     /// Enables or disables measured workflow timing.
     pub fn timing(mut self, mode: EquilibriumTimingMode) -> Self {
         self.solve_options = self.solve_options.with_timing_mode(mode);
+        self
+    }
+
+    /// Enables fine-grained evaluation counters on the returned facade
+    /// outcome. The default leaves instrumentation disabled.
+    pub fn instrumentation(mut self, mode: EquilibriumInstrumentationMode) -> Self {
+        self.solve_options = self.solve_options.with_instrumentation_mode(mode);
         self
     }
 
@@ -575,8 +648,246 @@ impl EquilibriumCalculatorBuilder {
         self
     }
 
+    /// Prepares a reusable fixed-phase P,T session for sequential points.
+    ///
+    /// Resolution, elemental feasibility, thermochemistry topology, numerical
+    /// formulation, and the parameterized RST graph are built once. Subsequent
+    /// calls on [`PreparedEquilibriumPtSession`] update only the point
+    /// temperature and numeric Gibbs parameters before solving from the last
+    /// accepted seed. The ordinary one-shot [`Self::solve`] path is unchanged.
+    ///
+    /// This first session boundary deliberately excludes bounded phase control,
+    /// P,H modes, and temperature-range postprocessing. Those routes have their
+    /// own lifecycle and continuation contracts and must be benchmarked before
+    /// sharing this ownership model.
+    pub fn prepare_pt_session(
+        self,
+    ) -> Result<PreparedEquilibriumPtSession, EquilibriumCalculatorError> {
+        let mode = self
+            .mode
+            .clone()
+            .ok_or(EquilibriumCalculatorError::MissingMode)?;
+        let EquilibriumCalculationMode::PtPoint { temperature_kelvin } = mode.clone() else {
+            return Err(EquilibriumCalculatorError::PreparedSessionRequiresPtPoint);
+        };
+        if self.phase_control_policy.is_some() {
+            return Err(EquilibriumCalculatorError::PreparedSessionRequiresFixedPhases);
+        }
+        if self.temperature_postprocessing.is_some() {
+            return Err(EquilibriumCalculatorError::PreparedSessionRequiresPtPoint);
+        }
+        let pressure_pa = self
+            .pressure_pa
+            .ok_or(EquilibriumCalculatorError::MissingPressure)?;
+        let reference_pressure_pa = self
+            .reference_pressure_pa
+            .ok_or(EquilibriumCalculatorError::MissingReferencePressure)?;
+        if self.element_inventory.is_some()
+            && (self.initial_moles.is_some() || self.sparse_initial_moles.is_some())
+        {
+            return Err(EquilibriumCalculatorError::ConflictingPhysicalInputs);
+        }
+        if self.element_numerical_seed.is_some() && self.element_inventory.is_none() {
+            return Err(EquilibriumCalculatorError::MissingElementInventoryForNumericalSeed);
+        }
+
+        let conditions =
+            EquilibriumConditions::new(temperature_kelvin, pressure_pa, reference_pressure_pa)?;
+        let timing_mode = self.solve_options.timing_mode();
+        let (resolved, candidate_selection) = self.resolve_system_with_selection(Some(&mode))?;
+        let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
+        let build_request = if let Some(inventory) = self.element_inventory.clone() {
+            let build_request = PhaseEquilibriumBuildRequest::from_element_inventory(
+                &resolved,
+                conditions,
+                inventory,
+                self.solve_options.trace_seed_policy(),
+                SupportedPhaseModelPolicy::default(),
+            )?;
+            match self.element_numerical_seed.clone() {
+                Some(seed) => build_request.with_numerical_seed(seed)?,
+                None => build_request,
+            }
+        } else {
+            let dense_initial_moles = self.initial_moles.clone();
+            let sparse_initial_moles = self.sparse_initial_moles.clone();
+            let initial = match (dense_initial_moles, sparse_initial_moles) {
+                (Some(moles), None) => MultiphaseInitialComposition::from_dense(&layout, moles)?,
+                (None, Some(entries)) => {
+                    MultiphaseInitialComposition::from_sparse(&layout, entries)?
+                }
+                (None, None) => return Err(EquilibriumCalculatorError::MissingInitialMoles),
+                (Some(_), Some(_)) => {
+                    return Err(EquilibriumCalculatorError::ConflictingInitialComposition);
+                }
+            };
+            PhaseEquilibriumBuildRequest::new(
+                &resolved,
+                conditions,
+                initial,
+                self.solve_options.trace_seed_policy(),
+                SupportedPhaseModelPolicy::default(),
+            )?
+        };
+        let build_request = match candidate_selection {
+            Some(selection) => build_request.with_candidate_selection(selection),
+            None => build_request,
+        };
+        let bundle = build_phase_equilibrium_problem_with_timing(build_request, timing_mode)?;
+        let seed = bundle.problem().initial_log_moles().clone();
+        let template = bundle.into_temperature_template(
+            self.solve_options.prepares_rst_backend(),
+            timing_mode,
+            self.solve_options.rst_symbolic_frontend(),
+        )?;
+
+        Ok(PreparedEquilibriumPtSession {
+            resolved,
+            template,
+            solve_options: self.solve_options,
+            pressure_pa,
+            reference_pressure_pa,
+            seed,
+        })
+    }
+
+    /// Prepares a reusable fixed-phase monolithic P,H session for sequential
+    /// enthalpy targets.
+    ///
+    /// Resolution, thermochemistry capabilities, the fixed-active numerical
+    /// formulation, and the parameterized RST P,H graph are built once.
+    /// [`PreparedEquilibriumPhSession::solve_at_total_enthalpy`] then updates
+    /// only the target and the last accepted continuation seed. Bounded phase
+    /// control, automatic nested fallback, and range postprocessing remain
+    /// outside this first public ownership boundary.
+    pub fn prepare_ph_session(
+        self,
+    ) -> Result<PreparedEquilibriumPhSession, EquilibriumCalculatorError> {
+        let mode = self
+            .mode
+            .clone()
+            .ok_or(EquilibriumCalculatorError::MissingMode)?;
+        let EquilibriumCalculationMode::PhPoint {
+            target_enthalpy,
+            initial_temperature_kelvin,
+            temperature_bounds,
+        } = mode.clone()
+        else {
+            return Err(EquilibriumCalculatorError::PreparedPhSessionRequiresPhPoint);
+        };
+        if self.ph_solve_mode != PhSolveMode::Monolithic {
+            return Err(EquilibriumCalculatorError::PreparedPhSessionRequiresMonolithic);
+        }
+        if self.phase_control_policy.is_some() {
+            return Err(EquilibriumCalculatorError::PreparedSessionRequiresFixedPhases);
+        }
+        if self.temperature_postprocessing.is_some() {
+            return Err(EquilibriumCalculatorError::PreparedPhSessionRequiresPhPoint);
+        }
+        let pressure_pa = self
+            .pressure_pa
+            .ok_or(EquilibriumCalculatorError::MissingPressure)?;
+        let reference_pressure_pa = self
+            .reference_pressure_pa
+            .ok_or(EquilibriumCalculatorError::MissingReferencePressure)?;
+        if self.element_inventory.is_some()
+            && (self.initial_moles.is_some() || self.sparse_initial_moles.is_some())
+        {
+            return Err(EquilibriumCalculatorError::ConflictingPhysicalInputs);
+        }
+        if self.element_numerical_seed.is_some() && self.element_inventory.is_none() {
+            return Err(EquilibriumCalculatorError::MissingElementInventoryForNumericalSeed);
+        }
+
+        let (resolved, candidate_selection) = self.resolve_system_with_selection(Some(&mode))?;
+        let thermochemistry = ResolvedThermochemistry::from_resolved_system(&resolved)
+            .map_err(EquilibriumCalculatorError::Preparation)?;
+        let constraint = EquilibriumConstraint::ph_joules(
+            pressure_pa,
+            reference_pressure_pa,
+            target_enthalpy,
+            initial_temperature_kelvin,
+        )?;
+        let mut request = if let Some(inventory) = self.element_inventory.clone() {
+            ResolvedPhaseEnthalpyRequest::from_element_inventory(
+                &resolved,
+                inventory,
+                constraint,
+                temperature_bounds,
+                thermochemistry,
+            )?
+        } else {
+            let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
+            let initial = match (
+                self.initial_moles.clone(),
+                self.sparse_initial_moles.clone(),
+            ) {
+                (Some(moles), None) => MultiphaseInitialComposition::from_dense(&layout, moles)?,
+                (None, Some(entries)) => {
+                    MultiphaseInitialComposition::from_sparse(&layout, entries)?
+                }
+                (None, None) => return Err(EquilibriumCalculatorError::MissingInitialMoles),
+                (Some(_), Some(_)) => {
+                    return Err(EquilibriumCalculatorError::ConflictingInitialComposition);
+                }
+            };
+            ResolvedPhaseEnthalpyRequest::from_resolved_thermochemistry(
+                &resolved,
+                initial,
+                constraint,
+                temperature_bounds,
+                thermochemistry,
+            )?
+        };
+        if let Some(seed) = self.element_numerical_seed {
+            request = request.with_initial_composition(seed)?;
+        }
+        request = request
+            .with_solve_options(self.solve_options)
+            .with_ph_solve_mode(PhSolveMode::Monolithic)
+            .with_temperature_options(self.ph_temperature_options)?;
+        if let Some(selection) = candidate_selection {
+            request = request.with_candidate_selection(selection);
+        }
+        let initial_composition = request.initial_composition().clone();
+        let prepared = PreparedPhContinuationState::new(&request)
+            .map_err(EquilibriumCalculatorError::Preparation)?;
+
+        Ok(PreparedEquilibriumPhSession {
+            resolved,
+            request,
+            prepared,
+            initial_composition,
+            next_temperature: initial_temperature_kelvin,
+        })
+    }
+
     /// Resolves phase data once and executes the selected canonical workflow.
     pub fn solve(self) -> Result<EquilibriumCalculatorOutcome, EquilibriumCalculatorError> {
+        let instrumentation_mode = self.solve_options.instrumentation_mode();
+        let timing_mode = self.solve_options.timing_mode();
+        let started =
+            matches!(timing_mode, EquilibriumTimingMode::Enabled).then(std::time::Instant::now);
+        let (captured, instrumentation) = capture_if_enabled(instrumentation_mode, || {
+            let mut timing = EquilibriumTimingCollector::new(timing_mode);
+            let outcome = self.solve_inner(&mut timing);
+            if let Some(started) = started {
+                timing.set_total(started.elapsed());
+            }
+            (outcome, timing.finish())
+        });
+        let (outcome, facade_timing) = captured;
+        outcome.map(|outcome| {
+            outcome
+                .with_instrumentation(instrumentation)
+                .with_facade_timing(facade_timing)
+        })
+    }
+
+    fn solve_inner(
+        self,
+        timing: &mut EquilibriumTimingCollector,
+    ) -> Result<EquilibriumCalculatorOutcome, EquilibriumCalculatorError> {
         let mode = self
             .mode
             .clone()
@@ -601,8 +912,10 @@ impl EquilibriumCalculatorBuilder {
             return Err(EquilibriumCalculatorError::MissingElementInventoryForNumericalSeed);
         }
         if let Some(inventory) = self.element_inventory.clone() {
-            let (resolved, candidate_selection) =
-                self.resolve_system_with_selection(Some(&mode))?;
+            let (resolved, candidate_selection) = timing
+                .measure(EquilibriumTimingStage::FacadeResolution, || {
+                    self.resolve_system_with_selection(Some(&mode))
+                })?;
             match mode {
                 EquilibriumCalculationMode::PtPoint { temperature_kelvin } => {
                     let conditions = EquilibriumConditions::new(
@@ -610,154 +923,211 @@ impl EquilibriumCalculatorBuilder {
                         pressure_pa,
                         reference_pressure_pa,
                     )?;
-                    let build_request = crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::
-                        PhaseEquilibriumBuildRequest::from_element_inventory(
-                            &resolved,
-                            conditions,
-                            inventory.clone(),
-                            self.solve_options.trace_seed_policy(),
-                            SupportedPhaseModelPolicy::default(),
-                        )?;
-                    let build_request = match self.element_numerical_seed.clone() {
-                        Some(seed) => build_request.with_numerical_seed(seed)?,
-                        None => build_request,
-                    };
-                    let build_request = match candidate_selection.clone() {
-                        Some(selection) => build_request.with_candidate_selection(selection),
-                        None => build_request,
-                    };
-                    let bundle = build_phase_equilibrium_problem(build_request)?;
-                    let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
-                    let numerical_seed = MultiphaseInitialComposition::from_dense(
-                        &layout,
-                        bundle.problem().initial_moles().to_vec(),
-                    )?;
-                    let request =
-                        ResolvedPhaseEquilibriumRequest::new(&resolved, conditions, numerical_seed)
+                    let (request, bundle) =
+                        timing.measure(EquilibriumTimingStage::RequestPreparation, || {
+                            let build_request =
+                                PhaseEquilibriumBuildRequest::from_element_inventory(
+                                    &resolved,
+                                    conditions,
+                                    inventory.clone(),
+                                    self.solve_options.trace_seed_policy(),
+                                    SupportedPhaseModelPolicy::default(),
+                                )?;
+                            let build_request = match self.element_numerical_seed.clone() {
+                                Some(seed) => build_request.with_numerical_seed(seed)?,
+                                None => build_request,
+                            };
+                            let build_request = match candidate_selection.clone() {
+                                Some(selection) => {
+                                    build_request.with_candidate_selection(selection)
+                                }
+                                None => build_request,
+                            };
+                            let bundle = build_phase_equilibrium_problem_with_timing(
+                                build_request,
+                                self.solve_options.timing_mode(),
+                            )?;
+                            let layout =
+                                MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
+                            let numerical_seed = MultiphaseInitialComposition::from_dense(
+                                &layout,
+                                bundle.problem().initial_moles().to_vec(),
+                            )?;
+                            let request = ResolvedPhaseEquilibriumRequest::new(
+                                &resolved,
+                                conditions,
+                                numerical_seed,
+                            )
                             .with_element_inventory(inventory)
-                            .with_candidate_selection(candidate_selection)
+                            .with_candidate_selection(candidate_selection.clone())
                             .with_solve_options(self.solve_options);
-                    let request = match self.phase_control_policy {
-                        Some(policy) => request.with_phase_control_policy(policy),
-                        None => request,
-                    };
-                    let solution = solve_resolved_pt_transaction(request)?;
-                    return Ok(EquilibriumCalculatorOutcome::PtPoint(
-                        EquilibriumCalculatorPoint { resolved, solution },
-                    ));
+                            let request = match self.phase_control_policy {
+                                Some(policy) => request.with_phase_control_policy(policy),
+                                None => request,
+                            };
+                            Ok::<_, EquilibriumCalculatorError>((request, bundle))
+                        })?;
+                    let solution = solve_resolved_pt_transaction_with_bundle(request, bundle)?;
+                    let outcome = timing.measure(EquilibriumTimingStage::ResultAssembly, || {
+                        EquilibriumCalculatorOutcome::PtPoint(EquilibriumCalculatorPoint {
+                            resolved,
+                            solution,
+                            instrumentation: EquilibriumInstrumentationReport::default(),
+                            facade_timing: EquilibriumTimingReport::default(),
+                        })
+                    });
+                    return Ok(outcome);
                 }
                 EquilibriumCalculationMode::PhPoint {
                     target_enthalpy,
                     initial_temperature_kelvin,
                     temperature_bounds,
                 } => {
-                    let thermochemistry = ResolvedThermochemistry::from_resolved_system(&resolved)?;
-                    let request = ResolvedPhaseEnthalpyRequest::from_element_inventory(
-                        &resolved,
-                        inventory,
-                        EquilibriumConstraint::ph_joules(
-                            pressure_pa,
-                            reference_pressure_pa,
-                            target_enthalpy,
-                            initial_temperature_kelvin,
-                        )?,
-                        temperature_bounds,
-                        thermochemistry,
-                    )?;
-                    let request = match self.element_numerical_seed.clone() {
-                        Some(seed) => request.with_initial_composition(seed)?,
-                        None => request,
-                    }
-                    .with_solve_options(self.solve_options)
-                    .with_ph_solve_mode(self.ph_solve_mode)
-                    .with_temperature_options(self.ph_temperature_options)?;
-                    let request = match candidate_selection.clone() {
-                        Some(selection) => request.with_candidate_selection(selection),
-                        None => request,
-                    };
-                    let request = match self.phase_control_policy {
-                        Some(policy) => request.with_phase_control_policy(policy),
-                        None => request,
-                    };
-                    let solution = solve_resolved_ph(request)?;
-                    return Ok(EquilibriumCalculatorOutcome::PhPoint(
-                        EquilibriumCalculatorPhPoint { resolved, solution },
-                    ));
+                    let thermochemistry = timing
+                        .measure(EquilibriumTimingStage::ThermochemistryPreparation, || {
+                            ResolvedThermochemistry::from_resolved_system(&resolved)
+                        })?;
+                    let request =
+                        timing.measure(EquilibriumTimingStage::RequestPreparation, || {
+                            let request = ResolvedPhaseEnthalpyRequest::from_element_inventory(
+                                &resolved,
+                                inventory,
+                                EquilibriumConstraint::ph_joules(
+                                    pressure_pa,
+                                    reference_pressure_pa,
+                                    target_enthalpy,
+                                    initial_temperature_kelvin,
+                                )?,
+                                temperature_bounds,
+                                thermochemistry,
+                            )?;
+                            let request = match self.element_numerical_seed.clone() {
+                                Some(seed) => request.with_initial_composition(seed)?,
+                                None => request,
+                            }
+                            .with_solve_options(self.solve_options)
+                            .with_ph_solve_mode(self.ph_solve_mode)
+                            .with_temperature_options(self.ph_temperature_options)?;
+                            let request = match candidate_selection.clone() {
+                                Some(selection) => request.with_candidate_selection(selection),
+                                None => request,
+                            };
+                            let request = match self.phase_control_policy {
+                                Some(policy) => request.with_phase_control_policy(policy),
+                                None => request,
+                            };
+                            Ok::<_, EquilibriumCalculatorError>(request)
+                        })?;
+                    let solution = solve_resolved_ph_transaction(request)?;
+                    let outcome = timing.measure(EquilibriumTimingStage::ResultAssembly, || {
+                        EquilibriumCalculatorOutcome::PhPoint(EquilibriumCalculatorPhPoint {
+                            resolved,
+                            solution,
+                            instrumentation: EquilibriumInstrumentationReport::default(),
+                            facade_timing: EquilibriumTimingReport::default(),
+                        })
+                    });
+                    return Ok(outcome);
                 }
                 EquilibriumCalculationMode::PhRange {
                     target_enthalpies,
                     initial_temperature_kelvin,
                     temperature_bounds,
                 } => {
-                    let thermochemistry = ResolvedThermochemistry::from_resolved_system(&resolved)?;
-                    let request = PhRangeRequest::from_element_inventory(
-                        &resolved,
-                        inventory,
-                        pressure_pa,
-                        reference_pressure_pa,
-                        target_enthalpies,
-                        temperature_bounds,
-                        initial_temperature_kelvin,
-                        thermochemistry,
-                    )?;
-                    let request = match self.element_numerical_seed.clone() {
-                        Some(seed) => request.with_initial_composition(seed)?,
-                        None => request,
-                    }
-                    .with_solve_options(self.solve_options)
-                    .with_ph_solve_mode(self.ph_solve_mode)
-                    .with_temperature_options(self.ph_temperature_options)?;
-                    let request = match candidate_selection.clone() {
-                        Some(selection) => request.with_candidate_selection(selection),
-                        None => request,
-                    };
-                    let request = match self.phase_control_policy {
-                        Some(policy) => request.with_phase_control_policy(policy),
-                        None => request,
-                    };
+                    let thermochemistry = timing
+                        .measure(EquilibriumTimingStage::ThermochemistryPreparation, || {
+                            ResolvedThermochemistry::from_resolved_system(&resolved)
+                        })?;
+                    let request =
+                        timing.measure(EquilibriumTimingStage::RequestPreparation, || {
+                            let request = PhRangeRequest::from_element_inventory(
+                                &resolved,
+                                inventory,
+                                pressure_pa,
+                                reference_pressure_pa,
+                                target_enthalpies,
+                                temperature_bounds,
+                                initial_temperature_kelvin,
+                                thermochemistry,
+                            )?;
+                            let request = match self.element_numerical_seed.clone() {
+                                Some(seed) => request.with_initial_composition(seed)?,
+                                None => request,
+                            }
+                            .with_solve_options(self.solve_options)
+                            .with_ph_solve_mode(self.ph_solve_mode)
+                            .with_temperature_options(self.ph_temperature_options)?;
+                            let request = match candidate_selection.clone() {
+                                Some(selection) => request.with_candidate_selection(selection),
+                                None => request,
+                            };
+                            let request = match self.phase_control_policy {
+                                Some(policy) => request.with_phase_control_policy(policy),
+                                None => request,
+                            };
+                            Ok::<_, EquilibriumCalculatorError>(request)
+                        })?;
                     let solution = request.solve()?;
-                    return Ok(EquilibriumCalculatorOutcome::PhRange(
-                        EquilibriumCalculatorPhRange { resolved, solution },
-                    ));
+                    let outcome = timing.measure(EquilibriumTimingStage::ResultAssembly, || {
+                        EquilibriumCalculatorOutcome::PhRange(EquilibriumCalculatorPhRange {
+                            resolved,
+                            solution,
+                            instrumentation: EquilibriumInstrumentationReport::default(),
+                            facade_timing: EquilibriumTimingReport::default(),
+                        })
+                    });
+                    return Ok(outcome);
                 }
                 EquilibriumCalculationMode::PtRange { temperatures } => {
-                    let request = TemperatureRangeRequest::from_element_inventory(
-                        &resolved,
-                        inventory,
-                        pressure_pa,
-                        reference_pressure_pa,
-                        temperatures,
-                    )?;
-                    let request = match self.element_numerical_seed.clone() {
-                        Some(seed) => request.with_initial_composition(seed)?,
-                        None => request,
-                    }
-                    .with_solve_options(self.solve_options);
-                    let request = match candidate_selection.clone() {
-                        Some(selection) => request.with_candidate_selection(selection),
-                        None => request,
-                    };
-                    let request = match self.phase_control_policy {
-                        Some(policy) => request.with_phase_control_policy(policy),
-                        None => request,
-                    };
+                    let request =
+                        timing.measure(EquilibriumTimingStage::RequestPreparation, || {
+                            let request = TemperatureRangeRequest::from_element_inventory(
+                                &resolved,
+                                inventory,
+                                pressure_pa,
+                                reference_pressure_pa,
+                                temperatures,
+                            )?;
+                            let request = match self.element_numerical_seed.clone() {
+                                Some(seed) => request.with_initial_composition(seed)?,
+                                None => request,
+                            }
+                            .with_solve_options(self.solve_options);
+                            let request = match candidate_selection.clone() {
+                                Some(selection) => request.with_candidate_selection(selection),
+                                None => request,
+                            };
+                            let request = match self.phase_control_policy {
+                                Some(policy) => request.with_phase_control_policy(policy),
+                                None => request,
+                            };
+                            Ok::<_, EquilibriumCalculatorError>(request)
+                        })?;
                     let solution = request.solve()?;
                     let postprocessing = self
                         .temperature_postprocessing
                         .as_ref()
                         .map(|policy| postprocess_temperature_range_solution(&solution, policy))
                         .transpose()?;
-                    return Ok(EquilibriumCalculatorOutcome::PtRange(
-                        EquilibriumCalculatorTemperatureRange {
-                            resolved,
-                            solution,
-                            postprocessing,
-                        },
-                    ));
+                    let outcome = timing.measure(EquilibriumTimingStage::ResultAssembly, || {
+                        EquilibriumCalculatorOutcome::PtRange(
+                            EquilibriumCalculatorTemperatureRange {
+                                resolved,
+                                solution,
+                                postprocessing,
+                                instrumentation: EquilibriumInstrumentationReport::default(),
+                                facade_timing: EquilibriumTimingReport::default(),
+                            },
+                        )
+                    });
+                    return Ok(outcome);
                 }
             }
         }
-        let (resolved, initial) = self.resolve_and_prepare_initial()?;
+        let (resolved, initial) = timing
+            .measure(EquilibriumTimingStage::FacadeResolution, || {
+                self.resolve_and_prepare_initial()
+            })?;
 
         match mode {
             EquilibriumCalculationMode::PtPoint { temperature_kelvin } => {
@@ -766,96 +1136,133 @@ impl EquilibriumCalculatorBuilder {
                     pressure_pa,
                     reference_pressure_pa,
                 )?;
-                let request = self.pt_request(&resolved, conditions, initial);
+                let request = timing.measure(EquilibriumTimingStage::RequestPreparation, || {
+                    Ok::<_, EquilibriumCalculatorError>(
+                        self.pt_request(&resolved, conditions, initial),
+                    )
+                })?;
                 let solution = solve_resolved_pt(request)?;
-                Ok(EquilibriumCalculatorOutcome::PtPoint(
-                    EquilibriumCalculatorPoint { resolved, solution },
-                ))
+                Ok(timing.measure(EquilibriumTimingStage::ResultAssembly, || {
+                    EquilibriumCalculatorOutcome::PtPoint(EquilibriumCalculatorPoint {
+                        resolved,
+                        solution,
+                        instrumentation: EquilibriumInstrumentationReport::default(),
+                        facade_timing: EquilibriumTimingReport::default(),
+                    })
+                }))
             }
             EquilibriumCalculationMode::PtRange { temperatures } => {
-                let request = TemperatureRangeRequest::new(
-                    &resolved,
-                    initial,
-                    pressure_pa,
-                    reference_pressure_pa,
-                    temperatures,
-                )?
-                .with_solve_options(self.solve_options);
-                let request = match self.phase_control_policy {
-                    Some(policy) => request.with_phase_control_policy(policy),
-                    None => request,
-                };
+                let request = timing.measure(EquilibriumTimingStage::RequestPreparation, || {
+                    let request = TemperatureRangeRequest::new(
+                        &resolved,
+                        initial,
+                        pressure_pa,
+                        reference_pressure_pa,
+                        temperatures,
+                    )
+                    .map_err(EquilibriumCalculatorError::from)?
+                    .with_solve_options(self.solve_options);
+                    let request = match self.phase_control_policy {
+                        Some(policy) => request.with_phase_control_policy(policy),
+                        None => request,
+                    };
+                    Ok::<_, EquilibriumCalculatorError>(request)
+                })?;
                 let solution = request.solve()?;
                 let postprocessing = self
                     .temperature_postprocessing
                     .as_ref()
                     .map(|policy| postprocess_temperature_range_solution(&solution, policy))
                     .transpose()?;
-                Ok(EquilibriumCalculatorOutcome::PtRange(
-                    EquilibriumCalculatorTemperatureRange {
+                Ok(timing.measure(EquilibriumTimingStage::ResultAssembly, || {
+                    EquilibriumCalculatorOutcome::PtRange(EquilibriumCalculatorTemperatureRange {
                         resolved,
                         solution,
                         postprocessing,
-                    },
-                ))
+                        instrumentation: EquilibriumInstrumentationReport::default(),
+                        facade_timing: EquilibriumTimingReport::default(),
+                    })
+                }))
             }
             EquilibriumCalculationMode::PhPoint {
                 target_enthalpy,
                 initial_temperature_kelvin,
                 temperature_bounds,
             } => {
-                let thermochemistry = ResolvedThermochemistry::from_resolved_system(&resolved)?;
-                let request = ResolvedPhaseEnthalpyRequest::from_resolved_thermochemistry(
-                    &resolved,
-                    initial,
-                    EquilibriumConstraint::ph_joules(
-                        pressure_pa,
-                        reference_pressure_pa,
-                        target_enthalpy,
-                        initial_temperature_kelvin,
-                    )?,
-                    temperature_bounds,
-                    thermochemistry,
-                )?
-                .with_solve_options(self.solve_options)
-                .with_ph_solve_mode(self.ph_solve_mode)
-                .with_temperature_options(self.ph_temperature_options)?;
-                let request = match self.phase_control_policy {
-                    Some(policy) => request.with_phase_control_policy(policy),
-                    None => request,
-                };
-                let solution = solve_resolved_ph(request)?;
-                Ok(EquilibriumCalculatorOutcome::PhPoint(
-                    EquilibriumCalculatorPhPoint { resolved, solution },
-                ))
+                let thermochemistry = timing
+                    .measure(EquilibriumTimingStage::ThermochemistryPreparation, || {
+                        ResolvedThermochemistry::from_resolved_system(&resolved)
+                    })?;
+                let request = timing.measure(EquilibriumTimingStage::RequestPreparation, || {
+                    let request = ResolvedPhaseEnthalpyRequest::from_resolved_thermochemistry(
+                        &resolved,
+                        initial,
+                        EquilibriumConstraint::ph_joules(
+                            pressure_pa,
+                            reference_pressure_pa,
+                            target_enthalpy,
+                            initial_temperature_kelvin,
+                        )?,
+                        temperature_bounds,
+                        thermochemistry,
+                    )?
+                    .with_solve_options(self.solve_options)
+                    .with_ph_solve_mode(self.ph_solve_mode)
+                    .with_temperature_options(self.ph_temperature_options)?;
+                    let request = match self.phase_control_policy {
+                        Some(policy) => request.with_phase_control_policy(policy),
+                        None => request,
+                    };
+                    Ok::<_, EquilibriumCalculatorError>(request)
+                })?;
+                let solution = solve_resolved_ph_transaction(request)?;
+                Ok(timing.measure(EquilibriumTimingStage::ResultAssembly, || {
+                    EquilibriumCalculatorOutcome::PhPoint(EquilibriumCalculatorPhPoint {
+                        resolved,
+                        solution,
+                        instrumentation: EquilibriumInstrumentationReport::default(),
+                        facade_timing: EquilibriumTimingReport::default(),
+                    })
+                }))
             }
             EquilibriumCalculationMode::PhRange {
                 target_enthalpies,
                 initial_temperature_kelvin,
                 temperature_bounds,
             } => {
-                let thermochemistry = ResolvedThermochemistry::from_resolved_system(&resolved)?;
-                let request = PhRangeRequest::from_resolved_thermochemistry(
-                    &resolved,
-                    initial,
-                    pressure_pa,
-                    reference_pressure_pa,
-                    target_enthalpies,
-                    temperature_bounds,
-                    initial_temperature_kelvin,
-                    thermochemistry,
-                )?
-                .with_solve_options(self.solve_options)
-                .with_ph_solve_mode(self.ph_solve_mode)
-                .with_temperature_options(self.ph_temperature_options)?;
-                let request = match self.phase_control_policy {
-                    Some(policy) => request.with_phase_control_policy(policy),
-                    None => request,
-                };
+                let thermochemistry = timing
+                    .measure(EquilibriumTimingStage::ThermochemistryPreparation, || {
+                        ResolvedThermochemistry::from_resolved_system(&resolved)
+                    })?;
+                let request = timing.measure(EquilibriumTimingStage::RequestPreparation, || {
+                    let request = PhRangeRequest::from_resolved_thermochemistry(
+                        &resolved,
+                        initial,
+                        pressure_pa,
+                        reference_pressure_pa,
+                        target_enthalpies,
+                        temperature_bounds,
+                        initial_temperature_kelvin,
+                        thermochemistry,
+                    )?
+                    .with_solve_options(self.solve_options)
+                    .with_ph_solve_mode(self.ph_solve_mode)
+                    .with_temperature_options(self.ph_temperature_options)?;
+                    let request = match self.phase_control_policy {
+                        Some(policy) => request.with_phase_control_policy(policy),
+                        None => request,
+                    };
+                    Ok::<_, EquilibriumCalculatorError>(request)
+                })?;
                 let solution = request.solve()?;
-                Ok(EquilibriumCalculatorOutcome::PhRange(
-                    EquilibriumCalculatorPhRange { resolved, solution },
-                ))
+                Ok(timing.measure(EquilibriumTimingStage::ResultAssembly, || {
+                    EquilibriumCalculatorOutcome::PhRange(EquilibriumCalculatorPhRange {
+                        resolved,
+                        solution,
+                        instrumentation: EquilibriumInstrumentationReport::default(),
+                        facade_timing: EquilibriumTimingReport::default(),
+                    })
+                }))
             }
         }
     }
@@ -1012,11 +1419,148 @@ impl EquilibriumCalculatorBuilder {
     }
 }
 
+/// Reusable fixed-phase P,T facade session for sequential points.
+///
+/// The session owns the resolved system and prepared formulation. It is mutable
+/// only at the continuation boundary: each accepted point replaces the next
+/// numerical seed while the RST symbolic graph remains parameterized and alive.
+pub struct PreparedEquilibriumPtSession {
+    resolved: ResolvedPhaseSystem,
+    template: PreparedPhaseEquilibriumTemplate,
+    solve_options: EquilibriumSolveOptions,
+    pressure_pa: f64,
+    reference_pressure_pa: f64,
+    seed: LogMolesInitialGuess,
+}
+
+/// Reusable fixed-phase monolithic P,H facade session for sequential targets.
+///
+/// The session owns the prepared P,H formulation and its optional parameterized
+/// RST graph. Every accepted result advances the local composition and
+/// temperature seed; a failed result leaves that continuation seed unchanged.
+pub struct PreparedEquilibriumPhSession {
+    resolved: ResolvedPhaseSystem,
+    request: ResolvedPhaseEnthalpyRequest<'static>,
+    prepared: PreparedPhContinuationState,
+    initial_composition: MultiphaseInitialComposition,
+    next_temperature: f64,
+}
+
+impl PreparedEquilibriumPhSession {
+    /// Timing captured while building the fixed P,H formulation and graph.
+    pub fn preparation_timing(&self) -> EquilibriumTimingReport {
+        self.prepared.preparation_timing()
+    }
+
+    /// Whether the prepared state contains a parameterized RST P,H graph.
+    pub fn rst_graph_prepared(&self) -> bool {
+        self.prepared.rst_graph_prepared()
+    }
+
+    /// Solves the next target from the previous accepted composition and
+    /// temperature. Preparation is reused; only target-local numeric state is
+    /// retargeted before the nonlinear runner starts.
+    pub fn solve_at_total_enthalpy(
+        &mut self,
+        target_enthalpy: TotalEnthalpyJoules,
+    ) -> Result<EquilibriumCalculatorPhPoint, EquilibriumCalculatorError> {
+        let timing_mode = self.request.solve_options().timing_mode();
+        let instrumentation_mode = self.request.solve_options().instrumentation_mode();
+        let started = std::time::Instant::now();
+        let (captured, instrumentation) = capture_if_enabled(instrumentation_mode, || {
+            let mut timing = EquilibriumTimingCollector::new(timing_mode);
+            let solution = timing
+                .measure(EquilibriumTimingStage::RequestPreparation, || {
+                    self.request.retarget_for_prepared_session(
+                        target_enthalpy,
+                        self.next_temperature,
+                        self.initial_composition.clone(),
+                    )
+                })
+                .map_err(EquilibriumCalculatorError::from)
+                .and_then(|_| {
+                    self.prepared
+                        .solve(&self.request, true)
+                        .map_err(EquilibriumCalculatorError::from)
+                });
+            timing.set_total(started.elapsed());
+            (solution, timing.finish())
+        });
+        let (solution, facade_timing) = captured;
+        let solution = solution?;
+        let layout = MultiphaseEquilibriumLayout::new(self.resolved.phase_specs().to_vec())?;
+        let next_composition = MultiphaseInitialComposition::from_dense(
+            &layout,
+            solution.equilibrium().component_moles().to_vec(),
+        )?;
+        self.initial_composition = next_composition;
+        self.next_temperature = solution.temperature();
+        Ok(EquilibriumCalculatorPhPoint {
+            resolved: self.resolved.clone(),
+            solution,
+            instrumentation,
+            facade_timing,
+        })
+    }
+}
+
+impl PreparedEquilibriumPtSession {
+    /// Timing accumulated while resolving, building, and preparing this session.
+    pub fn preparation_timing(&self) -> EquilibriumTimingReport {
+        self.template.build_timing()
+    }
+
+    /// Whether a parameterized RST graph was prepared for this session.
+    pub fn rst_graph_prepared(&self) -> bool {
+        self.template.symbolic_problem_reused()
+    }
+
+    /// Solves the next fixed-phase P,T point from the previous accepted seed.
+    ///
+    /// The returned value is the ordinary [`EquilibriumCalculatorPoint`] facade
+    /// result, including the same immutable solution and instrumentation
+    /// reports as a one-shot calculation.
+    pub fn solve_at_temperature(
+        &mut self,
+        temperature_kelvin: f64,
+    ) -> Result<EquilibriumCalculatorPoint, EquilibriumCalculatorError> {
+        let conditions = EquilibriumConditions::new(
+            temperature_kelvin,
+            self.pressure_pa,
+            self.reference_pressure_pa,
+        )?;
+        let timing_mode = self.solve_options.timing_mode();
+        let instrumentation_mode = self.solve_options.instrumentation_mode();
+        let settings = self.solve_options.clone().into_settings();
+        let seed = self.seed.clone();
+        let started = std::time::Instant::now();
+        let (captured, instrumentation) = capture_if_enabled(instrumentation_mode, || {
+            let mut timing = EquilibriumTimingCollector::new(timing_mode);
+            let solution = self
+                .template
+                .solve_at(conditions, seed, settings, timing_mode);
+            timing.set_total(started.elapsed());
+            (solution, timing.finish())
+        });
+        let (solution, facade_timing) = captured;
+        let solution = solution?;
+        self.seed = LogMolesInitialGuess::new(solution.accepted_solution().log_moles().to_vec())?;
+        Ok(EquilibriumCalculatorPoint {
+            resolved: self.resolved.clone(),
+            solution,
+            instrumentation,
+            facade_timing,
+        })
+    }
+}
+
 /// One accepted P,T point paired with the immutable resolved lookup report.
 #[derive(Debug, Clone)]
 pub struct EquilibriumCalculatorPoint {
     resolved: ResolvedPhaseSystem,
     solution: MultiphaseEquilibriumSolution,
+    instrumentation: EquilibriumInstrumentationReport,
+    facade_timing: EquilibriumTimingReport,
 }
 
 impl EquilibriumCalculatorPoint {
@@ -1026,6 +1570,16 @@ impl EquilibriumCalculatorPoint {
 
     pub fn solution(&self) -> &MultiphaseEquilibriumSolution {
         &self.solution
+    }
+
+    /// Fine-grained evaluation counts captured for this facade operation.
+    pub fn instrumentation_report(&self) -> &EquilibriumInstrumentationReport {
+        &self.instrumentation
+    }
+
+    /// Optional stage timing for facade resolution and request preparation.
+    pub fn facade_timing(&self) -> &EquilibriumTimingReport {
+        &self.facade_timing
     }
 
     /// Moves the resolved system and accepted solution to an integration
@@ -1040,6 +1594,8 @@ impl EquilibriumCalculatorPoint {
 pub struct EquilibriumCalculatorPhPoint {
     resolved: ResolvedPhaseSystem,
     solution: FixedPressureEnthalpySolution,
+    instrumentation: EquilibriumInstrumentationReport,
+    facade_timing: EquilibriumTimingReport,
 }
 
 impl EquilibriumCalculatorPhPoint {
@@ -1049,6 +1605,16 @@ impl EquilibriumCalculatorPhPoint {
 
     pub fn solution(&self) -> &FixedPressureEnthalpySolution {
         &self.solution
+    }
+
+    /// Fine-grained evaluation counts captured for this facade operation.
+    pub fn instrumentation_report(&self) -> &EquilibriumInstrumentationReport {
+        &self.instrumentation
+    }
+
+    /// Optional stage timing for facade resolution and request preparation.
+    pub fn facade_timing(&self) -> &EquilibriumTimingReport {
+        &self.facade_timing
     }
 
     /// Moves the resolved system and accepted P,H solution to an adapter.
@@ -1063,6 +1629,8 @@ pub struct EquilibriumCalculatorTemperatureRange {
     resolved: ResolvedPhaseSystem,
     solution: TemperatureRangeSolution,
     postprocessing: Option<TemperaturePostprocessingResult>,
+    instrumentation: EquilibriumInstrumentationReport,
+    facade_timing: EquilibriumTimingReport,
 }
 
 impl EquilibriumCalculatorTemperatureRange {
@@ -1076,6 +1644,16 @@ impl EquilibriumCalculatorTemperatureRange {
 
     pub fn postprocessing(&self) -> Option<&TemperaturePostprocessingResult> {
         self.postprocessing.as_ref()
+    }
+
+    /// Fine-grained evaluation counts captured for this facade operation.
+    pub fn instrumentation_report(&self) -> &EquilibriumInstrumentationReport {
+        &self.instrumentation
+    }
+
+    /// Optional stage timing for facade resolution and request preparation.
+    pub fn facade_timing(&self) -> &EquilibriumTimingReport {
+        &self.facade_timing
     }
 
     /// Moves a range result to a presentation adapter without rebuilding raw
@@ -1096,6 +1674,8 @@ impl EquilibriumCalculatorTemperatureRange {
 pub struct EquilibriumCalculatorPhRange {
     resolved: ResolvedPhaseSystem,
     solution: PhRangeSolution,
+    instrumentation: EquilibriumInstrumentationReport,
+    facade_timing: EquilibriumTimingReport,
 }
 
 impl EquilibriumCalculatorPhRange {
@@ -1105,6 +1685,16 @@ impl EquilibriumCalculatorPhRange {
 
     pub fn solution(&self) -> &PhRangeSolution {
         &self.solution
+    }
+
+    /// Fine-grained evaluation counts captured for this facade operation.
+    pub fn instrumentation_report(&self) -> &EquilibriumInstrumentationReport {
+        &self.instrumentation
+    }
+
+    /// Optional stage timing for facade resolution and request preparation.
+    pub fn facade_timing(&self) -> &EquilibriumTimingReport {
+        &self.facade_timing
     }
 
     /// Moves a P,H range result to a presentation adapter without copying it.
@@ -1120,6 +1710,50 @@ pub enum EquilibriumCalculatorOutcome {
     PtRange(EquilibriumCalculatorTemperatureRange),
     PhPoint(EquilibriumCalculatorPhPoint),
     PhRange(EquilibriumCalculatorPhRange),
+}
+
+impl EquilibriumCalculatorOutcome {
+    fn with_instrumentation(self, instrumentation: EquilibriumInstrumentationReport) -> Self {
+        match self {
+            Self::PtPoint(mut point) => {
+                point.instrumentation = instrumentation;
+                Self::PtPoint(point)
+            }
+            Self::PtRange(mut range) => {
+                range.instrumentation = instrumentation;
+                Self::PtRange(range)
+            }
+            Self::PhPoint(mut point) => {
+                point.instrumentation = instrumentation;
+                Self::PhPoint(point)
+            }
+            Self::PhRange(mut range) => {
+                range.instrumentation = instrumentation;
+                Self::PhRange(range)
+            }
+        }
+    }
+
+    fn with_facade_timing(self, facade_timing: EquilibriumTimingReport) -> Self {
+        match self {
+            Self::PtPoint(mut point) => {
+                point.facade_timing = facade_timing;
+                Self::PtPoint(point)
+            }
+            Self::PtRange(mut range) => {
+                range.facade_timing = facade_timing;
+                Self::PtRange(range)
+            }
+            Self::PhPoint(mut point) => {
+                point.facade_timing = facade_timing;
+                Self::PhPoint(point)
+            }
+            Self::PhRange(mut range) => {
+                range.facade_timing = facade_timing;
+                Self::PhRange(range)
+            }
+        }
+    }
 }
 
 /// Typed facade assembly and execution error.
@@ -1149,6 +1783,14 @@ pub enum EquilibriumCalculatorError {
     MissingPressure,
     #[error("equilibrium calculator requires standard-state reference pressure in Pa")]
     MissingReferencePressure,
+    #[error("prepared equilibrium session requires a fixed P,T point mode")]
+    PreparedSessionRequiresPtPoint,
+    #[error("prepared equilibrium session currently supports fixed declared phases only")]
+    PreparedSessionRequiresFixedPhases,
+    #[error("prepared P,H session requires a fixed P,H point mode")]
+    PreparedPhSessionRequiresPhPoint,
+    #[error("prepared P,H session requires the explicit monolithic route")]
+    PreparedPhSessionRequiresMonolithic,
     #[error("temperature postprocessing is available only for a P,T temperature range")]
     PostprocessingRequiresPtRange,
     #[error(transparent)]
@@ -1184,12 +1826,11 @@ impl From<PhRangeError> for EquilibriumCalculatorError {
 
 #[cfg(test)]
 mod tests {
-    use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::{
-    CandidateSelectionError, CandidateTemperatureRange, EquilibriumCandidatePhaseAssignment,
-    EquilibriumCandidatePhasePlan, EquilibriumCandidatePolicy, 
-    EquilibriumCandidateSelector,
-};
     use super::*;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::{
+        CandidateSelectionError, CandidateTemperatureRange, EquilibriumCandidatePhaseAssignment,
+        EquilibriumCandidatePhasePlan, EquilibriumCandidatePolicy, EquilibriumCandidateSelector,
+    };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_postprocessing::TemperatureResamplingGrid;
     use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::PhaseEquilibriumInputKind;
 
@@ -1277,6 +1918,7 @@ mod tests {
             .unwrap()
             .ph_solve_mode(PhSolveMode::NestedTemperature)
             .preset(EquilibriumCalculatorPreset::Timed)
+            .instrumentation(EquilibriumInstrumentationMode::Enabled)
             .solve()
             .expect("element-defined P,H range must solve")
         {
@@ -1287,6 +1929,25 @@ mod tests {
         assert_eq!(elemental_range.solution().report().continuation_points(), 1);
         assert_eq!(elemental_range.solution().report().formulation_builds(), 1);
         assert!(elemental_range.solution().report().formulation_reuses() > 0);
+        assert!(elemental_range.instrumentation_report().enabled());
+        assert_eq!(
+            elemental_range
+                .instrumentation_report()
+                .counters()
+                .phase_equilibrium_builds(),
+            1,
+            "elemental P,H range must build the canonical bridge once"
+        );
+        println!(
+            "ElementInventory range optimization P,H bridge_builds={} points={} continuation_points={} formulation_builds={}",
+            elemental_range
+                .instrumentation_report()
+                .counters()
+                .phase_equilibrium_builds(),
+            elemental_range.solution().points().len(),
+            elemental_range.solution().report().continuation_points(),
+            elemental_range.solution().report().formulation_builds(),
+        );
         assert!(
             elemental_range.solution().report().point_timing().total() > std::time::Duration::ZERO
         );
@@ -2028,6 +2689,168 @@ mod tests {
     }
 
     #[test]
+    fn elemental_calculator_ph_recovers_a_large_inventory_point_transactionally() {
+        const SCALE: f64 = 1.0e4;
+
+        let reference = match gas_point_builder()
+            .at_temperature(2_500.0)
+            .solve()
+            .expect("reference P,T point must solve")
+        {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected reference P,T point, got {other:?}"),
+        };
+        let thermochemistry =
+            ResolvedThermochemistry::from_resolved_system(reference.resolved()).unwrap();
+        let target_enthalpy = thermochemistry
+            .enthalpy_model()
+            .evaluate_total(reference.solution().component_moles(), 2_500.0)
+            .unwrap();
+        let mut temperature_options = PhTemperatureSolveOptions::default();
+        temperature_options.scaled_enthalpy_tolerance = 1.0e-7;
+        let solve = |scale| match EquilibriumCalculator::builder()
+            .single_ideal_gas(["H2", "O2", "H2O"])
+            .unwrap()
+            .element_inventory(
+                ElementInventory::from_amounts([("H", 4.0 * scale), ("O", 2.0 * scale)]).unwrap(),
+            )
+            .prefer_libraries(["NASA_gas"])
+            .offline_only()
+            .pressure_pa(PRESSURE_PA)
+            .reference_pressure_pa(REFERENCE_PRESSURE_PA)
+            .at_total_enthalpy(
+                TotalEnthalpyJoules::new(target_enthalpy * scale).unwrap(),
+                2_300.0,
+                TemperatureBounds::new(2_100.0, 2_900.0).unwrap(),
+            )
+            .ph_solve_mode(PhSolveMode::NestedTemperature)
+            .ph_temperature_options(temperature_options.clone())
+            .production_cascade()
+            .solve()
+            .expect("elemental P,H point must solve")
+        {
+            EquilibriumCalculatorOutcome::PhPoint(point) => point,
+            other => panic!("expected elemental P,H point, got {other:?}"),
+        };
+
+        let baseline = solve(1.0);
+        let recovered = solve(SCALE);
+        let evidence = recovered
+            .solution()
+            .equilibrium()
+            .extensive_normalization_recovery()
+            .expect("the large point must retain normalized-recovery provenance");
+
+        assert!((evidence.physical_inventory_scale - 6.0 * SCALE).abs() < 1.0e-6);
+        assert!(
+            (recovered.solution().temperature() - baseline.solution().temperature()).abs() < 1.0e-4
+        );
+        for (index, (baseline_moles, recovered_moles)) in baseline
+            .solution()
+            .equilibrium()
+            .component_moles()
+            .iter()
+            .zip(recovered.solution().equilibrium().component_moles())
+            .enumerate()
+        {
+            assert!(
+                (recovered_moles / SCALE - baseline_moles).abs() < 1.0e-6,
+                "component {index}: baseline={baseline_moles:?}, recovered={recovered_moles:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "bounded numerical characterization of the lower elemental P,H scale"]
+    fn elemental_calculator_ph_scale_envelope_characterization() {
+        let reference = match gas_point_builder()
+            .at_temperature(2_500.0)
+            .solve()
+            .expect("reference P,T point must solve")
+        {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected reference P,T point, got {other:?}"),
+        };
+        let thermochemistry =
+            ResolvedThermochemistry::from_resolved_system(reference.resolved()).unwrap();
+        let target_enthalpy = thermochemistry
+            .enthalpy_model()
+            .evaluate_total(reference.solution().component_moles(), 2_500.0)
+            .unwrap();
+        let mut temperature_options = PhTemperatureSolveOptions::default();
+        temperature_options.scaled_enthalpy_tolerance = 1.0e-7;
+        let solve = |scale| {
+            EquilibriumCalculator::builder()
+                .single_ideal_gas(["H2", "O2", "H2O"])
+                .unwrap()
+                .element_inventory(
+                    ElementInventory::from_amounts([("H", 4.0 * scale), ("O", 2.0 * scale)])
+                        .unwrap(),
+                )
+                .prefer_libraries(["NASA_gas"])
+                .offline_only()
+                .pressure_pa(PRESSURE_PA)
+                .reference_pressure_pa(REFERENCE_PRESSURE_PA)
+                .at_total_enthalpy(
+                    TotalEnthalpyJoules::new(target_enthalpy * scale).unwrap(),
+                    2_300.0,
+                    TemperatureBounds::new(2_100.0, 2_900.0).unwrap(),
+                )
+                .ph_solve_mode(PhSolveMode::NestedTemperature)
+                .ph_temperature_options(temperature_options.clone())
+                .production_cascade()
+                .solve()
+        };
+
+        let baseline = match solve(1.0).expect("baseline elemental P,H point must solve") {
+            EquilibriumCalculatorOutcome::PhPoint(point) => point,
+            other => panic!("expected baseline elemental P,H point, got {other:?}"),
+        };
+        println!(
+            "elemental P,H lower-scale characterization baseline T={:.9} K",
+            baseline.solution().temperature()
+        );
+
+        for scale in [
+            1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1, 1.0, 10.0, 1.0e2, 1.0e3, 1.0e4, 1.0e6,
+            1.0e8,
+        ] {
+            match solve(scale) {
+                Ok(EquilibriumCalculatorOutcome::PhPoint(point)) => {
+                    let temperature_delta =
+                        (point.solution().temperature() - baseline.solution().temperature()).abs();
+                    let max_relative_mole_error = baseline
+                        .solution()
+                        .equilibrium()
+                        .component_moles()
+                        .iter()
+                        .zip(point.solution().equilibrium().component_moles())
+                        .map(|(baseline_moles, scaled_moles)| {
+                            ((scaled_moles / scale) - baseline_moles).abs()
+                                / baseline_moles.abs().max(1.0e-30)
+                        })
+                        .fold(0.0_f64, f64::max);
+                    let validation = point
+                        .solution()
+                        .equilibrium()
+                        .accepted_solution()
+                        .validation();
+                    let relative_balance =
+                        validation.max_abs_element_balance_error / (6.0 * scale).max(1.0e-30);
+                    println!(
+                        "elemental P,H scale={scale:.1e} status=ok delta_T={temperature_delta:.6e} K max_relative_mole_error={max_relative_mole_error:.6e} residual={:.6e} relative_balance={relative_balance:.6e}",
+                        validation.residual_l2_norm,
+                    );
+                }
+                Ok(other) => panic!("scale {scale:e} returned unexpected outcome {other:?}"),
+                Err(error) => {
+                    println!("elemental P,H scale={scale:.1e} status=error error={error:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
     fn explicit_and_from_elements_policies_have_different_universes_when_explicit_is_restricted() {
         let repository = ThermoData::try_default_repository()
             .expect("bundled repository must load for automatic universe selection");
@@ -2275,6 +3098,227 @@ mod tests {
     }
 
     #[test]
+    fn facade_element_inventory_pt_point_builds_canonical_bridge_once() {
+        let inventory = ElementInventory::from_amounts([("H", 4.0), ("O", 2.0)])
+            .expect("element inventory must validate");
+        let result = EquilibriumCalculator::builder()
+            .single_ideal_gas(["H2", "O2", "H2O"])
+            .expect("phase declaration must validate")
+            .element_inventory(inventory)
+            .prefer_libraries(["NASA_gas"])
+            .offline_only()
+            .pressure_pa(PRESSURE_PA)
+            .reference_pressure_pa(REFERENCE_PRESSURE_PA)
+            .at_temperature(2_500.0)
+            .instrumentation(EquilibriumInstrumentationMode::Enabled)
+            .solve()
+            .expect("element-defined P,T point must solve");
+
+        let EquilibriumCalculatorOutcome::PtPoint(point) = result else {
+            panic!("expected element-defined P,T point");
+        };
+        assert_eq!(
+            point
+                .instrumentation_report()
+                .counters()
+                .phase_equilibrium_builds(),
+            1,
+            "elemental P,T point must reuse the seed-producing canonical bridge"
+        );
+        assert!(
+            point
+                .solution()
+                .accepted_solution()
+                .validation()
+                .max_abs_element_balance_error
+                < 1.0e-7
+        );
+    }
+
+    #[test]
+    fn prepared_pt_session_reuses_rst_graph_across_sequential_points() {
+        let mut session = gas_point_builder()
+            .at_temperature(2_400.0)
+            .preset(EquilibriumCalculatorPreset::Timed)
+            .prepare_pt_session()
+            .expect("prepared P,T session must build");
+        assert!(session.rst_graph_prepared());
+        assert!(session.preparation_timing().enabled());
+
+        let first = session
+            .solve_at_temperature(2_400.0)
+            .expect("first prepared P,T point must solve");
+        let second = session
+            .solve_at_temperature(2_500.0)
+            .expect("second prepared P,T point must solve");
+
+        assert!((first.solution().conditions().temperature() - 2_400.0).abs() < 1.0e-9);
+        assert!((second.solution().conditions().temperature() - 2_500.0).abs() < 1.0e-9);
+        assert!(second.solution().timing_report().enabled());
+    }
+
+    #[test]
+    fn prepared_ph_session_reuses_monolithic_formulation_across_targets() {
+        let reference = match gas_point_builder()
+            .at_temperature(2_500.0)
+            .solve()
+            .expect("reference P,T point must solve")
+        {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected reference P,T point, got {other:?}"),
+        };
+        let thermochemistry = ResolvedThermochemistry::from_resolved_system(reference.resolved())
+            .expect("resolved gas phase must provide P,H thermochemistry");
+        let target_enthalpy = thermochemistry
+            .enthalpy_model()
+            .evaluate_total(reference.solution().component_moles(), 2_500.0)
+            .expect("reference enthalpy must evaluate");
+
+        let mut session = gas_point_builder()
+            .at_total_enthalpy(
+                TotalEnthalpyJoules::new(target_enthalpy).unwrap(),
+                2_500.0,
+                TemperatureBounds::new(2_100.0, 2_900.0).unwrap(),
+            )
+            .ph_solve_mode(PhSolveMode::Monolithic)
+            .preset(EquilibriumCalculatorPreset::Timed)
+            .prepare_ph_session()
+            .expect("prepared monolithic P,H session must build");
+        assert!(session.rst_graph_prepared());
+        assert!(session.preparation_timing().enabled());
+        assert!(session.preparation_timing().rst_preparation() > std::time::Duration::ZERO);
+
+        assert!(
+            session
+                .solve_at_total_enthalpy(
+                    TotalEnthalpyJoules::new(target_enthalpy + 1.0e12).unwrap(),
+                )
+                .is_err(),
+            "an unreachable prepared target must not publish a point"
+        );
+        let first = session
+            .solve_at_total_enthalpy(TotalEnthalpyJoules::new(target_enthalpy).unwrap())
+            .expect("first prepared P,H point must solve");
+        let second = session
+            .solve_at_total_enthalpy(TotalEnthalpyJoules::new(target_enthalpy + 1_000.0).unwrap())
+            .expect("second prepared P,H point must solve");
+
+        for (point, expected_target) in [
+            (&first, target_enthalpy),
+            (&second, target_enthalpy + 1_000.0),
+        ] {
+            assert_eq!(point.solution().target_enthalpy(), expected_target);
+            assert!(
+                point.solution().enthalpy_error().abs()
+                    <= point.solution().enthalpy_error_limit_joules()
+            );
+            assert!(point.solution().temperature().is_finite());
+            assert!(point.facade_timing().enabled());
+        }
+        assert_eq!(first.solution().report().fixed_formulation_builds(), 0);
+        assert_eq!(second.solution().report().fixed_formulation_builds(), 0);
+        assert_eq!(first.solution().report().fixed_formulation_reuses(), 1);
+        assert_eq!(second.solution().report().fixed_formulation_reuses(), 1);
+        assert!(
+            first
+                .solution()
+                .report()
+                .timing()
+                .prepared_problem_retarget()
+                > std::time::Duration::ZERO
+        );
+        assert!(
+            second
+                .solution()
+                .report()
+                .timing()
+                .prepared_problem_retarget()
+                > std::time::Duration::ZERO
+        );
+        assert!(
+            first.solution().report().timing().request_validation() > std::time::Duration::ZERO
+        );
+        assert!(
+            second.solution().report().timing().request_validation() > std::time::Duration::ZERO
+        );
+        assert!(first.solution().report().timing().initial_enthalpy_reused());
+        assert!(
+            !second
+                .solution()
+                .report()
+                .timing()
+                .initial_enthalpy_reused()
+        );
+        assert!(!first.solution().report().timing().gibbs_snapshot_reused());
+        assert!(second.solution().report().timing().gibbs_snapshot_reused());
+    }
+
+    #[test]
+    fn prepared_ph_element_inventory_session_preserves_acceptance() {
+        let inventory = ElementInventory::from_amounts([("H", 4.0), ("O", 2.0)])
+            .expect("element inventory must validate");
+        let reference = match gas_point_builder()
+            .at_temperature(2_500.0)
+            .solve()
+            .expect("reference P,T point must solve")
+        {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected reference P,T point, got {other:?}"),
+        };
+        let thermochemistry = ResolvedThermochemistry::from_resolved_system(reference.resolved())
+            .expect("resolved gas phase must provide P,H thermochemistry");
+        let target_enthalpy = thermochemistry
+            .enthalpy_model()
+            .evaluate_total(reference.solution().component_moles(), 2_500.0)
+            .expect("reference enthalpy must evaluate");
+
+        let mut session = EquilibriumCalculator::builder()
+            .single_ideal_gas(["H2", "O2", "H2O"])
+            .unwrap()
+            .element_inventory(inventory)
+            .prefer_libraries(["NASA_gas"])
+            .offline_only()
+            .pressure_pa(PRESSURE_PA)
+            .reference_pressure_pa(REFERENCE_PRESSURE_PA)
+            .at_total_enthalpy(
+                TotalEnthalpyJoules::new(target_enthalpy).unwrap(),
+                2_500.0,
+                TemperatureBounds::new(2_100.0, 2_900.0).unwrap(),
+            )
+            .ph_solve_mode(PhSolveMode::Monolithic)
+            .preset(EquilibriumCalculatorPreset::Timed)
+            .prepare_ph_session()
+            .expect("prepared elemental P,H session must build");
+        assert!(session.rst_graph_prepared());
+
+        let first = session
+            .solve_at_total_enthalpy(TotalEnthalpyJoules::new(target_enthalpy).unwrap())
+            .expect("first prepared elemental P,H point must solve");
+        let second = session
+            .solve_at_total_enthalpy(TotalEnthalpyJoules::new(target_enthalpy + 1_000.0).unwrap())
+            .expect("second prepared elemental P,H point must solve");
+
+        for point in [&first, &second] {
+            assert!(
+                point.solution().enthalpy_error().abs()
+                    <= point.solution().enthalpy_error_limit_joules()
+            );
+            assert!(
+                point
+                    .solution()
+                    .equilibrium()
+                    .accepted_solution()
+                    .validation()
+                    .max_abs_element_balance_error
+                    < 1.0e-7
+            );
+        }
+        assert_eq!(first.solution().report().fixed_formulation_builds(), 0);
+        assert_eq!(second.solution().report().fixed_formulation_builds(), 0);
+        assert_eq!(second.solution().report().fixed_formulation_reuses(), 1);
+    }
+
+    #[test]
     fn facade_accepts_element_inventory_for_pt_temperature_range() {
         let inventory = ElementInventory::from_amounts([("H", 4.0), ("O", 2.0)])
             .expect("element inventory must validate");
@@ -2288,6 +3332,7 @@ mod tests {
             .reference_pressure_pa(REFERENCE_PRESSURE_PA)
             .over_temperature_range(vec![2_400.0, 2_500.0, 2_600.0])
             .unwrap()
+            .instrumentation(EquilibriumInstrumentationMode::Enabled)
             .solve()
             .expect("element-defined P,T range must solve");
 
@@ -2295,6 +3340,25 @@ mod tests {
             panic!("expected element-defined P,T range");
         };
         assert_eq!(range.solution().points().len(), 3);
+        assert!(range.instrumentation_report().enabled());
+        assert_eq!(
+            range
+                .instrumentation_report()
+                .counters()
+                .phase_equilibrium_builds(),
+            1,
+            "elemental P,T range must build the canonical bridge once"
+        );
+        println!(
+            "ElementInventory range optimization P,T bridge_builds={} points={} formulation_builds={} formulation_reuses={}",
+            range
+                .instrumentation_report()
+                .counters()
+                .phase_equilibrium_builds(),
+            range.solution().points().len(),
+            range.solution().report().formulation_builds(),
+            range.solution().report().formulation_reuses(),
+        );
         let balance_errors = range
             .solution()
             .points()
@@ -2386,6 +3450,8 @@ mod tests {
             other => panic!("expected P,T point, got {other:?}"),
         };
         assert!(!silent.solution().timing_report().enabled());
+        assert!(!silent.facade_timing().enabled());
+        assert!(!silent.instrumentation_report().enabled());
 
         let timed = match gas_point_builder()
             .preset(EquilibriumCalculatorPreset::Timed)
@@ -2397,10 +3463,132 @@ mod tests {
             other => panic!("expected P,T point, got {other:?}"),
         };
         assert!(timed.solution().timing_report().enabled());
+        assert!(timed.facade_timing().enabled());
         assert_eq!(
             silent.solution().component_moles().len(),
             timed.solution().component_moles().len()
         );
+    }
+
+    #[test]
+    fn facade_attaches_opt_in_instrumentation_to_a_ph_outcome() {
+        let reference = match gas_point_builder()
+            .at_temperature(2_500.0)
+            .solve()
+            .expect("reference P,T point must solve")
+        {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected reference P,T point, got {other:?}"),
+        };
+        let thermochemistry =
+            ResolvedThermochemistry::from_resolved_system(reference.resolved()).unwrap();
+        let target_enthalpy = thermochemistry
+            .enthalpy_model()
+            .evaluate_total(reference.solution().component_moles(), 2_500.0)
+            .unwrap();
+
+        let point = match gas_point_builder()
+            .at_total_enthalpy(
+                TotalEnthalpyJoules::new(target_enthalpy).unwrap(),
+                2_500.0,
+                TemperatureBounds::new(2_100.0, 2_900.0).unwrap(),
+            )
+            .ph_solve_mode(PhSolveMode::Monolithic)
+            .timing(EquilibriumTimingMode::Enabled)
+            .instrumentation(EquilibriumInstrumentationMode::Enabled)
+            .solve()
+            .expect("instrumented P,H facade point must solve")
+        {
+            EquilibriumCalculatorOutcome::PhPoint(point) => point,
+            other => panic!("expected P,H point, got {other:?}"),
+        };
+
+        assert!(point.instrumentation_report().enabled());
+        assert!(
+            point
+                .instrumentation_report()
+                .counters()
+                .candidate_snapshot_evaluations()
+                > 0
+        );
+        assert!(point.facade_timing().enabled());
+        assert!(point.facade_timing().facade_resolution() > std::time::Duration::ZERO);
+        assert!(point.facade_timing().thermochemistry_preparation() > std::time::Duration::ZERO);
+        assert!(point.facade_timing().result_assembly() > std::time::Duration::ZERO);
+        assert!(point.solution().report().inner_timing().enabled());
+        assert!(
+            point
+                .solution()
+                .report()
+                .inner_timing()
+                .ph_formulation_preparation()
+                > std::time::Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn facade_ph_monolithic_range_reuses_prepared_formulation_without_changing_acceptance() {
+        let reference = match gas_point_builder()
+            .at_temperature(2_500.0)
+            .solve()
+            .expect("reference P,T point must solve")
+        {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected reference P,T point, got {other:?}"),
+        };
+        let thermochemistry = ResolvedThermochemistry::from_resolved_system(reference.resolved())
+            .expect("resolved gas phase must provide P,H thermochemistry");
+        let target_enthalpy = thermochemistry
+            .enthalpy_model()
+            .evaluate_total(reference.solution().component_moles(), 2_500.0)
+            .expect("reference enthalpy must evaluate");
+
+        let range = match gas_point_builder()
+            .over_enthalpy_range(
+                vec![
+                    target_enthalpy,
+                    target_enthalpy + 1_000.0,
+                    target_enthalpy + 2_000.0,
+                ],
+                2_500.0,
+                TemperatureBounds::new(2_100.0, 2_900.0).unwrap(),
+            )
+            .unwrap()
+            .ph_solve_mode(PhSolveMode::Monolithic)
+            .timing(EquilibriumTimingMode::Enabled)
+            .instrumentation(EquilibriumInstrumentationMode::Enabled)
+            .solve()
+            .expect("monolithic P,H range must solve")
+        {
+            EquilibriumCalculatorOutcome::PhRange(range) => range,
+            other => panic!("expected P,H range, got {other:?}"),
+        };
+
+        assert_eq!(range.solution().points().len(), 3);
+        assert_eq!(range.solution().report().formulation_builds(), 1);
+        assert_eq!(range.solution().report().continuation_points(), 2);
+        assert!(range.solution().report().formulation_reuses() >= 2);
+        assert!(range.instrumentation_report().enabled());
+        assert_eq!(
+            range
+                .instrumentation_report()
+                .counters()
+                .phase_equilibrium_builds(),
+            1,
+            "monolithic P,H range must build the canonical bridge once"
+        );
+        for (point, expected_target) in range.solution().points().iter().zip([
+            target_enthalpy,
+            target_enthalpy + 1_000.0,
+            target_enthalpy + 2_000.0,
+        ]) {
+            assert_eq!(point.solution().target_enthalpy(), expected_target);
+            assert!(
+                point.solution().enthalpy_error().abs()
+                    <= point.solution().enthalpy_error_limit_joules()
+            );
+            assert!(point.solution().temperature().is_finite());
+        }
     }
 
     #[test]

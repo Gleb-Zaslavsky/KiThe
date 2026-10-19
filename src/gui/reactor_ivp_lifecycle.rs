@@ -445,8 +445,19 @@ fn reactor_solver_config_to_parser_settings(
             vectorized: None,
             parallel: None,
             neighborhood_check: None,
+            symbolic_assembly: Some(config.symbolic_backend.to_rusted()),
+            symbolic_execution: Some(execution_backend.clone()),
+            matrix_layout: Some(match config.matrix_backend {
+                ReactorIvpMatrixBackend::Sparse => Lsode2LinearSystemStructure::Sparse,
+                ReactorIvpMatrixBackend::Banded => {
+                    Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 }
+                }
+            }),
+            execution_policy: None,
+            telemetry: None,
             lsode2: Some(Lsode2TaskOptionsSpec {
                 controller: Some(config.method.to_controller()),
+                stop_conditions: Vec::new(),
                 symbolic_assembly: Some(config.symbolic_backend.to_rusted()),
                 symbolic_execution: Some(execution_backend),
                 linear_system_structure: Some(match config.matrix_backend {
@@ -490,40 +501,62 @@ fn parser_solver_settings_to_reactor_config(
 
     config.symbolic_backend = settings
         .solver_options
-        .lsode2
-        .as_ref()
-        .and_then(|lsode2| lsode2.symbolic_assembly)
+        .symbolic_assembly
+        .or_else(|| {
+            settings
+                .solver_options
+                .lsode2
+                .as_ref()
+                .and_then(|lsode2| lsode2.symbolic_assembly)
+        })
         .map(|backend| match backend {
             Lsode2SymbolicAssemblyBackend::AtomView => ReactorIvpSymbolicBackend::AtomView,
             Lsode2SymbolicAssemblyBackend::ExprLegacy => ReactorIvpSymbolicBackend::ExprLegacy,
         })
         .unwrap_or_default();
 
-    if let Some(lsode2) = settings.solver_options.lsode2.as_ref() {
-        if let Some(execution) = &lsode2.symbolic_execution {
-            match execution {
-                Lsode2TaskExecutionSpec::LambdifyExpr => {
-                    config.execution_backend = ReactorIvpExecutionBackend::Lambdify;
-                }
-                Lsode2TaskExecutionSpec::Aot {
-                    toolchain, profile, ..
-                } => {
-                    config.execution_backend = ReactorIvpExecutionBackend::Aot {
-                        toolchain: *toolchain,
-                        profile: *profile,
-                    };
-                }
+    if let Some(execution) = settings
+        .solver_options
+        .symbolic_execution
+        .as_ref()
+        .or_else(|| {
+            settings
+                .solver_options
+                .lsode2
+                .as_ref()
+                .and_then(|lsode2| lsode2.symbolic_execution.as_ref())
+        })
+    {
+        match execution {
+            Lsode2TaskExecutionSpec::LambdifyExpr => {
+                config.execution_backend = ReactorIvpExecutionBackend::Lambdify;
+            }
+            Lsode2TaskExecutionSpec::Aot {
+                toolchain, profile, ..
+            } => {
+                config.execution_backend = ReactorIvpExecutionBackend::Aot {
+                    toolchain: *toolchain,
+                    profile: *profile,
+                };
             }
         }
+    }
 
-        if let Some(structure) = lsode2.linear_system_structure {
-            config.matrix_backend = match structure {
-                Lsode2LinearSystemStructure::Sparse => ReactorIvpMatrixBackend::Sparse,
-                Lsode2LinearSystemStructure::Banded { .. } => ReactorIvpMatrixBackend::Banded,
-                Lsode2LinearSystemStructure::Dense => ReactorIvpMatrixBackend::Sparse,
-            };
-        }
+    if let Some(structure) = settings.solver_options.matrix_layout.or_else(|| {
+        settings
+            .solver_options
+            .lsode2
+            .as_ref()
+            .and_then(|lsode2| lsode2.linear_system_structure)
+    }) {
+        config.matrix_backend = match structure {
+            Lsode2LinearSystemStructure::Sparse => ReactorIvpMatrixBackend::Sparse,
+            Lsode2LinearSystemStructure::Banded { .. } => ReactorIvpMatrixBackend::Banded,
+            Lsode2LinearSystemStructure::Dense => ReactorIvpMatrixBackend::Sparse,
+        };
+    }
 
+    if let Some(lsode2) = settings.solver_options.lsode2.as_ref() {
         if let Some(native_execution) = lsode2.native_execution {
             config.native_execution = native_execution;
         }

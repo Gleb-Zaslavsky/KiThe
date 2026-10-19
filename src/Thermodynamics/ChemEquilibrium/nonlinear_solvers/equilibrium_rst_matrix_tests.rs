@@ -6,6 +6,7 @@
 //! than a solver-specific iterate, so this remains a regression test for the
 //! physical formulation and the backend boundary together.
 
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::capture;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{Phase, PhaseKind, Solvers};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RustedSciTheSolver;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
@@ -87,7 +88,8 @@ fn diluted_o2_solver(
 fn every_selected_rst_backend_accepts_the_o2_dissociation_fixture() {
     for backend in RustedSciTheSolver::recommended_cascade() {
         let mut solver = o2_dissociation_solver(backend);
-        solver.solve().unwrap_or_else(|error| {
+        let (solve_result, _) = capture(|| solver.solve());
+        solve_result.unwrap_or_else(|error| {
             panic!(
                 "{} should solve and pass O2/O acceptance: {error:?}",
                 backend.name()
@@ -121,7 +123,8 @@ fn every_selected_rst_backend_accepts_the_o2_dissociation_fixture() {
 fn every_selected_rst_backend_accepts_the_diluted_fixture_and_reports_metrics() {
     for backend in RustedSciTheSolver::recommended_cascade() {
         let mut solver = diluted_o2_solver(backend);
-        solver.solve().unwrap_or_else(|error| {
+        let (solve_result, _) = capture(|| solver.solve());
+        solve_result.unwrap_or_else(|error| {
             panic!(
                 "{} should solve and pass the diluted O2/O/N2 acceptance: {error:?}",
                 backend.name()
@@ -211,6 +214,7 @@ fn rusted_scithe_default_policy_has_a_stable_documented_backend_order() {
             SolverBackend::RustedSciThe(RustedSciTheSolver::NielsenLevenbergMarquardt),
             SolverBackend::RustedSciThe(RustedSciTheSolver::TrustRegionLevenbergMarquardt),
             SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton),
+            SolverBackend::RustedSciThe(RustedSciTheSolver::BacktrackingLevenbergMarquardt),
         ]
     );
     assert!(

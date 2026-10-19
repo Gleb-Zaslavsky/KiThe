@@ -139,7 +139,7 @@ fn full_lifecycle_runner(
         .unwrap(),
     )
     .unwrap();
-    let mut runner = PreparedPhaseControlRunner::new(problem, Vec::new(), false).unwrap();
+    let mut runner = PreparedPhaseControlRunner::new(problem, false).unwrap();
     let settings = runner.configure_solver();
     settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
     settings.solver_params.tol = 1.0e-11;
@@ -166,7 +166,13 @@ fn continue_at(
         )
         .unwrap();
     runner
-        .set_continuation_phase_set(previous.phase_control_report.final_phase_set.clone())
+        .set_continuation_phase_set(
+            previous
+                .acceptance_report
+                .phase_control
+                .final_phase_set
+                .clone(),
+        )
         .unwrap();
 }
 
@@ -214,7 +220,8 @@ fn accepted_point(
         .map(|report| report.minimum_tpd)
         .collect::<Vec<_>>();
     let activation = outcome
-        .phase_control_report
+        .acceptance_report
+        .phase_control
         .transitions
         .iter()
         .find(|transition| !transition.activated.is_empty());
@@ -228,21 +235,27 @@ fn accepted_point(
         temperature_k,
         used_accepted_continuation,
         oracle: flash.phase_class,
-        phase_mask: outcome.phase_control_report.final_phase_set.active_mask(),
+        phase_mask: outcome
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         beta,
         liquid,
         vapor,
         component_conservation_error,
         chemical_potential_mismatch_j_mol,
-        transition_count: outcome.phase_control_report.transitions.len(),
+        transition_count: outcome.acceptance_report.phase_control.transitions.len(),
         activation_count: outcome
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .transitions
             .iter()
             .filter(|transition| !transition.activated.is_empty())
             .count(),
         deactivation_count: outcome
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .transitions
             .iter()
             .filter(|transition| !transition.deactivated.is_empty())
@@ -347,7 +360,11 @@ fn gas_candidate_tpd_probe(temperature_k: f64) -> f64 {
         .set_explicit_hysteresis(-1.0e9, 1.0e9);
     let outcome = runner.solve().unwrap();
     assert_eq!(
-        outcome.phase_control_report.final_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         ExpectedTopology::LiquidOnly.phase_mask(),
         "the wide-band probe must retain the liquid-only reference assemblage"
     );
@@ -585,7 +602,11 @@ fn fixed_inventory_gas_hysteresis_has_history_dependent_in_band_and_unique_outsi
     let mut inactive_history = full_lifecycle_runner(in_band_k, false);
     let inactive = inactive_history.solve().unwrap();
     assert_eq!(
-        inactive.phase_control_report.final_phase_set.active_mask(),
+        inactive
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         ExpectedTopology::LiquidOnly.phase_mask()
     );
     let inactive_tpd = inactive.acceptance_report.phase_stability[0]
@@ -601,7 +622,8 @@ fn fixed_inventory_gas_hysteresis_has_history_dependent_in_band_and_unique_outsi
     let accepted_two_phase = active_history.solve().unwrap();
     assert_eq!(
         accepted_two_phase
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         ExpectedTopology::TwoPhase.phase_mask()
@@ -609,11 +631,21 @@ fn fixed_inventory_gas_hysteresis_has_history_dependent_in_band_and_unique_outsi
     continue_at(&mut active_history, &accepted_two_phase, in_band_k);
     let retained = active_history.solve().unwrap();
     assert_eq!(
-        retained.phase_control_report.final_phase_set.active_mask(),
+        retained
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         ExpectedTopology::TwoPhase.phase_mask(),
         "an accepted active history must be retained inside the keep band"
     );
-    assert!(retained.phase_control_report.transitions.is_empty());
+    assert!(
+        retained
+            .acceptance_report
+            .phase_control
+            .transitions
+            .is_empty()
+    );
 
     // Outside the band, discrete history no longer changes the permitted
     // topology. Below the band both routes are liquid-only; above it both
@@ -625,7 +657,8 @@ fn fixed_inventory_gas_hysteresis_has_history_dependent_in_band_and_unique_outsi
     let below_fresh = full_lifecycle_runner(below_band_k, false).solve().unwrap();
     assert_eq!(
         below_fresh
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         ExpectedTopology::LiquidOnly.phase_mask()
@@ -633,7 +666,8 @@ fn fixed_inventory_gas_hysteresis_has_history_dependent_in_band_and_unique_outsi
     let above_fresh = full_lifecycle_runner(above_band_k, false).solve().unwrap();
     assert_eq!(
         above_fresh
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         ExpectedTopology::TwoPhase.phase_mask()
@@ -788,8 +822,16 @@ fn print_hysteresis_characterization() {
     let retained = active_runner.solve().unwrap();
     println!(
         "hysteresis: T={temperature_k:.9} K gas-TPD={probe_tpd:.6e} J/mol band=({dg_create:.6e}, {dg_keep:.6e}) inactive={:?} active-history={:?}",
-        inactive.phase_control_report.final_phase_set.active_mask(),
-        retained.phase_control_report.final_phase_set.active_mask(),
+        inactive
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
+        retained
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
     );
 }
 

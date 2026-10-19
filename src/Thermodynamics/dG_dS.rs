@@ -334,33 +334,50 @@ impl SubsData {
         })
     }
 
-    /// Function for calculating Gibbs free energy of a given mixure of substances ( at given T, P, concentration)
+    fn calculate_dG0_fun_one_phase_local(
+        &mut self,
+    ) -> SubsDataResult<HashMap<String, Box<dyn Fn(f64) -> f64 + Send + Sync>>> {
+        let mut map_to_insert = HashMap::new();
+        let (_Cp, mut dh_vec, mut ds_vec) = self.calculate_therm_map_of_fun_local()?;
+        for (i, substance) in self.substances.iter().enumerate() {
+            let Some(dh) = dh_vec.get_mut(i).and_then(|slot| slot.take()) else {
+                return Err(SubsDataError::FunctionCreationFailed {
+                    substance: substance.clone(),
+                    function_type: "dH_fun".to_string(),
+                });
+            };
+            let Some(ds) = ds_vec.get_mut(i).and_then(|slot| slot.take()) else {
+                return Err(SubsDataError::FunctionCreationFailed {
+                    substance: substance.clone(),
+                    function_type: "dS_fun".to_string(),
+                });
+            };
+
+            let dG = Box::new(move |t: f64| dh(t) - t * ds(t));
+            let dG: Box<dyn Fn(f64) -> f64 + Send + Sync> = dG;
+            map_to_insert.insert(substance.clone(), dG);
+        }
+        Ok(map_to_insert)
+    }
+
+    /// Function for calculating Gibbs free energy of a given mixture of
+    /// substances while preserving the historical copy-on-entry behavior.
     pub fn calculate_dG0_fun_one_phase(
         &mut self,
     ) -> SubsDataResult<HashMap<String, Box<dyn Fn(f64) -> f64 + Send + Sync>>> {
-        with_pure_working_copy(self, |working| {
-            let mut map_to_insert = HashMap::new();
-            let (_Cp, mut dh_vec, mut ds_vec) = working.calculate_therm_map_of_fun_local()?;
-            for (i, substance) in working.substances.iter().enumerate() {
-                let Some(dh) = dh_vec.get_mut(i).and_then(|slot| slot.take()) else {
-                    return Err(SubsDataError::FunctionCreationFailed {
-                        substance: substance.clone(),
-                        function_type: "dH_fun".to_string(),
-                    });
-                };
-                let Some(ds) = ds_vec.get_mut(i).and_then(|slot| slot.take()) else {
-                    return Err(SubsDataError::FunctionCreationFailed {
-                        substance: substance.clone(),
-                        function_type: "dS_fun".to_string(),
-                    });
-                };
+        with_pure_working_copy(self, |working| working.calculate_dG0_fun_one_phase_local())
+    }
 
-                let dG = Box::new(move |t: f64| dh(t) - t * ds(t));
-                let dG: Box<dyn Fn(f64) -> f64 + Send + Sync> = dG;
-                map_to_insert.insert(substance.clone(), dG);
-            }
-            Ok(map_to_insert)
-        })
+    /// Builds numeric Gibbs closures on a caller-owned private working copy.
+    ///
+    /// The phase bridge already clones resolved repository data before
+    /// preparing a phase payload. Cloning that payload again here only to
+    /// protect the public legacy API duplicates a large thermochemistry graph;
+    /// this narrow crate-private entry point avoids that second clone.
+    pub(crate) fn calculate_dG0_fun_one_phase_in_place(
+        &mut self,
+    ) -> SubsDataResult<HashMap<String, Box<dyn Fn(f64) -> f64 + Send + Sync>>> {
+        self.calculate_dG0_fun_one_phase_local()
     }
     ////////////////////////////////////////////S - ENTHROPY///////////////////////////////////////////////////////////
     /// Function for calculating enthropy of a given mixure of substances (numerical result at given T, P, concentration)

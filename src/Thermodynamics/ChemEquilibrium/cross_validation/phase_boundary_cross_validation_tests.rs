@@ -400,7 +400,7 @@ fn production_phase_control_runner_with_candidate_inventory(
     )
     .expect("strict synthetic topology must produce a valid canonical problem");
 
-    let mut runner = PreparedPhaseControlRunner::new(problem, Vec::new(), false)
+    let mut runner = PreparedPhaseControlRunner::new(problem, false)
         .expect("production phase-control runner must prepare the synthetic problem");
     let settings = runner.configure_solver();
     settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
@@ -479,8 +479,8 @@ fn canonical_fixed_phase_solution_for_target_k(target_k: f64) -> Vec<f64> {
     .expect("strict synthetic family must build a canonical problem");
     let prepared = PreparedEquilibriumProblem::new(problem)
         .expect("canonical path must derive its reaction basis");
-    let mut runner = PreparedEquilibriumRunner::new(prepared, Vec::new())
-        .expect("numeric canonical runner must prepare");
+    let mut runner =
+        PreparedEquilibriumRunner::new(prepared).expect("numeric canonical runner must prepare");
     let settings = runner.configure();
     settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
     // Test-local accuracy matches the independent scalar bisection reference.
@@ -620,7 +620,7 @@ fn second_family_production_runner(target_k: f64) -> PreparedPhaseControlRunner 
             .expect("second-family canonical conditions are valid"),
     )
     .expect("second-family canonical problem is valid");
-    let mut runner = PreparedPhaseControlRunner::new(canonical_problem, Vec::new(), false)
+    let mut runner = PreparedPhaseControlRunner::new(canonical_problem, false)
         .expect("second-family runner must prepare");
     let settings = runner.configure_solver();
     settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
@@ -1763,7 +1763,11 @@ fn same_in_band_point_uses_previous_active_set_history() {
         .expect("the strongly favorable point must activate the pure phase");
     let accepted_seed = LogMolesInitialGuess::new(accepted_active.solution.log_moles().to_vec())
         .expect("an accepted solution is always a valid continuation seed");
-    let accepted_phase_set = accepted_active.phase_control_report.final_phase_set.clone();
+    let accepted_phase_set = accepted_active
+        .acceptance_report
+        .phase_control
+        .final_phase_set
+        .clone();
     assert_eq!(accepted_phase_set.active_mask(), &[true, true]);
 
     retarget_production_runner(&mut continued_runner, temperature, in_band_k, accepted_seed);
@@ -1775,17 +1779,28 @@ fn same_in_band_point_uses_previous_active_set_history() {
         .expect("an in-band continuation point must remain solvable");
     assert_eq!(
         continued
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .initial_phase_set
             .active_mask(),
         &[true, true]
     );
     assert_eq!(
-        continued.phase_control_report.final_phase_set.active_mask(),
+        continued
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         &[true, true],
         "the keep threshold retains an accepted active phase inside the hysteresis band"
     );
-    assert!(continued.phase_control_report.transitions.is_empty());
+    assert!(
+        continued
+            .acceptance_report
+            .phase_control
+            .transitions
+            .is_empty()
+    );
 
     // The same thermodynamic point starts inactive when it has no accepted
     // history: its TPD lies above dg_create and therefore cannot activate.
@@ -1801,14 +1816,22 @@ fn same_in_band_point_uses_previous_active_set_history() {
         .solve()
         .expect("fresh gas-only in-band point must be stable");
     assert_eq!(
-        fresh.phase_control_report.initial_phase_set.active_mask(),
+        fresh
+            .acceptance_report
+            .phase_control
+            .initial_phase_set
+            .active_mask(),
         &[true, false]
     );
     assert_eq!(
-        fresh.phase_control_report.final_phase_set.active_mask(),
+        fresh
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         &[true, false]
     );
-    assert!(fresh.phase_control_report.transitions.is_empty());
+    assert!(fresh.acceptance_report.phase_control.transitions.is_empty());
 }
 
 #[test]
@@ -1829,7 +1852,13 @@ fn ascending_and_descending_boundary_sweeps_expose_hysteresis() {
             let seed = LogMolesInitialGuess::new(previous.solution.log_moles().to_vec()).unwrap();
             retarget_production_runner(&mut ascending_runner, temperature, target_k, seed);
             ascending_runner
-                .set_continuation_phase_set(previous.phase_control_report.final_phase_set.clone())
+                .set_continuation_phase_set(
+                    previous
+                        .acceptance_report
+                        .phase_control
+                        .final_phase_set
+                        .clone(),
+                )
                 .unwrap();
             ascending_runner
                 .solve()
@@ -1846,21 +1875,24 @@ fn ascending_and_descending_boundary_sweeps_expose_hysteresis() {
 
     assert_eq!(
         ascending_outcomes[0]
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         &[true, true]
     );
     assert_eq!(
         ascending_outcomes[1]
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .initial_phase_set
             .active_mask(),
         &[true, true]
     );
     assert_eq!(
         ascending_outcomes[1]
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         &[true, true],
@@ -1868,20 +1900,22 @@ fn ascending_and_descending_boundary_sweeps_expose_hysteresis() {
     );
     assert!(
         ascending_outcomes[1]
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .transitions
             .is_empty()
     );
     assert_eq!(
         ascending_outcomes[2]
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         &[true, false],
         "the positive TPD endpoint must deactivate the vanishing pure phase"
     );
     assert!(matches!(
-        ascending_outcomes[2].phase_control_report.transitions.as_slice(),
+        ascending_outcomes[2].acceptance_report.phase_control.transitions.as_slice(),
         [transition] if matches!(transition.reason, PhaseTransitionReason::BoundaryUnstableActivePhase { minimum_tpd, .. } if minimum_tpd > 0.0)
     ));
 
@@ -1893,7 +1927,13 @@ fn ascending_and_descending_boundary_sweeps_expose_hysteresis() {
             let seed = LogMolesInitialGuess::new(previous.solution.log_moles().to_vec()).unwrap();
             retarget_production_runner(&mut descending_runner, temperature, target_k, seed);
             descending_runner
-                .set_continuation_phase_set(previous.phase_control_report.final_phase_set.clone())
+                .set_continuation_phase_set(
+                    previous
+                        .acceptance_report
+                        .phase_control
+                        .final_phase_set
+                        .clone(),
+                )
                 .unwrap();
             descending_runner
                 .solve()
@@ -1910,14 +1950,16 @@ fn ascending_and_descending_boundary_sweeps_expose_hysteresis() {
 
     assert_eq!(
         descending_outcomes[0]
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         &[true, false]
     );
     assert_eq!(
         descending_outcomes[1]
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         &[true, false],
@@ -1925,19 +1967,21 @@ fn ascending_and_descending_boundary_sweeps_expose_hysteresis() {
     );
     assert!(
         descending_outcomes[1]
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .transitions
             .is_empty()
     );
     assert_eq!(
         descending_outcomes[2]
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         &[true, true]
     );
     assert!(matches!(
-        descending_outcomes[2].phase_control_report.transitions.as_slice(),
+        descending_outcomes[2].acceptance_report.phase_control.transitions.as_slice(),
         [transition] if matches!(transition.reason, PhaseTransitionReason::UnstableInactivePhase { minimum_tpd } if minimum_tpd < 0.0)
     ));
 }
@@ -1958,22 +2002,31 @@ fn prepared_phase_control_activates_pure_phase_from_negative_tpd_and_matches_keq
         .expect("production phase control must activate the TPD-unstable pure phase");
     let moles = outcome.solution.moles();
     assert_eq!(
-        outcome.phase_control_report.transitions.len(),
+        outcome.acceptance_report.phase_control.transitions.len(),
         1,
         "simple pure-phase fixture must converge through exactly one activation transition"
     );
     let transition = outcome
-        .phase_control_report
+        .acceptance_report
+        .phase_control
         .transitions
         .first()
         .expect("negative inactive-phase TPD must create one lifecycle transition");
 
     assert_eq!(
-        outcome.phase_control_report.initial_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .initial_phase_set
+            .active_mask(),
         &[true, false]
     );
     assert_eq!(
-        outcome.phase_control_report.final_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         &[true, true]
     );
     assert_eq!(transition.activated.len(), 1);
@@ -2048,14 +2101,28 @@ fn prepared_phase_control_keeps_stable_pure_phase_inactive_without_restart() {
     let moles = outcome.solution.moles();
 
     assert_eq!(
-        outcome.phase_control_report.initial_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .initial_phase_set
+            .active_mask(),
         &[true, false]
     );
     assert_eq!(
-        outcome.phase_control_report.final_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         &[true, false]
     );
-    assert!(outcome.phase_control_report.transitions.is_empty());
+    assert!(
+        outcome
+            .acceptance_report
+            .phase_control
+            .transitions
+            .is_empty()
+    );
     assert!((moles[0] - 1.0).abs() < 1e-10);
     assert!((moles[1] - 1.0).abs() < 1e-10);
     let canonical_tpd = outcome.acceptance_report.phase_stability[1]
@@ -2096,21 +2163,29 @@ fn prepared_phase_control_deactivates_vanishing_pure_phase_and_restarts_gas_only
         .expect("production phase control must recover the gas-only boundary state");
     let moles = outcome.solution.moles();
     assert_eq!(
-        outcome.phase_control_report.initial_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .initial_phase_set
+            .active_mask(),
         &[true, true],
         "positive initial S inventory must enter the first fixed-set solve as active"
     );
     assert_eq!(
-        outcome.phase_control_report.transitions.len(),
+        outcome.acceptance_report.phase_control.transitions.len(),
         1,
         "controlled disappearance must take exactly one production deactivation restart"
     );
     assert_eq!(
-        outcome.phase_control_report.final_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         &[true, false]
     );
 
-    let transition = &outcome.phase_control_report.transitions[0];
+    let transition = &outcome.acceptance_report.phase_control.transitions[0];
     assert!(transition.activated.is_empty());
     assert_eq!(transition.deactivated.len(), 1);
     assert!(
@@ -2187,12 +2262,13 @@ fn second_synthetic_family_matches_independent_tpd_and_full_lifecycle() {
         .solve()
         .expect("production phase control must activate the second-family pure phase");
     assert_eq!(
-        outcome.phase_control_report.transitions.len(),
+        outcome.acceptance_report.phase_control.transitions.len(),
         1,
         "second-family fixture must converge through exactly one activation transition"
     );
     let transition = outcome
-        .phase_control_report
+        .acceptance_report
+        .phase_control
         .transitions
         .first()
         .expect("negative second-family TPD must activate the candidate");
@@ -2202,7 +2278,11 @@ fn second_synthetic_family_matches_independent_tpd_and_full_lifecycle() {
     };
     assert!((transition_tpd - independent_tpd).abs() < 1e-8);
     assert_eq!(
-        outcome.phase_control_report.final_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         &[true, true]
     );
 
@@ -2236,9 +2316,19 @@ fn second_synthetic_family_keeps_positive_tpd_candidate_inactive() {
     let outcome = second_family_production_runner(1.0)
         .solve()
         .expect("stable second-family candidate must not make phase control fail");
-    assert!(outcome.phase_control_report.transitions.is_empty());
+    assert!(
+        outcome
+            .acceptance_report
+            .phase_control
+            .transitions
+            .is_empty()
+    );
     assert_eq!(
-        outcome.phase_control_report.final_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         &[true, false]
     );
     let canonical_tpd = outcome.acceptance_report.phase_stability[1]

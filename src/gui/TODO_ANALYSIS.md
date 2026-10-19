@@ -428,6 +428,12 @@ silently substituting a temperature.
   provenance; the candidate table now also edits assigned initial amounts.
   Manual inclusion toggles beyond explicit assignment remain.
 
+- [x] Keep direct `ElementInventory` as a third, independent inventory mode.
+  It edits physical element totals in mol-atom units while a separate declared
+  species/phase universe supplies the calculation layout. The request boundary
+  passes only those totals as `b`; component rows in this mode are not a second
+  physical feed and are ignored by request conversion.
+
 - [x] Keep the candidate preview as derived state tied to the document
   fingerprint. Any change to elements, library policy, state filters,
   temperature interval, or candidate limit makes the preview stale; the
@@ -1053,6 +1059,9 @@ print the widget tree.
 - [x] Add a full element-defined UI story: choose elements, inspect candidate
   preview, assign a candidate to a phase, validate, prepare, run, and inspect
   the accepted result.
+- [x] Add a direct elemental-inventory UI story: select the third inventory
+  mode, render physical mol-atom totals beside the separate species universe,
+  preserve the serialized document, and prepare/execute through the facade.
 - [x] Add a bounded phase-control UI story covering fixed/bounded switching,
   hysteresis, initial phase policy, lifecycle budget, phase transition, and
   rendered lifecycle trace.
@@ -1075,9 +1084,9 @@ print the widget tree.
 
 ### Help and future range support
 
-- [ ] Add content-aware `egui_kittest` checks for every tab help section, not
-  only Help widget presence. Pure resource tests check key terms today, but the
-  rendered story verifies only that the Help widget exists.
+- [x] Add content-aware checks for every tab Help section. Resource tests assert
+  section-specific guidance, bilingual control contracts, and terminology;
+  rendered stories verify Help availability and language switching.
 - [ ] Test incomplete localized help through an injected pure lookup fixture and
   verify English fallback without changing the document or request. The current
   Russian `Setup` assertion exercises an existing section, not the fallback.
@@ -1216,7 +1225,7 @@ independent widget census plus actual hover stories.
   states; accepted snapshots and stale-publication behavior are covered by the
   local worker tests, including rendered diagnostic sections. The census is
   independent of tooltip IDs.
-- [ ] Add actual hover assertions for labels, text editors, checkboxes,
+- [x] Add actual hover assertions for labels, text editors, checkboxes,
   ComboBox headers and options, enabled/disabled actions, and dynamic rows.
   Also assert that language switching and all hover operations leave the
   editable document, prepared request, worker state, and accepted snapshot
@@ -1225,9 +1234,10 @@ independent widget census plus actual hover stories.
   every conditional subsection through repeated pointer/accessibility clicks.
   The baseline now verifies read-only hover behavior for a text editor, mode
   selector, action button, and bounded checkbox. ComboBox option and
-  dynamic-row coverage are now present. The current renderer omits unavailable
-  actions instead of rendering disabled widgets, so disabled-action hover
-  requires an explicit UI decision and remains open.
+  dynamic-row coverage and direct Element inventory coverage are present. The
+  explicit unavailable-action decision is that candidate actions are omitted
+  outside candidate-search context; the rendered story asserts their absence,
+  so no misleading disabled-action hover is exposed.
 
 #### P2 maintainability
 

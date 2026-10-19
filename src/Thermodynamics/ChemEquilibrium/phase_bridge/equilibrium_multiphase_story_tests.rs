@@ -31,6 +31,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     InitialPhaseSet, PhaseManager, PhaseStatus,
 };
+use crate::Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite::ResolvedNasaTp1907ChonGraphiteFixture;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
     PhaseEquilibriumBuildRequest, build_phase_equilibrium_problem,
 };
@@ -40,8 +41,6 @@ use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
 use crate::Thermodynamics::ChemEquilibrium::real_pure_phase_fixtures::{
     RealPurePhaseFamily, RealPurePhaseInventory,
 };
-use crate::Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite::
-    ResolvedNasaTp1907ChonGraphiteFixture;
 use crate::Thermodynamics::User_PhaseOrSolution::{PhaseSpec, ResolvedPhaseSystem};
 use crate::Thermodynamics::User_substances::{LibraryPriority, SubsData};
 use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
@@ -356,6 +355,8 @@ fn bounded_phase_control_publishes_its_acceptance_evidence_in_the_same_result() 
     let acceptance = result
         .acceptance_report()
         .expect("bounded solve must retain its complementarity gate");
+    assert!(std::ptr::eq(phase_control, &acceptance.phase_control));
+    assert_eq!(phase_control, &acceptance.phase_control);
     assert_eq!(phase_control.final_phase_set.active_mask(), vec![true]);
     assert!(acceptance.complementarity.satisfied);
     assert!(

@@ -207,7 +207,7 @@ EquilibriumSolverSettings {
 ```rust
 enum SolverBackend {
     Legacy(Solvers),           // LM, NR, TR
-    RustedSciThe(RustedSciTheSolver),  // 6 методов
+    RustedSciThe(RustedSciTheSolver),  // 7 методов
 }
 
 enum SolverPolicy {
@@ -388,9 +388,9 @@ PreparedEquilibriumProblem
     │   species_phase map, phase_stoichiometry)
     │  [equilibrium_problem.rs → PreparedEquilibriumProblem::new()]
     ▼
-EquilibriumSolveContract
-    │  (замыкания: residual, jacobian, rst_problem)
-    │  [equilibrium_log_moles.rs → build_solve_contract()]
+    PreparedEquilibriumRunner
+    │  (immutable numerical execution and explicit backend policy)
+    │  [equilibrium_prepared_runner.rs]
     ▼
 ┌─────────────────────────────────────────────────────┐
 │  SolverPolicy::Cascade                              │
@@ -445,7 +445,12 @@ solve()
 EquilibriumSolution (внутренние поля solution, moles)
 ```
 
-### 3.3 Путь с управлением фазами (Phase Control)
+### 3.3 Путь с управлением фазами (Phase Control, compatibility)
+
+The following mutable loop documents the retained compatibility workflow. The
+production bridge uses `PreparedPhaseControlRunner`, which owns the same
+active-set projection, stability, continuation, and accepted-only publication
+semantics without constructing `EquilibriumLogMoles`.
 
 ```
 EquilibriumLogMoles::solve_with_phase_control()
@@ -482,7 +487,12 @@ EquilibriumLogMoles::solve_with_phase_control()
     └── PhaseControlDidNotConverge (если лимит итераций)
 ```
 
-### 3.4 Путь для температурной серии
+### 3.4 Путь для температурной серии (compatibility and typed paths)
+
+The historical `EquilibriumLogMoles::solve_for_T_range` remains a compatibility
+API. New resolved-data ranges enter through `PhaseEquilibriumPipelineRequest`
+or `TemperatureRangeRequest`; they reuse prepared formulations and carry the
+previous accepted physical state, phase set, and provenance transactionally.
 
 ```
 solve_for_T_range(T_start, T_end, T_step)
@@ -554,7 +564,7 @@ f_{r+el}(y) = Σ_i a_{i,el} · exp(y_i) - b_el = 0
 **Зачем:** Два независимых стека реализуют одну и ту же математическую формулировку. Символьный стек (RustedSciThe) строит residual и Jacobian как символьные выражения, затем лямбдифицирует их в численные функции. Численный стек (Legacy) использует hand-written Jacobian.
 
 **Как:**
-1. **Символьный путь:** `RstSymbolicThermochemistry::from_solver()` → `prepare_rst_symbolic_problem()` → `SymbolicNonlinearProblem` → RST решатели (6 методов: LM, MinpackLM, NielsenLM, TrustRegionLM, PowellDogleg, DampedNewton)
+1. **Символьный путь:** `RstSymbolicThermochemistry::from_solver()` → `prepare_rst_symbolic_problem()` → `PreparedSymbolicNonlinearProblem` → RST решатели (7 методов: LM, BacktrackingLM, MinpackLM, NielsenLM, TrustRegionLM, PowellDogleg, DampedNewton)
 2. **Численный путь:** `solve_legacy_backend()` → `LMSolver`/`NRSolver`/`TrustRegionSolver` с hand-written residual и Jacobian
 
 Выбор между стеками — через `SolverPolicy::RustedSciThe` vs `SolverPolicy::Legacy`.
@@ -592,7 +602,9 @@ ResidualScalingContract {
 
 4. **EquilibriumSolution::new()** — проверяет, что все log-moles конечны, все moles конечны и строго положительны.
 
-5. **Feasibility check в решателях** — `max_step_moles_nonnegative()` ограничивает шаг NR, чтобы моли не стали отрицательными.
+5. **Feasibility check в решателях** — trial-state predicates и log-mole координаты
+   сохраняют положительность физических молей; отдельный physical-mole helper
+   удалён как неиспользуемый.
 
 6. **Валидация кандидата** — `validate_equilibrium_candidate()` проверяет:
    - Конечность всех значений
@@ -707,18 +719,20 @@ return PhaseControlDidNotConverge
 
 ### 4.10 Транзакционность публикации состояния
 
-**Где:** [`equilibrium_log_moles.rs`](equilibrium_log_moles.rs) → `publish_solve_candidate()`, `EquilibriumSolveCandidate`
+**Где:** [`prepared_phase_control_runner.rs`](phase_control/prepared_phase_control_runner.rs),
+`PhaseControlledSolveReport`, `MultiphaseAcceptanceReport`; the mutable
+`equilibrium_log_moles.rs` publication methods are compatibility-only.
 
 **Зачем:** В phase-control outer loop промежуточные решения не должны перезаписывать последнее опубликованное состояние. Только когда outer loop сошёлся, решение публикуется.
 
 **Как:**
-1. `solve_fixed_active_set_candidate()` возвращает `EquilibriumSolveCandidate` — временный результат
-2. Phase control анализирует кандидата, решает, нужен ли переход
-3. Только при `NoTransition` или `Hold` вызывается `publish_solve_candidate()`, которая:
-   - Записывает `self.solution`, `self.moles`
-   - Сохраняет `last_validation_report`, `last_solve_report`
-   - Сохраняет `last_keq_validation_status`
-   - Сохраняет `last_phase_control_report`
+1. `PreparedEquilibriumRunner` возвращает кандидат и backend evidence без
+   публикации в mutable host state.
+2. `PreparedPhaseControlRunner` проверяет stability, active-set transition,
+   conservation, and candidate acceptance.
+3. Только принятый terminal state становится immutable public output;
+   `PhaseControlledSolveReport` is the sole owner of lifecycle evidence, and
+   `MultiphaseAcceptanceReport` carries it at the public result boundary.
 
 ### 4.11 Политика решателя (SolverPolicy) и каскад
 
@@ -738,7 +752,10 @@ return PhaseControlDidNotConverge
    - `failure_kind`: Solver / Backend / ResidualEvaluation / JacobianEvaluation
    - `metrics`: termination, iterations, residual_evaluations, elapsed_millis
 
-Рекомендуемый RST каскад: LM → MinpackLM → NielsenLM → TrustRegionLM → PowellDogleg → DampedNewton.
+Production default: the recommended RST cascade followed by Legacy LM/NR/TR
+fallbacks. `rusted_scithe_default()` is the explicit RST-only policy;
+`legacy_default()` is the compatibility numerical policy; callers can also
+provide `Single` or a custom ordered cascade.
 
 ### 4.12 Температурные серии и постобработка
 
@@ -763,10 +780,12 @@ return PhaseControlDidNotConverge
 
 1. **Начните с [`equilibrium_problem.rs`](equilibrium_problem.rs)** — это входная граница. Поймите `EquilibriumProblem`, `EquilibriumConditions`, `EquilibriumSolution`, `LogMolesInitialGuess`.
 
-2. **Затем [`equilibrium_log_moles.rs`](equilibrium_log_moles.rs)** — основной оркестратор. Сосредоточьтесь на:
-   - `EquilibriumLogMoles::solve()` — однотемпературный расчёт
-   - `EquilibriumLogMoles::solve_candidate_from_seed()` — ядро каскада
-   - `evaluate_equilibrium_logmole_residual()` — математическая формулировка
+2. **Затем [`equilibrium_prepared_runner.rs`](equilibrium_prepared_runner.rs)** —
+   immutable fixed-formulation execution and backend cascade. Для bounded
+   lifecycle читайте [`prepared_phase_control_runner.rs`](phase_control/prepared_phase_control_runner.rs).
+3. **[`equilibrium_log_moles.rs`](equilibrium_log_moles.rs)** — только если
+   нужен retained mutable compatibility workflow или его pure residual/Jacobian
+   contract.
 
 3. **Потом [`equilibrium_workflows.rs`](phase_control/equilibrium_workflows.rs)** — управление фазами:
    - `PhaseManager`, `PhaseSet`, `PhaseTransitionPlan`
@@ -792,7 +811,9 @@ return PhaseControlDidNotConverge
 | [`equilibrium_ids.rs`](equilibrium_ids.rs) | Типобезопасные идентификаторы | `SpeciesId`, `ElementId`, `PhaseIndex`, `ReactionId` |
 | [`equilibrium_component.rs`](equilibrium_component.rs) | Фазово-квалифицированный компонент | `EquilibriumComponentDescriptor` |
 | [`equilibrium_problem.rs`](equilibrium_problem.rs) | Граница задачи | `EquilibriumProblem`, `PreparedEquilibriumProblem`, `EquilibriumSolution`, `LogMolesInitialGuess`, `ResidualScalingContract` |
-| [`equilibrium_log_moles.rs`](equilibrium_log_moles.rs) | Основной оркестратор (3881 строка) | `EquilibriumLogMoles`, `EquilibriumSolverSettings`, `Solvers`, `SolverParams`, `EquilibriumSolveCandidate`, `TemperatureWorkerSeed` |
+| [`equilibrium_calculator.rs`](equilibrium_calculator.rs) | Application-facing facade | `EquilibriumCalculator`, `EquilibriumCalculatorBuilder`, `EquilibriumCalculationMode` |
+| [`equilibrium_prepared_runner.rs`](equilibrium_prepared_runner.rs) | Immutable fixed-formulation runner | `PreparedEquilibriumRunner`, `PreparedSolveOutcome` |
+| [`equilibrium_log_moles.rs`](equilibrium_log_moles.rs) | Mutable compatibility host | `EquilibriumLogMoles`, `EquilibriumSolverSettings`, `Solvers`, `SolverParams`, `TemperatureWorkerSeed` |
 | [`equilibrium_nonlinear.rs`](nonlinear_solvers/equilibrium_nonlinear.rs) | Численные решатели | `LMSolver`, `NRSolver`, `TrustRegionSolver`, `ReactionBasis`, `ReactionExtentError` |
 | [`equilibrium_workflows.rs`](phase_control/equilibrium_workflows.rs) | Управление фазами, stability, convenience (2043 строки) | `PhaseManager`, `PhaseSet`, `PhaseTransitionPlan`, `PhaseStabilityReport`, `PhaseControlledSolveReport`, `MultiphaseAcceptanceReport`, `gas_solver()` |
 | [`equilibrium_active_set.rs`](phase_control/equilibrium_active_set.rs) | Проекция активного набора фаз | `ActiveSetProjection` |
@@ -810,7 +831,9 @@ return PhaseControlDidNotConverge
 | [`equilibrium_multiphase_domain.rs`](equilibrium_multiphase_domain.rs) | Многофазная доменная граница | `MultiphaseEquilibriumLayout`, `MultiphaseInitialComposition` |
 | [`phase_equilibrium_problem.rs`](phase_bridge/phase_equilibrium_problem.rs) | Мост к фазовой подсистеме | `PhaseEquilibriumMetadata`, `PhaseEquilibriumBuildRequest`, `PhaseEquilibriumSolutionBundle` |
 | [`phase_equilibrium_solution.rs`](phase_bridge/phase_equilibrium_solution.rs) | Иммутабельный многофазный результат | `MultiphaseEquilibriumSolution` |
-| [`phase_equilibrium_workflow.rs`](phase_bridge/phase_equilibrium_workflow.rs) | Публичный фасад fixed-P,T | `solve_resolved_pt()` |
+| [`phase_equilibrium_workflow.rs`](phase_bridge/phase_equilibrium_workflow.rs) | Публичный фасад fixed-P,T | `solve_resolved_pt()`, `PhaseEquilibriumPipelineRequest` |
+| [`equilibrium_ph_workflow.rs`](ph/equilibrium_ph_workflow.rs) | Публичный фасад fixed-P,H | `solve_resolved_ph()`, `PhSolveMode`, `PhSolvePath` |
+| [`prepared_phase_control_runner.rs`](phase_control/prepared_phase_control_runner.rs) | Immutable bounded lifecycle | `PreparedPhaseControlRunner`, `PhaseControlledSolveReport` |
 | [`equilibrium_temperature_postprocessing.rs`](postprocessing_and_logging/equilibrium_temperature_postprocessing.rs) | Постобработка температурных серий | `TemperaturePostprocessingPolicy`, `TemperatureSweepSeries` |
 | [`easy_equilibrium.rs`](easy_equilibrium.rs) | Упрощённый интерфейс (одна реакция) | `EasyEquilibrium` |
 | [`NR_Legacy.rs`](nonlinear_solvers/NR_Legacy.rs) | Legacy Newton-Raphson | `NRSolver` (legacy) |
@@ -893,13 +916,18 @@ equilibrium_ids.rs
     └── phase_equilibrium_workflow.rs
             │
             └── (solve_resolved_pt — публичный вход)
-## Актуальная production-граница (2026-07-26)
+## Актуальная production-граница (2026-09-11)
 
-Единственный production-вход для поддерживаемого fixed-`P,T` равновесия —
-типизированный `phase_equilibrium_workflow::solve_resolved_pt` (или
-`PhaseEquilibriumPipelineRequest` из `ChemEquilibrium::prelude`). Он принимает
-разрешённую фазовую систему, typed initial composition, условия и валидируемые
-политики, а возвращает immutable solution и typed reports.
+Основной application-facing production-вход — `EquilibriumCalculator` из
+`ChemEquilibrium::prelude`. Он принимает объявления фаз или политику поиска
+кандидатов, `ElementInventory` либо начальную композицию, режим `P,T`/`P,H`,
+а также валидируемые численные политики. Для интеграций с уже разрешёнными
+данными используются typed lower-level фасады: `solve_resolved_pt` для
+fixed-`P,T` и `solve_resolved_ph` для fixed-`P,H`.
+
+Все эти входы делегируют подготовку и выполнение immutable runner-ам,
+возвращают accepted solution и typed reports, а range workflows дополнительно
+сохраняют accepted-state continuation и transactional publication.
 
 `gas_solver`, `easy_equilibrium` и mutable `EquilibriumLogMoles` workflows —
 только compatibility/characterization surface. Legacy LM/NR/TR внутри

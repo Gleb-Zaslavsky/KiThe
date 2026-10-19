@@ -37,8 +37,8 @@
 //! outer `P,H` acceptance is independently determined from the typed enthalpy
 //! residual, scalar bracket, conservation, and normal `P,T` acceptance gate.
 
-use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::EquilibriumCandidateSelectionReport;
@@ -57,6 +57,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_extensive_normalization:
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::GibbsFn;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
+    initial_composition_from_element_inventory,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
     ReactionExtentError, ReactionExtentErrorKind,
@@ -84,13 +85,14 @@ pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_thermochemistry::
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::LogMolesInitialGuess;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    RstPreparedProblem, prepare_rst_symbolic_ph_problem,
+    RstPreparedProblem, prepare_rst_symbolic_ph_problem_with_timing,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, MultiStartSolveReport,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
-    EquilibriumTimingMode, EquilibriumTimingReport,
+    EquilibriumTimingCollector, EquilibriumTimingMode, EquilibriumTimingReport,
+    EquilibriumTimingStage, RstPreparationTimingReport,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     MultiphaseAcceptanceReport, PhaseControlledSolveReport,
@@ -103,7 +105,7 @@ use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::Extensiv
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::MultiphaseEquilibriumSolution;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
     EquilibriumSolveOptions, PhaseControlPolicy, PhaseEquilibriumSolveMode,
-    ResolvedPhaseEquilibriumRequest, solve_resolved_pt,
+    ResolvedPhaseEquilibriumRequest, normalized_recovery_trace_policy, solve_resolved_pt,
 };
 use crate::Thermodynamics::User_PhaseOrSolution::ResolvedPhaseSystem;
 
@@ -756,6 +758,25 @@ pub struct PhTemperatureTimingReport {
     total: Duration,
     scalar_orchestration: Duration,
     enthalpy_evaluation: Duration,
+    trial_total: Duration,
+    trial_inner_execution: Duration,
+    trial_preparation: Duration,
+    trial_template_preparation: Duration,
+    trial_postprocessing: Duration,
+    bracket_orchestration: Duration,
+    monolithic_preparation: Duration,
+    request_validation: Duration,
+    initial_enthalpy: Duration,
+    initial_enthalpy_reused: bool,
+    prepared_problem_retarget: Duration,
+    gibbs_snapshot: Duration,
+    gibbs_snapshot_reused: bool,
+    monolithic_rst_preparation: Duration,
+    monolithic_backend_execution: Duration,
+    monolithic_execution: Duration,
+    monolithic_publication: Duration,
+    recovery_request_clone: Duration,
+    rst_preparation_timing: RstPreparationTimingReport,
 }
 
 impl PhTemperatureTimingReport {
@@ -778,6 +799,116 @@ impl PhTemperatureTimingReport {
     pub fn enthalpy_evaluation(&self) -> Duration {
         self.enthalpy_evaluation
     }
+
+    /// Aggregate wall-clock duration of all accepted scalar trials.
+    pub fn trial_total(&self) -> Duration {
+        self.trial_total
+    }
+
+    /// Aggregate wall-clock duration spent executing inner P,T requests.
+    pub fn trial_inner_execution(&self) -> Duration {
+        self.trial_inner_execution
+    }
+
+    /// Trial time outside the inner P,T request and additive enthalpy
+    /// evaluation. This includes per-trial request/formulation preparation.
+    pub fn trial_preparation(&self) -> Duration {
+        self.trial_preparation
+    }
+
+    /// Time spent building the reusable fixed-phase P,T template for nested
+    /// trials. This is normally paid once per nested request.
+    pub fn trial_template_preparation(&self) -> Duration {
+        self.trial_template_preparation
+    }
+
+    /// Time spent publishing trial evidence after the inner solve and
+    /// enthalpy evaluation have returned.
+    pub fn trial_postprocessing(&self) -> Duration {
+        self.trial_postprocessing
+    }
+
+    /// Scalar bracket bookkeeping outside all trial callbacks.
+    pub fn bracket_orchestration(&self) -> Duration {
+        self.bracket_orchestration
+    }
+
+    /// Time spent preparing a monolithic P,H formulation before its coupled
+    /// nonlinear runner starts.
+    pub fn monolithic_preparation(&self) -> Duration {
+        self.monolithic_preparation
+    }
+
+    /// Time spent validating the prepared point request before its nonlinear
+    /// runner starts.
+    pub fn request_validation(&self) -> Duration {
+        self.request_validation
+    }
+
+    /// Time spent obtaining the molar enthalpy vector used for initial P,H
+    /// normalization, including a cache clone when one is available.
+    pub fn initial_enthalpy(&self) -> Duration {
+        self.initial_enthalpy
+    }
+
+    /// Whether the initial molar enthalpy vector came from the previous
+    /// continuation point at the same seed temperature.
+    pub fn initial_enthalpy_reused(&self) -> bool {
+        self.initial_enthalpy_reused
+    }
+
+    /// Time spent retargeting the reusable prepared P,T problem for one
+    /// prepared P,H point, including its structural clone and validation.
+    pub fn prepared_problem_retarget(&self) -> Duration {
+        self.prepared_problem_retarget
+    }
+
+    /// Time spent preparing or cloning the constant Gibbs snapshot used by
+    /// the prepared P,H retarget path.
+    pub fn gibbs_snapshot(&self) -> Duration {
+        self.gibbs_snapshot
+    }
+
+    /// Whether the Gibbs snapshot came from the previous accepted point.
+    pub fn gibbs_snapshot_reused(&self) -> bool {
+        self.gibbs_snapshot_reused
+    }
+
+    /// Time spent materializing the RST symbolic payload for the accepted
+    /// monolithic seed.
+    pub fn monolithic_rst_preparation(&self) -> Duration {
+        self.monolithic_rst_preparation
+    }
+
+    /// Wall-clock time spent in the selected monolithic backend cascade after
+    /// RST payload preparation.
+    pub fn monolithic_backend_execution(&self) -> Duration {
+        self.monolithic_backend_execution
+    }
+
+    /// Wall-clock duration of the coupled monolithic runner.
+    pub fn monolithic_execution(&self) -> Duration {
+        self.monolithic_execution
+    }
+
+    /// Time spent publishing a monolithic candidate after the runner returns.
+    pub fn monolithic_publication(&self) -> Duration {
+        self.monolithic_publication
+    }
+
+    /// Time spent cloning the physical request kept for classified recovery.
+    ///
+    /// This is measured separately because a successful physical solve does
+    /// not use the retained request at all. It therefore must not be hidden in
+    /// generic P,H orchestration time when evaluating copy-on-failure work.
+    pub fn recovery_request_clone(&self) -> Duration {
+        self.recovery_request_clone
+    }
+
+    /// Fine-grained stages inside monolithic RST symbolic/problem preparation.
+    pub fn rst_preparation_timing(&self) -> RstPreparationTimingReport {
+        self.rst_preparation_timing
+    }
 }
 
 /// Backend and active-set evidence for a coupled monolithic P,H solve.
@@ -794,6 +925,7 @@ pub struct PhMonolithicEvidence {
     phase_control_report: Option<PhaseControlledSolveReport>,
     acceptance_report: Option<MultiphaseAcceptanceReport>,
     inner_timing: EquilibriumTimingReport,
+    validation_duration: Duration,
 }
 
 impl PhMonolithicEvidence {
@@ -825,6 +957,11 @@ impl PhMonolithicEvidence {
     /// Timing report for the coupled inner equilibrium solve.
     pub fn inner_timing(&self) -> EquilibriumTimingReport {
         self.inner_timing
+    }
+
+    /// Time spent validating candidate snapshots in the monolithic cascade.
+    pub fn validation_duration(&self) -> Duration {
+        self.validation_duration
     }
 
     /// Residual evaluations reported by the coupled backend cascade.
@@ -1056,6 +1193,30 @@ impl FixedPressureEnthalpySolution {
         self
     }
 
+    /// Adds timing for an enclosing P,H route decision and keeps the copied
+    /// report in sync with the accepted inner solution timing.
+    pub(crate) fn with_route_selection_timing(self, duration: std::time::Duration) -> Self {
+        self.with_inner_timing_stage(EquilibriumTimingStage::RouteSelection, duration)
+    }
+
+    pub(crate) fn with_inner_timing_stage(
+        mut self,
+        stage: EquilibriumTimingStage,
+        duration: std::time::Duration,
+    ) -> Self {
+        self.solution = self.solution.with_timing_stage(stage, duration);
+        self.report.inner_timing = *self.solution.timing_report();
+        self
+    }
+
+    pub(crate) fn with_recovery_request_clone_timing(
+        mut self,
+        duration: std::time::Duration,
+    ) -> Self {
+        self.report.timing.recovery_request_clone = duration;
+        self
+    }
+
     /// Solved equilibrium temperature in K.
     pub fn temperature(&self) -> f64 {
         self.solution.conditions().temperature()
@@ -1148,7 +1309,7 @@ impl FixedPressureEnthalpySolution {
 pub struct ResolvedPhaseEnthalpyRequest<'a> {
     /// Immutable snapshot captured when the request is built. The solve does
     /// not borrow the caller's mutable lifecycle or depend on its storage.
-    resolved: ResolvedPhaseSystem,
+    resolved: Arc<ResolvedPhaseSystem>,
     /// Physical conservation input.  A dense composition is both the legacy
     /// physical input and its first numerical seed; an elemental inventory
     /// remains `b` while `initial_composition` is only a numerical seed.
@@ -1217,7 +1378,7 @@ impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
         enthalpy: EnthalpyModel<'a>,
     ) -> Result<Self, ReactionExtentError> {
         let request = Self {
-            resolved: resolved.clone(),
+            resolved: Arc::new(resolved.clone()),
             physical_input: PhPhysicalInput::Composition,
             initial_composition,
             constraint,
@@ -1285,25 +1446,9 @@ impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
         temperature_bounds: TemperatureBounds,
         thermochemistry: ResolvedThermochemistry,
     ) -> Result<Self, ReactionExtentError> {
-        let (_, initial_temperature) = validated_ph_parameters(constraint)?;
-        let conditions = constraint.conditions_at(initial_temperature)?;
-        let bundle = build_phase_equilibrium_problem_with_timing(
-            PhaseEquilibriumBuildRequest::from_element_inventory(
-                resolved,
-                conditions,
-                element_inventory.clone(),
-                crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::TraceSpeciesSeedPolicy::Absolute {
-                    floor: crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::DEFAULT_TRACE_MOLE_FLOOR,
-                },
-                SupportedPhaseModelPolicy::default(),
-            )?,
-            EquilibriumTimingMode::Disabled,
-        )?;
-        let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
-        let numerical_seed = MultiphaseInitialComposition::from_dense(
-            &layout,
-            bundle.problem().initial_moles().to_vec(),
-        )?;
+        validated_ph_parameters(constraint)?;
+        let numerical_seed =
+            initial_composition_from_element_inventory(resolved, &element_inventory)?;
         let mut request = Self::from_resolved_thermochemistry(
             resolved,
             numerical_seed,
@@ -1365,7 +1510,15 @@ impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
     /// violation so callers receive a diagnostic message rather than a silent
     /// assertion failure during the scalar search.
     fn validate(&self) -> Result<(), ReactionExtentError> {
-        let (target_enthalpy, initial_temperature) = validated_ph_parameters(self.constraint)?;
+        let (_, initial_temperature) = self.validate_structure()?;
+        let initial_molar = self.enthalpy.evaluate_molar(initial_temperature)?;
+        self.validate_with_initial_molar_enthalpies(&initial_molar)
+    }
+
+    /// Validates fields that do not require evaluating thermochemistry.
+    fn validate_structure(&self) -> Result<(f64, f64), ReactionExtentError> {
+        let parameters = validated_ph_parameters(self.constraint)?;
+        let (_, initial_temperature) = parameters;
         self.constraint
             .validate_temperature(initial_temperature, self.temperature_bounds)?;
         if self.initial_composition.moles().len() != self.resolved.layout().component_count() {
@@ -1383,11 +1536,27 @@ impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
             )));
         }
         self.temperature_options.validate()?;
-        let initial_molar = self.enthalpy.evaluate_molar(initial_temperature)?;
+        Ok(parameters)
+    }
+
+    /// Completes request validation from an already evaluated molar enthalpy
+    /// vector, avoiding a second thermochemistry traversal on prepared points.
+    fn validate_with_initial_molar_enthalpies(
+        &self,
+        initial_molar: &[f64],
+    ) -> Result<(), ReactionExtentError> {
+        let (target_enthalpy, _) = self.validate_structure()?;
+        if initial_molar.len() != self.enthalpy.len() {
+            return Err(ReactionExtentError::DimensionMismatch(format!(
+                "molar enthalpy vector has {} entries but enthalpy model has {} functions",
+                initial_molar.len(),
+                self.enthalpy.len()
+            )));
+        }
         EnthalpyScale::from_magnitudes(
             target_enthalpy,
             self.initial_composition.moles(),
-            &initial_molar,
+            initial_molar,
         )?;
         Ok(())
     }
@@ -1465,9 +1634,39 @@ impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
         Ok(self)
     }
 
+    /// Retargets an owned prepared-session request without cloning its large
+    /// resolved and thermochemistry payloads. The caller owns the session's
+    /// transactional seed and invokes this only at the next point boundary.
+    pub(crate) fn retarget_for_prepared_session(
+        &mut self,
+        target_enthalpy: crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::
+            TotalEnthalpyJoules,
+        initial_temperature: f64,
+        initial_composition: MultiphaseInitialComposition,
+    ) -> Result<(), ReactionExtentError> {
+        let constraint = EquilibriumConstraint::ph_joules(
+            self.constraint.pressure(),
+            self.constraint.reference_pressure(),
+            target_enthalpy,
+            initial_temperature,
+        )?;
+        let layout = MultiphaseEquilibriumLayout::new(self.resolved.phase_specs().to_vec())?;
+        initial_composition.validate_for(&layout)?;
+        let previous_constraint = self.constraint;
+        let previous_composition = self.initial_composition.clone();
+        self.constraint = constraint;
+        self.initial_composition = initial_composition;
+        if let Err(error) = self.validate_structure() {
+            self.constraint = previous_constraint;
+            self.initial_composition = previous_composition;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Returns the immutable resolved system borrowed by this request.
     pub fn resolved(&self) -> &ResolvedPhaseSystem {
-        &self.resolved
+        self.resolved.as_ref()
     }
 
     /// Returns the physical composition used to initialize this request.
@@ -1506,7 +1705,7 @@ impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
     /// path retry with a different numerical route without rebuilding the request.
     pub(crate) fn cloned_with_ph_solve_mode(&self, mode: PhSolveMode) -> Self {
         Self {
-            resolved: self.resolved.clone(),
+            resolved: Arc::clone(&self.resolved),
             physical_input: self.physical_input.clone(),
             initial_composition: self.initial_composition.clone(),
             constraint: self.constraint,
@@ -1551,8 +1750,11 @@ pub(crate) struct PreparedPhContinuationState {
     formulation: PreparedPhFormulation,
     thermochemistry: ResolvedThermochemistry,
     rst_problem: Option<RstPreparedProblem>,
+    preparation_timing: EquilibriumTimingReport,
     cached_target_enthalpy: f64,
     cached_enthalpy_scale: f64,
+    cached_initial_enthalpies: Option<(f64, Vec<f64>)>,
+    cached_gibbs: Option<(f64, Vec<GibbsFn>)>,
 }
 
 /// Shared fixed-`P,T` template for a nested `P,H` target range.
@@ -1562,7 +1764,7 @@ pub(crate) struct PreparedPhContinuationState {
 /// particular, this type never carries a bracket, a rejected trial, or a
 /// bounded phase-control active set from one target into the next.
 pub(crate) struct PreparedNestedPhContinuationState {
-    fixed_template: Rc<RefCell<Option<PreparedPhaseEquilibriumTemplate>>>,
+    fixed_template: Option<PreparedPhaseEquilibriumTemplate>,
 }
 
 impl PreparedNestedPhContinuationState {
@@ -1582,26 +1784,40 @@ impl PreparedNestedPhContinuationState {
             });
         }
         Ok(Self {
-            fixed_template: Rc::new(RefCell::new(None)),
+            fixed_template: None,
         })
     }
 
     /// Solves one scalar target while sharing only the prepared inner
     /// fixed-`P,T` formulation with earlier targets.
     pub(crate) fn solve(
-        &self,
+        &mut self,
         request: ResolvedPhaseEnthalpyRequest<'_>,
     ) -> Result<FixedPressureEnthalpySolution, ReactionExtentError> {
-        solve_resolved_ph_nested_with_template(request, Some(Rc::clone(&self.fixed_template)))
+        solve_resolved_ph_nested_with_template(request, &mut self.fixed_template)
     }
 }
 
 impl PreparedPhContinuationState {
+    /// Returns the immutable timing captured while preparing the fixed state.
+    pub(crate) fn preparation_timing(&self) -> EquilibriumTimingReport {
+        self.preparation_timing
+    }
+
+    /// Whether preparation materialized a reusable RST P,H graph.
+    pub(crate) fn rst_graph_prepared(&self) -> bool {
+        self.rst_problem.is_some()
+    }
+
     /// Builds structural P,H state from the first range point.
     pub(crate) fn new(
         request: &ResolvedPhaseEnthalpyRequest<'_>,
     ) -> Result<Self, ReactionExtentError> {
-        request.validate()?;
+        let started = Instant::now();
+        let mut timing = EquilibriumTimingCollector::new(request.solve_options.timing_mode());
+        timing.measure(EquilibriumTimingStage::RequestPreparation, || {
+            request.validate_structure().map(|_| ())
+        })?;
         if !matches!(
             request.ph_solve_mode,
             PhSolveMode::Monolithic | PhSolveMode::Auto
@@ -1623,38 +1839,62 @@ impl PreparedPhContinuationState {
                     message: "prepared monolithic P,H state requires resolved thermochemistry"
                         .into(),
                 })?;
-        let (target, initial_temperature) = validated_ph_parameters(request.constraint)?;
-        let initial_molar_enthalpies = thermochemistry.evaluate_enthalpy(initial_temperature)?;
-        let scale = EnthalpyScale::from_magnitudes(
-            target,
-            request.initial_composition.moles(),
-            &initial_molar_enthalpies,
-        )?;
-        let conditions = request.constraint.conditions_at(initial_temperature)?;
+        let (target, initial_temperature) = timing
+            .measure(EquilibriumTimingStage::RequestPreparation, || {
+                validated_ph_parameters(request.constraint)
+            })?;
+        let initial_molar_enthalpies = timing
+            .measure(EquilibriumTimingStage::ThermochemistryPreparation, || {
+                thermochemistry.evaluate_enthalpy(initial_temperature)
+            })?;
+        let scale = timing.measure(EquilibriumTimingStage::Normalization, || {
+            EnthalpyScale::from_magnitudes(
+                target,
+                request.initial_composition.moles(),
+                &initial_molar_enthalpies,
+            )
+        })?;
+        let conditions = timing.measure(EquilibriumTimingStage::RequestPreparation, || {
+            request.constraint.conditions_at(initial_temperature)
+        })?;
         let bundle = build_phase_equilibrium_problem_with_timing(
             request.build_pt_request(conditions)?,
             request.solve_options.timing_mode(),
         )?;
         let prepared = bundle.into_prepared_fixed_active_problem()?;
-        let formulation = PreparedPhFormulation::new(
-            prepared.prepared.clone(),
-            thermochemistry.clone(),
-            request.temperature_bounds,
-            target,
-            scale,
-        )?;
-        let rst_problem = request
-            .solve_options
-            .prepares_rst_backend()
-            .then(|| prepare_rst_symbolic_ph_problem(&formulation))
-            .transpose()?;
+        timing.accumulate(prepared.timing);
+        let formulation =
+            timing.measure(EquilibriumTimingStage::PhFormulationPreparation, || {
+                PreparedPhFormulation::new(
+                    prepared.prepared.clone(),
+                    thermochemistry.clone(),
+                    request.temperature_bounds,
+                    target,
+                    scale,
+                )
+            })?;
+        let rst_problem = if request.solve_options.prepares_rst_backend() {
+            let (problem, rst_timing) = prepare_rst_symbolic_ph_problem_with_timing(
+                &formulation,
+                request.solve_options.timing_mode(),
+                request.solve_options.rst_symbolic_frontend(),
+            )?;
+            timing.accumulate(rst_timing);
+            Some(problem)
+        } else {
+            None
+        };
+        timing.set_total(started.elapsed());
         Ok(Self {
             prepared,
             formulation,
             thermochemistry,
             rst_problem,
+            preparation_timing: timing.finish(),
             cached_target_enthalpy: target,
             cached_enthalpy_scale: scale.joules(),
+            cached_initial_enthalpies: Some((initial_temperature, initial_molar_enthalpies)),
+            cached_gibbs: None,
         })
     }
 
@@ -1665,11 +1905,26 @@ impl PreparedPhContinuationState {
         formulation_reused: bool,
     ) -> Result<FixedPressureEnthalpySolution, ReactionExtentError> {
         let started = Instant::now();
-        request.validate()?;
+        let timing_enabled = request.solve_options.timing_mode() == EquilibriumTimingMode::Enabled;
         let (target, initial_temperature) = validated_ph_parameters(request.constraint)?;
-        let initial_molar_enthalpies = self
-            .thermochemistry
-            .evaluate_enthalpy(initial_temperature)?;
+        let enthalpy_started = timing_enabled.then(Instant::now);
+        let (initial_molar_enthalpies, initial_enthalpy_reused) = match self
+            .cached_initial_enthalpies
+            .as_ref()
+            .filter(|(temperature, _)| *temperature == initial_temperature)
+        {
+            Some((_, enthalpies)) => (enthalpies.clone(), true),
+            None => (
+                self.thermochemistry
+                    .evaluate_enthalpy(initial_temperature)?,
+                false,
+            ),
+        };
+        let initial_enthalpy = enthalpy_started.map_or(Duration::ZERO, |started| started.elapsed());
+        let request_validation_started = timing_enabled.then(Instant::now);
+        request.validate_with_initial_molar_enthalpies(&initial_molar_enthalpies)?;
+        let request_validation =
+            request_validation_started.map_or(Duration::ZERO, |started| started.elapsed());
         let scale = EnthalpyScale::from_magnitudes(
             target,
             request.initial_composition.moles(),
@@ -1678,13 +1933,28 @@ impl PreparedPhContinuationState {
         let conditions = request.constraint.conditions_at(initial_temperature)?;
         let log_seed =
             LogMolesInitialGuess::from_initial_moles(request.initial_composition.moles())?;
-        let gibbs = self
-            .thermochemistry
-            .gibbs_snapshot_for_legacy_boundary(initial_temperature)?;
+        let gibbs_started = timing_enabled.then(Instant::now);
+        let (gibbs, gibbs_snapshot_reused) = match self
+            .cached_gibbs
+            .as_ref()
+            .filter(|(temperature, _)| *temperature == initial_temperature)
+        {
+            Some((_, gibbs)) => (gibbs.clone(), true),
+            None => {
+                let gibbs = self
+                    .thermochemistry
+                    .gibbs_snapshot_for_legacy_boundary(initial_temperature)?;
+                (gibbs, false)
+            }
+        };
+        let gibbs_snapshot = gibbs_started.map_or(Duration::ZERO, |started| started.elapsed());
+        let retarget_started = timing_enabled.then(Instant::now);
         let prepared =
             self.prepared
                 .prepared
                 .retarget_with_gibbs(conditions, log_seed.clone(), gibbs)?;
+        let prepared_problem_retarget =
+            retarget_started.map_or(Duration::ZERO, |started| started.elapsed());
         // Retarget local copies. The prepared cache is committed only after
         // the candidate has passed the ordinary publication boundary; a
         // failed point must not become the seed/formulation of the next one.
@@ -1695,7 +1965,8 @@ impl PreparedPhContinuationState {
             formulation.clone(),
             request.solve_options.clone().into_settings(),
             monolithic_options,
-        )?;
+        )?
+        .with_timing_enabled(request.solve_options.timing_mode() == EquilibriumTimingMode::Enabled);
         if let Some(control) = options.execution_control() {
             control.check_cancelled()?;
             control.report(EquilibriumProgressEvent::new(
@@ -1757,6 +2028,9 @@ impl PreparedPhContinuationState {
             .into_iter()
             .map(|value| Rc::new(move |_| value) as GibbsFn)
             .collect::<Vec<_>>();
+        let next_cached_initial_enthalpies =
+            (initial_temperature, initial_molar_enthalpies.clone());
+        let next_cached_gibbs = (outcome.snapshot.temperature, accepted_gibbs.clone());
         let accepted_report = self
             .prepared
             .report
@@ -1768,7 +2042,6 @@ impl PreparedPhContinuationState {
             outcome.solve_report.clone(),
             self.prepared.timing,
         )?;
-        let timing_enabled = request.solve_options.timing_mode() == EquilibriumTimingMode::Enabled;
         let report = PhTemperatureSolveReport {
             solve_path: PhSolvePath::MonolithicFixedActiveSet,
             fallback_reason: None,
@@ -1799,6 +2072,25 @@ impl PreparedPhContinuationState {
                 },
                 scalar_orchestration: Duration::ZERO,
                 enthalpy_evaluation: Duration::ZERO,
+                trial_total: Duration::ZERO,
+                trial_inner_execution: Duration::ZERO,
+                trial_preparation: Duration::ZERO,
+                trial_template_preparation: Duration::ZERO,
+                trial_postprocessing: Duration::ZERO,
+                bracket_orchestration: Duration::ZERO,
+                monolithic_preparation: Duration::ZERO,
+                request_validation,
+                initial_enthalpy,
+                initial_enthalpy_reused,
+                prepared_problem_retarget,
+                gibbs_snapshot,
+                gibbs_snapshot_reused,
+                monolithic_rst_preparation: outcome.rst_preparation,
+                monolithic_backend_execution: outcome.backend_execution,
+                monolithic_execution: Duration::ZERO,
+                monolithic_publication: Duration::ZERO,
+                recovery_request_clone: Duration::ZERO,
+                rst_preparation_timing: outcome.rst_preparation_timing,
             },
             iterations: 0,
             trials: Vec::new(),
@@ -1809,6 +2101,7 @@ impl PreparedPhContinuationState {
                 phase_control_report: None,
                 acceptance_report: solution.acceptance_report().cloned(),
                 inner_timing: *solution.timing_report(),
+                validation_duration: outcome.validation_duration,
             }),
         };
         let result = FixedPressureEnthalpySolution {
@@ -1824,6 +2117,8 @@ impl PreparedPhContinuationState {
         self.formulation = formulation;
         self.cached_target_enthalpy = target;
         self.cached_enthalpy_scale = scale.joules();
+        self.cached_initial_enthalpies = Some(next_cached_initial_enthalpies);
+        self.cached_gibbs = Some(next_cached_gibbs);
         Ok(result)
     }
 }
@@ -1862,9 +2157,11 @@ pub fn solve_resolved_ph(
                             message: error.to_string(),
                         },
                     );
-                    match solve_resolved_ph(
-                        request.cloned_with_ph_solve_mode(PhSolveMode::NestedTemperature),
-                    ) {
+                    let route_selection_started = Instant::now();
+                    let nested_request =
+                        request.cloned_with_ph_solve_mode(PhSolveMode::NestedTemperature);
+                    let route_selection_duration = route_selection_started.elapsed();
+                    match solve_resolved_ph(nested_request) {
                         Ok(mut nested) => {
                             nested.report.fallback_reason = Some(fallback_reason.clone());
                             nested
@@ -1875,7 +2172,7 @@ pub fn solve_resolved_ph(
                                     to_route: PhDiagnosticRoute::NestedTemperature,
                                     reason: fallback_reason,
                                 });
-                            Ok(nested)
+                            Ok(nested.with_route_selection_timing(route_selection_duration))
                         }
                         Err(nested) => {
                             diagnostics.emit(
@@ -1909,6 +2206,66 @@ pub fn solve_resolved_ph(
     }
 }
 
+/// Runs one complete `P,H` point transaction, including typed extensive
+/// recovery after a classified physical-coordinate failure.
+///
+/// This is the single-point counterpart to the range driver's recovery
+/// boundary. Prepared range states keep invoking
+/// [`recover_resolved_ph_after_numerical_failure`] themselves because they
+/// already own the failed fast-path evidence and continuation state.
+pub(crate) fn solve_resolved_ph_transaction(
+    request: ResolvedPhaseEnthalpyRequest<'_>,
+) -> Result<FixedPressureEnthalpySolution, ReactionExtentError> {
+    let transaction_started = Instant::now();
+    let timing_enabled = request.solve_options.timing_mode() == EquilibriumTimingMode::Enabled;
+    let (working_request, recovery_request_clone) = if timing_enabled {
+        let clone_started = Instant::now();
+        let working_request = request.clone();
+        (working_request, clone_started.elapsed())
+    } else {
+        (request.clone(), Duration::ZERO)
+    };
+    let physical_attempt_started = Instant::now();
+    match solve_resolved_ph(working_request) {
+        Ok(solution) => Ok(solution.with_recovery_request_clone_timing(recovery_request_clone)),
+        Err(physical_error) => {
+            let physical_failure_duration = physical_attempt_started.elapsed();
+            if request.solve_options.timing_mode() == EquilibriumTimingMode::Enabled {
+                recover_resolved_ph_after_numerical_failure(
+                    request,
+                    physical_error,
+                    physical_failure_duration,
+                )
+                .map(|mut solution| {
+                    // Preserve the rejected physical attempt in the
+                    // accepted recovery transaction's timing evidence.
+                    let elapsed = transaction_started.elapsed();
+                    solution.solution = solution
+                        .solution
+                        .with_timing_stage(EquilibriumTimingStage::Recovery, elapsed)
+                        .with_timing_total(elapsed);
+                    solution.report.inner_timing = *solution.solution.timing_report();
+                    // The accepted normalized result carries the inner
+                    // recovery evidence, but its outer P,H report was
+                    // created by the normalized solve. Restore the wall
+                    // clock of the complete physical transaction here.
+                    if timing_enabled {
+                        solution.report.timing.total = elapsed;
+                    }
+                    solution = solution.with_recovery_request_clone_timing(recovery_request_clone);
+                    solution
+                })
+            } else {
+                recover_resolved_ph_after_numerical_failure(
+                    request,
+                    physical_error,
+                    physical_failure_duration,
+                )
+            }
+        }
+    }
+}
+
 /// Recovers one rejected P,H point in an exactly equivalent normalized
 /// extensive representation.
 ///
@@ -1919,6 +2276,7 @@ pub fn solve_resolved_ph(
 pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
     request: ResolvedPhaseEnthalpyRequest<'a>,
     physical_error: ReactionExtentError,
+    physical_failure_duration: Duration,
 ) -> Result<FixedPressureEnthalpySolution, ReactionExtentError> {
     if request.solve_options.extensive_normalization_policy()
         != crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::
@@ -1933,6 +2291,7 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
         return Err(physical_error);
     }
 
+    let normalization_started = Instant::now();
     let normalization = match &request.physical_input {
         PhPhysicalInput::Composition => {
             ExtensiveNormalization::from_physical_moles(request.initial_composition.moles())?
@@ -1985,7 +2344,10 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
         )
         .with_diagnostics(EquilibriumDiagnosticsOptions::disabled())
         .with_trace_seed_policy(
-            normalization.normalize_trace_seed_policy(request.solve_options.trace_seed_policy())?,
+            normalized_recovery_trace_policy(
+                normalization,
+                request.solve_options.trace_seed_policy(),
+            )?,
         );
     let normalized_request = ResolvedPhaseEnthalpyRequest {
         resolved: request.resolved.clone(),
@@ -2001,17 +2363,26 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
         thermochemistry: request.thermochemistry.clone(),
         candidate_selection: request.candidate_selection.clone(),
     };
+    let normalization_duration = normalization_started.elapsed();
+    let physical_failure_attempts = physical_error.backend_attempt_reports();
+    let normalized_discovery_started = Instant::now();
     let normalized_solution = solve_resolved_ph(normalized_request).map_err(|recovery| {
         ReactionExtentError::ExtensiveNormalizationRecoveryFailed {
-            stage: "P,H range normalized basin discovery",
+            stage: "P,H normalized basin discovery",
             physical: Box::new(physical_error),
             recovery: Box::new(recovery),
         }
     })?;
+    let normalized_discovery_duration = normalized_discovery_started.elapsed();
     let discovery_backend = normalized_solution
         .equilibrium()
         .solve_report()
         .accepted_backend
+        .clone();
+    let normalized_discovery_attempts = normalized_solution
+        .equilibrium()
+        .solve_report()
+        .attempts
         .clone();
     let accepted_conditions = normalized_solution.equilibrium().conditions();
     let recovered_moles = normalization.denormalize_moles(
@@ -2039,12 +2410,24 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
             crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::
                 ExtensiveNormalizationPolicy::Disabled,
         );
-    let physical_retry_failure = match solve_resolved_ph(physical_retry) {
-        Ok(mut physical_solution) => {
+    let physical_retry_started = Instant::now();
+    let physical_retry_result = solve_resolved_ph(physical_retry);
+    let physical_retry_duration = physical_retry_started.elapsed();
+    let physical_retry_attempts = match physical_retry_result {
+        Ok(physical_solution) => {
             let physical_retry_backend = physical_solution
                 .equilibrium()
                 .solve_report()
                 .accepted_backend
+                .clone();
+            let mut physical_solution = physical_solution.with_inner_timing_stage(
+                EquilibriumTimingStage::Normalization,
+                normalization_duration,
+            );
+            let physical_retry_attempts = physical_solution
+                .equilibrium()
+                .solve_report()
+                .attempts
                 .clone();
             physical_solution.solution = physical_solution
                 .solution
@@ -2055,12 +2438,21 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
                     discovery_backend,
                     physical_retry_backend: Some(physical_retry_backend),
                     physical_retry_failure: None,
+                    physical_failure_attempts: physical_failure_attempts.clone(),
+                    normalized_discovery_attempts: normalized_discovery_attempts.clone(),
+                    physical_retry_attempts: physical_retry_attempts.clone(),
+                    physical_failure_duration,
+                    normalization_duration,
+                    normalized_discovery_duration,
+                    physical_retry_duration,
+                    reconstruction_duration: Duration::ZERO,
                     reconstructed_physical_boundary: false,
                 });
             return Ok(physical_solution);
         }
-        Err(error) => Some(error.to_string()),
+        Err(error) => Some((error.to_string(), error.backend_attempt_reports())),
     };
+    let reconstruction_started = Instant::now();
     let physical_build_report = build_phase_equilibrium_problem_with_timing(
         request.build_pt_request(accepted_conditions)?,
         request.solve_options.timing_mode(),
@@ -2069,6 +2461,11 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
     .clone();
     let mut recovered = normalized_solution
         .reconstruct_physical_extensive_boundary(normalization, physical_build_report)?;
+    let reconstruction_duration = reconstruction_started.elapsed();
+    recovered = recovered.with_inner_timing_stage(
+        EquilibriumTimingStage::Normalization,
+        normalization_duration,
+    );
     recovered.solution = recovered.solution.with_extensive_normalization_recovery(
         ExtensiveNormalizationRecoveryEvidence {
             physical_inventory_scale: normalization.physical_inventory_scale(),
@@ -2076,7 +2473,19 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
             trigger_message,
             discovery_backend,
             physical_retry_backend: None,
-            physical_retry_failure,
+            physical_retry_failure: physical_retry_attempts
+                .as_ref()
+                .map(|(message, _)| message.clone()),
+            physical_failure_attempts,
+            normalized_discovery_attempts,
+            physical_retry_attempts: physical_retry_attempts
+                .map(|(_, attempts)| attempts)
+                .unwrap_or_default(),
+            physical_failure_duration,
+            normalization_duration,
+            normalized_discovery_duration,
+            physical_retry_duration,
+            reconstruction_duration,
             reconstructed_physical_boundary: true,
         },
     );
@@ -2232,6 +2641,25 @@ fn solve_resolved_ph_monolithic_phase_control(
             total: timing_enabled.then_some(total).unwrap_or(Duration::ZERO),
             scalar_orchestration: Duration::ZERO,
             enthalpy_evaluation: Duration::ZERO,
+            trial_total: Duration::ZERO,
+            trial_inner_execution: Duration::ZERO,
+            trial_preparation: Duration::ZERO,
+            trial_template_preparation: Duration::ZERO,
+            trial_postprocessing: Duration::ZERO,
+            bracket_orchestration: Duration::ZERO,
+            monolithic_preparation: Duration::ZERO,
+            request_validation: Duration::ZERO,
+            initial_enthalpy: Duration::ZERO,
+            initial_enthalpy_reused: false,
+            prepared_problem_retarget: Duration::ZERO,
+            gibbs_snapshot: Duration::ZERO,
+            gibbs_snapshot_reused: false,
+            monolithic_rst_preparation: Duration::ZERO,
+            monolithic_backend_execution: Duration::ZERO,
+            monolithic_execution: Duration::ZERO,
+            monolithic_publication: Duration::ZERO,
+            recovery_request_clone: Duration::ZERO,
+            rst_preparation_timing: RstPreparationTimingReport::default(),
         },
         iterations: phase_control_report.iterations,
         trials: Vec::new(),
@@ -2242,6 +2670,7 @@ fn solve_resolved_ph_monolithic_phase_control(
             phase_control_report: Some(phase_control_report),
             acceptance_report: solution.acceptance_report().cloned(),
             inner_timing: *solution.timing_report(),
+            validation_duration: solution.timing_report().validation(),
         }),
     };
     let result = FixedPressureEnthalpySolution {
@@ -2272,6 +2701,9 @@ fn solve_resolved_ph_monolithic(
     request: ResolvedPhaseEnthalpyRequest<'_>,
 ) -> Result<FixedPressureEnthalpySolution, ReactionExtentError> {
     let started = Instant::now();
+    let timing_mode = request.solve_options.timing_mode();
+    let timing_enabled = timing_mode == EquilibriumTimingMode::Enabled;
+    let preparation_started = timing_enabled.then(Instant::now);
     request.validate()?;
     let thermochemistry = request.thermochemistry.clone().ok_or_else(|| {
         ReactionExtentError::InvalidProblem {
@@ -2287,26 +2719,34 @@ fn solve_resolved_ph_monolithic(
         &initial_molar_enthalpies,
     )?;
     let initial_conditions = request.constraint.conditions_at(initial_temperature)?;
-    let timing_mode = request.solve_options.timing_mode();
     let bundle = build_phase_equilibrium_problem_with_timing(
         request.build_pt_request(initial_conditions)?,
         timing_mode,
     )?;
-    let prepared = bundle.into_prepared_fixed_active_problem()?;
-    let formulation = PreparedPhFormulation::new(
-        prepared.prepared.clone(),
-        thermochemistry.clone(),
-        request.temperature_bounds,
-        target,
-        scale,
-    )?;
+    let mut prepared = bundle.into_prepared_fixed_active_problem()?;
+    let mut formulation_timing = EquilibriumTimingCollector::from_report(prepared.timing);
+    let formulation =
+        formulation_timing.measure(EquilibriumTimingStage::PhFormulationPreparation, || {
+            PreparedPhFormulation::new(
+                prepared.prepared.clone(),
+                thermochemistry.clone(),
+                request.temperature_bounds,
+                target,
+                scale,
+            )
+        })?;
     let options = request.temperature_options.clone();
-    let monolithic_options = options.monolithic_options()?;
-    let runner = PreparedMonolithicPhRunner::new(
-        formulation,
-        request.solve_options.clone().into_settings(),
-        monolithic_options,
-    )?;
+    let runner =
+        formulation_timing.measure(EquilibriumTimingStage::PhFormulationPreparation, || {
+            let monolithic_options = options.monolithic_options()?;
+            PreparedMonolithicPhRunner::new(
+                formulation,
+                request.solve_options.clone().into_settings(),
+                monolithic_options,
+            )
+            .map(|runner| runner.with_timing_enabled(timing_enabled))
+        })?;
+    prepared.timing = formulation_timing.finish();
     if let Some(control) = options.execution_control() {
         control.check_cancelled()?;
         control.report(EquilibriumProgressEvent::new(
@@ -2316,6 +2756,9 @@ fn solve_resolved_ph_monolithic(
             Some(initial_temperature),
         ));
     }
+    let monolithic_preparation =
+        preparation_started.map_or(Duration::ZERO, |started| started.elapsed());
+    let execution_started = timing_enabled.then(Instant::now);
     let outcome = match runner.solve_from_temperature_seed(initial_temperature) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -2336,6 +2779,9 @@ fn solve_resolved_ph_monolithic(
         outcome.temperature_seed_report.nonlinear_iterations(),
         0,
     )?;
+    let monolithic_execution =
+        execution_started.map_or(Duration::ZERO, |started| started.elapsed());
+    let publication_started = timing_enabled.then(Instant::now);
     let conditions = request
         .constraint
         .conditions_at(outcome.snapshot.temperature)?;
@@ -2362,7 +2808,8 @@ fn solve_resolved_ph_monolithic(
         outcome.solve_report.clone(),
         prepared.timing,
     )?;
-    let timing_enabled = timing_mode == EquilibriumTimingMode::Enabled;
+    let monolithic_publication =
+        publication_started.map_or(Duration::ZERO, |started| started.elapsed());
     let total = started.elapsed();
     let report = PhTemperatureSolveReport {
         solve_path: PhSolvePath::MonolithicFixedActiveSet,
@@ -2390,6 +2837,25 @@ fn solve_resolved_ph_monolithic(
             total: timing_enabled.then_some(total).unwrap_or(Duration::ZERO),
             scalar_orchestration: Duration::ZERO,
             enthalpy_evaluation: Duration::ZERO,
+            trial_total: Duration::ZERO,
+            trial_inner_execution: Duration::ZERO,
+            trial_preparation: Duration::ZERO,
+            trial_template_preparation: Duration::ZERO,
+            trial_postprocessing: Duration::ZERO,
+            bracket_orchestration: Duration::ZERO,
+            monolithic_preparation,
+            request_validation: Duration::ZERO,
+            initial_enthalpy: Duration::ZERO,
+            initial_enthalpy_reused: false,
+            prepared_problem_retarget: Duration::ZERO,
+            gibbs_snapshot: Duration::ZERO,
+            gibbs_snapshot_reused: false,
+            monolithic_rst_preparation: outcome.rst_preparation,
+            monolithic_backend_execution: outcome.backend_execution,
+            monolithic_execution,
+            monolithic_publication,
+            recovery_request_clone: Duration::ZERO,
+            rst_preparation_timing: outcome.rst_preparation_timing,
         },
         iterations: 0,
         trials: Vec::new(),
@@ -2400,6 +2866,7 @@ fn solve_resolved_ph_monolithic(
             phase_control_report: None,
             acceptance_report: solution.acceptance_report().cloned(),
             inner_timing: *solution.timing_report(),
+            validation_duration: outcome.validation_duration,
         }),
     };
     let result = FixedPressureEnthalpySolution {
@@ -2425,12 +2892,13 @@ fn solve_resolved_ph_monolithic(
 fn solve_resolved_ph_nested(
     request: ResolvedPhaseEnthalpyRequest<'_>,
 ) -> Result<FixedPressureEnthalpySolution, ReactionExtentError> {
-    solve_resolved_ph_nested_with_template(request, None)
+    let mut fixed_template = None;
+    solve_resolved_ph_nested_with_template(request, &mut fixed_template)
 }
 
 fn solve_resolved_ph_nested_with_template(
     request: ResolvedPhaseEnthalpyRequest<'_>,
-    shared_template: Option<Rc<RefCell<Option<PreparedPhaseEquilibriumTemplate>>>>,
+    fixed_template: &mut Option<PreparedPhaseEquilibriumTemplate>,
 ) -> Result<FixedPressureEnthalpySolution, ReactionExtentError> {
     let outer_started = Instant::now();
     request.validate()?;
@@ -2474,14 +2942,7 @@ fn solve_resolved_ph_nested_with_template(
     // samples temperatures in non-monotone order. Bounded phase control is
     // deliberately excluded: its active set has lifecycle semantics and must
     // not inherit state from an arbitrary rejected scalar trial.
-    let fixed_template = shared_template.or_else(|| {
-        matches!(&solve_mode, PhaseEquilibriumSolveMode::FixedDeclaredPhases)
-            .then(|| Rc::new(RefCell::new(None)))
-    });
-    let fixed_template_for_report = fixed_template.clone();
-    let template_was_initialized = fixed_template_for_report
-        .as_ref()
-        .is_some_and(|template| template.borrow().is_some());
+    let template_was_initialized = fixed_template.is_some();
     // Continuation is safe for fixed declared phases. Bounded phase control
     // keeps the original inventory seed because its active set can change.
     let use_continuation = matches!(&solve_mode, PhaseEquilibriumSolveMode::FixedDeclaredPhases);
@@ -2494,11 +2955,14 @@ fn solve_resolved_ph_nested_with_template(
     let mut inner_backend_attempts_total = 0usize;
     let mut inner_nonlinear_iterations_total = 0usize;
     let mut phase_control_transitions_total = 0usize;
-    let nested_evidence = Rc::new(RefCell::new(Vec::<PhNestedTrialEvidence>::new()));
-    let nested_evidence_for_trial = Rc::clone(&nested_evidence);
-    let enthalpy_timing = Rc::new(RefCell::new(Duration::ZERO));
-    let enthalpy_timing_for_trial = Rc::clone(&enthalpy_timing);
-    let evaluator = move |temperature: f64| {
+    let mut nested_evidence = Vec::<PhNestedTrialEvidence>::new();
+    let mut enthalpy_timing = Duration::ZERO;
+    let mut trial_total_timing = Duration::ZERO;
+    let mut trial_inner_execution_timing = Duration::ZERO;
+    let mut trial_preparation_timing = Duration::ZERO;
+    let mut trial_template_preparation_timing = Duration::ZERO;
+    let mut trial_postprocessing_timing = Duration::ZERO;
+    let evaluator = |temperature: f64| {
         if temperature_evaluations >= evaluator_options.max_temperature_evaluations {
             return Err(ReactionExtentError::InvalidProblem {
                 field: "temperature_budget",
@@ -2527,7 +2991,57 @@ fn solve_resolved_ph_nested_with_template(
             ));
             control.check_cancelled()?;
         }
-        let trial_evaluator = PhTrialEvaluator {
+        let conditions = constraint.conditions_at(temperature)?;
+        let trial_preparation_started = timing_enabled.then(Instant::now);
+        let mut trial_template_preparation_duration = Duration::ZERO;
+        let mut template_preparation_timing = EquilibriumTimingReport::default();
+        let fixed_template_was_initialized = fixed_template.is_some();
+        let fixed_template_for_trial =
+            if use_continuation {
+                if fixed_template.is_none() {
+                    let template_started = timing_enabled.then(Instant::now);
+                    let build_request = PhTrialEvaluator {
+                        resolved,
+                        physical_input: &physical_input,
+                        initial_composition: &initial_composition,
+                        constraint,
+                        enthalpy: &enthalpy,
+                        solve_options: &solve_options,
+                        solve_mode: &solve_mode,
+                        fixed_template: None,
+                        execution_control: execution_control.as_ref(),
+                        fixed_template_was_initialized,
+                        candidate_selection: candidate_selection.as_ref(),
+                        timing_enabled,
+                        template_preparation_timing: EquilibriumTimingReport::default(),
+                    }
+                    .build_pt_request(conditions)?;
+                    let template = build_phase_equilibrium_problem_with_timing(
+                        build_request,
+                        solve_options.timing_mode(),
+                    )?
+                    .into_temperature_template(
+                        solve_options.prepares_rst_backend(),
+                        solve_options.timing_mode(),
+                        solve_options.rst_symbolic_frontend(),
+                    )?;
+                    template_preparation_timing = template.build_timing();
+                    *fixed_template = Some(template);
+                    trial_template_preparation_duration =
+                        template_started.map_or(Duration::ZERO, |started| started.elapsed());
+                }
+                Some(fixed_template.as_mut().ok_or_else(|| {
+                    ReactionExtentError::InvalidProblem {
+                        field: "ph_fixed_template",
+                        message: "fixed P,H formulation was not initialized".to_string(),
+                    }
+                })?)
+            } else {
+                None
+            };
+        let trial_preparation_duration =
+            trial_preparation_started.map_or(Duration::ZERO, |started| started.elapsed());
+        let mut trial_evaluator = PhTrialEvaluator {
             resolved,
             physical_input: &physical_input,
             initial_composition: &initial_composition,
@@ -2535,10 +3049,12 @@ fn solve_resolved_ph_nested_with_template(
             enthalpy: &enthalpy,
             solve_options: &solve_options,
             solve_mode: &solve_mode,
-            fixed_template: fixed_template.as_deref(),
+            fixed_template: fixed_template_for_trial,
             execution_control: execution_control.as_ref(),
+            fixed_template_was_initialized,
             candidate_selection: candidate_selection.as_ref(),
             timing_enabled,
+            template_preparation_timing,
         };
         let trial_continuation_seed = use_continuation.then(|| continuation_seed.take()).flatten();
         let outcome = match trial_evaluator.evaluate(temperature, trial_continuation_seed) {
@@ -2616,10 +3132,20 @@ fn solve_resolved_ph_nested_with_template(
                 outcome.solution.component_moles(),
             )?);
         }
-        *enthalpy_timing_for_trial.borrow_mut() += outcome.enthalpy_evaluation;
-        nested_evidence_for_trial
-            .borrow_mut()
-            .push(outcome.evidence.clone());
+        enthalpy_timing += outcome.enthalpy_evaluation;
+        let inner_execution = outcome.evidence.trial_timing.inner_execution;
+        let trial_reported_overhead = outcome
+            .evidence
+            .trial_timing
+            .total
+            .saturating_sub(inner_execution)
+            .saturating_sub(outcome.enthalpy_evaluation);
+        trial_total_timing += trial_preparation_duration + outcome.evidence.trial_timing.total;
+        trial_inner_execution_timing += inner_execution;
+        trial_preparation_timing += trial_preparation_duration + trial_reported_overhead;
+        trial_template_preparation_timing += trial_template_preparation_duration;
+        trial_postprocessing_timing += outcome.evidence.trial_timing.postprocessing;
+        nested_evidence.push(outcome.evidence.clone());
         if let Some(control) = &execution_control {
             control.check_cancelled()?;
             control.report(EquilibriumProgressEvent::new(
@@ -2644,6 +3170,11 @@ fn solve_resolved_ph_nested_with_template(
         outer_started,
         evaluator,
     )?;
+    let scalar_duration = if timing_enabled {
+        scalar_started.elapsed()
+    } else {
+        Duration::ZERO
+    };
     if let Some(control) = &publication_execution_control {
         control.report(EquilibriumProgressEvent::new(
             EquilibriumProgressStage::PublicationStarted,
@@ -2661,25 +3192,66 @@ fn solve_resolved_ph_nested_with_template(
             Duration::ZERO
         },
         scalar_orchestration: if timing_enabled {
-            scalar_started.elapsed()
+            scalar_duration
         } else {
             Duration::ZERO
         },
         enthalpy_evaluation: if timing_enabled {
-            *enthalpy_timing.borrow()
+            enthalpy_timing
         } else {
             Duration::ZERO
         },
+        trial_total: if timing_enabled {
+            trial_total_timing
+        } else {
+            Duration::ZERO
+        },
+        trial_inner_execution: if timing_enabled {
+            trial_inner_execution_timing
+        } else {
+            Duration::ZERO
+        },
+        trial_preparation: if timing_enabled {
+            trial_preparation_timing
+        } else {
+            Duration::ZERO
+        },
+        trial_template_preparation: if timing_enabled {
+            trial_template_preparation_timing
+        } else {
+            Duration::ZERO
+        },
+        trial_postprocessing: if timing_enabled {
+            trial_postprocessing_timing
+        } else {
+            Duration::ZERO
+        },
+        bracket_orchestration: if timing_enabled {
+            scalar_duration.saturating_sub(trial_total_timing)
+        } else {
+            Duration::ZERO
+        },
+        monolithic_preparation: Duration::ZERO,
+        request_validation: Duration::ZERO,
+        initial_enthalpy: Duration::ZERO,
+        initial_enthalpy_reused: false,
+        prepared_problem_retarget: Duration::ZERO,
+        gibbs_snapshot: Duration::ZERO,
+        gibbs_snapshot_reused: false,
+        monolithic_rst_preparation: Duration::ZERO,
+        monolithic_backend_execution: Duration::ZERO,
+        monolithic_execution: Duration::ZERO,
+        monolithic_publication: Duration::ZERO,
+        recovery_request_clone: Duration::ZERO,
+        rst_preparation_timing: RstPreparationTimingReport::default(),
     };
     let (
         inner_backend_attempts,
         inner_nonlinear_iterations,
         phase_control_transitions,
         inner_timing,
-    ) = attach_nested_evidence(&mut trials, &nested_evidence.borrow())?;
-    let template_is_initialized = fixed_template_for_report
-        .as_ref()
-        .is_some_and(|template| template.borrow().is_some());
+    ) = attach_nested_evidence(&mut trials, &nested_evidence)?;
+    let template_is_initialized = fixed_template.is_some();
     let fixed_formulation_builds =
         usize::from(!template_was_initialized && template_is_initialized);
     let fixed_formulation_reuses = if !template_is_initialized {
@@ -2838,7 +3410,7 @@ struct PhTrialOutcome {
 /// This object owns no global counters, continuation state, or publication
 /// state. The outer solve is therefore the sole authority for budgets,
 /// progress notifications, and transactional result publication.
-struct PhTrialEvaluator<'request, 'enthalpy> {
+struct PhTrialEvaluator<'request, 'enthalpy, 'template> {
     resolved: &'request ResolvedPhaseSystem,
     physical_input: &'request PhPhysicalInput,
     initial_composition: &'request MultiphaseInitialComposition,
@@ -2846,16 +3418,18 @@ struct PhTrialEvaluator<'request, 'enthalpy> {
     enthalpy: &'request EnthalpyModel<'enthalpy>,
     solve_options: &'request EquilibriumSolveOptions,
     solve_mode: &'request PhaseEquilibriumSolveMode,
-    fixed_template: Option<&'request RefCell<Option<PreparedPhaseEquilibriumTemplate>>>,
+    fixed_template: Option<&'template mut PreparedPhaseEquilibriumTemplate>,
     execution_control: Option<&'request EquilibriumExecutionControl>,
+    fixed_template_was_initialized: bool,
     candidate_selection: Option<&'request EquilibriumCandidateSelectionReport>,
     timing_enabled: bool,
+    template_preparation_timing: EquilibriumTimingReport,
 }
 
-impl<'request, 'enthalpy> PhTrialEvaluator<'request, 'enthalpy> {
-    /// Builds a P,T request for the current trial.  For an element-defined
-    /// P,H problem, `initial_composition` is an accepted-only numerical seed;
-    /// the original element inventory remains the conservation contract.
+impl<'request, 'enthalpy, 'template> PhTrialEvaluator<'request, 'enthalpy, 'template> {
+    /// Builds a P,T request for the current trial. For an element-defined
+    /// P,H problem, `initial_composition` is an accepted numerical seed; the
+    /// original element inventory remains the conservation contract.
     fn build_pt_request(
         &self,
         conditions: crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumConditions,
@@ -2895,7 +3469,7 @@ impl<'request, 'enthalpy> PhTrialEvaluator<'request, 'enthalpy> {
     /// solver when the caller wants to warm-start from a previous point.
     /// Timing is collected when the request has timing enabled.
     fn evaluate(
-        &self,
+        &mut self,
         temperature: f64,
         continuation_seed: Option<LogMolesInitialGuess>,
     ) -> Result<PhTrialOutcome, ReactionExtentError> {
@@ -2908,6 +3482,7 @@ impl<'request, 'enthalpy> PhTrialEvaluator<'request, 'enthalpy> {
         } else {
             self.solve_options.clone()
         };
+        let inner_started = self.timing_enabled.then(Instant::now);
         let (solution, preparation) = match self.solve_mode {
             PhaseEquilibriumSolveMode::FixedDeclaredPhases => {
                 let mut seeds = vec![LogMolesInitialGuess::from_initial_moles(
@@ -2916,31 +3491,12 @@ impl<'request, 'enthalpy> PhTrialEvaluator<'request, 'enthalpy> {
                 if let Some(seed) = continuation_seed {
                     seeds.push(seed);
                 }
-                let template =
-                    self.fixed_template
-                        .ok_or_else(|| ReactionExtentError::InvalidProblem {
-                            field: "ph_fixed_template",
-                            message: "fixed P,H trial is missing its prepared formulation"
-                                .to_string(),
-                        })?;
-                let mut template = template.borrow_mut();
-                let reused = template.is_some();
-                if template.is_none() {
-                    let build_request = self.build_pt_request(conditions)?;
-                    let bundle = build_phase_equilibrium_problem_with_timing(
-                        build_request,
-                        self.solve_options.timing_mode(),
-                    )?;
-                    *template = Some(bundle.into_temperature_template(
-                        self.solve_options.prepares_rst_backend(),
-                        self.solve_options.timing_mode(),
-                    )?);
-                }
-                let solution = template
+                let solution = self
+                    .fixed_template
                     .as_mut()
                     .ok_or_else(|| ReactionExtentError::InvalidProblem {
                         field: "ph_fixed_template",
-                        message: "fixed P,H formulation was not initialized".to_string(),
+                        message: "fixed P,H trial is missing its prepared formulation".to_string(),
                     })?
                     .solve_at_with_initial_guesses(
                         conditions,
@@ -2950,7 +3506,7 @@ impl<'request, 'enthalpy> PhTrialEvaluator<'request, 'enthalpy> {
                     )?;
                 (
                     solution,
-                    if reused {
+                    if self.fixed_template_was_initialized {
                         PhTrialPreparation::FixedFormulationReused
                     } else {
                         PhTrialPreparation::FixedFormulationInitial
@@ -2982,36 +3538,46 @@ impl<'request, 'enthalpy> PhTrialEvaluator<'request, 'enthalpy> {
                 (solution, PhTrialPreparation::BoundedPhaseControlIsolated)
             }
         };
+        let inner_execution = inner_started.map_or(Duration::ZERO, |started| started.elapsed());
         let enthalpy_started = self.timing_enabled.then(Instant::now);
         let total_enthalpy = self
             .enthalpy
             .evaluate_total(solution.component_moles(), temperature)?;
         let enthalpy_evaluation =
             enthalpy_started.map_or(Duration::ZERO, |started| started.elapsed());
+        let postprocessing_started = self.timing_enabled.then(Instant::now);
+        let phase_states = phase_states_from_solution(&solution)?;
+        let inner_evidence = PhTrialInnerEvidence {
+            solve_report: solution.solve_report().clone(),
+            multi_start_report: solution.multi_start_report().cloned(),
+            phase_control_report: solution.phase_control_report().cloned(),
+            acceptance_report: solution.acceptance_report().cloned(),
+            extensive_normalization_recovery: solution.extensive_normalization_recovery().cloned(),
+        };
+        let postprocessing =
+            postprocessing_started.map_or(Duration::ZERO, |started| started.elapsed());
         let trial_timing = PhTrialTimingReport {
             enabled: self.timing_enabled,
             total: trial_started.map_or(Duration::ZERO, |started| started.elapsed()),
+            inner_execution,
             inner_equilibrium: if self.timing_enabled {
                 solution.timing_report().total()
             } else {
                 Duration::ZERO
             },
             enthalpy_evaluation,
+            postprocessing,
+            template_preparation: self.template_preparation_timing,
         };
         let evidence = PhNestedTrialEvidence {
             backend_attempts: solution.started_backend_attempts(),
             nonlinear_iterations: solution.nonlinear_iterations(),
             phase_control_transitions: solution.phase_control_transitions(),
             preparation,
-            phase_states: phase_states_from_solution(&solution)?,
+            phase_states,
             timing: *solution.timing_report(),
             trial_timing,
-            inner_evidence: Some(PhTrialInnerEvidence {
-                solve_report: solution.solve_report().clone(),
-                multi_start_report: solution.multi_start_report().cloned(),
-                phase_control_report: solution.phase_control_report().cloned(),
-                acceptance_report: solution.acceptance_report().cloned(),
-            }),
+            inner_evidence: Some(inner_evidence),
         };
         Ok(PhTrialOutcome {
             solution,
@@ -3125,8 +3691,39 @@ mod tests {
     use crate::Thermodynamics::User_substances::{DataType, SubsData};
     use crate::Thermodynamics::phase_layout::{PhaseComponentId, PhaseId};
 
+    #[path = "../stanjan15_atom_view_diagnostics.rs"]
+    mod stanjan15_atom_view_diagnostics;
+
     fn linear_enthalpy_model() -> EnthalpyModel<'static> {
         EnthalpyModel::from_functions(vec![Arc::new(|temperature| Ok(temperature * 10.0))]).unwrap()
+    }
+
+    #[test]
+    fn legacy_request_accepts_a_borrowed_enthalpy_callback() {
+        let slope = 10.0_f64;
+        let mut data = SubsData::new();
+        data.set_substances(vec!["A".to_string()]);
+        let phase = PhaseSpec::ideal_gas(PhaseId::new(None), vec!["A".to_string()]).unwrap();
+        let resolved =
+            ResolvedPhaseSystem::new(vec![phase.clone()], HashMap::from([(None, data)])).unwrap();
+        let layout = MultiphaseEquilibriumLayout::new(vec![phase]).unwrap();
+        let composition = MultiphaseInitialComposition::from_dense(&layout, vec![1.0]).unwrap();
+        let enthalpy =
+            EnthalpyModel::from_functions(vec![Arc::new(|temperature| Ok(temperature * slope))])
+                .unwrap();
+
+        let request = ResolvedPhaseEnthalpyRequest::new(
+            &resolved,
+            composition,
+            EquilibriumConstraint::ph(101_325.0, 101_325.0, 0.0, 700.0).unwrap(),
+            TemperatureBounds::new(300.0, 1_000.0).unwrap(),
+            enthalpy,
+        )
+        .unwrap();
+
+        assert_eq!(request.ph_solve_mode(), PhSolveMode::NestedTemperature);
+        drop(request);
+        assert_eq!(slope, 10.0);
     }
 
     fn synthetic_inner_evidence() -> PhTrialInnerEvidence {
@@ -3149,6 +3746,7 @@ mod tests {
             multi_start_report: None,
             phase_control_report: None,
             acceptance_report: None,
+            extensive_normalization_recovery: None,
         }
     }
 
@@ -3806,8 +4404,11 @@ mod tests {
             trial_timing: PhTrialTimingReport {
                 enabled: true,
                 total: Duration::from_millis(3),
+                inner_execution: Duration::from_millis(2),
                 inner_equilibrium: Duration::from_millis(2),
                 enthalpy_evaluation: Duration::from_micros(10),
+                postprocessing: Duration::from_micros(5),
+                template_preparation: EquilibriumTimingReport::default(),
             },
             inner_evidence: Some(synthetic_inner_evidence()),
         }];

@@ -299,7 +299,7 @@ fn solve_phase_controlled_ph(
         &initial_enthalpies,
     )
     .unwrap();
-    let mut runner = PreparedPhaseControlRunner::new(fixture.problem, Vec::new(), false).unwrap();
+    let mut runner = PreparedPhaseControlRunner::new(fixture.problem, false).unwrap();
     let settings: &mut EquilibriumSolverSettings = runner.configure_solver();
     settings.solver = Solvers::LM;
     settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
@@ -334,7 +334,7 @@ fn solve_phase_controlled_ph(
 }
 
 fn configure_lifecycle_runner(problem: EquilibriumProblem) -> PreparedPhaseControlRunner {
-    let mut runner = PreparedPhaseControlRunner::new(problem, Vec::new(), false).unwrap();
+    let mut runner = PreparedPhaseControlRunner::new(problem, false).unwrap();
     let settings: &mut EquilibriumSolverSettings = runner.configure_solver();
     settings.solver = Solvers::LM;
     settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
@@ -381,7 +381,13 @@ fn install_accepted_continuation(
         .retarget_numeric(outcome.solution.conditions(), seed, gibbs)
         .unwrap();
     runner
-        .set_continuation_phase_set(outcome.phase_control_report.final_phase_set.clone())
+        .set_continuation_phase_set(
+            outcome
+                .acceptance_report
+                .phase_control
+                .final_phase_set
+                .clone(),
+        )
         .unwrap();
 }
 
@@ -389,7 +395,7 @@ fn install_accepted_continuation(
 fn i3_ph_favorable_inactive_pure_phase_is_activated_by_tpd_and_matches_i2() {
     let (outcome, thermochemistry, independent_problem) =
         solve_phase_controlled_ph(synthetic_fixture(true));
-    let report = &outcome.phase_control_report;
+    let report = &outcome.acceptance_report.phase_control;
 
     let gas = PhaseIndex::new(0, 2).unwrap();
     let condensed = PhaseIndex::new(1, 2).unwrap();
@@ -427,7 +433,7 @@ fn i3_ph_favorable_inactive_pure_phase_is_activated_by_tpd_and_matches_i2() {
 fn i3_ph_stable_inactive_pure_phase_stays_inactive_without_transition() {
     let (outcome, _thermochemistry, independent_problem) =
         solve_phase_controlled_ph(synthetic_fixture(false));
-    let report = &outcome.phase_control_report;
+    let report = &outcome.acceptance_report.phase_control;
 
     let gas = PhaseIndex::new(0, 2).unwrap();
     let condensed = PhaseIndex::new(1, 2).unwrap();
@@ -472,7 +478,7 @@ fn i3_ph_stable_active_pure_phase_recovers_the_gas_only_boundary() {
     // numerical trace merely because log-moles cannot represent zero.
     let (outcome, _thermochemistry, independent_problem) =
         solve_phase_controlled_ph(synthetic_fixture_with_candidate_inventory(false, 1.0e-1));
-    let report = &outcome.phase_control_report;
+    let report = &outcome.acceptance_report.phase_control;
 
     let gas = PhaseIndex::new(0, 2).unwrap();
     let condensed = PhaseIndex::new(1, 2).unwrap();
@@ -583,11 +589,13 @@ fn i3_ph_continuation_uses_only_accepted_states_and_matches_i2_at_each_target() 
     }
     assert_eq!(
         accepted[0]
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         accepted[1]
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .initial_phase_set
             .active_mask(),
         "the second target must start from the preceding accepted phase state"
@@ -646,11 +654,13 @@ fn i3_ph_continuation_uses_only_accepted_states_and_matches_i2_at_each_target() 
         .unwrap();
     assert_eq!(
         accepted[1]
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         recovered
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .initial_phase_set
             .active_mask(),
         "a failed target must not replace the accepted continuation phase set"
@@ -714,7 +724,8 @@ fn i3_ph_in_band_hysteresis_keeps_only_the_accepted_active_history() {
         .unwrap();
     assert_eq!(
         established
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         &[true, true]
@@ -748,17 +759,28 @@ fn i3_ph_in_band_hysteresis_keeps_only_the_accepted_active_history() {
         .unwrap();
     assert_eq!(
         continued
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .initial_phase_set
             .active_mask(),
         &[true, true]
     );
     assert_eq!(
-        continued.phase_control_report.final_phase_set.active_mask(),
+        continued
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         &[true, true],
         "the in-band keep threshold must retain the accepted active phase"
     );
-    assert!(continued.phase_control_report.transitions.is_empty());
+    assert!(
+        continued
+            .acceptance_report
+            .phase_control
+            .transitions
+            .is_empty()
+    );
 
     let fresh_fixture = synthetic_fixture_with_candidate_offset(
         0.0,
@@ -769,15 +791,23 @@ fn i3_ph_in_band_hysteresis_keeps_only_the_accepted_active_history() {
     let (fresh, _fresh_thermochemistry, _fresh_independent_problem) =
         solve_phase_controlled_ph(fresh_fixture);
     assert_eq!(
-        fresh.phase_control_report.initial_phase_set.active_mask(),
+        fresh
+            .acceptance_report
+            .phase_control
+            .initial_phase_set
+            .active_mask(),
         &[true, false]
     );
     assert_eq!(
-        fresh.phase_control_report.final_phase_set.active_mask(),
+        fresh
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         &[true, false],
         "an in-band gas-only history must not activate the candidate"
     );
-    assert!(fresh.phase_control_report.transitions.is_empty());
+    assert!(fresh.acceptance_report.phase_control.transitions.is_empty());
     let fresh_tpd = fresh.acceptance_report.phase_stability[1]
         .minimum_tpd
         .expect("the fresh inactive candidate must retain TPD evidence");

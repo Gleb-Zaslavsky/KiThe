@@ -16,6 +16,10 @@
 //! The module will be removed once the retained regression matrix is fully covered
 //! by the canonical backends.
 //!
+//! The production `equilibrium_legacy_backend` dispatches to the typed
+//! closure-based solvers in `equilibrium_nonlinear`; this standalone module is
+//! not part of production backend dispatch.
+//!
 //! # Physical and Mathematical Background
 //!
 //! The solvers find the root of the nonlinear system `F(x) = 0` where `F` is
@@ -98,6 +102,8 @@
 //! - [`equilibrium_nonlinear`](super::equilibrium_nonlinear) — canonical solvers (preferred)
 //! - [`equilibrium_legacy_backend`](super::equilibrium_legacy_backend) — adapter that calls this module
 //!
+#![allow(deprecated)]
+
 use RustedSciThe::numerical::BVP_Damp::BVP_utils::checkmem;
 use RustedSciThe::numerical::BVP_Damp::BVP_utils::{CustomTimer, elapsed_time};
 /// A framework for solving system of nonlinear equations using
@@ -181,6 +187,9 @@ pub enum Method {
 /// This struct wraps the `RustedSciThe::numerical::Nonlinear_systems::NR` framework
 /// and provides Newton-Raphson, damped Newton-Raphson, trust-region, and
 /// Levenberg-Marquardt implementations. Retained for regression testing only.
+#[deprecated(
+    note = "use the typed equilibrium_nonlinear solvers through the production equilibrium facade"
+)]
 pub struct NR {
     /// Jacobian struct containing Jacobian matrix function and equation functions.
     pub jacobian: Jacobian,

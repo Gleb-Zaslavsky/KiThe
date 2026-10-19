@@ -126,7 +126,7 @@ mod tests {
             EquilibriumConditions::new(T_K, P_TOTAL_PA, P0_PA).unwrap(),
         )
         .unwrap();
-        let mut runner = PreparedPhaseControlRunner::new(problem, Vec::new(), false).unwrap();
+        let mut runner = PreparedPhaseControlRunner::new(problem, false).unwrap();
         let settings = runner.configure_solver();
         settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
         settings.solver_params.tol = 1e-11;
@@ -210,7 +210,7 @@ mod tests {
             EquilibriumConditions::new(T_K, P_TOTAL_PA, P0_PA).unwrap(),
         )
         .unwrap();
-        let mut runner = PreparedPhaseControlRunner::new(problem, Vec::new(), false).unwrap();
+        let mut runner = PreparedPhaseControlRunner::new(problem, false).unwrap();
         let settings = runner.configure_solver();
         settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
         settings.solver_params.tol = 1e-11;
@@ -250,7 +250,8 @@ mod tests {
         assert!(out_a.acceptance_report.complementarity.satisfied);
         assert!(out_b.acceptance_report.complementarity.satisfied);
         let initial_tpds_a = out_a
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .transitions
             .first()
             .expect("candidate competition must produce an accepted transition")
@@ -269,11 +270,19 @@ mod tests {
                 .is_some_and(|v| v < dg_create)
         );
         assert_eq!(
-            out_a.phase_control_report.final_phase_set.active_mask(),
+            out_a
+                .acceptance_report
+                .phase_control
+                .final_phase_set
+                .active_mask(),
             vec![true, false, true]
         );
         assert_eq!(
-            out_b.phase_control_report.final_phase_set.active_mask(),
+            out_b
+                .acceptance_report
+                .phase_control
+                .final_phase_set
+                .active_mask(),
             vec![true, true, false]
         );
         for (x, y) in ma.into_iter().zip(mb) {
@@ -323,7 +332,11 @@ mod tests {
                 });
                 let physical = physical_moles(&outcome, liquid_before_ice);
                 assert_eq!(
-                    outcome.phase_control_report.final_phase_set.active_mask(),
+                    outcome
+                        .acceptance_report
+                        .phase_control
+                        .final_phase_set
+                        .active_mask(),
                     if liquid_before_ice {
                         vec![true, false, true]
                     } else {
@@ -346,7 +359,7 @@ mod tests {
                 println!(
                     "history={history:<9} order={} final=gas+ice transitions={} liquid_moles={:.6e} ice_moles={:.6e}",
                     if liquid_before_ice { "L->I" } else { "I->L" },
-                    outcome.phase_control_report.transitions.len(),
+                    outcome.acceptance_report.phase_control.transitions.len(),
                     physical[2],
                     physical[3]
                 );
@@ -383,11 +396,19 @@ mod tests {
             assert!((ma[2] + ma[3] - physical_b[2] - physical_b[3]).abs() < 1e-8);
             if delta > 0.0 {
                 assert_eq!(
-                    outcome_a.phase_control_report.final_phase_set.active_mask(),
+                    outcome_a
+                        .acceptance_report
+                        .phase_control
+                        .final_phase_set
+                        .active_mask(),
                     vec![true, true, false]
                 );
                 assert_eq!(
-                    outcome_b.phase_control_report.final_phase_set.active_mask(),
+                    outcome_b
+                        .acceptance_report
+                        .phase_control
+                        .final_phase_set
+                        .active_mask(),
                     vec![true, false, true]
                 );
                 let losing = outcome_a.acceptance_report.phase_stability[2]
@@ -401,8 +422,8 @@ mod tests {
             }
             println!(
                 "delta_G={delta:.1e} A/B physical_state_invariant=true transitions={}/{}",
-                outcome_a.phase_control_report.transitions.len(),
-                outcome_b.phase_control_report.transitions.len()
+                outcome_a.acceptance_report.phase_control.transitions.len(),
+                outcome_b.acceptance_report.phase_control.transitions.len()
             );
         }
         assert_eq!(resolved, 7);
@@ -489,8 +510,16 @@ mod tests {
                 .zip(ba_physical)
                 .map(|(x, y)| (x - y).abs())
                 .fold(0.0, f64::max);
-            let winner_ab = ab.phase_control_report.final_phase_set.active_mask()[1];
-            let winner_ba = ba.phase_control_report.final_phase_set.active_mask()[2];
+            let winner_ab = ab
+                .acceptance_report
+                .phase_control
+                .final_phase_set
+                .active_mask()[1];
+            let winner_ba = ba
+                .acceptance_report
+                .phase_control
+                .final_phase_set
+                .active_mask()[2];
             let tpd_ab = ab.acceptance_report.phase_stability[2].minimum_tpd;
             let tpd_ba = ba.acceptance_report.phase_stability[1].minimum_tpd;
             let rel_ab = tpd_ab.map(|tpd| (tpd - actual).abs() / requested.max(f64::MIN_POSITIVE));
@@ -501,9 +530,17 @@ mod tests {
                 && tpd_ba.is_some_and(|v| (v - actual).abs() <= actual.abs() * 1e-4 + 1e-14);
             let unique = requested > 0.0
                 && winner_ab
-                && !ab.phase_control_report.final_phase_set.active_mask()[2]
+                && !ab
+                    .acceptance_report
+                    .phase_control
+                    .final_phase_set
+                    .active_mask()[2]
                 && winner_ba
-                && !ba.phase_control_report.final_phase_set.active_mask()[1];
+                && !ba
+                    .acceptance_report
+                    .phase_control
+                    .final_phase_set
+                    .active_mask()[1];
             let verdict = if requested == 0.0 {
                 "ExactDegeneracyNonUnique"
             } else if actual == 0.0 {
@@ -524,8 +561,8 @@ mod tests {
                 tpd_ba,
                 rel_ab,
                 rel_ba,
-                ab.phase_control_report.transitions.len(),
-                ba.phase_control_report.transitions.len()
+                ab.acceptance_report.phase_control.transitions.len(),
+                ba.acceptance_report.phase_control.transitions.len()
             );
             assert!(state_delta.is_finite());
             if requested == 0.0 {
@@ -534,8 +571,8 @@ mod tests {
                 assert!(
                     ((ab_moles[2] + ab_moles[3]) - (ba_physical[2] + ba_physical[3])).abs() < 1e-8
                 );
-                assert!(ab.phase_control_report.transitions.len() <= 2);
-                assert!(ba.phase_control_report.transitions.len() <= 2);
+                assert!(ab.acceptance_report.phase_control.transitions.len() <= 2);
+                assert!(ba.acceptance_report.phase_control.transitions.len() <= 2);
             }
             assert!(
                 both_positive

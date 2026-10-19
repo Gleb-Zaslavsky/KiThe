@@ -254,6 +254,10 @@ pub enum SolverAttemptOutcome {
         kind: SolverAttemptFailureKind,
         /// Stable diagnostic detail for a human or log consumer.
         reason: String,
+        /// Wall time of the backend call when no structured metrics were
+        /// published. A zero value is used by synthetic reports that do not
+        /// represent a measured backend call.
+        elapsed_micros: u128,
     },
     /// A candidate was returned but rejected by common acceptance checks.
     RejectedCandidate { reason: String },
@@ -301,8 +305,9 @@ impl SolverAttemptOutcome {
 
 /// Backend stopping reason in a solver-independent report.
 ///
-/// RST provides these values directly. Temporary legacy adapters leave
-/// [`SolverAttemptReport::metrics`] empty until they expose equivalent data.
+/// RST provides these values directly. Instrumented legacy adapters provide
+/// the closest mapped terminal state, while the attempt outcome remains the
+/// authority for the exact error classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverTermination {
     /// The backend satisfied its convergence criterion.
@@ -317,26 +322,87 @@ pub enum SolverTermination {
     RejectedStepLimit,
 }
 
+/// Per-iteration telemetry reported by a numerical backend when it is
+/// available. The shape is backend-neutral; RST currently populates it from
+/// `SolveAttemptStatistics`, while legacy backends leave it unavailable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SolverIterationTelemetry {
+    pub iteration: usize,
+    pub residual_evaluations: usize,
+    pub state_residual_evaluations: usize,
+    pub trial_residual_evaluations: usize,
+    pub jacobian_evaluations: usize,
+    pub state_jacobian_evaluations: usize,
+    pub trial_jacobian_evaluations: usize,
+    pub linear_factorizations: usize,
+    pub linear_solves: usize,
+    pub accepted_steps: usize,
+    pub rejected_steps: usize,
+    pub residual_micros: u128,
+    pub jacobian_micros: u128,
+    pub linear_solve_micros: u128,
+    pub linear_factorization_micros: u128,
+    pub linear_system_solve_micros: u128,
+}
+
 /// Callback-level timing reported by a numerical backend when it is available.
 ///
-/// RustedSciThe fills this from a transparent wrapper around its symbolic
-/// residual and Jacobian provider. Legacy methods leave it absent rather than
-/// manufacturing an incomparable split.
+/// RustedSciThe fills callback timing from a transparent wrapper around its
+/// symbolic residual and Jacobian provider. Legacy LM/NR/TR fill the same
+/// structure, including their linear-system split, only inside an enabled
+/// calculator instrumentation capture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SolverEvaluationTiming {
     /// Time spent evaluating residual callbacks inside the backend attempt.
     pub residual_evaluation_micros: u128,
     /// Time spent evaluating analytic or symbolic Jacobian callbacks.
     pub jacobian_evaluation_micros: u128,
-    /// Backend time outside callbacks, including linear algebra and step control.
+    /// Number of adjacent Legacy residual/Jacobian callback pairs receiving
+    /// the same exact iterate. `None` means the backend does not expose this
+    /// Legacy-only diagnostic.
+    pub legacy_same_iterate_callback_pairs: Option<usize>,
+    /// Time spent solving linearized systems. `None` means the backend did
+    /// not expose this internal split.
+    pub linear_system_micros: Option<u128>,
+    /// Backend time outside callbacks and any separately timed linear systems.
+    /// For RST, this may still include linear algebra because its adapter does
+    /// not expose that internal split.
     pub solver_overhead_micros: u128,
+    /// Legacy-only matrix products and vector algebra outside linear solves.
+    pub matrix_operations_micros: u128,
+    /// Legacy-only residual and step norm calculations.
+    pub norm_micros: u128,
+    /// Legacy-only construction of trial state vectors.
+    pub trial_vector_micros: u128,
+    /// Legacy-only feasibility predicate calls.
+    pub feasibility_micros: u128,
+    /// Legacy-only line-search and trust-region scalar decision logic.
+    pub globalization_micros: u128,
+    /// RST's split between callbacks establishing the accepted state and
+    /// callbacks evaluating trial points.
+    pub state_residual_evaluations: Option<usize>,
+    pub trial_residual_evaluations: Option<usize>,
+    pub state_jacobian_evaluations: Option<usize>,
+    pub trial_jacobian_evaluations: Option<usize>,
+    /// RST's linear-operation sub-stages. The inclusive linear-system value
+    /// above remains the common cross-backend metric.
+    pub linear_factorization_micros: Option<u128>,
+    pub linear_system_solve_micros: Option<u128>,
+    pub linear_factorizations: Option<usize>,
+    pub accepted_steps: Option<usize>,
+    pub rejected_steps: Option<usize>,
+    pub reusable_trial_points: Option<usize>,
+    /// Optional per-iteration RST trace. It is present only when the backend
+    /// collected detailed statistics for the solve.
+    pub iteration_telemetry: Option<Vec<SolverIterationTelemetry>>,
 }
 
-/// Backend-provided diagnostics for a candidate-producing solve attempt.
+/// Backend-provided diagnostics for a solve attempt, including attempts that
+/// stopped with a backend error before producing a candidate.
 ///
-/// Counters are optional because temporary legacy methods do not expose a
-/// comparable engine-level trace. RST adapters fill every field they receive
-/// from `SolveResult` and attach callback timing for release diagnosis.
+/// Counter and timing availability are reported independently because RST can
+/// collect either channel without the other. Legacy attempts keep the old
+/// zero-overhead contract unless calculator instrumentation is active.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SolverAttemptMetrics {
     /// Typed stopping classification reported by the backend.
@@ -353,8 +419,15 @@ pub struct SolverAttemptMetrics {
     pub jacobian_evaluations: usize,
     /// Number of linear subproblems solved by the backend.
     pub linear_solves: usize,
+    /// Whether the backend actually collected discrete work counters.
+    pub counters_collected: bool,
+    /// Whether the backend actually collected clock-based measurements.
+    pub timings_collected: bool,
     /// Wall-clock time spent in the backend call.
     pub elapsed_millis: u128,
+    /// Wall-clock time spent in the backend call with sub-millisecond
+    /// precision for small control fixtures.
+    pub elapsed_micros: u128,
     /// Optional split between callback work and solver-internal overhead.
     pub evaluation_timing: Option<SolverEvaluationTiming>,
 }
@@ -401,11 +474,19 @@ pub struct MultiStartAttemptReport {
 pub struct MultiStartSolveReport {
     /// Ordered per-seed outcomes.
     pub attempts: Vec<MultiStartAttemptReport>,
+    /// Backend cascades executed for each seed, in the same order as
+    /// [`Self::attempts`]. This preserves discarded-seed cost for diagnostics.
+    pub backend_attempts: Vec<Vec<SolverAttemptReport>>,
     /// Selected seed, using the existing candidate comparison contract.
     pub selected_start: usize,
 }
 
 impl MultiStartSolveReport {
+    /// Backend attempt traces grouped by their originating multi-start seed.
+    pub fn backend_attempts(&self) -> &[Vec<SolverAttemptReport>] {
+        &self.backend_attempts
+    }
+
     /// Total started backend attempts across every seed in this multi-start
     /// transaction, including seeds that ultimately failed.
     pub fn started_backend_attempts(&self) -> usize {
@@ -451,7 +532,7 @@ impl SolverAttemptReport {
             SolverAttemptOutcome::Accepted => {
                 format!("backend={:?}, outcome=accepted", self.backend)
             }
-            SolverAttemptOutcome::Failed { kind, reason } => {
+            SolverAttemptOutcome::Failed { kind, reason, .. } => {
                 format!(
                     "backend={:?}, outcome=failed({kind:?}): {reason}",
                     self.backend
@@ -631,6 +712,7 @@ mod tests {
                     outcome: SolverAttemptOutcome::Failed {
                         kind: SolverAttemptFailureKind::Solver,
                         reason: "first".to_string(),
+                        elapsed_micros: 0,
                     },
                     metrics: None,
                 },
@@ -676,6 +758,7 @@ mod tests {
         let outcome = SolverAttemptOutcome::Failed {
             kind: SolverAttemptFailureKind::ResidualEvaluation,
             reason: "temporary residual failure".to_string(),
+            elapsed_micros: 0,
         };
         assert!(outcome.is_started());
         assert!(!outcome.is_skipped());
@@ -713,6 +796,7 @@ mod tests {
                     nonlinear_iterations: 7,
                 },
             ],
+            backend_attempts: Vec::new(),
             selected_start: 1,
         };
 

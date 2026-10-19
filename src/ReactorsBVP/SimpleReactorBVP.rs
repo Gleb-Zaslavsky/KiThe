@@ -36,7 +36,9 @@ use crate::ReactorsBVP::solver_backend::ReactorBvpSolverConfig;
 use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{
     DampedSolverOptions, NRBVP, SolverParams,
 };
-use RustedSciThe::numerical::BVP_sci::BVP_sci_symb::BVPwrap as BVPsci;
+use RustedSciThe::numerical::BVP_sci::new::{
+    BvpSciAssembly, BvpSciMatrixLayout, BvpSciSolver, BvpSciTelemetryMode,
+};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use log::{info, warn};
 
@@ -619,9 +621,7 @@ impl BVPSolver {
             ))
         }
     }
-    /// Solve BVP using adaptive mesh refinement (BVPsci)
-    ///
-    /// Alternative solver with automatic mesh adaptation
+    /// Solve with the current adaptive collocation BVP_sci implementation.
     pub fn solve_BVPsci(
         &mut self,
         initial_guess: DMatrix<f64>,
@@ -629,27 +629,78 @@ impl BVPSolver {
         max_nodes: usize,
         tol: f64,
     ) {
-        let BC = self.backend_boundary_conditions();
+        let dimensions = self.unknowns.len();
+        if n_steps < 2 || dimensions == 0 {
+            warn!("BVP_sci requires at least two mesh nodes and one state variable");
+            return;
+        }
+        if initial_guess.nrows() != dimensions || initial_guess.ncols() != n_steps {
+            warn!(
+                "BVP_sci initial guess shape must be {dimensions}x{n_steps}, got {}x{}",
+                initial_guess.nrows(),
+                initial_guess.ncols()
+            );
+            return;
+        }
 
-        let mut bvp = BVPsci::new(
-            None,
-            Some(0.0 as f64),
-            Some(1.0 as f64),
-            Some(n_steps),
-            self.eq_system.clone(),
-            self.unknowns.clone(),
-            vec![],
-            None,
-            BC,
-            "x".to_string(),
-            tol,
-            max_nodes,
-            initial_guess,
-        );
-        bvp.solve();
-        if let Some(solution) = bvp.get_result() {
-            self.solution = Some(solution);
-            self.x_mesh = Some(bvp.mesh());
+        let mut boundary_values = Vec::with_capacity(self.unknowns.len());
+        for (state_index, name) in self.unknowns.iter().enumerate() {
+            let Some(&(endpoint, value)) = self.BorderConditions.get(name) else {
+                warn!("BVP_sci has no boundary condition for state '{name}'");
+                return;
+            };
+            if endpoint > 1 {
+                warn!("BVP_sci boundary endpoint for '{name}' must be 0 or 1, got {endpoint}");
+                return;
+            }
+            boundary_values.push((state_index, endpoint, value));
+        }
+        let mut initial_state = Vec::with_capacity(dimensions * n_steps);
+        for node in 0..n_steps {
+            for state in 0..dimensions {
+                initial_state.push(initial_guess[(state, node)]);
+            }
+        }
+        let boundary_callback =
+            move |ya: &[f64], yb: &[f64], _parameters: &[f64], output: &mut [f64]| {
+                for (output_index, &(state_index, endpoint, value)) in
+                    boundary_values.iter().enumerate()
+                {
+                    let endpoint_state = if endpoint == 0 { ya } else { yb };
+                    output[output_index] = endpoint_state[state_index] - value;
+                }
+                Ok(())
+            };
+        let mut bvp = match BvpSciSolver::builder(self.eq_system.clone(), self.unknowns.clone())
+            .with_frontend(BvpSciAssembly::ExprLegacy)
+            .with_matrix_layout(BvpSciMatrixLayout::Dense)
+            .with_tolerance(tol)
+            .with_limits(max_nodes, 100, 20)
+            .with_telemetry(BvpSciTelemetryMode::Off)
+            .with_mesh_and_initial_state(
+                (0..n_steps)
+                    .map(|node| node as f64 / (n_steps - 1) as f64)
+                    .collect(),
+                initial_state,
+            )
+            .with_boundary_callback(boundary_callback)
+            .build()
+        {
+            Ok(solver) => solver,
+            Err(error) => {
+                warn!("BVP_sci preparation failed: {error}");
+                return;
+            }
+        };
+        match bvp.solve() {
+            Ok(result) => {
+                let nodes = result.x.len();
+                self.solution = Some(DMatrix::from_fn(dimensions, nodes, |state, node| {
+                    result.y[node * dimensions + state]
+                }));
+                self.x_mesh = Some(DVector::from_vec(result.x));
+            }
+            Err(error) => warn!("BVP_sci solve failed: {error}"),
         }
     }
     /// Get reference to solution matrix

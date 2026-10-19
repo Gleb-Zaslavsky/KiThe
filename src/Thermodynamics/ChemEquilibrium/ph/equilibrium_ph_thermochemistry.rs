@@ -12,6 +12,10 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::TemperatureBounds;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::{
+    record_component_call, record_gibbs_coefficient_refresh, record_gibbs_interval_reuse,
+    record_property_calculation, record_property_coefficient_selection, record_vector_evaluation,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::GibbsFn;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::DBhandlers::thermo_api::ThermoCalculator;
@@ -768,6 +772,7 @@ impl ResolvedThermochemistry {
         &self,
         temperature: f64,
     ) -> Result<Vec<Option<f64>>, ReactionExtentError> {
+        record_vector_evaluation("heat_capacity");
         self.temperature_bounds
             .contains(temperature)
             .then_some(())
@@ -824,6 +829,7 @@ impl ResolvedThermochemistry {
         functions: &[MolarThermoFunction],
         temperature: f64,
     ) -> Result<Vec<f64>, ReactionExtentError> {
+        record_vector_evaluation(field);
         self.temperature_bounds
             .contains(temperature)
             .then_some(())
@@ -858,6 +864,11 @@ fn property_function(
     data_type: DataType,
 ) -> MolarThermoFunction {
     Arc::new(move |temperature| {
+        record_component_call(match &data_type {
+            DataType::dH_fun => "enthalpy",
+            DataType::Cp_fun => "heat_capacity",
+            _ => "other",
+        });
         let mut data = data
             .lock()
             .map_err(|_| ReactionExtentError::InvalidProblem {
@@ -873,12 +884,14 @@ fn property_function(
                 field: "thermochemistry_property",
                 message: format!("failed to select coefficients for '{substance}': {error}"),
             })?;
+        record_property_coefficient_selection();
         let (cp, dh, _) = data
             .calculate_thermo_properties(&substance, temperature)
             .map_err(|error| ReactionExtentError::InvalidProblem {
                 field: "thermochemistry_property",
                 message: format!("failed to evaluate '{substance}': {error}"),
             })?;
+        record_property_calculation();
         match data_type {
             DataType::Cp_fun => Ok(cp),
             DataType::dH_fun => Ok(dh),
@@ -948,11 +961,13 @@ fn symbolic_phase_capabilities(
 /// temperature, so a residual/Jacobian evaluation does not rebuild identical
 /// closures once per component. The source is private to the bundle and never
 /// publishes coefficient changes back into the resolved phase system. A new
-/// temperature first refreshes all selected intervals, keeping P,H Gibbs data
-/// identical to the canonical P,T bridge at polynomial boundaries.
+/// temperature reuses the closures only while every component remains inside
+/// its actual selected native interval. A crossing refreshes all intervals,
+/// keeping P,H Gibbs data identical to the canonical P,T bridge at boundaries.
 struct PhaseGibbsSource {
     data: SubsData,
     selected_temperature: Option<f64>,
+    selected_intervals: Vec<(f64, f64)>,
     functions: std::collections::HashMap<String, Box<dyn Fn(f64) -> f64 + Send + Sync>>,
 }
 
@@ -961,29 +976,69 @@ impl PhaseGibbsSource {
         Self {
             data,
             selected_temperature: None,
+            selected_intervals: Vec::new(),
             functions: std::collections::HashMap::new(),
         }
     }
 
+    fn current_intervals_cover(&self, temperature: f64) -> bool {
+        self.selected_temperature.is_some()
+            && self.selected_intervals.len() == self.data.substances().len()
+            && self
+                .selected_intervals
+                .iter()
+                .all(|&(lower, upper)| lower <= temperature && temperature <= upper)
+    }
+
     fn evaluate(&mut self, substance: &str, temperature: f64) -> Result<f64, ReactionExtentError> {
         if self.selected_temperature != Some(temperature) {
-            self.data
-                .extract_all_thermal_coeffs(temperature)
-                .map_err(|error| ReactionExtentError::InvalidProblem {
-                    field: "thermochemistry_gibbs",
-                    message: format!(
-                        "failed to select phase coefficients at {temperature} K: {error}"
-                    ),
-                })?;
-            self.functions = self.data.calculate_dG0_fun_one_phase().map_err(|error| {
-                ReactionExtentError::InvalidProblem {
-                    field: "thermochemistry_gibbs",
-                    message: format!(
-                        "failed to build phase standard Gibbs functions at {temperature} K: {error}"
-                    ),
-                }
-            })?;
-            self.selected_temperature = Some(temperature);
+            let can_reuse = !cfg!(feature = "equilibrium-benchmark-no-gibbs-interval-reuse")
+                && self.current_intervals_cover(temperature);
+            if can_reuse {
+                record_gibbs_interval_reuse();
+                self.selected_temperature = Some(temperature);
+            } else {
+                record_gibbs_coefficient_refresh();
+                self.data
+                    .extract_all_thermal_coeffs(temperature)
+                    .map_err(|error| ReactionExtentError::InvalidProblem {
+                        field: "thermochemistry_gibbs",
+                        message: format!(
+                            "failed to select phase coefficients at {temperature} K: {error}"
+                        ),
+                    })?;
+                let components = self.data.substances().to_vec();
+                let selected_intervals = components
+                    .iter()
+                    .map(|component| {
+                        self.data
+                            .current_coeffs_temperature_interval(component)
+                            .map_err(|error| ReactionExtentError::InvalidProblem {
+                                field: "thermochemistry_gibbs",
+                                message: format!(
+                                    "failed to read selected phase coefficient interval for '{component}' at {temperature} K: {error}"
+                                ),
+                            })?
+                            .ok_or_else(|| ReactionExtentError::InvalidProblem {
+                                field: "thermochemistry_gibbs",
+                                message: format!(
+                                    "phase coefficient interval for '{component}' is not selected at {temperature} K"
+                                ),
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.functions = self
+                    .data
+                    .calculate_dG0_fun_one_phase_in_place()
+                    .map_err(|error| ReactionExtentError::InvalidProblem {
+                        field: "thermochemistry_gibbs",
+                        message: format!(
+                            "failed to build phase standard Gibbs functions at {temperature} K: {error}"
+                        ),
+                    })?;
+                self.selected_intervals = selected_intervals;
+                self.selected_temperature = Some(temperature);
+            }
         }
         let function =
             self.functions
@@ -1007,6 +1062,7 @@ impl PhaseGibbsSource {
 
 fn gibbs_function(data: Arc<Mutex<PhaseGibbsSource>>, substance: String) -> MolarThermoFunction {
     Arc::new(move |temperature| {
+        record_component_call("gibbs");
         let mut data = data
             .lock()
             .map_err(|_| ReactionExtentError::InvalidProblem {
@@ -1021,7 +1077,17 @@ fn gibbs_function(data: Arc<Mutex<PhaseGibbsSource>>, substance: String) -> Mola
 mod tests {
     use serde_json::json;
 
-    use super::ThermochemistryStandardStatePressure;
+    use super::{
+        MolarThermoFunction, ResolvedThermochemistry, ThermochemistryStandardStatePressure,
+    };
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn thermochemistry_bundle_is_send_sync_for_shared_capabilities() {
+        assert_send_sync::<ResolvedThermochemistry>();
+        assert_send_sync::<MolarThermoFunction>();
+    }
 
     #[test]
     fn standard_state_pressure_requires_explicit_numeric_record_metadata() {

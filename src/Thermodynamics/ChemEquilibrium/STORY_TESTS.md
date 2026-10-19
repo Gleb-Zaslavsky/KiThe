@@ -296,34 +296,107 @@ cargo test --release --lib Thermodynamics::ChemEquilibrium::frozen_reference_nas
   --no-default-features -- --include-ignored --exact --nocapture
 ```
 
-### Recorded release result
+### Recorded result
 
 ```text
 TP-1907 backend/default story: test ...::production_default_retains_a_scale_robust_backend_on_real_tp1907_story ... ok
 
 TP-1907 backend matrix at scale=1e8:
   rst-lm: FAILED, normalized basin discovery, candidate residual 5.12501771773085e1
-  rst-minpack-lm: residual=3.545e-14, balance=3.998e-8
+  rst-minpack-lm: FAILED, normalized basin discovery, candidate residual 1.6277711838251514e2
   rst-nielsen-lm: FAILED, normalized basin discovery, candidate residual 1.6277711838251489e2
-  rst-trust-region-lm: residual=3.519e-14, balance=3.998e-8
+  rst-trust-region-lm: residual=2.712e-14, balance=1.192e-7
   rst-damped-newton: FAILED, normalized basin discovery, candidate residual 8.859999596823666e1
-  legacy-lm: residual=2.588e-14, balance=1.999e-8
-  legacy-nr: residual=1.848e-14, balance=3.498e-6
-  legacy-tr: residual=1.772e-14, balance=3.998e-8
-  accepted: rst-minpack-lm, rst-trust-region-lm, legacy-lm, legacy-nr, legacy-tr
-  failed in isolated Single mode: rst-lm, rst-nielsen-lm, rst-damped-newton
+  legacy-lm: residual=1.557e-14, balance=1.192e-7
+  legacy-nr: residual=1.693e-14, balance=3.532e-6
+  legacy-tr: residual=1.474e-14, balance=1.192e-7
+  accepted: rst-trust-region-lm, legacy-lm, legacy-nr, legacy-tr
+  failed in isolated Single mode: rst-lm, rst-minpack-lm, rst-nielsen-lm, rst-damped-newton
 test ...::production_default_retains_a_scale_robust_backend_on_real_tp1907_story ... ok
 test ...::tp1907_upper_inventory_is_backend_invariant ... ok
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2520 filtered out
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2559 filtered out
 ```
 
-The three isolated RST failures are strict normalized-recovery outcomes, not
+The four isolated RST failures are strict normalized-recovery outcomes, not
 evidence that the thermodynamic equations or the complete production cascade
-are invalid. RST Minpack/Trust-Region and all retained legacy methods pass the
-same real fixture. Legacy NR reports a physical absolute balance of about
-`3.50e-6` at this scale, while its scale-aware relative balance remains within
-the matrix guard. The production default must therefore remain a cascade, not
-an isolated RST LM/Nielsen/Damped Newton selection.
+are invalid. RST Trust-Region and all retained legacy methods return a
+candidate, while Legacy NR reports a physical absolute balance of about
+`3.53e-6` at this scale and is accuracy-failing in the strict matrix. The
+production default must therefore remain a cascade, not an isolated RST
+LM/Nielsen/Damped Newton selection.
+
+### Current facade acceptance matrix: local and RST backends
+
+#### Story name
+
+TP-1907 upper `ElementInventory` facade must retain at least one physically
+accurate backend in each solver family.
+
+#### Test
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_frozen_facade_upper_inventory_matches_the_same_oracle`
+
+#### Command
+
+```powershell
+cargo test --lib `
+  Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_frozen_facade_upper_inventory_matches_the_same_oracle `
+  --no-default-features -- --exact --nocapture
+```
+
+#### Question / hypothesis
+
+Does the real TP-1907 upper-scale `ElementInventory` problem have at least
+one acceptable RST method and at least one acceptable local Legacy method when
+each method is exercised through the normal typed facade with an explicit
+`Single` policy? A solver is not accepted merely because it returns or reports
+convergence: the published physical state must pass the same oracle and
+conservation checks.
+
+#### Classification
+
+- `PASS`: scaled and raw residuals, physical elemental balance, component
+  amounts, mole fractions, topology, finiteness, and non-negativity all pass;
+- `ACCURACY_FAIL`: a candidate was returned or rejected by the acceptance
+  gate, but it did not meet the physical/oracle tolerances;
+- `HARD_FAIL`: the backend produced no candidate because of a typed backend,
+  singularity, evaluation, or iteration failure without an accepted-candidate
+  rejection.
+
+The test prints every backend row and detailed attempt trace. It fails only
+when no RST backend passes or when no Legacy backend passes. Thus a weak
+isolated method remains visible without hiding the fact that the family still
+has a usable method.
+
+#### Recorded result
+
+```text
+TP-1907 upper inventory facade backend acceptance matrix
+| backend | family | status | scaled residual | raw residual | max physical balance | max component rel | max fraction error | topology |
+|---|---|---|---:|---:|---:|---:|---:|---|
+| rst-lm | RST | ACCURACY_FAIL | - | - | - | - | - | false |
+| rst-minpack-lm | RST | ACCURACY_FAIL | - | - | - | - | - | false |
+| rst-nielsen-lm | RST | ACCURACY_FAIL | - | - | - | - | - | false |
+| rst-trust-region-lm | RST | PASS | 2.712e-14 | 2.712e-14 | 1.192e-7 | 6.742e-14 | 1.665e-16 | true |
+| rst-damped-newton | RST | ACCURACY_FAIL | - | - | - | - | - | false |
+| legacy-lm | Legacy | PASS | 1.557e-14 | 1.557e-14 | 1.192e-7 | 3.091e-13 | 3.053e-16 | true |
+| legacy-nr | Legacy | ACCURACY_FAIL | 1.693e-14 | 1.693e-14 | 3.532e-6 | 6.325e-12 | 3.469e-16 | true |
+| legacy-tr | Legacy | PASS | 1.474e-14 | 1.474e-14 | 1.192e-7 | 1.616e-13 | 1.388e-16 | true |
+```
+
+Summary: RST `1/5` and Legacy `2/3` methods passed the complete physical
+gate. No method was a `HARD_FAIL` in this run. RST LM, Minpack LM, Nielsen LM,
+and Damped Newton returned candidates rejected by the strict acceptance
+residual; Legacy NR returned a numerically small residual but missed the
+physical balance limit (`3.532e-6 > 1e-6`). The family-level assertions passed
+because Trust-Region LM, Legacy LM, and Legacy TR matched the independent
+molecular oracle.
+
+This matrix deliberately differs from the production-default test above:
+the production cascade may accept RST LM under its ordinary solver tolerance
+before the stronger physical balance gate is applied. That behavior remains a
+separate correctness issue and is now visible rather than being confused with
+the family-level availability result.
 
 ### Conclusion
 
@@ -331,6 +404,363 @@ The hypothesis is supported. The production default remains valid at `1e8`
 because it retains a scale-robust backend in its cascade. The explicit matrix
 also records which isolated methods are currently unsuitable as the sole
 default backend.
+
+## 3a.1. Paste-ready RST witness for the upper-scale failure
+
+### Story name
+
+TP-1907 upper `ElementInventory` scale must have a standalone symbolic RST
+reproducer.
+
+### Test
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_upper_inventory_emits_paste_ready_rst_symbolic_problem`
+
+### What it checks
+
+- prepares the real TP-1907 fixed-`P,T` graph at inventory scale `1e8`;
+- exports the exact symbolic residual expressions, variable order, numeric
+  equation parameters (`T`, `g0_i`), initial log-moles, and production bounds;
+- runs every recommended RST method plus explicit Powell Dogleg in `Single`
+  mode, without phase control, normalization, or facade fallback logic;
+- prints the full physical contract, rank evidence, raw/scaled residuals,
+  molecular oracle, termination, callback counters, and typed backend errors
+  for direct transfer to the RustedSciThe test suite.
+
+The `1e8` qualifier is intentional. This witness does not claim that every
+inventory scale is inaccurate: the neighboring facade scale tests cover
+`1e-3` through `1e6`, while this reproducer isolates the upper stress point
+that currently exposes the conditioning failure.
+
+### Hypothesis / question
+
+Can the RST convergence problem observed through the TP-1907 facade be reduced
+to the prepared symbolic residual/Jacobian problem and reproduced without any
+KiThe thermochemistry or orchestration code?
+
+### Command
+
+```powershell
+cargo test --lib Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_upper_inventory_emits_paste_ready_rst_symbolic_problem `
+  --no-default-features -- --include-ignored --exact --nocapture *> tp1907_rst_reproducer.txt
+```
+
+The generated `tp1907_rst_reproducer.txt` contains a Rust `vec![...]` payload
+that can be copied into an RST-side test. The payload is intentionally emitted
+by an ignored diagnostic test and is not part of the ordinary correctness
+gate.
+
+### Full physical contract emitted by the witness
+
+The output is now a complete transfer contract, not only a symbolic equation
+dump:
+
+- physical point: `T = 700 K`, `P = 101325 Pa`, inventory multiplier `1e8`;
+- element order: `Ar, C, H, N, O`;
+- species order: `gas::Ar, gas::CH4, gas::CO, gas::CO2, gas::H, gas::HO2,
+  gas::H2, gas::H2O, gas::N, gas::NH3, gas::NO, gas::NO2, gas::N2,
+  gas::N2O, gas::O, gas::OH, gas::O2, graphite::C(gr)`;
+- the complete `A[element, species]` matrix, `b`, `species_phase`, phase
+  membership, bounds, seed, and all numeric Gibbs parameters are printed in
+  `tp1907_rst_reproducer.txt`;
+- the physical balance is exactly `balance[e] = sum_i A[e,i] * n[i] - b[e]`;
+- phase order is `gas` with species `0..17` and `graphite` with species `17`.
+
+The printed `residual_row_scale_w` name is historical. It is the positive
+denominator vector `D`, not the diagonal of `W`:
+
+```text
+F_raw(y) = [reaction-affinity rows; A*n - b]
+W = diag(1 / D)
+F_scaled(y) = W * F_raw(y)
+F_scaled[i] = F_raw[i] / D[i]
+J_scaled[i,:] = J_raw[i,:] / D[i]
+```
+
+For reaction rows `D[i] = ||nu_i||`; for elemental rows
+`D[r + e] = abs(b[e])`, or `1` when `b[e] == 0`. Thus the elemental scaled
+row is `(A_e*n - b_e) / abs(b_e)` and is never a replacement for the physical
+balance check.
+
+For elemental input, the production normalization rule is also explicit:
+`s = sum(b) = 1.440533904e9`, `b_hat = b/s`, `n_hat = n/s`, and
+`y_hat = log(n_hat) = log(n) - log(s)`. The emitted witness deliberately uses
+raw physical `b` and `y`; row scaling `W` is printed separately and cannot
+replace physical balance checks.
+
+The direct witness coordinates are always `y = log(n)`. Plain mole coordinates
+`n` are not passed to RST. The normalized recovery representation uses
+`y_hat = y - log(s)`, evaluates `n_hat = exp(y_hat)`, and reconstructs the
+published physical vector as `n = s * n_hat`. Under the default facade policy,
+the physical solve is attempted first and this normalized representation is a
+recovery route after a classified numerical failure, not an unconditional first
+step.
+
+There is an important current adapter distinction. Legacy backends consume the
+runner's scaled residual/Jacobian closures. RST currently receives the separate
+`RstPreparedProblem`, whose symbolic callbacks are raw; the generic scaled `f/j`
+closures are not passed into that RST call. Consequently the direct RST matrix
+in this witness is a raw-system characterization. The common validation gate
+then computes both views, and its `residual_l2_norm` is the scaled view when
+scaling is enabled. Making RST consume a parameterized scaled symbolic problem
+is a separate integration task, not something this witness silently assumes.
+
+The molecular oracle is solved at the actual `1e8` physical scale through the
+production `EquilibriumCalculator` molecular-input facade with an explicit
+`SolverPolicy::Single(SolverBackend::Legacy(Solvers::TR))` policy. It is
+independent of the direct standalone RST callback invocation and independent
+of the RST algorithms under test, while still exercising the real facade,
+phase-control, validation, and publication boundaries.
+The current debug run reports `raw_residual_l2 = 1.24957e-6`,
+`scaled_residual_l2 = 2.42217e-14`, and
+`max_abs(A*n-b) = 1.19209e-7`, so it passes the proposed physical thresholds.
+Both `gas` and `graphite` are active; the final graphite minimum TPD is
+`+1.87993e-9`, accepted by the phase-control stability tolerance. Phase
+control is therefore an active-set/complementarity condition, not an extra
+equality that can be added to this fixed-topology graph without redesigning
+the formulation.
+
+The ideal phase-stability value is
+`TPD(x) = sum_i x_i * (g_reduced[i] + R*T*ln(x_i))`, with zero-support terms
+omitted, and is expressed in `J/mol`. At `700 K` the default temperature-scaled
+thresholds are `dg_create = -5.820123832707268e-3 J/mol` and
+`dg_keep = 5.820123832707268e-5 J/mol`. An inactive candidate is activated when
+`minimum_tpd < dg_create`; an active phase is removed only when its total is
+below `phase_eps` and `minimum_tpd > dg_keep`. The default `phase_eps` is
+`1e-30 mol`. A stable active phase therefore need not have strictly negative
+TPD; it must be inside the hysteresis keep threshold.
+
+The singular values contain one exact zero at the stated numerical threshold,
+so the `18 x 18` reduced Jacobian has rank `17`. This remains an intentional
+rank-deficiency safety regression. It is not yet the full physical RST gate:
+that gate must wait for a full-rank formulation carrying normalization and
+the outer phase-control acceptance contract.
+
+### Recorded debug characterization
+
+The current direct, unnormalized `18 x 18` graph reports:
+
+| RST method | Result |
+|---|---|
+| `rst_levenberg_marquardt` | typed `SingularJacobian` error |
+| `rst_minpack_levenberg_marquardt` | `Stagnation`, residual `1.2486e2` |
+| `rst_nielsen_levenberg_marquardt` | `StepTooSmall`, residual `1.2486e2` |
+| `rst_trust_region_levenberg_marquardt` | `MaxIterations` at 500, residual `5.2978e1` |
+| `rst_damped_newton` | typed `SingularJacobian` error |
+| `rst_powell_dogleg` | typed `NumericalBreakdown/SingularMatrix` error |
+
+This is a solver-development witness, not a new equilibrium benchmark. Its
+purpose is to let RST investigate conditioning and scaling while preserving
+the exact TP-1907 symbolic payload that triggered the KiThe facade failure.
+
+### Full acceptance gate status
+
+The future non-ignored gate is specified but intentionally not marked green.
+For each of RST Minpack LM, Nielsen LM, and Trust-Region LM it must require:
+
+- `raw_residual_l2 < 1e-5` and separately reported `scaled_residual_l2`;
+- `max_abs(A*n-b) <= 1e-6`;
+- component relative error `<= 1e-5` or absolute error `<= 1e-10`;
+- mole-fraction error `<= 1e-8`;
+- finite, non-negative published moles, exact component/phase ordering, and
+  oracle topology/phase-control acceptance.
+
+The current isolated methods do not satisfy this gate because the transferred
+reduced graph is rank deficient. The gate must be enabled only after RST can
+solve the augmented physical formulation; weakening tolerances or accepting a
+scaled residual alone is explicitly out of scope.
+
+The distinction from the current common KiThe gate is deliberate: when row
+scaling is enabled, `EquilibriumCandidateReport.residual_l2_norm` is the norm
+of `F_scaled` and is the value currently compared with the backend tolerance;
+`raw_residual_l2_norm` is recorded diagnostic evidence. Physical element
+balances are independently recomputed as `A*n-b` and currently use the
+configured absolute-plus-relative tolerance. The strict raw and absolute
+physical thresholds above belong to this future TP-1907 transfer gate.
+
+The production-correct pipeline as implemented today is therefore:
+physical input -> physical fixed-active problem build -> raw RST symbolic
+preparation or scaled legacy closures -> nonlinear backend cascade -> candidate
+validation (`F_raw` and `F_scaled`, plus physical `A*n-b`) -> phase-control TPD
+and active-set transition/restart -> publication. If the physical attempt has a
+classified numerical failure at a material extensive scale, normalized discovery
+(`b_hat`, `n_hat`, `y_hat`) is inserted, followed by physical retry or the typed
+physical publication boundary. A future RST gate must state explicitly whether
+its symbolic callback is raw or scaled; it must not infer this from the name
+`residual_row_scale_w`.
+
+### 3a.1a. Strict KiThe/RST parity export from the accepted facade route
+
+#### Story name
+
+TP-1907 upper `ElementInventory` must export a lossless enough accepted KiThe
+state for componentwise RST residual/Jacobian parity.
+
+#### Test and command
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_upper_inventory_emits_paste_ready_rst_parity_fixture`
+
+```powershell
+cargo test --lib Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_upper_inventory_emits_paste_ready_rst_parity_fixture `
+  --no-default-features -- --include-ignored --exact --nocapture *> tp1907_rst_parity_fixture.txt
+```
+
+#### Question / hypothesis
+
+Can the already accepted KiThe upper-inventory facade result be transferred to
+RustedSciThe as a deterministic numerical fixture, including its exact
+coordinates, equations, scaling, phase state, derivatives, physical checks,
+and the actual recovery solve history? The export is diagnostic only and does
+not alter solver order or acceptance behavior.
+
+#### Current result
+
+**PASS: export generated and test passed.** The request uses an explicit
+`Single(RST Trust-Region LM)` policy. The actual accepted route is:
+
+```text
+physical attempt (MaxIterations)
+-> extensive normalization
+-> normalized RST discovery (Converged)
+-> physical retry (StepTooSmall)
+-> reconstructed physical publication
+```
+
+The accepted backend is `RustedSciThe(TrustRegionLevenbergMarquardt)`, the
+inventory normalization scale is `1.44053390400000000e9`, and the captured
+normalized discovery reports `18` iterations, `34` residual calls, `16`
+Jacobian calls, `18` linear solves, `15` accepted steps, and `3` rejected
+steps. Its denormalized final coordinate agrees with facade `y_final` at
+`0.00000000000000000e0` in the observed run.
+
+The fixture recomputes the accepted physical state on the same `18 x 18`
+prepared RST graph. Observed values were:
+
+```text
+recomputed raw residual L2       = 1.19255846588116014e-6
+recomputed scaled residual L2    = 2.81236124142565315e-14
+exp(y_final) max balance error    = 1.19209289550781250e-6
+published moles max balance error = 1.19209289550781250e-7
+final graphite minimum TPD        = 1.90902937902137637e-9
+```
+
+Both `raw_jacobian` and `scaled_jacobian` are printed as full matrices, along
+with `raw_residual`, `scaled_residual`, `jt_f_raw`, `jt_f_scaled`, `A`, `b`,
+species/phase ordering, bounds, parameter values, and full-precision
+`y_final`, `exp(y_final)`, and published moles. The published-moles balance is
+the facade publication check; the separate `exp(y_final)` balance is retained
+so RST can see any floating-point log/exp round-trip effect directly.
+In this run the `exp(y_final)` value is slightly above the proposed strict
+`1e-6` transfer limit (`1.19209289550781250e-6`), while the published vector
+passes. That is deliberately exposed as a parity diagnostic, not hidden by
+substituting published moles for `exp(y_final)`.
+
+#### Trace contract
+
+The actual normalized discovery `SolveResult.history` is captured from the
+facade call, not from a substitute hand-built solve. RST `0.4.17` exposes only
+iteration, post-step residual norm, step norm, and accepted flag. Therefore the
+fixture prints `lambda`, regularization form, trial `alpha`, exact internal
+trial residual-before/after, and per-iteration termination as `None`, and
+prints the final termination separately. Filling those fields is a separate
+RST telemetry TODO; inferring them from aggregate counters would invalidate
+parity evidence.
+
+### 3a.1b. Strict symbolic string round-trip gate
+
+#### Story name
+
+The equations exported by the accepted KiThe TP-1907 route must be a faithful
+public RST string fixture, not merely a human-readable rederivation.
+
+#### Test and command
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_upper_inventory_symbolic_string_round_trip_matches_original_graph`
+
+```powershell
+cargo test --lib Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_upper_inventory_symbolic_string_round_trip_matches_original_graph `
+  --no-default-features -- --include-ignored --exact --nocapture
+```
+
+#### Question / hypothesis
+
+Does the exact `equations`, ordered variables, and parameter binding returned by
+`symbolic_payload_for_test()` produce the same residual and Jacobian when
+reconstructed through the public RST
+`SymbolicNonlinearProblem::from_strings_with_options(...)` path at the exact
+accepted `y_final`? The gate requires componentwise residual and Jacobian drift
+no greater than `1e-12`, and prints both L2 norms, the first differing row or
+Jacobian element, and an FNV-1a-64 hash of the complete equation list.
+
+#### Current result
+
+**RED, localized before numerical comparison.** RST `0.4.17` panics while
+parsing the first exported equation with `Invalid expression format`. The
+complete equation-list hash is `FNV-1a-64 = 0x6dc514792152d82c`. The
+offending fragment is:
+
+```text
+... - -0.12027235504272604 * (...)
+```
+
+The serializer emits subtraction of a negative coefficient as `a - -b`, while
+the current RST parser does not accept that unary-minus form. The test therefore
+does not yet reach residual or Jacobian evaluation; no numerical parity claim
+can be made from this run. The failure is deterministic and belongs to the
+serializer/parser contract, not to the TP-1907 nonlinear convergence issue.
+
+The test remains ignored until the RST string path accepts a semantically
+faithful canonical form. Its assertion is still strict and must not be replaced
+by tolerance relaxation or an ad-hoc equation rewrite. The emitted diagnostic
+also prints the complete first failing equation and its stable equation hash so
+the RST test can reproduce the parser defect exactly.
+
+## 3a.2. TP-1907 analytic versus symbolic Jacobian contract
+
+### Story name
+
+The real TP-1907 upper-scale failure must not be caused by a disagreement
+between KiThe's analytical formulation and RST's lambdified symbolic graph.
+
+### Test
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_upper_inventory_analytic_and_lambdified_symbolic_contracts_agree`
+
+### What it checks
+
+- evaluates the canonical analytical residual and Jacobian;
+- evaluates the identical prepared parameterized graph through RST's
+  lambdified residual and symbolic Jacobian;
+- compares both representations at the `1e8` initial point and a deterministic
+  nearby perturbation;
+- uses relative error assertions, so large conservation rows are not hidden by
+  a small absolute tolerance.
+
+### Command
+
+```powershell
+cargo test --lib Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_upper_inventory_analytic_and_lambdified_symbolic_contracts_agree `
+  --no-default-features -- --exact --nocapture
+```
+
+### Recorded debug result
+
+```text
+TP-1907 analytic-vs-symbolic upper scale
+max_residual_abs=2.842170943040401e-14
+max_residual_relative=9.770375732637176e-16
+max_jacobian_abs=2.632681394231215e-15
+max_jacobian_relative=2.632681394231215e-15
+test result: ok; 1 passed; 0 failed
+```
+
+The residual and Jacobian representations agree to floating-point roundoff.
+The upper-scale RST issue therefore remains a nonlinear conditioning/step
+acceptance problem, not a symbolic differentiation or lambdification defect.
+The backend matrix still supplies the LM comparison (`legacy-lm` versus RST
+LM); RST currently has no plain undamped NR method, so `rst-damped-newton` is
+only a Newton-family comparison, not an algorithm-identical `NR versus NR`
+pair.
 
 ## 3b. ElementInventory route equivalence at production scale
 
@@ -344,11 +774,11 @@ scaling.
 
 `Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_frozen_pt_molecular_elemental_and_formal_routes_match`
 
-`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_frozen_facade_upper_inventory_matches_the_same_oracle`
-
 `Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_frozen_ph_molecular_elemental_and_formal_routes_reuse_target`
 
 `Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_real_ph_solution_is_extensive_when_inventory_and_target_scale_together`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests::elemental_calculator_ph_is_extensive_under_inventory_and_enthalpy_scaling`
 
 ### Hypothesis / question
 
@@ -360,7 +790,9 @@ preserve the intensive P,H solution?
 
 - `ElementInventory` and formal elemental input reach the same physical state
   as the molecular TP-1907/TP-1906 route;
-- the public P,T facade preserves that equivalence at inventory scale `1e8`;
+- the public P,T facade preserves that equivalence on the regular production
+  scales; the upper-scale per-backend gate is recorded separately in section
+  3a;
 - P,H preserves the recovered temperature and target enthalpy when inventory
   and total enthalpy are scaled together;
 - route comparisons are made against the same molecular oracle, with residual,
@@ -370,8 +802,6 @@ preserve the intensive P,H solution?
 
 ```powershell
 cargo test --release --lib Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_frozen_pt_molecular_elemental_and_formal_routes_match --no-default-features -- --include-ignored --exact --nocapture
-
-cargo test --release --lib Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_frozen_facade_upper_inventory_matches_the_same_oracle --no-default-features -- --include-ignored --exact --nocapture
 
 cargo test --release --lib Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_frozen_ph_molecular_elemental_and_formal_routes_reuse_target --no-default-features -- --include-ignored --exact --nocapture
 
@@ -387,10 +817,10 @@ TP-1907 P,T elemental/formal routes at T=700 K:
   residual=9.793148882444655e-14 balance=9.547918011776346e-14
   test result: ok; 1 passed; 0 failed; finished in 0.27s
 
-TP-1907 public facade scale=1e8:
-  elemental: total_b=1.440534e9 residual=3.545e-14 balance=3.998e-8
-  formal:    total_b=1.440534e9 residual=3.545e-14 balance=3.998e-8
-  test result: ok; 1 passed; 0 failed; finished in 0.33s
+TP-1907 upper facade backend acceptance matrix: see section 3a,
+  RST Trust-Region LM PASS, Legacy LM PASS, Legacy TR PASS;
+  RST LM/Minpack LM/Nielsen LM/Damped Newton ACCURACY_FAIL,
+  Legacy NR ACCURACY_FAIL.
 
 TP-1906 P,H elemental/formal routes:
   recovered_T=699.508902431 K H_target=-4.200392761e5 J
@@ -3354,3 +3784,5242 @@ Command:
 ```powershell
 cargo test --lib --no-default-features i5_controlled_condensed_gibbs_split_matrix_has_analytic_losing_tpd -- --nocapture
 ```
+## 55. Frozen ElementInventory facade witnesses and independent K_eq validation
+
+### Tests
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_cea_h2_o2_hp_tests::tests::i5_nasa_cea_hp_element_inventory_facade_matches_frozen_reference`
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_argonne_stanjan_chon_tests::tests::i5_argonne_stanjan_chon_element_inventory_facade_matches_frozen_reference`
+
+`Thermodynamics::ChemEquilibrium::cross_validation::real_boudouard_ph_tests::tests::p9_i1_i2_i4_boudouard_independent_reference_matches_fixed_topology_ph`
+
+### Hypothesis / question
+
+Does the public `EquilibriumCalculator` facade preserve independent frozen
+NASA CEA and Argonne/STANJAN results when feeds are supplied as
+`ElementInventory`, and does the real Boudouard reaction-quotient route agree
+with the production result through an independent `K_eq` calculation?
+
+### What it checks
+
+- NASA CEA H2/O2: exact nine-species named `gas` phase, fixed-P,H
+  `NestedTemperature` route, facade input provenance, external species envelope,
+  and unchanged frozen/library snapshots;
+- Argonne/STANJAN CHON: exact 15-species named `gas` phase, fixed-P,T
+  production cascade, C/H/O/N atom totals `6 / 16 / 20 / 75.2`, species identity
+  comparison, and unchanged snapshots;
+- real Boudouard: independent reaction quotient versus evaluated `K_eq`, plus
+  enthalpy and elemental-balance gates.
+
+### Commands
+
+    cargo test --release --lib Thermodynamics::ChemEquilibrium::frozen_reference_nasa_cea_h2_o2_hp_tests::tests::i5_nasa_cea_hp_element_inventory_facade_matches_frozen_reference --no-default-features -- --ignored --nocapture
+    cargo test --release --lib Thermodynamics::ChemEquilibrium::frozen_reference_argonne_stanjan_chon_tests::tests::i5_argonne_stanjan_chon_element_inventory_facade_matches_frozen_reference --no-default-features -- --ignored --nocapture
+    cargo test --release --lib Thermodynamics::ChemEquilibrium::cross_validation::real_boudouard_ph_tests::tests::p9_i1_i2_i4_boudouard_independent_reference_matches_fixed_topology_ph --no-default-features -- --nocapture
+
+### Recorded result
+
+The two new facade witnesses passed: CEA `|delta T|=1.991 K`, residual
+`9.336e-9`, balance `3.815e-9`; Argonne residual `1.482e-11`, balance
+`1.152e-11`. The existing Boudouard story remains the independent `K_eq`
+source of truth; no artificial frozen benchmark was added.
+
+## 56. Monolithic P,H source-property evaluation baseline
+
+### Test name
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::i5_tp1906_monolithic_ph_property_evaluation_characterization`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests::facade_attaches_opt_in_instrumentation_to_a_ph_outcome`
+
+### Command
+
+```powershell
+cargo test --release --lib `
+  i5_tp1906_monolithic_ph_property_evaluation_characterization `
+  --no-default-features -- --include-ignored --nocapture
+```
+
+### Hypothesis / question
+
+How often does one source-backed monolithic `P,H` solve evaluate `G(T)`,
+`H(T)`, and `Cp(T)`, and does the shared `evaluate_context` request property
+families that are unused by the current residual or Jacobian caller?
+
+### What it checks
+
+- the real frozen NASA TP-1906/1907 CHON + graphite fixture reaches the
+  accepted monolithic phase-control route;
+- context, residual, Jacobian, and candidate-snapshot evaluation counts;
+- component-level Gibbs, enthalpy, and heat-capacity calls;
+- coefficient refreshes and source property calculation calls;
+- counter consistency without imposing a machine-dependent performance limit.
+
+### Baseline release output before context separation
+
+```text
+TP-1906 monolithic P,H property evaluation: species=18 context=176 residual=87 jacobian=36 snapshots=140 G_vectors=182 H_vectors=179 Cp_vectors=178 G_component_calls=3213 H_component_calls=3196 Cp_component_calls=3142 G_coefficient_refreshes=90 property_coefficient_selections=6338 property_calculations=6338
+test Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::i5_tp1906_monolithic_ph_property_evaluation_characterization ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2529 filtered out; finished in 0.02s
+```
+
+### Release output after context separation
+
+```text
+TP-1906 monolithic P,H property evaluation: species=18 context=176 residual_context=140 jacobian_context=36 residual=87 jacobian=36 snapshots=140 G_vectors=146 H_vectors=179 Cp_vectors=38 G_component_calls=2578 H_component_calls=3196 Cp_component_calls=670 G_coefficient_refreshes=90 property_coefficient_selections=3866 property_calculations=3866
+test Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::i5_tp1906_monolithic_ph_property_evaluation_characterization ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2529 filtered out; finished in 0.02s
+```
+
+### Result and decision
+
+The baseline hypothesis was confirmed. After separating the contexts, the
+accepted route and all thermochemistry contracts remain green while the same
+release story changes `G_vectors` from `182` to `146`, `Cp_vectors` from `178`
+to `38`, and source property calculations from `6338` to `3866`. The remaining
+Gibbs and heat-capacity calls belong to preparation, stability, or Jacobian and
+residual work respectively; no machine-dependent timing threshold is imposed.
+The story now asserts that residual-side contexts are exactly the candidate
+snapshot contexts and Jacobian-side contexts are exactly the analytic Jacobian
+contexts.
+
+## 57. ElementInventory semantic-to-numeric boundary
+
+### Test name
+
+`Thermodynamics::ChemEquilibrium::phase_bridge::phase_equilibrium_problem_tests::elemental_and_species_feeds_with_the_same_b_share_the_fixed_pt_solution`
+
+### Command
+
+```powershell
+cargo test phase_equilibrium_problem_tests --lib --no-default-features
+```
+
+### Hypothesis / question
+
+Can the bridge preserve one physical conserved vector `b` while keeping
+semantic `ElementInventory`, phase-qualified physical composition, and the
+independent solver-column representation distinct?
+
+### What it checks
+
+- an explicit molecular feed and an `ElementInventory` feed with the same
+  physical H/O totals build the same component matrix and conserved totals;
+- reaction-basis rank and reaction matrix remain identical;
+- the report preserves different input provenance and seed sources;
+- accepted fixed-P,T solutions agree component-by-component;
+- the shared dense-moles-to-element-totals calculation does not alter the
+  existing validation contract.
+
+### Recorded result
+
+```text
+test Thermodynamics::ChemEquilibrium::phase_bridge::phase_equilibrium_problem_tests::elemental_and_species_feeds_with_the_same_b_share_the_fixed_pt_solution ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 2495 filtered out; finished in 0.19s
+```
+
+The consolidation decision is deliberate: `ElementInventory` remains the
+semantic authority for closed-system `b`; dense phase composition remains a
+physical seed value; `EquilibriumProblem` receives the numeric independent
+column vector required by the solver. The public representation boundaries are
+therefore retained, while duplicate totals arithmetic and duplicate seed
+reconstruction are removed.
+
+## 58. Backend seam preserves deterministic cascade policy
+
+### Test names
+
+`Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::tests::fake_backend_can_be_used_as_a_deterministic_test_double`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::tests::fake_backend_can_force_a_repeatable_failure`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_log_moles::solver_cascade_story_tests::controlled_cascade_reports_each_started_backend_attempt`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_log_moles::solver_cascade_story_tests::first_backend_fails_recoverably_second_succeeds_and_is_accepted`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_log_moles::solver_cascade_story_tests::first_backend_returns_a_rejected_candidate_and_the_next_one_succeeds`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_log_moles::solver_cascade_story_tests::every_backend_fails_and_the_report_keeps_the_declared_order`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_log_moles::solver_budget_tests::every_started_backend_receives_the_original_validated_seed`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_log_moles::solver_cascade_story_tests::global_budget_exhaustion_stops_later_backends_deterministically`
+
+`Thermodynamics::ChemEquilibrium::phase_bridge::phase_equilibrium_problem_tests::prepared_runner_honours_cancellation_before_starting_a_backend`
+
+### Hypothesis / question
+
+Can `EquilibriumNonlinearBackend` remain as the internal backend seam without
+being a redundant abstraction, while preserving deterministic fallback,
+failure evidence, retry classification, attempt ordering, progress, and
+cancellation behavior across the prepared `P,T`, historical host, and
+monolithic `P,H` routes?
+
+### What it checks
+
+- the uniform `PreparedNonlinearSystem` contract rejects invalid dimensions;
+- a fake backend can deterministically succeed or produce a typed backend
+  failure;
+- a recoverable first attempt allows the next backend to succeed;
+- rejected candidates and exhaustive failures retain ordered attempt evidence;
+- progress reports expose both started and finished backend attempts;
+- cancellation is returned as a typed error before a backend starts;
+- all started backends receive the original validated seed through the shared
+  cascade policy.
+
+### Commands
+
+```powershell
+cargo test equilibrium_backend_adapter --lib --no-default-features
+cargo test controlled_cascade_reports_each_started_backend_attempt --lib --no-default-features
+cargo test first_backend_fails_recoverably_second_succeeds_and_is_accepted --lib --no-default-features
+cargo test first_backend_returns_a_rejected_candidate_and_the_next_one_succeeds --lib --no-default-features
+cargo test every_backend_fails_and_the_report_keeps_the_declared_order --lib --no-default-features
+cargo test every_started_backend_receives_the_original_validated_seed --lib --no-default-features
+cargo test global_budget_exhaustion_stops_later_backends_deterministically --lib --no-default-features
+cargo test prepared_runner_honours_cancellation_before_starting_a_backend --lib --no-default-features
+```
+
+### Recorded result
+
+The adapter module passed `4` tests. Each of the seven cascade, budget, seed,
+and cancellation commands passed its focused test (`1 passed; 0 failed`). The
+seam is therefore retained as the owner of backend dispatch and attempt
+evidence. Cancellation remains cooperative at the boundaries before and after
+a backend attempt; interrupting a solver internally is outside this contract
+and was not changed.
+
+## 59. P,H callback lifetime and nested template ownership
+
+### Test names
+
+`Thermodynamics::ChemEquilibrium::ph::equilibrium_ph_workflow::tests::legacy_request_accepts_a_borrowed_enthalpy_callback`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_reactive_gas_ph_target_range_continues_from_previous_accepted_state`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_nested_ph_target_range_story`
+
+### Hypothesis / question
+
+Can the P,H request preserve borrowed callback compatibility without making the
+canonical resolved-data route depend on caller-owned mutable state, while the
+nested target-range runner reuses only topology-stable preparation and keeps
+target-specific scalar and lifecycle state independent?
+
+### What it checks
+
+- deprecated arbitrary-callback construction accepts a callback borrowing a
+  local value, so the compatibility lifetime is not accidentally narrowed to
+  `'static`;
+- canonical resolved thermochemistry remains owned by clone-cheap `Arc`
+  capabilities and the request owns its resolved-system snapshot;
+- nested P,H ranges hand the accepted temperature and composition to the next
+  target;
+- fixed declared phases build one reusable inner P,T template, while every
+  target retains an independent scalar bracket;
+- rejected scalar trials and bounded active-set lifecycle state are not shared
+  as continuation state.
+
+### Commands
+
+```powershell
+cargo test legacy_request_accepts_a_borrowed_enthalpy_callback --lib --no-default-features
+cargo test --release --lib `
+  Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_reactive_gas_ph_target_range_continues_from_previous_accepted_state `
+  --no-default-features -- --ignored --nocapture
+cargo test --release --lib `
+  Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_nested_ph_target_range_story `
+  --no-default-features -- --ignored --nocapture
+```
+
+### Recorded result
+
+The focused borrowed-callback test passed (`1 passed; 0 failed`). The recorded
+three-target continuation story passes in debug with one template build and
+accepted-state hand-off; its release rerun remains explicitly pending in the
+earlier Story Test 10. The large nested story has a recorded release pass with
+nine targets, one template build, and `163` template reuses. The ownership
+decision is therefore to keep the generic callback lifetime for the
+deprecated/reference route and keep the nested continuation template as a
+narrow mutable cache, without introducing a new shared P,H state object.
+
+## 60. P,H resolved-data copying and lock ownership
+
+### Test names
+
+`Thermodynamics::ChemEquilibrium::ph::equilibrium_ph_thermochemistry::tests::thermochemistry_bundle_is_send_sync_for_shared_capabilities`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_reactive_gas_ph_target_range_continues_from_previous_accepted_state`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_nested_ph_target_range_story`
+
+### Hypothesis / question
+
+Which P,H data are deep-copied, which are cheap `Arc` capability clones, and
+which synchronization is required by the current thermochemistry ownership
+contract? Can that be documented without changing snapshot isolation or
+assuming parallel P,H range execution that the production routes do not use?
+
+### What it checks
+
+- `ResolvedThermochemistry` and its public capability function type satisfy
+  `Send + Sync` at compile time;
+- `ResolvedPhaseSystem::Clone` remains understood as a deep snapshot over
+  `SubsData`, not as a cheap shared pointer operation;
+- numeric G/H/Cp callbacks share immutable capability handles while private
+  calculator/cache mutation remains behind `Arc<Mutex<...>>`;
+- retained symbolic sources remain isolated from numeric evaluation state;
+- the nested range stories continue to reuse only topology-stable preparation,
+  with accepted composition and temperature hand-off between targets.
+
+### Commands
+
+```powershell
+cargo test equilibrium_ph_thermochemistry --lib --no-default-features
+cargo test equilibrium_ph_range --lib --no-default-features
+```
+
+The real-data continuation commands and their release evidence remain in
+Story Tests 10, 13, and 19; they are not duplicated here.
+
+### Recorded result
+
+The thermochemistry suite passed `3` tests and the range/presentation suite
+passed `6` tests. The audit confirms that replacing the resolved snapshot with
+a blanket `Arc`, or removing the locks, would alter isolation and/or mutable
+coefficient-cache semantics without a demonstrated production need. Runtime
+clone allocation and lock-contention benchmarks remain a separate future
+performance task, not an assumption of this story.
+
+## 61. Common opt-in equilibrium instrumentation
+
+### Test name
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::i5_tp1906_monolithic_ph_property_evaluation_characterization`
+
+### Command
+
+```powershell
+cargo test i5_tp1906_monolithic_ph_property_evaluation_characterization --lib --no-default-features -- --ignored --nocapture
+cargo test facade_attaches_opt_in_instrumentation_to_a_ph_outcome --lib --no-default-features
+cargo check --release --features equilibrium-instrumentation --lib
+```
+
+### Hypothesis / question
+
+Can fine-grained thermochemistry evaluation counts live in the common
+postprocessing/diagnostic layer instead of in P,H thermochemistry, while the
+ordinary build remains disabled by default and release benchmarking has an
+explicit opt-in feature? Are the measured counts unchanged by the move?
+
+### What it checks
+
+- the former `PhThermochemistryEvaluationCounters` and every `record_ph_*`
+  caller are owned by `equilibrium_instrumentation`;
+- one reusable `capture` call collects the monolithic P,H evaluation contract;
+- the accepted TP-1906 solve and all characterization assertions remain the
+  same (`176` contexts, `140` residual contexts, `36` Jacobian contexts,
+  `146/179/38` G/H/Cp vectors, and `3866` property calculations);
+- stage durations continue to come from the existing enabled
+  `EquilibriumTimingReport`, while the instrumentation report supplies the
+  outer capture duration and fine-grained counts;
+- no cross-thread aggregation is claimed until the workflow explicitly passes
+  a collector handle to worker closures.
+
+### Recorded result
+
+The focused characterization passed (`1 passed; 0 failed`) with the same
+evaluation counts as Story Test 56. The common instrumentation unit tests
+passed (`2 passed; 0 failed`). The facade attachment test passed in both the
+default test build and the feature-enabled calculator suite (`22 passed; 0
+failed`). Release library checking with
+`equilibrium-instrumentation` passed. The default build keeps hooks compiled
+out. The facade attachment test now proves that an explicitly enabled mode
+publishes the snapshot on a typed P,H outcome and keeps stage timing in the
+existing inner timing report. Explicit worker-thread propagation remains a
+follow-up TODO item.
+
+## 62. ElementInventory range preparation does not duplicate the bridge
+
+### Test name
+
+`Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests::facade_solves_pt_then_ph_without_manual_resolved_request_assembly`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests::facade_accepts_element_inventory_for_pt_temperature_range`
+
+### Command
+
+```powershell
+cargo test facade_solves_pt_then_ph_without_manual_resolved_request_assembly --lib --no-default-features -- --nocapture
+cargo test facade_accepts_element_inventory_for_pt_temperature_range --lib --no-default-features -- --nocapture
+```
+
+### Hypothesis / question
+
+Can elemental range constructors derive their first numerical composition from
+the resolved element matrix without performing a full thermochemical bridge
+build, while the first real solve still publishes the same physical inventory,
+provenance, continuation, and prepared-formulation evidence?
+
+### What it checks
+
+- the `P,T` and `P,H` elemental constructors use matrix-only feasible-seed
+  preparation;
+- the canonical bridge is built exactly once per range solve, rather than once
+  during construction and once again for the first point;
+- the range still accepts all points transactionally and reuses continuation
+  state/formulation;
+- every accepted point still reports `ElementInventory` with unchanged `b`;
+- the instrumentation counter measures bridge preparation, not numerical
+  iterations, and remains opt-in at the facade boundary.
+
+### Recorded result
+
+Both focused tests passed (`1 passed; 0 failed` each). The captured output was:
+
+```text
+ElementInventory range optimization P,H bridge_builds=1 points=2 continuation_points=1 formulation_builds=1
+ElementInventory range optimization P,T bridge_builds=1 points=3 formulation_builds=1 formulation_reuses=2
+```
+
+The pre-change call graph required two bridge builds for each elemental range
+(`constructor seed derivation` plus `first real solve`). The optimized path
+retains one canonical bridge build and moves only answer-independent element
+matrix/seed construction to the lightweight domain helper. Existing warnings
+are unrelated deprecated APIs and unused legacy fields; no numerical failure
+was observed.
+
+## 63. Explicit multi-start failure retains every typed backend trace
+
+### Test name
+
+`Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::error_contract_tests::multi_start_failure_preserves_each_typed_cascade_and_aggregates_work`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_presentation::tests::multi_start_seed_failure_flattens_every_preserved_backend_trace`
+
+### Command
+
+```powershell
+cargo test multi_start_failure_preserves_each_typed_cascade_and_aggregates_work --lib --no-default-features -- --nocapture
+cargo test multi_start_seed_failure_flattens_every_preserved_backend_trace --lib --no-default-features -- --nocapture
+cargo check --lib --no-default-features
+```
+
+### Hypothesis / question
+
+When every explicit initial log-mole seed is rejected, does the prepared
+runner preserve the complete work of every seed and its backend cascade, while
+keeping the established solver-budget semantics? Can diagnostic presentation
+consume that nested evidence without reconstructing it from a summary string?
+
+### What it checks
+
+- `SolverCascadeBudget` is documented and retained as a per-seed inner-cascade
+  budget for explicit multi-start recovery;
+- the runner's all-seeds-failed path uses typed
+  `MultiStartSeedRecoveryFailed` causes instead of `InvalidProblem` plus only
+  the first error text;
+- every seed retains its original `AllBackendsFailed` trace, seed ordering and
+  typed classification;
+- aggregate started-backend and nonlinear-iteration values come from the
+  recursive `ReactionExtentError` API, not duplicated local counters;
+- presentation and frozen diagnostic traversal expose both nested backend
+  traces when no candidate exists.
+
+### Recorded result
+
+Both focused tests passed (`1 passed; 0 failed` each), and `cargo check`
+passed. The error retains two ordered seed causes, reports
+`started_backend_attempts() = 2`, remains classified as
+`AllBackendsFailed`, and the presentation projection returns both backend
+rows. No solver equations or backend order were changed.
+
+## 64. Reaction-basis nullspace and validation invariants
+
+### Test name
+
+`Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::tests_reaction_basis::rectangular_rank_deficient_basis_has_complete_independent_nullspace`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::tests_reaction_basis::reaction_basis_rejects_invalid_matrix_and_rank_tolerances`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_constant_tests::tests::reaction_basis_rejects_dependent_reaction_columns`
+
+### Command
+
+```powershell
+cargo test tests_reaction_basis --lib --no-default-features -- --nocapture
+cargo test equilibrium_constant_tests --lib --no-default-features -- --nocapture
+```
+
+### Hypothesis / question
+
+Does the SVD-derived reaction basis always contain the complete independent
+nullspace implied by `m - rank(A)`, including rectangular rank-deficient
+matrices? Do conservation and normalization remain valid, and does the
+independent K_eq basis reject a dependent explicit reaction matrix instead of
+trusting only its declared element rank?
+
+### What it checks
+
+- finite positive rank tolerance and finite positive-dimensional element
+  matrices are required;
+- near-rank-deficient singular values follow the documented absolute
+  threshold;
+- thin-SVD nullspace vectors and Gram-Schmidt completion are mutually
+  independent and conserve every element;
+- no post-hoc coefficient truncation changes the conservation equation;
+- `ValidatedReactionBasis` retains species ordering and deterministic
+  normalization while rejecting dependent reaction columns.
+
+### Recorded result
+
+All six direct reaction-basis tests and all twelve equilibrium-constant
+contract tests passed. The previously failing rectangular rank-deficient
+case now returns three independent nullspace columns with conservation below
+the test tolerance. The implementation keeps `ReactionBasis` and
+`ValidatedReactionBasis` as separate contracts; only their verified numerical
+invariants were strengthened.
+
+## 65. TP-1906 P,H extensive scaling envelope
+
+### Test name
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_real_ph_solution_is_extensive_when_inventory_and_target_scale_together`
+
+### Command
+
+```powershell
+cargo test tp1906_real_ph_solution_is_extensive_when_inventory_and_target_scale_together --lib --no-default-features -- --nocapture
+cargo test elemental_calculator_ph_is_extensive_under_inventory_and_enthalpy_scaling --lib --no-default-features -- --nocapture
+```
+
+### Hypothesis / question
+
+If the physical inventory is multiplied by `s` and the total enthalpy target
+is multiplied by the same `s`, does the canonical nested P,H path preserve
+the intensive temperature and phase topology while scaling every published
+component amount by `s`? Separately, does the public elemental calculator
+facade preserve the same law at its existing factor-10 contract?
+
+### What it checks
+
+- the real frozen TP-1906/1907 CHON + graphite fixture is solved at the
+  baseline target and at `s = 1e-3, 1e-1, 1e1, 1e3, 1e4, 1e6, 1e8` through
+  the canonical nested P,H request with `s*n_initial` and `s*H`;
+- the public elemental calculator route independently checks `s = 10` with
+  `s*b` and `s*H`, using the ordinary facade and no test-only solver;
+- accepted temperature is intensive, graphite active/inactive topology is
+  unchanged, enthalpy/residual/balance acceptance remains bounded, and
+  component moles divided by `s` agree with the baseline;
+- the check is a metamorphic scaling contract, not a new equilibrium oracle;
+  the frozen chemical source and target remain unchanged apart from the
+  declared extensive factor.
+
+### Recorded result
+
+The frozen nested P,H story passed for all seven factors (`1 passed; 0
+failed`) in `87.17 s` in the debug profile. The independent public elemental
+calculator story passed at factor `10` (`1 passed; 0 failed`). A TP-1906 elemental probe
+at `1e-3` failed the intensive-temperature assertion with a reproducible
+`1.19e-2 K` drift, while `1e-1` showed `1.49e-5 K`; the lower elemental
+boundary is therefore open numerical debt, not a relaxed assertion. The
+frozen nested contract is verified through `1e8`; behavior beyond `1e8` is
+uncharacterized.
+
+## 66. Production public surface and phase-interface compatibility
+
+### Test name
+
+`Thermodynamics::ChemEquilibrium::equilibrium_public_api_tests::tests::*`
+
+`Thermodynamics::User_PhaseOrSolution_tests::tests::test_one_and_many_phase_facades_implement_the_same_narrow_roles`
+
+### Command
+
+```powershell
+cargo test equilibrium_public_api_tests --lib --no-default-features -- --nocapture
+cargo test test_one_and_many_phase_facades_implement_the_same_narrow_roles --lib --no-default-features -- --nocapture
+```
+
+### Hypothesis / question
+
+Can the supported production workflow be consumed through the curated
+`ChemEquilibrium::prelude` without naming implementation modules, while the
+narrow phase interfaces remain usable by both one-phase and many-phase
+facades? Is there evidence strong enough to remove or reorganize the public
+surface now?
+
+### What it checks
+
+- the prelude names and exercises the application facade, elemental inventory,
+  numerical seed, range seed constructors, solver policy, immutable reports,
+  stability evidence, and transactional input validation;
+- the retained legacy solver policy is explicit and the deprecated namespace
+  is not confused with the production entry point;
+- one-phase and many-phase facades implement the shared narrow layout,
+  property, preparation, symbolic, and equilibrium-assembly contracts;
+- no public removal or module reorganization is inferred without downstream
+  consumer evidence.
+
+### Recorded result
+
+The public facade contract passed `6 passed; 0 failed`, and the phase-interface
+compatibility witness passed `1 passed; 0 failed`. The current public surface
+is therefore retained; removal of legacy exports remains a breaking-release
+decision rather than an internal cleanup.
+
+## 67. Public elemental P,H scale envelope and lower-bound characterization
+
+### Story name
+
+The public elemental P,H facade must expose its scale behavior honestly: joint
+inventory and enthalpy scaling is an extensive transformation, but a passing
+solve outside the measured envelope must not be promoted into a supported
+equivalence contract.
+
+### Test name
+
+`Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests::elemental_calculator_ph_scale_envelope_characterization`
+
+`Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests::elemental_calculator_ph_recovers_a_large_inventory_point_transactionally`
+
+### Command
+
+```powershell
+cargo test elemental_calculator_ph_scale_envelope_characterization --lib --no-default-features -- --include-ignored --nocapture
+cargo test elemental_calculator_ph_recovers_a_large_inventory_point_transactionally --lib --no-default-features -- --nocapture
+```
+
+### Hypothesis / question
+
+Is the lower elemental P,H boundary caused by an invalid extensive
+transformation, or by numerical acceptance and inner-basin conditioning? Does
+the public point facade remain usable through the already measured upper
+window, without claiming anything beyond `1e8`?
+
+### What it checks
+
+- the ordinary `EquilibriumCalculator` facade is used for every scale;
+- both elemental inventory and total enthalpy are multiplied by the same `s`;
+- accepted cases compare intensive temperature, scaled component moles,
+  residual, and relative elemental balance against the `s=1` result;
+- failed cases retain their typed error instead of being hidden by a relaxed
+  assertion;
+- the measurement includes lower probes `1e-6..1e-1`, the existing pair `1`
+  and `10`, and upper probes through `1e8`.
+- the dedicated point transaction starts with the same physical facade solve,
+  then recovers a classified large-inventory numerical failure in exactly
+  normalized coordinates; it asserts physical publication provenance,
+  intensive temperature, and component amounts divided by the scale.
+
+### Recorded result
+
+```text
+baseline T=2499.999998428 K
+1e-6   error: enthalpy_non_monotone
+1e-5   ok, delta_T=4.277201e-4 K
+1e-4   ok, delta_T=4.292847e-4 K
+1e-3   ok, delta_T=4.292847e-4 K
+1e-2   error: enthalpy_acceptance
+1e-1   ok, delta_T=4.102910e-4 K
+1      ok, delta_T=0
+1e1    ok, delta_T=5.343509e-7 K
+1e2    ok, delta_T=1.858272e-6 K
+1e3..1e8 ok, delta_T=4.046777e-5 K after typed normalized recovery
+```
+
+The dedicated `1e4` transaction story passed (`1 passed; 0 failed`). It
+retained normalized-recovery evidence at the public physical boundary and
+matched the unit-scale temperature within `1e-4 K` while every component
+amount scaled by `1e4`.
+
+### Conclusion / next action
+
+The extensive transformation itself is valid where a solution is accepted,
+but the current strict lower contract is not established below `s=1`: small
+scales either show a reproducible temperature drift or fail typed P,H
+acceptance. Direct facade P,H points now share the typed, failure-triggered
+normalization transaction with the canonical point workflow, restoring the
+measured upper `1e3..1e8` window without changing the default solver order or
+acceptance thresholds. This remains evidence rather than a contract beyond
+`1e8`. Improving the lower boundary needs a separately measured
+preconditioning policy because those physical solves are accepted before
+failure recovery can be authorized.
+
+## 68. TP-1907 normalization regressions after exact reaction-basis restoration
+
+### Story name
+
+Restoring the exact conservation-preserving reaction basis must not regress the
+independent extensive-normalization evidence or turn a fresh-seed basin
+diagnostic into a false physical failure.
+
+### Test names
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::i5_tp1907_extensive_normalization_scale_metamorphism`
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::i5_tp1907_large_inventory_extensive_normalization_matrix`
+
+`Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::i5_tp1907_large_inventory_seed_basin_matrix_diagnostic`
+
+### Command
+
+```powershell
+cargo test i5_tp1907_extensive_normalization_scale_metamorphism --lib --no-default-features -- --include-ignored --nocapture
+cargo test i5_tp1907_large_inventory_extensive_normalization_matrix --lib --no-default-features -- --include-ignored --nocapture
+cargo test i5_tp1907_large_inventory_seed_basin_matrix_diagnostic --lib --no-default-features -- --include-ignored --nocapture
+```
+
+### Hypothesis / question
+
+Did the reaction-basis hardening break the exact normalized formulation, or is
+the observed failure limited to an under-seeded fresh nonlinear basin? Does
+the normalized route still reconstruct the same physical TP-1907 solution?
+
+### What it checks
+
+- exact `A^T*N = 0` reaction-basis conservation is retained without post-hoc
+  coefficient truncation;
+- the normalized inventory remains one mole and is derived from the physical
+  request, not from an accepted oracle;
+- 680/700 K preserve gas plus graphite, while 720 K uses the correct gas-only
+  projection and positive graphite TPD;
+- physical reconstruction preserves component amounts, gas fractions,
+  residual, balance, and topology;
+- the seed-basin diagnostic distinguishes fresh-seed failure from a valid
+  transformed accepted seed and records the original backend trace;
+- the metamorphic reference solve uses the existing canonical row-scaling
+  contract, so arbitrary reaction-column norms do not become a numerical
+  artifact of the comparison.
+
+### Recorded result
+
+All three tests passed (`1 passed; 0 failed` each). The scale metamorphism
+accepted all fifteen rows for factors `1e-4, 1e-2, 1, 1e2, 1e4` across 680,
+700, and 720 K. The large-inventory matrix accepted its three `1e4` rows with
+the largest displayed reconstructed mole error `3.450e-9` and normalized
+720 K gas-only topology. The basin matrix classified 680/700 K as
+`FreshSeedBasinLimited` and 720 K as `StrictScaleInvariant`; the transformed
+accepted seed remained valid in every applicable comparison.
+
+The diagnostic fixed-active fixture uses `1e-20` only as a seed-only basin
+hint. The production recovery rule is independent of that fixture: when an
+absolute physical trace floor collapses after normalization, it uses a
+relative normalized seed and retains the transformed absolute floor as its
+minimum bound. No frozen value, equation, or acceptance tolerance was
+changed.
+
+The full ChemEquilibrium run also exposed and closed a test-only conditioning
+gap: the exact-basis metamorphic reference cascade failed when its deliberately
+rescaled reaction rows were left unscaled. Enabling `scaling_flag` only for
+that reference solve restores deterministic comparison of the same physical
+root; production defaults and backend order remain unchanged.
+
+### Conclusion
+
+The failure was a fresh-seed conditioning issue exposed by the exact reaction
+basis, not a broken extensive-normalization identity. The exact basis remains
+in production, and the three previously failing regressions are green. The
+remaining direct elemental P,H point limitation is recorded separately in
+Story 67 and must not be hidden by changing solver tolerances.
+
+## 69. Production facade performance baseline: P,T, P,H, and ElementInventory
+
+### Story name
+
+The canonical `EquilibriumCalculator` facade must have a repeatable performance
+baseline across the main point and range workflows before optimization work
+begins. Timing and evaluation counts must come from the shared internal
+`postprocessing_and_logging` instrumentation, not benchmark-specific wrappers
+around solver internals.
+
+### Benchmark target and command
+
+`benches/equilibrium_baseline.rs`
+
+```powershell
+$env:CARGO_PROFILE_BENCH_LTO='false'
+$env:CARGO_PROFILE_BENCH_CODEGEN_UNITS='16'
+$env:CARGO_PROFILE_RELEASE_LTO='false'
+$env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS='16'
+cargo bench --bench equilibrium_baseline --features equilibrium-instrumentation -- --noplot
+```
+
+The recorded run used the optimized `bench` profile with LTO disabled only for
+practical build time, `10` fixed-repeat instrumentation observations per row,
+and `10` Criterion samples per scenario with a `1 s` warm-up and `2 s`
+measurement window. The repository's ordinary default build remains
+uninstrumented; these settings are part of the measurement identity.
+
+### Hypothesis / question
+
+Which stages and evaluation counters dominate the production facade for the
+main fixed-`P,T`, fixed-`P,H`, and continuation-range tasks? What is the
+baseline cost of replacing explicit molecular initial amounts with a physical
+`ElementInventory` while keeping the same declared H2/O2/H2O universe and
+NASA-gas repository?
+
+### What it checks
+
+- all cases enter through `EquilibriumCalculator`, `production_cascade()`,
+  offline local NASA data, and the public facade outcome types;
+- molecular and elemental inventory inputs are measured separately for `P,T`
+  and `P,H` points;
+- elemental `P,T` and `P,H` ranges measure continuation and accepted-point
+  work, with range stage values reported per accepted point;
+- the table uses `EquilibriumTimingReport` and
+  `EquilibriumInstrumentationReport` from the shared diagnostic layer;
+- Criterion supplies wall-time distributions while the internal table retains
+  stage/counter evidence; neither timing nor counters are used as correctness
+  assertions.
+
+### Status
+
+This first compact baseline is superseded. Its wide table mixed facade wall
+time, attached inner reports, inclusive P,H fields, and counters from an older
+instrumentation contract. The current benchmark and its authoritative
+macro/stage tables are recorded in Story 72; no timing values from this story
+should be used for optimization comparisons.
+
+## 70. Expanded component-count performance baseline and P,H attribution
+
+### Story name
+
+The performance baseline must include real high-dimensional frozen universes,
+not only the three-species smoke system. The measurement must expose whether
+the observed P,H wall time belongs to the reported nonlinear stages or to
+facade preparation that is currently outside the timing report.
+
+### Benchmark target and command
+
+`benches/equilibrium_baseline.rs`
+
+```powershell
+$env:CARGO_PROFILE_BENCH_LTO='false'
+$env:CARGO_PROFILE_BENCH_CODEGEN_UNITS='16'
+$env:CARGO_PROFILE_RELEASE_LTO='false'
+$env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS='16'
+cargo bench --bench equilibrium_baseline --features equilibrium-instrumentation -- --noplot
+```
+
+### Systems and question
+
+- `small3`: H2/O2/H2O control, including molecular and ElementInventory P,T/P,H
+  points and the two continuation ranges;
+- `stanjan15`: the exact 15-species Argonne/STANJAN CHON gas universe;
+- `tp1907_18`: the exact 17-species NASA gas universe plus solid `C(gr)`;
+- `rp1311_40`: the exact 40-species NASA CEA RP-1311 gas universe.
+
+For the three large systems the baseline measures the production
+`ElementInventory` P,T and P,H facade routes. TP-1907 P,H uses the frozen
+nested-temperature route and its source-backed target, because the monolithic
+route is intentionally rejected across the graphite coefficient boundary.
+The 40-component P,H case uses nested temperature as the stable accepted
+route for this baseline. These route choices are printed through accepted
+backend/attempt/iteration evidence and are not silently mixed.
+
+### Hypothesis / question
+
+Does the cost grow materially with component count, and which measured stage
+should be optimized first? In particular, can the previous 22--25 ms small
+P,H facade interval be attributed to inner equilibrium work, or is it setup,
+symbolic preparation, recovery, or result assembly outside the current timing
+report?
+
+### Status
+
+The intermediate wide matrix, legacy-control matrix, and focused P,H rerun
+are removed. They mixed facade, workflow, and inclusive child timings from
+different report contracts, so their values are not valid baseline evidence.
+The current benchmark command and the authoritative macro and detailed stage
+views are recorded in Story 72.
+
+One compatibility finding is retained: a fixed legacy LM policy did not
+complete the TP-1907 nested P,H fixture during normalized basin discovery,
+while the production cascade accepted it with legacy TR. This is a
+convergence guard, not a successful timing row or an apples-to-apples
+performance comparison.
+
+## 71. Optional legacy nonlinear-solver diagnostic table
+
+### Name
+
+`legacy_solver_diagnostics_are_scoped_to_calculator_capture` plus the
+solver-diagnostic table printed by `equilibrium_baseline`.
+
+### Command
+
+```text
+cargo test --lib Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::tests::legacy_solver_diagnostics_are_scoped_to_calculator_capture --no-default-features -- --exact --nocapture
+
+$env:CARGO_PROFILE_BENCH_LTO='false'
+$env:CARGO_PROFILE_BENCH_CODEGEN_UNITS='16'
+$env:CARGO_PROFILE_RELEASE_LTO='false'
+$env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS='16'
+cargo bench --bench equilibrium_baseline --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint" -- __solver_diagnostics__ --noplot
+```
+
+### Question and hypothesis
+
+Do the retained legacy LM, NR, and TR solvers expose enough internal timing to
+decide later whether residual/Jacobian or linear-system work is worth
+parallelizing, without adding runtime cost to ordinary calculations? The
+hypothesis is that a calculator-level instrumentation capture can own one
+short-lived per-attempt scope, while the solver callbacks report calls and
+durations upward through the existing `SolverAttemptMetrics` contract.
+
+### What is checked
+
+- Legacy LM, NR, and TR residual callbacks are counted and timed separately.
+- Legacy analytic Jacobian callbacks are counted and timed separately.
+- Legacy dense linear-system solves are counted and timed separately.
+- The adapter reports the snapshot for every completed instrumented legacy
+  attempt; this benchmark table selects the accepted backend. P,H nested rows
+  aggregate accepted inner-attempt diagnostics over their temperature trials.
+- The scope is enabled only while the calculator's existing `capture` is
+  active. A direct solver call remains uninstrumented and returns no fabricated
+  zero-valued metrics.
+- The benchmark emits a separate `tabled` solver table alongside the
+  hierarchical facade/stage report. It contains backend wall clock, iterations,
+  residual/Jacobian/
+  linear calls, absolute microseconds, and each measured time as a percentage
+  of backend wall time.
+- RST rows retain their available callback/overhead metrics but show `n/a` for
+  linear-system time and percentage because the RST adapter does not expose
+  that internal operation.
+
+### Current report
+
+The earlier compact solver table is removed because it was a historical
+snapshot of the diagnostic output. Current residual, Jacobian, linear-system,
+callback, backend wall-time, and failed-attempt evidence is emitted by the
+separate backend-attempt and accepted-solver tables in Story 72.
+
+### Result and decision
+
+The hypothesis is supported. The legacy instruments are opt-in, scoped to the
+calculator capture, and the payload reaches the accepted backend metrics
+without changing solver equations or order. The first measurement also shows
+why parallelism must not be assumed: in the tiny legacy P,T cases callback and
+linear timings are below useful resolution and solver overhead dominates,
+while the larger nested TP-1907 P,H case has measurable Jacobian and residual
+work. Do not parallelize yet. First collect the same table at larger stable
+component counts and compare instrumentation overhead; then evaluate only a
+measured solver-level hypothesis.
+
+### Limitations
+
+Failed legacy attempts now publish a partial residual/Jacobian/linear-system
+snapshot together with their backend-call wall time in the full attempt table,
+so their fallback cost is visible at callback level. `wall-only` is retained
+only for backends that do not expose the corresponding internal split, such as
+RST linear algebra.
+RST linear algebra remains `n/a` until its backend exposes a corresponding
+hook.
+
+## 72. Hierarchical performance-budget report without hidden percentages
+
+### Story name
+
+The performance report must explain every large timing budget at the level
+where an optimization can act. A single wide table is not sufficient when it
+mixes complete-call partitions with inclusive parent/child timings.
+
+### Benchmark command
+
+```powershell
+$env:CARGO_PROFILE_BENCH_LTO='false'
+$env:CARGO_PROFILE_BENCH_CODEGEN_UNITS='16'
+$env:CARGO_PROFILE_RELEASE_LTO='false'
+$env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS='16'
+cargo bench --bench equilibrium_baseline --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint" -- --noplot
+```
+
+`cargo bench` uses Cargo's optimized benchmark profile. The fixed-repeat
+pretty tables are emitted before Criterion's statistical benchmark output and
+are intended for attribution, not as assertions about a universal machine
+time. Without `equilibrium-benchmark-prettyprint`, the benchmark now prints
+only the compact macro columns; the obsolete wide diagnostic row is no longer
+part of either benchmark interface.
+
+### Question and hypothesis
+
+When a macro row reports tens of percent in the workflow, can that budget be
+followed into facade, P,H orchestration, fixed-P,T stages, the nonlinear
+envelope, and every backend attempt without counting a parent and its child as
+independent work? The hypothesis is yes, provided each table declares its own
+scope and the nonlinear remainder is shown explicitly.
+
+### Report contract
+
+The pretty report now emits these independent views:
+
+1. **Macro budget:** complete facade wall split only into mutually exclusive
+   `facade outside workflow` and `workflow`; these two columns sum to 100%.
+2. **Facade detail:** resolution, request preparation, route selection,
+   normalization, phase control, thermochemistry, and result assembly as
+   facade-owned observations.
+3. **P,H workflow detail:** scalar/enthalpy orchestration, trial totals and
+   preparation, bracket control, monolithic preparation/execution/publication,
+   with parent/child overlap explicitly labelled.
+4. **Inner fixed-P,T detail:** thermochemistry, numeric closure, normalization,
+   recovery, symbolic and equation preparation, numerical problem preparation,
+   active-set formulation build, RST preparation, projection build, nonlinear
+   envelope, phase control, validation, postprocessing, repository lookup, and
+   result assembly. It also includes `outside nonlinear envelope` as an
+   arithmetic complement. Monolithic P,H rows do not fabricate an inner P,T
+   table; their payload is shown in the P,H table and backend table.
+5. **Nonlinear envelope:** parent scope/wall, all attempt wall including
+   wall-only failures, known active-set/RST/projection preparation, and the
+   remaining runner/orchestration budget. It also prints backend coverage,
+   total attempt count, `no metrics` count, and `unknown wall` count. This
+   distinguishes a real orchestration gap from a backend whose internal split
+   was not published.
+6. **Backend attempt detail:** one row per backend attempt, including accepted,
+   failed, rejected-candidate, skipped, fallback, and normalization-recovery
+   scopes. It reports outcome, samples, wall, iterations, residual/Jacobian/
+   linear-solve/solver-overhead times and percentages relative to that
+   attempt's own wall.
+7. **Accepted solver callback summary:** retained compact view for comparing
+   callback cost across accepted legacy and RST attempts.
+
+All tables use milliseconds for wall time and percentages rounded to one
+decimal place. Detailed stage rows are inclusive diagnostics and are not
+supposed to sum to 100%. A failed attempt without published counters is shown
+as `wall-only`: its real elapsed call time is retained, while iterations and
+callback splits remain `n/a`. `unknown wall` is a separate count and is zero
+for the release capture; skipped backends are not started and therefore do not
+consume wall time. The remaining debt is to retain partial legacy callback
+timing when an interrupted legacy attempt never publishes a metrics snapshot.
+
+### Decision use
+
+This report is now the authoritative format for performance work. For every
+`ElementInventory`, molecular, P,T, nested P,H, monolithic P,H, legacy, and
+RST row, first use the macro partition to locate the owning workflow, then use
+the matching lower-level table and its denominator. Do not sum the inclusive
+facade/P,H/inner rows, and do not treat the runner/orchestration remainder as
+a residual or Jacobian cost without an attempt-level measurement. A change is
+performance evidence only when the same case, route, backend order, profile,
+and correctness story remain fixed.
+
+### Runtime verification of the rendered hierarchy
+
+The optimized run on 2026-09-12 rendered all seven tables and passed the
+benchmark's per-scenario coverage assertions for all 23 scenarios. The fixed-
+repeat dashboard itself completed; Criterion later returned non-zero because
+its statistical comparison flagged a `ph_element_inventory_range` regression,
+which is a performance signal rather than a dashboard or correctness failure.
+The assertions require every scenario to have macro, facade, nonlinear, backend
+attempt, and accepted-solver rows; P,T scenarios must have inner detail, while
+P,H scenarios must expose either nested trials plus inner detail or monolithic
+execution detail. Criterion completed normally in this capture. Representative
+macro rows from the latest capture were:
+
+| case | wall | facade outside workflow | workflow | partition |
+| --- | ---: | ---: | ---: | ---: |
+| `stanjan15_ph_element_inventory_point` | 571.58 ms | 1.01 ms / 0.2% | 570.57 ms / 99.8% | 100.0% |
+| `tp1907_18_ph_element_inventory_point` | 146.75 ms | 2.18 ms / 1.5% | 144.58 ms / 98.5% | 100.0% |
+| `rp1311_40_pt_element_inventory_point` | 255.15 ms | 1.18 ms / 0.5% | 253.97 ms / 99.5% | 100.0% |
+| `rp1311_40_ph_element_inventory_point` | 381.71 ms | 16.72 ms / 4.4% | 364.99 ms / 95.6% | 100.0% |
+
+This is the macro table only. It is intentionally the one additive view: the
+two partition columns account for the complete facade wall time. The detailed
+facade, P,H workflow, inner fixed-P,T, nonlinear-envelope, backend-attempt,
+and accepted-solver tables are separate rendered views with their own parent
+scope and denominator; their percentages must not be added to this table or
+to one another.
+
+### Current detailed dashboard capture
+
+The following rows are copied from the same ten-repeat optimized `bench`
+profile capture on 2026-09-12. They are deliberately limited to the large
+production cases and the small `ElementInventory` control, so the evidence is
+readable while the command above still renders all 23 scenarios. Every table
+below has an explicit scope. The rows are not a replacement for the complete
+machine output; they are the retained optimization dashboard for the cases
+that own the large budgets.
+
+#### Facade-owned stages
+
+| case | resolution | request preparation | route selection | normalization | phase control | thermochemistry | result assembly |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ph_element_inventory_point` | 0.05 ms / 0.3% | 0.03 ms / 0.1% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.02 ms / 0.1% | 0.00 ms / 0.0% |
+| `stanjan15_pt_element_inventory_point` | 0.21 ms / 1.2% | 0.26 ms / 1.5% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% |
+| `stanjan15_ph_element_inventory_point` | 0.26 ms / 0.0% | 0.13 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.11 ms / 0.0% | 0.00 ms / 0.0% |
+| `tp1907_18_pt_element_inventory_point` | 0.30 ms / 0.3% | 0.39 ms / 0.4% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% |
+| `tp1907_18_ph_element_inventory_point` | 0.36 ms / 0.2% | 0.20 ms / 0.1% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.16 ms / 0.1% | 0.00 ms / 0.0% |
+| `rp1311_40_pt_element_inventory_point` | 0.60 ms / 0.2% | 0.57 ms / 0.2% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% |
+| `rp1311_40_ph_element_inventory_point` | 0.58 ms / 0.2% | 0.28 ms / 0.1% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.00 ms / 0.0% | 0.25 ms / 0.1% | 0.00 ms / 0.0% |
+
+#### P,H workflow stages
+
+These are inclusive observations. For nested P,H, `trial total` contains
+`trial inner execution`; for monolithic P,H, `monolithic execution` contains
+backend execution. The rows therefore explain the workflow without pretending
+that all percentages form a second additive partition.
+
+| case | stage | time | % of workflow | optimization meaning |
+| --- | --- | ---: | ---: | --- |
+| `ph_element_inventory_point` | monolithic RST preparation | 19.35 ms | 93.2% | RST payload/preparation boundary |
+| `ph_element_inventory_point` | monolithic backend execution | 1.02 ms | 4.9% | accepted backend callbacks |
+| `ph_element_inventory_point` | monolithic validation | 0.03 ms | 0.2% | acceptance checks |
+| `ph_element_inventory_point` | monolithic execution | 20.69 ms | 99.6% | inclusive parent, not additive |
+| `stanjan15_ph_element_inventory_point` | monolithic preparation | 0.36 ms | 0.1% | outer preparation |
+| `stanjan15_ph_element_inventory_point` | monolithic RST preparation | 554.19 ms | 97.1% | primary performance target |
+| `stanjan15_ph_element_inventory_point` | monolithic backend execution | 6.22 ms | 1.1% | accepted backend callbacks |
+| `stanjan15_ph_element_inventory_point` | monolithic validation | 0.14 ms | 0.0% | not performance-critical |
+| `stanjan15_ph_element_inventory_point` | monolithic execution | 570.18 ms | 99.9% | inclusive parent, not additive |
+| `tp1907_18_ph_element_inventory_point` | P,H scalar orchestration | 144.51 ms | 100.0% | inclusive outer parent |
+| `tp1907_18_ph_element_inventory_point` | trial total | 144.37 ms | 99.9% | contains trial children |
+| `tp1907_18_ph_element_inventory_point` | trial preparation | 20.33 ms | 14.1% | template/prepared-state construction |
+| `tp1907_18_ph_element_inventory_point` | trial inner execution | 123.92 ms | 85.7% | fixed-P,T work inside trials |
+| `tp1907_18_ph_element_inventory_point` | bracket orchestration | 0.14 ms | 0.1% | not a target |
+| `rp1311_40_ph_element_inventory_point` | P,H scalar orchestration | 364.88 ms | 100.0% | inclusive outer parent |
+| `rp1311_40_ph_element_inventory_point` | trial total | 364.45 ms | 99.9% | contains trial children |
+| `rp1311_40_ph_element_inventory_point` | trial preparation | 230.85 ms | 63.3% | primary preparation target |
+| `rp1311_40_ph_element_inventory_point` | trial inner execution | 133.09 ms | 36.5% | fixed-P,T work inside trials |
+| `rp1311_40_ph_element_inventory_point` | bracket orchestration | 0.43 ms | 0.1% | not a target |
+
+#### Inner stages and nonlinear ownership
+
+`outside nonlinear envelope` is an exclusive arithmetic complement. Other
+inner rows are inclusive measurements and are intentionally read as ownership
+evidence, not summed percentages.
+
+| case | inner scope | outside envelope | RST preparation | numeric closure | nonlinear solve | validation |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `stanjan15_pt_element_inventory_point` | fixed P,T | 0.23 ms / 1.4% | 12.62 ms / 76.3% | 0.04 ms / 0.3% | 16.32 ms / 98.6% | 0.01 ms / 0.0% |
+| `tp1907_18_pt_element_inventory_point` | fixed P,T | 77.21 ms / 78.2% | 20.24 ms / 20.5% | 0.06 ms / 0.1% | 21.55 ms / 21.8% | 0.01 ms / 0.0% |
+| `tp1907_18_ph_element_inventory_point` | fixed P,T trial | 0.94 ms / 0.8% | 0.00 ms / 0.0% | 0.70 ms / 0.6% | 122.81 ms / 99.2% | 0.16 ms / 0.1% |
+| `rp1311_40_pt_element_inventory_point` | fixed P,T | 0.58 ms / 0.2% | 233.85 ms / 92.1% | 0.10 ms / 0.0% | 253.39 ms / 99.8% | 0.02 ms / 0.0% |
+| `rp1311_40_ph_element_inventory_point` | fixed P,T trial | 3.88 ms / 2.9% | 0.00 ms / 0.0% | 2.94 ms / 2.2% | 128.64 ms / 97.1% | 0.51 ms / 0.4% |
+
+#### Nonlinear envelope and all-attempt accounting
+
+This is the table that answers what lies inside the large workflow numbers.
+`all attempt wall` includes accepted, rejected, failed, fallback, and recovery
+attempts. `known preparation` is the measured active-set/RST/projection part;
+`runner remainder` is the still-unattributed orchestration inside the parent,
+not silently assigned to the solver. `no metrics` is different from
+`unknown wall`: the current capture has elapsed wall time for every row.
+
+| case | parent scope | parent wall | envelope | attempts | all attempt wall | known preparation | runner remainder | no metrics | unknown wall |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `stanjan15_ph_element_inventory_point` | monolithic backend execution | 6.22 ms | 6.22 ms / 100.0% | 2 | 6.07 ms / 97.6% | 0.00 ms / 0.0% | 0.15 ms / 2.4% | 1/2 | 0 |
+| `tp1907_18_pt_element_inventory_point` | inner recovery transaction | 98.76 ms | 98.76 ms / 100.0% | 15 | 33.22 ms / 33.6% | 20.24 ms / 20.5% | 45.30 ms / 45.9% | 5/15 | 0 |
+| `tp1907_18_ph_element_inventory_point` | inner fixed P,T | 123.75 ms | 122.81 ms / 99.2% | 98 | 122.31 ms / 98.8% | 0.00 ms / 0.0% | 0.50 ms / 0.4% | 49/98 | 0 |
+| `rp1311_40_pt_element_inventory_point` | inner fixed P,T | 253.97 ms | 253.39 ms / 99.8% | 1 | 4.44 ms / 1.7% | 233.85 ms / 92.1% | 15.10 ms / 5.9% | 0 | 0 |
+| `rp1311_40_ph_element_inventory_point` | inner fixed P,T | 132.52 ms | 128.64 ms / 97.1% | 49 | 127.70 ms / 96.4% | 0.00 ms / 0.0% | 0.94 ms / 0.7% | 0 | 0 |
+
+#### Nonlinear solver callback table
+
+This separate table is the solver-level evidence. It reports the accepted
+backend callback work; the full rendered attempt table additionally retains
+each failed and rejected backend row. RST does not expose its internal linear
+solve, so `n/a` is an interface limitation, not zero work.
+
+| case | backend | backend wall | iterations | residual calls / time | Jacobian calls / time | linear solves / time | overhead |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `stanjan15_ph_element_inventory_point` | RST | 2.95 ms | 10 | 10 / 1,516.5 us (51.5%) | 10 / 1,255.9 us (42.6%) | 10 / n/a | 173.8 us (5.9%) |
+| `tp1907_18_ph_element_inventory_point` | legacy TR | 3.43 ms | 207 | 404 / 925.5 us (27.0%) | 212 / 1,485.3 us (43.3%) | 207 / 194.6 us (5.7%) | 820.1 us (23.9%) |
+| `rp1311_40_pt_element_inventory_point` | RST | 4.44 ms | 10 | 8 / 928.1 us (20.9%) | 8 / 3,299.1 us (74.3%) | 10 / n/a | 210.9 us (4.8%) |
+| `rp1311_40_ph_element_inventory_point` | RST | 69.32 ms | 174 | 160 / 10,693.1 us (15.4%) | 160 / 55,816.8 us (80.5%) | 174 / n/a | 2,784.7 us (4.0%) |
+| `ph_element_inventory_point_legacy_lm` | legacy LM | 0.14 ms | 8 | 17 / 26.8 us (19.1%) | 8 / 16.4 us (11.7%) | 8 / 0.0 us (0.0%) | 96.9 us (69.2%) |
+
+#### Representative backend-attempt ledger
+
+The production output contains one row for every started attempt. These rows
+show the important transitions from the current capture: failed and rejected
+attempts are retained with their wall time, and the accepted attempt is shown
+with callback detail. The full table includes the remaining seed/trial rows.
+
+| case | scope | backend | outcome | metrics | wall | residual / Jacobian / linear / overhead |
+| --- | --- | --- | --- | --- | ---: | --- |
+| `stanjan15_ph_element_inventory_point` | monolithic | RST LM | failed | wall-only | 3.12 ms | n/a / n/a / n/a / n/a |
+| `stanjan15_ph_element_inventory_point` | monolithic | RST Minpack LM | accepted | reported+callbacks | 2.95 ms | 1.52 / 1.26 / n/a / 0.17 ms |
+| `tp1907_18_pt_element_inventory_point` | recovery/physical-failure | RST LM | failed | wall-only | 0.52 ms | n/a / n/a / n/a / n/a |
+| `tp1907_18_pt_element_inventory_point` | recovery/normalized-discovery | Legacy LM | accepted | reported+callbacks | 0.13 ms | 0.02 / 0.00 / 0.01 / 0.10 ms |
+| `tp1907_18_pt_element_inventory_point` | recovery/physical-retry | RST LM | accepted | reported+callbacks | 0.20 ms | 0.10 / 0.10 / n/a / 0.00 ms |
+| `tp1907_18_ph_element_inventory_point` | trial-0 | RST LM | failed | wall-only | 0.20 ms | n/a / n/a / n/a / n/a |
+| `tp1907_18_ph_element_inventory_point` | trial-0 | RST Minpack LM | rejected candidate | reported+callbacks | 4.84 ms | 2.24 / 2.02 / n/a / 0.58 ms |
+| `tp1907_18_ph_element_inventory_point` | trial-0 | Legacy TR | accepted | reported+callbacks | 0.15 ms | 0.00 / 0.00 / 0.03 / 0.12 ms |
+| `rp1311_40_pt_element_inventory_point` | point | RST LM | accepted | reported+callbacks | 4.44 ms | 0.93 / 3.30 / n/a / 0.21 ms |
+| `rp1311_40_ph_element_inventory_point` | trial-0 | RST LM | accepted | reported+callbacks | 4.09 ms | 0.79 / 3.12 / n/a / 0.18 ms |
+
+The accepted callback table explains solver work, while the attempt ledger
+explains solver selection cost. For example, TP-1907 P,H has `98` started
+attempts and `49/98` without structured metrics, but zero unknown wall time;
+those calls remain visible in the full attempt table as measured `wall-only`
+rows. Therefore the remaining optimization questions are concrete: RST
+preparation for STANJAN/RP P,T, P,H trial preparation for RP-1311, and the
+callback implementation itself only after the separate nonlinear-solver
+optimization task is opened.
+
+The lower-level tables rendered failed calls as `wall-only` with their actual
+elapsed time and `n/a` only for unavailable internal counters. `unknown wall`
+was zero across the capture. TP-1907 P,T recovery is explicitly visible as a
+recovery transaction; RP-1311/40 P,T exposes its large RST preparation stage
+and the remaining runner/orchestration remainder. Thus the report identifies
+the next optimization owner instead of leaving a generic unexplained budget.
+
+The post-fix focused check
+`cargo test --lib --no-default-features Thermodynamics::ChemEquilibrium --quiet`
+completed with `979 passed; 0 failed; 71 ignored`. The three frozen cases that
+were reported as failures in the parallel all-library run each pass when run
+individually; their parallel failure is the pre-existing relative-path/global
+library snapshot sensitivity, not an equilibrium solve or timing failure. The
+same all-library run also reported seven unrelated failures in kinetics, GUI,
+settings, and the legacy phase test.
+
+## 73. PERF-RST-01: isolated RST solver comparison [HISTORICAL]
+
+**Status:** Historical pre-prepared-adapter capture from 2026-09-12. This
+section is retained for the original solver-compatibility evidence only. It
+predates the parameterized prepared RST adapter, the production Sequential
+Lambdify policy, and the addition of Backtracking LM to the benchmark matrix.
+Do not use its wall times or four-method list as the current baseline; use
+Stories 103, 104, 105, and 108 plus the current benchmark source.
+
+### Story name
+
+The RST preparation benchmark must show not only where the calculator spends
+time, but also which RST method can produce an accepted equilibrium for the
+same facade request. `LevenbergMarquardt`, `MinpackLevenbergMarquardt`,
+`NielsenLevenbergMarquardt`, and `DampedNewton` are separate methods and must
+not be represented by a production cascade row.
+
+### Command
+
+```powershell
+$env:CARGO_PROFILE_BENCH_LTO='false'
+$env:CARGO_PROFILE_BENCH_CODEGEN_UNITS='16'
+cargo bench --bench equilibrium_rst_preparation --features equilibrium-instrumentation -- --noplot
+```
+
+The capture was made on 2026-09-12 in the optimized Cargo benchmark profile.
+The diagnostic dashboard uses three fixed repetitions per case; Criterion
+uses ten measurements per benchmark ID. `equilibrium_rst_preparation` uses
+the normal `EquilibriumCalculator` facade and
+`postprocessing_and_logging` instrumentation. Every row uses
+`SolverPolicy::Single(RustedSciThe(...))`; legacy fallback is disabled.
+
+### Question and hypothesis
+
+Can the RST methods be compared on both acceptance and cost as the system grows
+from 3 to 15, 18, and 40 components? The answer must be split into two
+dimensions: accepted-solve time and solver compatibility. A short rejected
+attempt is useful diagnostic evidence, but is not a faster equilibrium solve.
+
+### Matrix
+
+The benchmark contains 44 fixed-policy cases. All four RST methods run the
+same molecular P,T size ladder (3, 15, 18, 40 components), small elemental
+P,T, small monolithic elemental P,H, and 15-component elemental P,T. LM and
+Minpack additionally cover molecular and elemental P,H, TP-1907/18 and
+RP-1311/40 elemental points, and the three-point elemental continuation range.
+
+### Result: molecular P,T solver comparison
+
+The numbers below are Criterion median wall times. `failed` means the isolated
+RST call did not publish an accepted solution; its measured rejection time is
+not a successful-solve performance result.
+
+| RST method | 3 components | 15 components | 18 components | 40 components |
+| --- | ---: | ---: | ---: | ---: |
+| LM | 1.057 ms, accepted | 15.268 ms, accepted | 22.776 ms, failed | 253.39 ms, failed |
+| Minpack LM | 1.100 ms, accepted | 15.003 ms, accepted | 29.654 ms, failed | 252.47 ms, accepted |
+| Nielsen LM | 1.426 ms, accepted | 34.532 ms, failed | 30.794 ms, failed | 259.03 ms, failed |
+| Damped Newton | 1.092 ms, accepted | 28.625 ms, failed | 22.514 ms, failed | 251.84 ms, failed |
+
+The 40-component molecular row identifies Minpack LM as the only accepted
+method in this isolated slice. Damped Newton has a low rejection time there,
+but that is not evidence that it is the best solver. LM remains the best
+accepted choice on the 3/15-component molecular rows in this capture. Nielsen
+LM and Damped Newton require further compatibility work before a production
+default decision can be based on speed.
+
+### Result: elemental and P,H controls
+
+| Case | LM | Minpack LM | Nielsen LM | Damped Newton |
+| --- | ---: | ---: | ---: | ---: |
+| small elemental P,T | failed | 1.35 ms, accepted | 2.33 ms, accepted | failed |
+| small elemental P,H | 21.89 ms, accepted | 21.98 ms, accepted | failed | 22.17 ms, accepted |
+| STANJAN-15 elemental P,T | 16.65 ms, accepted | 16.26 ms, accepted | 17.98 ms, accepted | failed |
+
+The P,H and elemental controls confirm that solver ranking is route- and
+fixture-dependent. No method is promoted or demoted from this benchmark
+alone; the isolated acceptance result must first pass the ordinary and frozen
+correctness gates.
+
+### Detailed timing evidence
+
+The rendered report contains four separate views rather than one misleading
+sum of overlapping percentages:
+
+1. macro facade wall partition into `outside workflow` and `workflow`;
+2. concrete facade and route stages, including thermochemistry, normalization,
+   preparation, projection, validation, and publication;
+3. every RST attempt, including rejected candidates and failed attempts;
+4. execution/reuse counters and RST callback timing.
+
+Representative accepted callback rows from the same capture were:
+
+| Case | RST method | backend wall | iterations | residual | Jacobian | overhead |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| small molecular P,T | LM | 0.39 ms | 3 | 0.17 ms / about 43% | 0.20 ms / about 50% | about 0.02 ms |
+| STANJAN-15 molecular P,T | LM | about 1 ms | 7 | about 0.4 ms | about 0.6 ms | about 0.05 ms |
+| RP-1311/40 molecular P,T | Minpack LM | about 3.5 ms | 5 | about 0.8 ms | about 2.4 ms | about 0.32 ms |
+
+RST does not currently publish a separate internal linear-system duration;
+the report prints that field as `n/a`, never as zero. Failed and rejected
+attempts remain in the ledger with their wall time and callback counts where
+RST published metrics.
+
+### Verification and decision
+
+`cargo check --bench equilibrium_rst_preparation --no-default-features`
+passed, `cargo fmt -- benches/equilibrium_rst_preparation.rs` completed, and
+`git diff --check` reported no whitespace errors. The dashboard completed and
+rendered all matrix tables. Criterion returned exit code 1 because its stored
+statistical baseline flagged performance regressions in some existing IDs;
+there was no benchmark panic or hidden fallback. This is a performance signal,
+not a correctness pass.
+
+The correctness gate remains open: run the focused calculator suite, matching
+frozen references, molecular/elemental equivalence stories, and phase
+lifecycle tests before using any solver ranking for optimization or defaults.
+
+## 74. PERF-PREP-01: elemental P,T bridge reuse
+
+### Story name
+
+The elemental P,T facade must not prepare the same canonical
+`PhaseEquilibriumProblemBundle` twice merely because it needs the bundle's
+initial numerical seed. One bridge build is the ownership invariant for a
+one-shot elemental P,T point; normalized recovery is allowed to build its own
+transformed retry after a physical numerical failure.
+
+### Commands
+
+```powershell
+cargo test --lib --no-default-features Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests::facade_element_inventory_pt_point_builds_canonical_bridge_once --quiet
+cargo test --lib --no-default-features Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests --quiet
+$env:CARGO_PROFILE_BENCH_LTO='false'
+$env:CARGO_PROFILE_BENCH_CODEGEN_UNITS='16'
+cargo bench --bench equilibrium_rst_preparation --features equilibrium-instrumentation -- rp1311_40_pt_element_inventory_rst_minpack_levenberg_marquardt --noplot
+```
+
+### Question and hypothesis
+
+Does passing the seed-producing bridge into the first physical transaction
+remove the duplicate preparation without changing the accepted equilibrium,
+recovery behavior, or diagnostic stage ownership? The expected invariant is
+`phase_equilibrium_builds = 1` for the public elemental P,T point. Any wall-time
+improvement is expected to be modest here because the dominant RP-1311/40 cost
+is RST preparation, not bridge construction.
+
+### Correctness result
+
+The focused point test passed and printed no additional backend route. It
+asserts `phase_equilibrium_builds() == 1` and conservation error below
+`1e-7`. The full `equilibrium_calculator::tests` module passed: `24 passed,
+0 failed, 1 ignored`. The existing elemental P,T range test also passed and
+continues to assert one canonical bridge build and formulation reuse.
+
+### Performance result
+
+The optimized RP-1311/40 elemental P,T Minpack diagnostic observations were
+`251.39/252.20/254.98 ms` before and `247.34/244.79/244.73 ms` after this
+change. The concrete post-change stage sample was `request preparation
+0.43 ms`, `RST preparation 228.06 ms`, and `nonlinear solve 246.20 ms`.
+Criterion measured `[246.88 ms, 248.84 ms, 250.79 ms]` and reported
+`No change in performance detected` (`p = 0.44`). The comparison therefore
+confirms removal of duplicate bridge work and no correctness regression, but
+does not claim a material benchmark speedup.
+
+### Decision and next action
+
+`PERF-PREP-01` is accepted as a correctness-preserving preparation cleanup.
+It does not close the performance target for large cases. Continue with cold
+versus repeated/prepared RST graph measurements; the next optimization must
+attack the measured `RST preparation` budget while retaining the same isolated
+solver policy and detailed attempt ledger.
+
+## 75. PERF-PREP-02: prepared fixed-P,T session
+
+### Story name
+
+Repeated fixed-phase P,T calculations over one unchanged species universe must
+reuse the prepared formulation and parameterized RST graph. The public facade
+must expose this as a typed session so that preparation time is not paid again
+for every temperature point.
+
+### Commands
+
+```powershell
+cargo test --lib --no-default-features Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests::prepared_pt_session_reuses_rst_graph_across_sequential_points --quiet
+cargo check --bench equilibrium_prepared_session --no-default-features --quiet
+$env:CARGO_PROFILE_BENCH_LTO='false'
+$env:CARGO_PROFILE_BENCH_CODEGEN_UNITS='16'
+cargo bench --bench equilibrium_prepared_session --features equilibrium-instrumentation -- --noplot
+```
+
+### Question and hypothesis
+
+Does a prepared session remove repeated symbolic RST construction while
+preserving ordinary accepted-solution publication and continuation from the
+last accepted seed? The expected evidence is one retained graph, a large
+construction budget on the first point, and no symbolic construction on the
+later point.
+
+### Matrix and scope
+
+`equilibrium_prepared_session` uses the normal `EquilibriumCalculator` facade
+and the internal timing/instrumentation reports. The capture covers molecular
+3-, 15-, and 40-component gas systems, elemental 3- and 15-component systems,
+and the 18-component TP-1907 gas-plus-graphite ElementInventory fixture. Each
+row compares preparation plus the first point with a later temperature point
+on the same fixed-phase session. P,H and bounded phase-control routes are
+intentionally excluded because their rollback and active-set lifecycles need a
+separate prepared boundary.
+
+### Correctness result
+
+The focused sequential-session test passed. It asserts that the RST graph is
+prepared, solves two temperatures through the session, and checks both
+published solution temperatures and enabled timing on the second result. The
+ordinary one-shot facade path was not changed by this experiment.
+
+### Performance result
+
+A representative diagnostic capture produced the following rows:
+
+| Case | Prepared construction | Cold operation (construction + first point) | Hot point | Saved versus cold |
+| --- | ---: | ---: | ---: | ---: |
+| TP-1907/18 elemental P,T | 23.095 ms | 35.776 ms | 0.682 ms | 98.1% |
+| RP-1311/40 molecular P,T | 267.132 ms | 275.111 ms | 2.881 ms | 99.0% |
+| STANJAN-15 elemental P,T | 13.171 ms | 16.881 ms | 1.024 ms | 93.9% |
+
+The concrete stage table attributes RP-1311/40 preparation to
+`266.490 ms` of symbolic construction; its hot point has about `2.620 ms` in
+the nonlinear solve and no new symbolic construction. The macro and concrete
+tables are separate because the concrete stages are inclusive and must not be
+summed as independent percentages.
+
+A separate equal two-point capture compared three public
+facade workflows. These are diagnostic wall samples, not Criterion medians:
+
+| Case | One-shot loop | Prepared session | Built-in range | Session saving | Range saving |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| small3 molecular P,T | 2.284 ms | 1.506 ms | 1.534 ms | 34.1% | 32.8% |
+| STANJAN-15 molecular P,T | 30.835 ms | 16.369 ms | 15.839 ms | 46.9% | 48.6% |
+| TP-1907/18 elemental P,T | 69.474 ms | 33.835 ms | 34.533 ms | 51.3% | 50.3% |
+| RP-1311/40 molecular P,T | 495.888 ms | 231.799 ms | 245.918 ms | 53.3% | 50.4% |
+| small3 elemental P,T | 2.984 ms | 2.225 ms | 2.217 ms | 25.4% | 25.7% |
+| STANJAN-15 elemental P,T | 31.178 ms | 15.782 ms | 16.202 ms | 49.4% | 48.0% |
+
+The result answers two different questions. Against a one-shot loop, both
+prepared session and built-in range remove repeated symbolic construction and
+save about `25-53%` for this two-point workload. Against each other, they are
+close; the new session is therefore a reusable public ownership boundary, not
+a claim that range internals were previously uncached.
+
+### Decision and next action
+
+`PERF-PREP-02` is accepted as a measured ownership/API optimization for fixed
+P,T. The large result confirms that prepared formulation ownership is a real
+performance target. The next work is a correctness matrix against frozen and
+ElementInventory stories, followed by allocation/shared-buffer measurements;
+P,H prepared ownership remains open and must not be inferred from this result.
+
+## 76. PERF-PH-01: focused P,H preparation and continuation baseline
+
+### Story name
+
+P,H performance work must identify the owner of the large wall-time budget for
+both monolithic and nested routes. The report must distinguish formulation and
+trial preparation from inner execution and bracket control, and must retain the
+backend-attempt evidence needed to interpret fallback cost.
+
+### Commands
+
+```powershell
+cargo test --lib --no-default-features Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests::facade_ph_monolithic_range_reuses_prepared_formulation_without_changing_acceptance -- --nocapture
+cargo test --lib --no-default-features Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests::facade_solves_pt_then_ph_without_manual_resolved_request_assembly -- --nocapture
+cargo check --bench equilibrium_ph_preparation --no-default-features --quiet
+cargo bench --bench equilibrium_ph_preparation --no-default-features --features equilibrium-instrumentation -- --noplot
+```
+
+The optimized capture was executed from the generated release benchmark
+binary with the same `--noplot` arguments after the benchmark target was
+built. The benchmark uses the public `EquilibriumCalculator` facade,
+`EquilibriumTimingMode::Enabled`, shared calculator instrumentation, and
+`tabled`; it does not construct equations or time benchmark-local solver
+wrappers.
+
+### Question and hypothesis
+
+Where does cold P,H time go after the facade and workflow reports are made
+complete? The hypothesis was that monolithic cases are dominated by one-time
+RST graph preparation, while nested cases are dominated by repeated trial
+template preparation or inner execution. Route selection and bracket control
+were expected to be small. P,H range reuse was expected to show one prepared
+formulation build followed by reuse without changing accepted results.
+
+### Matrix
+
+| Fixture | Components | Input | Route |
+| --- | ---: | --- | --- |
+| `small3_molecular` | 3 | molecular | monolithic |
+| `stanjan15_molecular` | 15 | molecular | monolithic |
+| `stanjan15_elemental` | 15 | `ElementInventory` | monolithic |
+| `tp1907_18_elemental` | 18 | `ElementInventory` + graphite | nested |
+| `rp1311_40_elemental` | 40 | `ElementInventory` | nested |
+
+### Correctness result
+
+Both focused facade tests passed. The monolithic range published three
+accepted points with `formulation_builds=1`, `continuation_points=2`, and
+`formulation_reuses >= 2`; every target had an accepted enthalpy error and a
+finite temperature. The existing ElementInventory P,H point/range test also
+passed with one canonical bridge build, two points, and one continuation point.
+No production equation, solver order, fallback classification, or rollback
+contract was changed by this baseline.
+
+### Diagnostic result
+
+The following is one optimized diagnostic capture. The detailed stage columns
+are inclusive and therefore are not percentages to be summed together. The
+only additive boundary is facade wall time versus the complete P,H workflow;
+the nested trial and inner columns explain the workflow budget at the next
+level.
+
+| Case | Route | Wall ms | P,H total ms | Mono prep ms | Mono RST ms | Mono backend ms | Trial prep ms | Trial template ms | Trial inner ms | Bracket ms | Builds | Reuses | Attempts |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `small3_molecular` | mono | 20.384 | 20.168 | 0.139 | 18.565 | 1.132 | 0 | 0 | 0 | 0 | 1 | 0 | 2 |
+| `stanjan15_molecular` | mono | 532.658 | 531.790 | 0.443 | 492.215 | 28.844 | 0 | 0 | 0 | 0 | 1 | 0 | 6 |
+| `stanjan15_elemental` | mono | 515.889 | 514.857 | 0.613 | 497.955 | 5.999 | 0 | 0 | 0 | 0 | 1 | 0 | 2 |
+| `tp1907_18_elemental` | nested | 162.752 | 159.879 | 0 | 0 | 0 | 19.949 | 19.917 | 139.457 | 0.272 | 1 | 10 | 98 |
+| `rp1311_40_elemental` | nested | 271.188 | 252.112 | 0 | 0 | 0 | 225.594 | 225.587 | 26.258 | 0.050 | 1 | 2 | 6 |
+
+The attempt table printed by the same command contains every accepted,
+rejected, and failed inner backend attempt. Representative evidence is:
+
+| Case | Attempt evidence | Accepted backend |
+| --- | --- | --- |
+| small molecular | RST LM rejected at `0.539 ms`; RST Minpack accepted at `0.518 ms` | RST Minpack LM |
+| STANJAN-15 molecular | RST LM failed; Minpack and Trust Region were rejected; Nielsen and Damped Newton failed | Legacy LM |
+| STANJAN-15 elemental | RST LM failed at `2.974 ms`; RST Minpack accepted at `2.887 ms` | RST Minpack LM |
+| TP-1907/18 nested | `11` trials and `98` backend attempts retained, including RST and legacy fallbacks | shown per trial in attempt table |
+| RP-1311/40 nested | `3` trials and `6` backend attempts retained | shown per trial in attempt table |
+
+### Range evidence
+
+| Case | Targets | Total ms | Mean point ms | Formulation builds | Formulation reuses | Continuation points |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `small3_molecular` | 3 | 21.725 | 0.735 | 1 | 2 | 2 |
+| `stanjan15_elemental` | 3 | 522.552 | 5.351 | 1 | 2 | 2 |
+| `rp1311_40_elemental` | 2 | 483.658 | 231.887 | 1 | 42 | 1 |
+
+The RP-1311/40 nested reuse count is aggregated over nested trial
+formulations, so it is not a point count; it must not be compared directly to
+the `2` point targets. The one-build result and continuation point are the
+relevant range ownership evidence.
+
+### Decision and next action
+
+`PERF-PH-01` is accepted as a diagnostic baseline and correctness gate. The
+large monolithic budgets are in RST preparation (`18.821/20.353 ms` for the
+small case and `496.815/534.766 ms` for STANJAN-15 molecular), while nested
+TP/RP budgets are respectively trial inner execution and trial-template
+preparation. Bracket control is not a target at these sizes. This is not yet a
+performance win and does not authorize nonlinear solver changes.
+
+The next experiment described by this baseline was executed as `PERF-PH-02`
+below. The legacy fallback attempt table remains part of this baseline and was
+not removed or averaged away.
+
+## 77. PERF-PH-02: prepared monolithic P,H session
+
+### Story name
+
+Repeated fixed-phase monolithic P,H targets should pay for thermochemistry,
+the fixed formulation, and the parameterized RST graph once. Later targets
+must retarget only scalar enthalpy parameters and the last accepted numerical
+seed, while preserving accepted physical results and transactional continuation.
+
+### Commands
+
+```powershell
+cargo test --lib --no-default-features Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests::prepared_ph_session_reuses_monolithic_formulation_across_targets -- --nocapture
+cargo test --lib --no-default-features Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests::prepared_ph_element_inventory_session_preserves_acceptance -- --nocapture
+cargo test --lib --no-default-features Thermodynamics::ChemEquilibrium::equilibrium_calculator::tests::facade_ph_monolithic_range_reuses_prepared_formulation_without_changing_acceptance -- --nocapture
+cargo check --bench equilibrium_ph_preparation --no-default-features --quiet
+cargo bench --bench equilibrium_ph_preparation --no-default-features --features equilibrium-instrumentation -- --noplot prepared_session_two_points
+```
+
+The benchmark uses the public facade and the shared opt-in instrumentation.
+The capture prints the complete P,H stage/attempt/range tables and a separate
+prepared-session table; Criterion also executes the three session benchmark
+IDs: `one_shot_two_points`, `prepared_session_two_points`, and
+`prepared_session_hot_point`.
+
+### Question and hypothesis
+
+Does a public prepared P,H ownership boundary remove repeated fixed-formulation
+and RST graph construction? The hypothesis is that the first prepared point
+has approximately the ordinary one-shot cost, the session preparation pays
+that cost once, and a later point is reduced to hot numeric execution. The
+accepted backend and physical acceptance contract must remain unchanged.
+
+### Implementation
+
+`PreparedEquilibriumPhSession` is exported from the production prelude. It is
+implemented on top of the existing `PreparedPhContinuationState`; it does not
+introduce a second equation system or alter solver order. The initial scope is
+deliberately fixed declared phases with explicit `PhSolveMode::Monolithic`.
+Bounded phase control, `Auto` nested fallback, nested P,H, and cross-identity
+cache sharing remain outside this session.
+
+The session retargets its owned request in place and advances its composition
+and temperature seed only after a successful accepted point. Failed solves do
+not replace the continuation seed. Both molecular and ElementInventory
+correctness tests passed.
+
+### Performance result
+
+One optimized diagnostic capture produced these two-target rows:
+
+| Case | One-shot two points | Session preparation | Session first point | Session hot point | Session total | Reduction |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `small3_molecular` | 42.789 ms | 19.817 ms | 1.454 ms | 0.407 ms | 21.678 ms | 49.3% |
+| `stanjan15_molecular` | 1185.978 ms | 542.876 ms | 29.699 ms | 4.505 ms | 577.080 ms | 51.3% |
+| `stanjan15_elemental` | 1127.899 ms | 545.127 ms | 6.485 ms | 6.018 ms | 557.630 ms | 50.6% |
+
+The session first and second points each report `fixed_formulation_builds=0`
+and `fixed_formulation_reuses=1`. The session total is the sum of preparation,
+first point, and hot point for this capture; the reduction is against the
+two-point one-shot loop. These are diagnostic wall samples, not a claim about
+Criterion confidence intervals.
+
+### Correctness result
+
+The two session tests passed. They assert accepted enthalpy error, finite
+temperature, and formulation reuse for molecular input; the molecular session
+also tries an unreachable target first and then solves the original target,
+proving that a failed point does not replace the continuation seed. The
+ElementInventory test additionally asserts element balance. The monolithic
+range regression also passed with one build and two continuation reuses. The
+calculator test module remained green: `28 passed, 1 ignored`.
+
+### Decision and next action
+
+`PERF-PH-02` is accepted as a correctness-preserving performance/API
+optimization. It demonstrates approximately `49-51%` reduction for this
+two-target workload by removing the second one-time preparation. It does not
+optimize nonlinear residual/Jacobian/linear-system execution.
+
+Next, measure the internal split of the one-time session preparation and the
+remaining nested P,H trial-template cost. Only shared immutable payloads or
+large buffers with a material measured effect should be changed; the existing
+legacy attempt ledger, fallback ordering, scale envelope, and frozen lifecycle
+tests remain mandatory gates.
+
+## 78. PERF-PH-03: P,H preparation and nested trial detail
+
+### Story name
+
+The P,H performance dashboard must explain cold prepared-session construction
+and every nested temperature trial without hiding work inside one preparation
+or workflow number.
+
+### Command
+
+```powershell
+cargo bench --bench equilibrium_ph_preparation --no-default-features --features equilibrium-instrumentation -- --noplot prepared_session_two_points
+```
+
+The benchmark uses the public facade and the opt-in shared instrumentation.
+It prints the existing macro/stage/attempt/session tables, a cold monolithic
+preparation breakdown, and one row for every nested TP-1907/18 and RP-1311/40
+temperature trial. The capture below was run from the optimized benchmark
+executable after the bench target was linked; the package-level Cargo command
+also started rebuilding the unrelated GUI binary.
+
+### Question and hypothesis
+
+Which part of the one-time prepared P,H state is responsible for its large
+cold wall time, and does nested P,H spend its time in template construction,
+scalar orchestration, or inner equilibrium execution? The hypothesis was that
+symbolic expression construction plus RST payload materialization dominate
+cold monolithic preparation, while nested trial rows expose whether the
+one-time template is amortized and whether the remaining cost belongs to the
+inner nonlinear solve.
+
+### Cold monolithic preparation output
+
+| case | facade setup | state total | thermochemistry | normalization | equation | symbolic construction | P,H formulation | RST preparation | state remainder |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `small3_molecular` | 0.123 ms | 25.005 ms | 0.693 ms | 0.000 ms | 0.003 ms | 5.710 ms | 0.020 ms | 18.497 ms | 0.069 ms |
+| `stanjan15_molecular` | 0.336 ms | 756.420 ms | 5.757 ms | 0.000 ms | 0.005 ms | 517.481 ms | 0.070 ms | 232.854 ms | 0.191 ms |
+| `stanjan15_elemental` | 0.876 ms | 751.531 ms | 5.284 ms | 0.000 ms | 0.008 ms | 513.946 ms | 0.128 ms | 231.744 ms | 0.326 ms |
+
+The stage values are measured inside one preparation invocation. The facade
+setup is the measured wall outside the prepared state; the state remainder is
+the explicit complement after the named exclusive preparation fields.
+`symbolic construction` covers the transformed Gibbs and enthalpy expression
+graph; `RST preparation` covers RST symbolic-problem and lambdify/backend
+materialization. The values are ownership evidence, not a promise that
+independently printed wall samples will be identical.
+
+### Nested P,H output
+
+The existing macro row gave this aggregate ownership view for the same
+optimized executable:
+
+| case | trials | template preparation | trial preparation | inner execution | bracket orchestration |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `tp1907_18_elemental` | 11 | 20.391 ms | 20.424 ms | 138.731 ms | 0.210 ms |
+| `rp1311_40_elemental` | 3 | 232.878 ms | 232.887 ms | 25.556 ms | 0.072 ms |
+
+The separate `PERF-PH-03 nested P,H trial detail` table contains all 14
+trial rows and, for each row, prints temperature, scalar step, preparation
+kind, template-build marker, trial total, inner execution/equilibrium,
+enthalpy, postprocessing, and inner equation/RST/nonlinear/validation times.
+Representative rows from that table were:
+
+| case/trial | preparation | template build | trial total | inner execution | nonlinear solve | enthalpy |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `tp1907_18_elemental/0` | `FixedFormulationInitial` | true | 12.806 ms | 12.780 ms | 12.622 ms | 0.023 ms |
+| `tp1907_18_elemental/10` | `FixedFormulationReused` | false | 12.773 ms | 12.759 ms | 12.665 ms | 0.012 ms |
+| `rp1311_40_elemental/0` | `FixedFormulationInitial` | true | 4.346 ms | 4.301 ms | 4.034 ms | 0.043 ms |
+| `rp1311_40_elemental/1` | `FixedFormulationReused` | false | 12.918 ms | 12.884 ms | 12.673 ms | 0.031 ms |
+
+### Correctness result
+
+The calculator module remained green: `28 passed, 1 ignored`. The prepared
+molecular P,H session, its failed-target retry/rollback check, and the
+ElementInventory acceptance test all passed. The benchmark's three prepared
+session Criterion IDs (`small3_molecular`, `stanjan15_molecular`, and
+`stanjan15_elemental`) completed successfully.
+
+### Decision and next action
+
+`PERF-PH-03` closes the diagnostic gap for the next optimization decision.
+The large cold monolithic cost is not in normalization, equation assembly, or
+P,H formulation. It is split between symbolic expression construction and RST
+payload materialization. On STANJAN-15, symbolic construction accounts for
+about `68.4%` of state preparation and RST materialization for about `30.8%`;
+on the 3-component case the corresponding shares are about `22.8%` and
+`74.0%`. Thermochemistry remains small but is measurable at roughly `5-6 ms`
+on STANJAN-15.
+For nested TP-1907/18, the template is paid once and subsequent rows are
+nonlinear-execution dominated. For RP-1311/40, the first template build is
+the dominant cost and is already reused by later trials. Bracket control and
+enthalpy evaluation are not performance targets.
+
+The next implementation experiment should first isolate immutable symbolic
+expression construction from request-specific numeric state, then measure RST
+backend materialization separately. A shared payload across P,T and P,H is
+only valid if the differing equation dimensions and temperature/enthalpy
+parameters are represented explicitly; the current P,H graph cannot be
+reused by identity with a P,T graph. No callback parallelization or
+solver-order change is justified by this story alone.
+
+## 79. PERF-PH-04: Remove redundant P,H symbolic simplification
+
+### Story name
+
+Monolithic P,H RST preparation must not run a second full symbolic
+simplification pass over already simplified physical residuals or over the
+scaled enthalpy row.
+
+### Question and hypothesis
+
+Does removing the redundant `.simplify()` work at the P,H builder boundary
+reduce cold preparation and end-to-end P,H time without changing equations,
+accepted backend, attempt order, or physical acceptance? The hypothesis was
+that the large symbolic trees make this repeated pass material, especially for
+15-component systems.
+
+### Change
+
+`prepare_rst_symbolic_ph_problem_with_timing` still builds exactly the same
+scaled residual and enthalpy equations. It now applies the validated constant
+row scale and enthalpy scale directly, leaving the existing per-residual
+generator simplification and RST differentiation unchanged. No nonlinear
+solver, cascade order, tolerance, or fallback behavior was changed.
+
+### Command and paired release capture
+
+```powershell
+cargo build --release --bench equilibrium_ph_preparation `
+  --no-default-features --features equilibrium-instrumentation
+```
+
+The old and new release bench executables were run three times with
+`prepared_session_two_points`; the table reports the median `ph_total_ms` from
+the `PERF-PH-01` macro row. The same case matrix and public facade were used
+on both sides.
+
+| case | before median | after median | change |
+| --- | ---: | ---: | ---: |
+| `stanjan15_molecular` | 545.701 ms | 383.452 ms | -29.7% |
+| `stanjan15_elemental` | 522.100 ms | 353.739 ms | -32.2% |
+
+The paired samples retained the same accepted routes: legacy LM for the
+molecular case and RST Minpack LM for the ElementInventory case. The RST
+rejections/failures and fallback order remained visible in the attempt table.
+The measurement is a wall-time experiment rather than a claim that every
+machine will reproduce the same absolute milliseconds.
+
+### Correctness result
+
+The ordinary calculator module passed `28 passed, 1 ignored`. TP-1906 frozen
+P,H molecular/elemental/formal route equivalence passed, including the same
+recovered temperature, enthalpy error, residual, and element balance; the
+nested/Auto physical-state agreement test also passed.
+
+### Decision and next action
+
+`PERF-PH-04` is accepted as a correctness-preserving preparation optimization:
+the paired large-case medians show a material reduction, while nonlinear
+callback execution was not modified. The next experiment remains immutable
+symbolic expression reuse across compatible prepared sessions. It must keep
+P,T and P,H graph dimensions separate unless an explicit shared RST payload
+contract is introduced and measured.
+
+## 80. PERF-PH-05: Skip intermediate P,H residual simplification
+
+### Story name
+
+The monolithic P,H RST route should pass its already-structured residuals
+directly to RST instead of simplifying every physical residual before RST
+differentiates and materializes the final payload.
+
+### Command and question
+
+```powershell
+cargo build --release --bench equilibrium_ph_preparation `
+  --no-default-features --features equilibrium-instrumentation
+```
+
+The release executable was run three times with
+`--noplot prepared_session_two_points`. Does removing only the intermediate
+P,H residual-generator simplification preserve the accepted routes and
+reduce the cold preparation budget? The comparison control is the
+post-PERF-PH-04 release capture, before this P,H generator change. The table
+uses the median of three current runs; absolute wall values are machine and
+load dependent.
+
+### Hypothesis and implementation
+
+The P,H RST path now uses a private raw generator mode. Fixed-P,T continues
+to use the canonical simplified generator. The P,H path still performs the
+final row scaling, adds the enthalpy equation, and lets RST own the
+subsequent symbolic differentiation. Equation dimensions, variables,
+parameters, tolerances, solver order, and fallback behavior are unchanged.
+
+### Cold preparation evidence
+
+| case | PERF-PH-04 control state total | PERF-PH-05 median state total | symbolic median | RST median | state change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `stanjan15_molecular` | 383.825 ms | 233.075 ms | 10.763 ms | 216.483 ms | -39.3% |
+| `stanjan15_elemental` | 461.680 ms | 227.570 ms | 10.673 ms | 210.912 ms | -50.7% |
+
+The three current runs were:
+
+| case | run 1 state / symbolic / RST | run 2 state / symbolic / RST | run 3 state / symbolic / RST |
+| --- | --- | --- | --- |
+| `stanjan15_molecular` | 223.500 / 6.956 / 211.898 ms | 235.466 / 11.339 / 218.069 ms | 233.075 / 10.763 / 216.483 ms |
+| `stanjan15_elemental` | 227.570 / 10.673 / 210.912 ms | 224.970 / 11.147 / 208.026 ms | 230.591 / 10.353 / 214.509 ms |
+
+RST materialization remains the dominant current owner at roughly
+`~210-218 ms`; this experiment removes the former symbolic-construction
+spike rather than claiming that the whole P,H preparation is solved.
+
+### Correctness and route invariants
+
+The following gates passed after the change:
+
+```text
+calculator tests: 28 passed, 1 ignored
+TP-1906 frozen P,H molecular/elemental/formal route reuse: passed
+TP-1906 nested monolithic versus Auto physical state: passed
+TP-1907 frozen P,T molecular/elemental/formal route match: passed
+numeric/legacy closure versus symbolic residual contract: passed
+```
+
+The prepared-session benchmark completed successfully for `small3_molecular`,
+`stanjan15_molecular`, and `stanjan15_elemental`. Accepted routes and backend
+attempt evidence remained unchanged: legacy LM for the molecular case and
+RST Minpack LM for the ElementInventory case.
+
+The full repository command `cargo test --lib --no-default-features` was also
+attempted, but ended with `2387 passed, 10 failed, 154 ignored`. The failures
+were outside this change (kinetics, GUI, settings, phase-spec, and concurrent
+local-library fixture access). The three affected frozen tests pass when run
+serially, including the P,H reuse and lifecycle cases listed above.
+
+### Decision and next action
+
+`PERF-PH-05` is accepted as a localized, correctness-preserving P,H
+preparation optimization. It does not alter the fixed-P,T symbolic route or
+the nonlinear solver itself. The next performance target is RST payload
+materialization and immutable expression reuse at that boundary; any cache
+must keep P,T and P,H graph identities separate and must be validated against
+the same frozen and route-invariant gates.
+
+## 81. PERF-PH-06: Keep one production RST symbolic payload
+
+### Story name
+
+The production RST adapter should retain only the callable symbolic payload
+needed by the nonlinear solver. It should not retain a second copy of the
+equations and symbolic Jacobian that is useful to the dependency's broader
+diagnostic/AOT API but is not read by KiThe during a solve.
+
+### Command and question
+
+```powershell
+cargo build --release --bench equilibrium_ph_preparation `
+  --no-default-features --features equilibrium-instrumentation
+```
+
+Run the resulting executable three times with
+`--noplot prepared_session_two_points`. Does the RST preparation boundary
+remove the outer duplicate symbolic ownership while preserving the same
+residual/Jacobian closures, solver cascade, accepted backend, and physical
+result?
+
+### Hypothesis and implementation
+
+`RstSymbolicProblem` now owns one RST `Jacobian`, its lambdified residual and
+Jacobian closures, variable names, and parameter values. It invokes the same
+`Jacobian::calc_jacobian` and parameterized/non-parameterized lambdification
+methods as the previous `SymbolicNonlinearProblem` route. The production path
+therefore changes ownership and materialization overhead only; it does not
+change equations, differentiation, scaling, variables, tolerances, solver
+order, fallback behavior, or the separate P,T/P,H graph contracts.
+
+### Release evidence
+
+The table shows `facade_setup / state_total / thermochemistry / normalization /
+equation / symbolic / P,H formulation / RST / state_unattributed`, in ms.
+The last column is only the remainder after the named stages and is not part
+of the RST share.
+
+| case | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| `stanjan15_molecular` | 0.342 / 95.692 / 3.173 / 0.000 / 0.011 / 6.961 / 0.142 / 85.067 / 0.275 | 0.317 / 106.540 / 3.262 / 0.000 / 0.005 / 6.836 / 0.069 / 96.096 / 0.210 | 0.377 / 97.766 / 3.400 / 0.000 / 0.010 / 6.935 / 0.185 / 86.755 / 0.320 |
+| `stanjan15_elemental` | 0.438 / 109.782 / 3.221 / 0.000 / 0.007 / 7.458 / 0.121 / 98.592 / 0.281 | 0.453 / 101.216 / 3.103 / 0.000 / 0.006 / 6.850 / 0.088 / 90.791 / 0.313 | 0.450 / 93.542 / 3.530 / 0.000 / 0.006 / 7.038 / 0.231 / 82.448 / 0.223 |
+
+Median comparison with the accepted `PERF-PH-05` control:
+
+| case | PERF-PH-05 control state | PERF-PH-06 median state | PERF-PH-05 RST | PERF-PH-06 RST | state change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `stanjan15_molecular` | 233.075 ms | 97.766 ms | 216.483 ms | 86.755 ms | -58.1% |
+| `stanjan15_elemental` | 227.570 ms | 101.216 ms | 210.912 ms | 90.791 ms | -55.5% |
+
+The RST preparation stage remains the largest named owner, but its median
+falls by `59.9%` for the molecular case and `57.0%` for ElementInventory.
+This is evidence for a materialization/ownership cost, not evidence that the
+nonlinear solve became faster: solver execution is outside this cold
+preparation measurement.
+
+### Correctness and route invariants
+
+The following focused gates passed after the adapter change:
+
+```text
+cargo test --lib --no-default-features equilibrium_rst_backend_tests -- --quiet
+3 passed
+
+cargo test --lib --no-default-features \
+  prepared_ph_session_reuses_monolithic_formulation_across_targets -- --quiet
+1 passed
+
+cargo test --lib --no-default-features \
+  tp1906_frozen_ph_molecular_elemental_and_formal_routes_reuse_target -- --quiet
+1 passed
+
+cargo test --lib --no-default-features \
+  tp1907_frozen_pt_molecular_elemental_and_formal_routes_match -- --quiet
+1 passed
+```
+
+The prepared-session benchmark reported `Success` for `small3_molecular`,
+`stanjan15_molecular`, and `stanjan15_elemental`. The accepted backend routes
+and cascade evidence remained unchanged: legacy LM for the molecular case and
+RST Minpack LM for the ElementInventory case.
+
+### Decision and next action
+
+`PERF-PH-06` is accepted as a correctness-preserving RST preparation
+optimization. It reduces duplicate dependency-side symbolic ownership without
+altering the production equations or nonlinear solver. The next experiment is
+safe reuse of an already materialized immutable RST `Jacobian`/expression
+payload across compatible prepared sessions, only where graph identity,
+parameter ownership, and P,T versus P,H dimensions are explicit. Nonlinear
+callback optimization remains a separate benchmark family.
+
+## 82. PERF-PH-07: Share immutable P,H retarget payloads
+
+### Story name
+
+Prepared monolithic P,H sessions should not deep-copy large immutable
+thermochemistry capabilities or row-scale buffers when a new enthalpy target
+is retargeted. Only target-local numerical state and the scalar energy
+parameters should change.
+
+### Command and question
+
+```powershell
+cargo build --release --bench equilibrium_ph_preparation `
+  --no-default-features --features equilibrium-instrumentation
+```
+
+Run the resulting executable three times with
+`--noplot prepared_session_two_points` and inspect the
+`PERF-PH-01 prepared monolithic P,H session` table. Question: does sharing the
+immutable payload preserve the prepared-session contract and reduce hot-point
+retarget overhead without changing the nonlinear result?
+
+### Hypothesis and implementation
+
+`PreparedPhFormulation` now stores `Arc<ResolvedThermochemistry>` and
+`Arc<Vec<f64>>` for the P,T row scales. `retarget` and the immutable runner
+clone increment reference counts instead of cloning the complete capability
+bundle and scale vector. The fixed-active numerical problem remains owned by
+the retargeted formulation because it carries the current conditions, Gibbs
+closures, and continuation seed. No residual, Jacobian, temperature transform,
+enthalpy scaling, solver order, or publication rule changed.
+
+### Release evidence
+
+The prepared-session columns are `one_shot_two_points / preparation /
+first_point / second_point`, in ms. The before values are the available single
+PERF-PH-06 release control capture; the after values are medians of three fresh
+PERF-PH-07 captures. The control is therefore directional evidence rather than
+a statistically matched benchmark series.
+
+| case | PERF-PH-06 control | PERF-PH-07 median | preparation change | first point change | second point change |
+| --- | --- | --- | ---: | ---: | ---: |
+| `stanjan15_molecular` | 264.617 / 93.219 / 35.088 / 5.713 | 257.339 / 85.618 / 28.758 / 4.559 | -8.2% | -18.0% | -20.2% |
+| `stanjan15_elemental` | 229.317 / 105.706 / 6.531 / 8.934 | 208.498 / 95.541 / 6.175 / 4.547 | -9.6% | -5.5% | -49.1% |
+
+All three post-change captures completed the prepared-session benchmark with
+`Success` for `small3_molecular`, `stanjan15_molecular`, and
+`stanjan15_elemental`. The cold preparation and first-point numbers remain
+solver/load-sensitive; the meaningful architectural evidence is that the
+retarget path now shares the large immutable bundle, while the second-point
+hot path did not regress in either case.
+
+### Correctness and ownership evidence
+
+```text
+cargo test --lib --no-default-features equilibrium_ph_formulation -- --quiet
+12 passed
+
+cargo test --lib --no-default-features \
+  prepared_ph_session_reuses_monolithic_formulation_across_targets -- --quiet
+1 passed
+
+cargo test --lib --no-default-features \
+  tp1906_frozen_ph_molecular_elemental_and_formal_routes_reuse_target -- --quiet
+1 passed
+
+cargo test --lib --no-default-features \
+  tp1907_frozen_pt_molecular_elemental_and_formal_routes_match -- --quiet
+1 passed
+```
+
+The formulation test also asserts pointer identity for thermochemistry and
+row-scale storage before and after retarget. This protects the intended
+ownership property directly; numerical frozen tests protect the physical
+contract.
+
+### Decision and next action
+
+`PERF-PH-07` is retained as a narrow ownership optimization, with the caveat
+that its before/after timing control is not a matched multi-run experiment.
+The next measurement should target the remaining cloned structural
+`PreparedEquilibriumProblem` in P,H retargeting. It must first prove that this
+copy is material for 15/18/40-component cases and preserve transactional
+rollback before any ownership change. Nonlinear callback work remains a
+separate benchmark family.
+
+## 83. PERF-PH-08: Retarget structural P,H state (rejected)
+
+### Story name
+
+Remove the per-target clone of `PreparedEquilibriumProblem` from the prepared
+monolithic P,H session, while preserving transactional rollback and the exact
+fixed-active physical contract.
+
+### Command and question
+
+```powershell
+cargo build --release --bench equilibrium_ph_preparation `
+  --no-default-features --features equilibrium-instrumentation
+```
+
+Run the refreshed executable three times with
+`--noplot prepared_session_two_points`. Is the structural retarget clone a
+material hot-path cost for the current 15-component molecular and
+ElementInventory cases?
+
+### Hypothesis and attempted implementation
+
+The attempted change moved the fixed-active `PreparedEquilibriumProblem` into
+an `Arc` owned by `PreparedPhFormulation`, retargeting only target-local P,H
+values. The formulation, workflow, and frozen tests were kept unchanged in
+their equations and solver behavior. The change was reverted after the
+measurement because the result did not establish a repeatable gain.
+
+### Release evidence
+
+The prepared-session columns are `one_shot_two_points / preparation /
+first_point / second_point`, in ms. The PERF-PH-07 values are the preceding
+three-run control; PERF-PH-08 values are three runs with the structural-share
+attempt.
+
+| case | PERF-PH-07 control median | PERF-PH-08 attempt median | preparation change | first point change | second point change |
+| --- | --- | --- | ---: | ---: | ---: |
+| `stanjan15_molecular` | 257.339 / 85.618 / 28.758 / 4.559 | 261.069 / 95.152 / 29.633 / 4.738 | +11.1% | +3.0% | +3.9% |
+| `stanjan15_elemental` | 208.498 / 95.541 / 6.175 / 4.547 | 214.751 / 97.203 / 6.189 / 4.320 | +1.7% | +0.2% | -5.0% |
+
+The attempt did not improve cold preparation or first-point execution. The
+ElementInventory second point improved modestly, while the molecular second
+point regressed; this is insufficient evidence against run-to-run noise and
+does not isolate the structural copy from solver variance.
+
+### Correctness and rollback
+
+During the attempt the focused gates passed: formulation `12/12`, workflow
+`35/35`, RST adapter `3/3`, prepared P,H `1/1`, TP-1906 P,H `1/1`, and TP-1907
+P,T `1/1`. The attempt was nevertheless rolled back because the performance
+acceptance criterion was not met. The rejected measurement remains recorded;
+the production code retains the accepted PERF-PH-07 ownership change.
+
+### Decision and next action
+
+`PERF-PH-08` is rejected and reverted. Before revisiting this copy, add a
+matched before/after allocation or profiler measurement for 15, 18, and 40
+components, with structural-copy time separated from nonlinear execution.
+Do not change the transactional ownership model based on the current wall
+table alone. Nonlinear callback work remains a separate benchmark family.
+
+## 84. PERF-PH-09: Isolate prepared P,H structural retarget cost
+
+### Story name
+
+Measure the remaining `PreparedEquilibriumProblem::retarget_with_gibbs`
+structural clone and validation inside a reusable monolithic P,H session,
+without attributing that work to the nonlinear solver.
+
+### Command and question
+
+```powershell
+cargo bench --bench equilibrium_ph_preparation `
+  --no-default-features --features equilibrium-instrumentation -- --noplot
+```
+
+The benchmark now prints a dedicated retarget table with
+`one_shot_two_points / preparation / first_point / second_point /
+first_retarget / second_retarget` in ms, plus an explicit route-availability
+table. The question is whether the remaining structural copy is large enough
+to justify another transactional ownership experiment.
+
+### Hypothesis and scope
+
+The measurement must cover small, 15-component, and 40-component prepared
+monolithic routes. TP-1907 is an 18-component ElementInventory fixture, but
+its current production P,H route is nested; forcing fixed-monolithic mode is a
+rejected numerical route, so it is retained in the nested trial table rather
+than reported as a misleading zero-cost retarget row.
+
+### Capture evidence
+
+The release timing capture completed for `small3_molecular`,
+`stanjan15_molecular`, `stanjan15_elemental`, and `rp1311_40_elemental`; the
+new retarget columns were non-zero for both prepared points. The table below
+is `one-shot-two-points / preparation / first-point / second-point /
+first-retarget / second-retarget`, all in ms:
+
+| case | one-shot two points | preparation | first point | second point | first retarget | second retarget |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `small3_molecular` | 17.599 | 7.249 | 1.164 | 0.434 | 0.005 | 0.003 |
+| `stanjan15_molecular` | 244.457 | 81.450 | 29.139 | 4.150 | 0.009 | 0.006 |
+| `stanjan15_elemental` | 204.823 | 99.116 | 6.404 | 4.453 | 0.009 | 0.006 |
+| `rp1311_40_elemental` | 2495.210 | 1146.921 | 51.618 | 10.131 | 0.014 | 0.018 |
+
+The separate allocation-enabled release capture reported the following
+allocation calls/bytes for the first and second accepted points:
+
+| case | first calls | first bytes | second calls | second bytes |
+| --- | ---: | ---: | ---: | ---: |
+| `small3_molecular` | 1686 | 200591 | 1073 | 123814 |
+| `stanjan15_molecular` | 38242 | 6487512 | 21319 | 3098061 |
+| `stanjan15_elemental` | 6311 | 1232544 | 21320 | 3099587 |
+| `rp1311_40_elemental` | 16263 | 8518743 | 15135 | 2718725 |
+
+These allocation totals include thermochemistry, nonlinear execution, and
+publication; they are evidence for the size of the point-wide allocation
+budget, not an attribution of every allocation to `retarget_with_gibbs`.
+The retarget-specific timing is currently tens of microseconds, while cold
+preparation and nonlinear work are orders of magnitude larger. This does not
+justify another ownership experiment.
+
+### Correctness gate
+
+```powershell
+cargo test --lib --no-default-features equilibrium_ph_workflow -- --quiet
+cargo test --lib --no-default-features equilibrium_ph_formulation -- --quiet
+cargo check --bench equilibrium_ph_preparation --no-default-features `
+  --features equilibrium-instrumentation --quiet
+
+cargo bench --bench equilibrium_ph_preparation `
+  --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-allocation" `
+  -- --noplot prepared_session_two_points
+```
+
+The prepared-session test also asserts that enabled reports publish a
+non-zero retarget duration for both the first and second accepted points.
+Timing remains opt-in: disabled execution does not read the clock for this
+stage.
+
+### Decision and next action
+
+`PERF-PH-09` is accepted as measurement infrastructure and a negative
+materiality result for the structural-copy hypothesis. Do not repeat the
+rejected `Arc<PreparedEquilibriumProblem>` experiment. The 18-component
+TP-1907 result belongs to the nested-route baseline and is a separate
+stability/solver case; its fixed-monolithic `N/A` status is intentional.
+
+## 85. PERF-PH-10: Reuse the accepted Gibbs snapshot
+
+### Story name
+
+Reuse the immutable Gibbs closure snapshot produced for the previous accepted
+prepared P,H point when the next point starts at that same continuation
+temperature.
+
+### Command and question
+
+```powershell
+cargo bench --bench equilibrium_ph_preparation `
+  --no-default-features --features equilibrium-instrumentation `
+  -- --noplot prepared_session_two_points
+```
+
+The prepared-session table now includes `first_gibbs_ms`, `second_gibbs_ms`,
+and `first_gibbs_reused / second_gibbs_reused`. The question is whether the
+Gibbs evaluation and closure materialization can be removed from the hot
+continuation point without changing the accepted physical result.
+
+### Hypothesis and implementation
+
+After an accepted point, the workflow already evaluates a constant Gibbs
+snapshot for publication. The prepared continuation now retains that snapshot
+only at the accepted-result commit boundary. A later point reuses it when its
+initial temperature is bitwise identical to the cached temperature; otherwise
+it evaluates a fresh snapshot. Failed targets cannot warm or replace this
+cache, preserving transactional continuation semantics.
+
+### Release evidence
+
+The filtered release capture reported the following values in ms. The Gibbs
+columns are `first-point preparation / second-point cache clone`; the boolean
+columns prove the lifecycle transition:
+
+| case | first point | second point | first Gibbs | second Gibbs | first reused | second reused |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| `small3_molecular` | 1.066 | 0.506 | 0.024 | 0.000 | false | true |
+| `stanjan15_molecular` | 29.563 | 4.634 | 0.080 | 0.000 | false | true |
+| `stanjan15_elemental` | 5.994 | 4.863 | 0.128 | 0.000 | false | true |
+| `rp1311_40_elemental` | 52.656 | 10.437 | 0.215 | 0.000 | false | true |
+
+The same capture retained successful prepared-session routes for all four
+cases. The failed-target-then-success test also proves that a rejected target
+does not make the first accepted point report a false cache hit. This is a
+narrow preparation optimization; it does not parallelize or alter nonlinear
+callbacks, and it does not cache target-dependent enthalpy scaling.
+
+### Correctness gate
+
+```powershell
+cargo test --lib --no-default-features `
+  prepared_ph_session_reuses_monolithic_formulation_across_targets -- --quiet
+cargo test --lib --no-default-features equilibrium_ph_workflow -- --quiet
+cargo check --bench equilibrium_ph_preparation --no-default-features `
+  --features equilibrium-instrumentation --quiet
+```
+
+### Decision and next action
+
+`PERF-PH-10` is accepted as a cache-localization optimization. The next
+measurement should determine whether repeated P,H request validation and
+initial enthalpy-vector evaluation are material; any cache must respect the
+changing continuation temperature and failed-point rollback boundary.
+
+## 86. PERF-PH-11: Remove repeated prepared P,H validation and enthalpy traversal
+
+### Story name
+
+Measure and minimize request validation and initial molar-enthalpy preparation
+at the prepared P,H continuation boundary without reusing thermochemistry at a
+different seed temperature.
+
+### Command and question
+
+```powershell
+cargo bench --bench equilibrium_ph_preparation `
+  --no-default-features --features equilibrium-instrumentation `
+  -- --noplot prepared_session_two_points
+```
+
+The prepared-session table now reports
+`first/second_request_validation_ms`,
+`first/second_initial_enthalpy_ms`, and their reuse flags. The question is
+whether request validation or construction of the initial molar enthalpy
+vector is large enough to justify a continuation cache.
+
+### Hypothesis and implementation
+
+The old prepared-session boundary performed full request validation before the
+prepared workflow, then validated again while preparing the nonlinear point.
+The retarget operation now validates only structural fields and restores the
+previous request if that check fails. The prepared workflow evaluates or clones
+one initial enthalpy vector, validates against that vector, and commits its
+temperature-keyed cache only after an accepted result.
+
+Exact temperature matching is required. A changed continuation temperature
+must evaluate a fresh vector, and a failed target must not update the cache.
+The same transaction rule as the Gibbs cache therefore remains in force.
+
+### Release evidence
+
+The filtered release capture reported the following values in ms. A `true`
+reuse flag means the vector was cloned from the prepared continuation cache;
+`0.000` validation means it was below the displayed millisecond precision.
+
+| case | first point | second point | first validation | second validation | first enthalpy | second enthalpy | first reused | second reused |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| `small3_molecular` | 1.046 | 0.449 | 0.000 | 0.000 | 0.000 | 0.001 | true | false |
+| `stanjan15_molecular` | 30.171 | 5.040 | 0.000 | 0.000 | 0.000 | 0.006 | true | false |
+| `stanjan15_elemental` | 6.649 | 4.760 | 0.000 | 0.000 | 0.000 | 0.007 | true | false |
+| `rp1311_40_elemental` | 51.864 | 10.556 | 0.000 | 0.000 | 0.000 | 0.020 | true | false |
+
+The first point begins at the prepared session temperature and reuses the
+vector captured during cold preparation. The second point changes its seed
+temperature in these fixtures and correctly performs a fresh evaluation. This
+is a correctness signal, not an invitation to reuse a vector across
+temperatures.
+
+### Correctness gate
+
+```powershell
+cargo test --lib --no-default-features `
+  prepared_ph_session_reuses_monolithic_formulation_across_targets -- --quiet
+cargo test --lib --no-default-features equilibrium_ph_workflow -- --quiet
+cargo check --bench equilibrium_ph_preparation --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-allocation" --quiet
+```
+
+Observed gates:
+
+```text
+prepared_ph_session_reuses_monolithic_formulation_across_targets: 1 passed
+equilibrium_ph_workflow: 35 passed
+equilibrium_calculator: 28 passed, 1 ignored
+nasa_tp1907_chon_graphite_tests: 22 passed, 6 ignored
+nasa_tp1906_chon_graphite_ph_tests: 6 passed, 6 ignored
+bench allocation configuration: cargo check passed
+```
+
+### Decision and next action
+
+`PERF-PH-11` is accepted as a de-duplication and diagnostics improvement. The
+measured validation path is below materiality, and initial enthalpy traversal
+is only `0.001–0.020 ms` in the 3/15/40-component fixtures. Do not add a more
+general thermochemistry workspace cache based on this evidence. The next
+performance work remains the separately instrumented nonlinear callback path;
+prepared P,H orchestration is no longer the leading target in these cases.
+
+## 87. PERF-LEGACY-01: Isolated Legacy callback budget
+
+### Story name
+
+As a performance engineer, I need residual, analytic Jacobian, linear-system,
+and solver-overhead timing for each retained Legacy nonlinear backend so that
+the next optimization targets measured work rather than an opaque facade
+`workflow` bucket.
+
+### Command
+
+```powershell
+cargo bench --bench equilibrium_legacy_callbacks `
+  --no-default-features `
+  --features equilibrium-instrumentation `
+  -- --noplot
+```
+
+`cargo bench` uses Cargo's optimized benchmark profile. The benchmark selects
+exactly one `Legacy(LM)`, `Legacy(NR)`, or `Legacy(TR)` backend per case through
+the public equilibrium facade. It prints two independent `tabled` tables:
+
+1. `accepted callback breakdown`: callback counts, callback time, shares of
+   backend wall time, iterations, and solver overhead for accepted attempts;
+2. `complete attempt ledger`: every started attempt, including rejected and
+   failed attempts. `wall-only` means that the selected backend did not expose
+   structured callback metrics; failed Legacy attempts now do expose them.
+
+### Question and hypothesis
+
+Question: where does time go inside Legacy LM, NR, and TR for P,T, monolithic
+P,H, and nested P,H, and does ElementInventory change the answer?
+
+Hypothesis: small controls are dominated by solver overhead, while larger
+universes make residual, Jacobian, and linear-system work material. Therefore
+callback parallelism must not be selected from call counts alone.
+
+### Coverage
+
+The matrix covers public-facade molecular and ElementInventory controls over
+3, 15, 18, and 40-component universes, with separate `P,H monolithic` and
+`P,H nested` labels. The 18-component TP-1907 and 40-component RP-1311
+fixtures are the large phase-aware controls. Cases where a deliberately
+isolated Legacy backend cannot converge remain visible in the attempt ledger;
+they are not silently replaced by the production cascade.
+
+### Release evidence
+
+Representative rows from the optimized dashboard are below. Percentages are
+within the selected backend attempt and therefore add up to the reported
+callback/overhead budget; they are not facade percentages.
+
+| case | backend | wall ms | iterations | residual | Jacobian | linear | overhead |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `rp1311_40_pt_element_inventory` | Legacy LM | 0.178 | 10 | 29.2% | 7.3% | 20.2% | 43.3% |
+| `rp1311_40_pt_element_inventory` | Legacy NR | 0.146 | 11 | 36.3% | 10.3% | 33.6% | 19.9% |
+| `rp1311_40_pt_element_inventory` | Legacy TR | 0.683 | 42 | 24.6% | 6.6% | 25.6% | 43.2% |
+| `stanjan15_ph_element_inventory` | Legacy LM | 6.530 | 35 | 13.7% | 6.4% | 0.0% | 79.9% |
+| `stanjan15_ph_element_inventory` | Legacy TR | 0.965 | 14 | 24.7% | 14.0% | 0.2% | 61.1% |
+| `tp1907_18_ph_element_inventory` | Legacy TR, nested | 0.167 | 32 | 1.2% | 0.6% | 19.8% | 78.4% |
+
+The full command prints all matrix rows. Failed Legacy attempts retain their
+callback snapshot even when the nonlinear call returns an error; an
+unavailable backend-specific split remains explicitly marked `wall-only`.
+The first capture also showed
+intentional isolated-backend failures: LM failed on one TP-1907 nested P,H
+case, NR failed on TP-1907 and both Stanjan P,H cases in this seed setup, and
+TR rejected one small P,H candidate and failed the TP-1907 P,T case. This is
+useful solver-selection evidence, not a correctness regression: production
+policy is not changed by this benchmark.
+
+### Correctness gate
+
+```powershell
+cargo test --lib --no-default-features equilibrium_nonlinear -- --quiet
+cargo test --lib --no-default-features equilibrium_rst_backend_tests -- --quiet
+cargo test --lib --no-default-features equilibrium_backend_adapter -- --quiet
+cargo check --bench equilibrium_legacy_callbacks --no-default-features `
+  --features equilibrium-instrumentation --quiet
+```
+
+Observed gate:
+
+```text
+equilibrium_nonlinear: 36 passed
+equilibrium_rst_backend_tests: 6 passed
+equilibrium_backend_adapter: 7 passed
+tp1907_upper_inventory_is_backend_invariant: 1 passed
+production_default_retains_a_scale_robust_backend_on_real_tp1907_story: 1 passed
+failed_legacy_attempt_preserves_callback_metrics: 1 passed
+cargo check equilibrium_legacy_callbacks: passed
+full Criterion matrix (36 case/backend functions): passed
+```
+
+### Decision and next action
+
+`PERF-LEGACY-01` is accepted as measurement infrastructure. The immediate
+optimization target is to split the currently unaccounted solver remainder in
+large P,H and TR cases before calling it orchestration overhead. It includes
+iteration bookkeeping, norms, trial-vector construction, feasibility and
+line-search/trust-region decisions, matrix products or copies outside the
+timed linear solve, and any other Legacy solver work not covered by the three
+callback timers. Residual, Jacobian, and linear-system work is material in the
+40-component cases, but the data does not yet justify parallel callbacks
+because callback shares vary strongly by backend and route. No equations,
+solver order, or production default changed. Failed Legacy callback metrics
+are now part of the internal attempt ledger. Allocation counters and a
+before/after optimization capture remain open TODO items.
+
+## 88. PERF-LEGACY-02: Remove diagnostics from the ordinary Legacy path
+
+### Story name
+
+As a production user, I need Legacy solver callbacks and linear solves to run
+without diagnostic-scope checks when instrumentation is not compiled in, so
+the optional benchmark tooling does not become ordinary solver orchestration
+overhead.
+
+### Commands
+
+```powershell
+cargo check --lib --no-default-features --quiet
+cargo check --bench equilibrium_legacy_callbacks --no-default-features --quiet
+cargo check --bench equilibrium_legacy_callbacks --no-default-features `
+  --features equilibrium-instrumentation --quiet
+cargo test --lib --no-default-features equilibrium_nonlinear -- --quiet
+cargo test --lib --no-default-features equilibrium_backend_adapter -- --quiet
+```
+
+### Question and hypothesis
+
+Question: does the normal library build pay for the Legacy diagnostic timer
+scope on every residual, Jacobian, and linear-system call?
+
+Hypothesis: compile-time selection can make the disabled path a direct callback
+or solve invocation. Instrumented builds retain the same per-attempt metrics,
+while ordinary builds contain no thread-local diagnostic lookup or `Instant`
+creation in these hot calls.
+
+### Change under test
+
+`timed_legacy_residual`, `timed_legacy_jacobian`, and the linear-system helper
+now have a direct `#[cfg(not(...))]` implementation. The timing implementation
+and the diagnostic counter functions exist only for tests or the
+`equilibrium-instrumentation` feature. No equations, tolerances, iteration
+order, acceptance rule, or backend policy changed.
+
+The same Legacy pass retains only ownership-preserving copy elision already
+visible in the solver code: LM uses the normal-equation product as its mutable
+system, and LM/NR/TR move owned residual buffers where the value is no longer
+needed. The mixed Criterion deltas do not justify claiming a general solver
+speedup, so these changes remain correctness-preserving candidates rather
+than a new performance baseline.
+
+### Correctness and build evidence
+
+```text
+equilibrium_nonlinear: 36 passed
+equilibrium_backend_adapter: 7 passed
+cargo check --lib --no-default-features: passed
+cargo check equilibrium_legacy_callbacks without instrumentation: passed
+cargo check equilibrium_legacy_callbacks with instrumentation: passed
+```
+
+The instrumented release callback benchmark still publishes the same accepted
+callback table and complete attempt ledger. Its repeated TR measurement did
+not establish a statistically significant wall-time change, so this story
+does not claim a numeric speedup for the diagnostic build. A separate attempt
+to precompute J^T J and remove the TR Jacobian clone was rejected after a
+`1.655 ms` result versus the previous `1.590 ms`-class measurement; that
+experiment was reverted.
+
+The matching release run without `equilibrium-instrumentation` completed the
+same `rp1311_40_pt_element_inventory_legacy_TR` case at `1.533 ms`. The
+preceding instrumented run was `1.643 ms`, a `-6.98%` on/off difference in
+this large TR control by the Criterion comparison. The displayed medians
+themselves imply about `-6.7%`; the distinction is the stored Criterion
+baseline denominator. This measures the cost of optional diagnostics, not an
+algorithmic TR speedup; a clean historical no-feature baseline is still
+needed before generalizing the percentage.
+
+### Decision and next action
+
+Accept the compile-time cleanup as a production-path optimization and keep
+instrumentation opt-in. Do not label the broad `solver_overhead` remainder as
+orchestration yet: the next Legacy optimization must add a measured split for
+matrix products, norms, trial-vector construction, feasibility, and
+line-search/trust-region work, then target only a material bucket. The
+instrumented benchmark remains the regression gate for preserving callback
+diagnostics.
+
+## 89. PERF-LEGACY-03: Legacy P,H end-to-end optimization gate
+
+### Story name
+
+Before changing Legacy P,H orchestration, measure the complete chain from the
+public facade to the accepted Legacy backend. The decision must distinguish
+facade cost, P,H orchestration, trial work, nonlinear solve time, and the
+backend-attempt wall clock instead of treating the whole `workflow` bucket as
+solver time.
+
+### Command
+
+```powershell
+$env:CARGO_PROFILE_BENCH_LTO='false'
+$env:CARGO_PROFILE_BENCH_CODEGEN_UNITS='16'
+cargo bench --bench equilibrium_baseline `
+  --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint" `
+  -- --noplot
+```
+
+`cargo bench` uses Cargo's optimized `bench` profile. The table below is the
+fixed-repeat diagnostic capture from the same release-style run; Criterion's
+statistical output is intentionally not used as the stage attribution.
+
+### Question / hypothesis
+
+Question: is Legacy orchestration large enough to justify a dedicated
+optimization, or is the nonlinear backend itself the material part of Legacy
+P,H wall time?
+
+Hypothesis: orchestration should be deferred when nonlinear work is only a few
+percent of facade time. Large P,H cases must be measured through the complete
+chain before applying that rule, because nested and monolithic routes have
+different timing scopes.
+
+### What the columns mean
+
+- `profile` identifies the execution graph: `P,T accepted`, `P,H monolithic`,
+  `P,H nested`, or `P,H recovery`. Rows from different profiles are not a
+  single homogeneous population and must not be ranked by percentage alone.
+- `facade total` is the complete public-facade wall measurement.
+- `P,H workflow` is the outer P,H workflow timing, shown as a share of facade
+  total.
+- `trial total` is the accepted nested scalar-trial aggregate, shown as a
+  share of P,H workflow. It is intentionally `n/a (monolithic)` for the
+  monolithic route.
+- `nonlinear solve` is the nested inner nonlinear aggregate as a share of
+  trial total. For monolithic P,H it is the measured monolithic backend
+  execution as a share of P,H workflow.
+- `Legacy backend wall` is the accepted Legacy backend metric wall time. It is
+  printed without a percentage because nested accepted backend metrics may
+  aggregate several trial/attempt scopes and therefore do not share one
+  denominator with the outer P,H timing.
+
+The percentages are parent-relative. They are not additive across columns:
+`P,H workflow` contains `trial total`, and `trial total` contains the nested
+nonlinear solve. `Legacy backend wall` is a separate backend-attempt
+observation, not another segment to add to the chain. Only the macro table's
+`facade outside workflow + solve transaction` partition is additive. The
+workflow and diagnostic detail tables are inclusive views; their `profile` and
+`scope` columns are the comparison key.
+
+### Release evidence
+
+| case | backend | P,H route | profile | facade total | P,H workflow | trial total | nonlinear solve | Legacy backend wall |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `ph_element_inventory_point_legacy_lm` | Legacy LM | monolithic | P,H monolithic | 0.28 ms | 0.19 ms / 66.7% | n/a | 0.13 ms / 69.2% | 0.13 ms |
+| `stanjan15_ph_element_inventory_point_legacy_lm` | Legacy LM | monolithic | P,H monolithic | 7.95 ms | 7.31 ms / 91.9% | n/a | 6.97 ms / 95.4% | 6.97 ms |
+| `stanjan15_ph_element_inventory_point_legacy_tr` | Legacy TR | monolithic | P,H monolithic | 1.99 ms | 1.38 ms / 69.1% | n/a | 1.05 ms / 76.1% | 1.04 ms |
+| `tp1907_18_ph_element_inventory_point_legacy_tr` | Legacy TR | nested | P,H nested | 3.86 ms | 3.26 ms / 84.4% | 3.12 ms / 95.8% | 2.13 ms / 68.2% | 0.46 ms |
+| `rp1311_40_ph_element_inventory_point_legacy_lm` | Legacy LM | nested | P,H nested | 12.34 ms | 10.72 ms / 86.9% | 10.25 ms / 95.6% | 6.12 ms / 59.7% | 3.48 ms |
+| `rp1311_40_ph_element_inventory_point_legacy_tr` | Legacy TR | nested | P,H recovery | 16.55 ms | 15.56 ms / 94.0% | 1.44 ms / 9.2% | 0.12 ms / 8.4% | 0.26 ms |
+
+### Result and decision
+
+The measurement rejects a global statement that Legacy orchestration is the
+next optimization target. In the small control it is not material to the
+complete call. In STANJAN-15 monolithic P,H, Legacy LM spends about `6.97 ms`
+of `7.95 ms` facade time in the monolithic nonlinear execution, so
+orchestration is not the dominant opportunity. Legacy TR has a smaller
+nonlinear share, but its total is also much lower.
+
+For nested TP-1907/18 and RP-1311/40, the accepted trial chain is visible and
+the nonlinear share is substantial for LM (`6.12 ms` of `10.25 ms` trial),
+while Legacy TR's accepted backend wall is small. The previously observed
+`15.81 ms` outside-workflow remainder was a reporting defect: the normalized
+recovery result retained the inner recovery timing but not the complete outer
+P,H transaction wall. The corrected RP-1311/40 Legacy TR capture attributes
+`15.56 ms` to the complete `P,H recovery` workflow and leaves only `0.99 ms`
+outside the workflow for facade-owned work. The recovery parent and its
+physical-failure, normalized-discovery, and physical-retry attempt rows are
+now printed separately.
+
+Therefore Legacy orchestration optimization is deferred until a material
+bucket is demonstrated inside a matching profile and parent scope. The next
+valid Legacy experiment should use the attempt ledger and solver callback
+table to split the nonlinear remainder into concrete operations. A change is
+worthwhile only when its owning bucket is a material fraction of the same
+complete-facade case and all correctness gates remain green.
+
+### Correctness and coverage gate
+
+```powershell
+cargo check --bench equilibrium_baseline --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint" --quiet
+cargo test --lib --no-default-features equilibrium_ph_workflow -- --quiet
+cargo test --lib --no-default-features equilibrium_nonlinear -- --quiet
+cargo test --lib --no-default-features equilibrium_backend_adapter -- --quiet
+cargo test --lib --no-default-features nasa_tp1907_chon_graphite_tests -- --quiet
+```
+
+The benchmark's pretty-coverage assertions require every baseline scenario to
+have macro, facade, nonlinear, attempt, and accepted-solver rows. The Legacy
+P,H envelope additionally requires one row for every non-production Legacy
+P,H case, including both monolithic and nested routes.
+
+## 90. PERF-DASHBOARD-01: Heterogeneous stage evidence is explicitly scoped
+
+### Story name
+
+The equilibrium performance dashboard must make every large wall-time bucket
+actionable without pretending that different execution graphs have the same
+denominator. Shared benchmark fixtures must also have one source of truth.
+
+### Command
+
+```powershell
+cargo build --release --bench equilibrium_baseline `
+  --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint"
+$exe = Get-ChildItem target\release\deps\equilibrium_baseline-*.exe |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+& $exe.FullName --noplot
+```
+
+### Question / hypothesis
+
+Question: can a reader identify the owner of a large facade wall time and
+compare Legacy with RST without adding overlapping parent and child rows?
+
+Hypothesis: a macro partition plus separate scoped detail tables is sufficient
+if every row carries its execution `profile` and its parent `scope`.
+
+### Output contract
+
+- **Macro time budget:** only `facade outside workflow + solve transaction`
+  is additive and must equal 100% of facade wall time.
+- **Facade detail:** resolution, request preparation, route selection,
+  normalization, phase control, thermochemistry, and result assembly.
+- **P,H workflow detail:** scalar orchestration, enthalpy evaluation, trial
+  preparation/execution, monolithic preparation/execution, validation,
+  publication, and the complete recovery transaction where applicable.
+- **Inner/recovery detail:** fixed-P,T stages or the explicitly named P,H
+  recovery transaction; recovery is not mislabeled as fixed-P,T.
+- **Nonlinear envelope:** parent wall, all attempt wall, known preparation,
+  runner/orchestration remainder, backend coverage, missing metrics, and
+  missing wall time.
+- **Attempt ledger:** every accepted, failed, rejected, fallback, and
+  normalization-recovery attempt, including Legacy callback diagnostics.
+- **Accepted solver table:** residual, Jacobian, linear-system, and solver
+  overhead timings for the accepted backend only.
+
+Every table includes `profile`: `P,T accepted`, `P,H monolithic`, `P,H
+nested`, or `P,H recovery`. Percentages are valid only relative to the row's
+own parent `scope` and profile. Backend wall is a separate observation and is
+never added to facade or workflow wall. This prevents an RST preparation
+parent, a Legacy callback attempt, and a nested scalar trial from being read as
+three additive slices of one clock.
+
+### Representative output
+
+The corrected 40-component Legacy TR recovery point printed:
+
+```text
+profile=P,H recovery
+facade total       16.55 ms
+P,H workflow       15.56 ms / 94.0%
+recovery parent    15.56 ms / 100.0% of P,H workflow
+facade outside      0.99 ms / 6.0%
+nonlinear solve     0.12 ms / 8.4% of accepted nested trial
+Legacy backend      0.26 ms (separate attempt aggregate)
+```
+
+The prior `15.81 ms` outside-workflow value no longer appears. It was caused
+by a normalized recovery result carrying inner recovery timing while its outer
+P,H timing still described only the normalized solve. The facade now restores
+the complete physical transaction wall; the remaining outside-workflow time is
+ordinary facade-owned resolution/request/thermochemistry work.
+
+### Result
+
+The dashboard is decision-capable for optimization: additive macro budget,
+inclusive detail, backend-attempt ledger, and callback diagnostics are
+separate views with explicit comparison keys. Common frozen species lists,
+pressure constants, phase-component construction, and the TP-1907 elemental
+seed are shared through `benches/support/mod.rs`; case-specific builders and
+timing contracts remain local to each benchmark target.
+
+## 91. PERF-LEGACY-04: Legacy solver remainder is decomposed by operation
+
+### Story name
+
+The retained Legacy LM, NR, and TR backends must expose enough per-attempt
+timing evidence to decide whether their `solver overhead` is worth optimizing.
+The benchmark must preserve failed attempts and nested P,H attempts, because a
+single accepted row cannot explain retry cost.
+
+### Command
+
+```powershell
+cargo bench --bench equilibrium_legacy_overhead `
+  --no-default-features `
+  --features equilibrium-instrumentation `
+  -- --noplot
+```
+
+This is a release-style Criterion benchmark. The dashboard is printed once
+before Criterion repetitions. For a quicker local rebuild, the same target
+can be built with LTO disabled, but before/after comparisons must use the same
+profile settings.
+
+### Question / hypothesis
+
+Question: on large Legacy calculations, is the remaining backend time caused
+by matrix algebra, norms, trial-vector construction, feasibility, globalization
+logic, or an unmeasured remainder? Is any one named bucket large enough to
+justify an optimization?
+
+Hypothesis: small cases are dominated by fixed solver overhead, while large
+40-component cases should reveal a material matrix/linear or residual backend
+bucket. Norms, trial-vector construction, feasibility, and globalization are
+not optimization targets unless their measured parent-relative share is
+material.
+
+### Output contract
+
+The benchmark prints two intentionally different tables.
+
+- **Macro facade/backend comparison:** `facade_ms`, accepted Legacy attempt
+  wall and its facade share, all-attempt wall and its facade share, accepted
+  overhead share, structured detail total, and the accepted unattributed
+  remainder. The accepted row is one attempt; `all_attempts_ms` includes every
+  measured attempt in the route.
+- **Internal Legacy attempt detail:** one row per measured accepted, failed, or
+  rejected attempt with callback, linear system, matrix operations, norms,
+  trial-vector, feasibility, globalization, and unattributed milliseconds.
+  Percentages are relative to that attempt's backend wall. P,H nested trial
+  and recovery attempts remain separate rows.
+
+The internal columns are mutually exclusive by construction: callback and
+linear time come from the existing callback instrument, the five new fields
+come from the Legacy solver stage instrument, and `unattributed` is the
+remaining `solver_overhead` after subtracting those five fields. This table is
+therefore suitable for optimization triage; it is not an inclusive workflow
+table.
+
+### Release evidence
+
+Representative output from the focused release-style run:
+
+| profile | backend | facade | accepted / facade | all attempts | all / facade | overhead share | material named buckets |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 40-component P,T ElementInventory | Legacy LM | 1.448 ms | 0.186 ms / 12.8% | 0.186 ms | 12.8% | 53.2% | matrix 0.030 ms; unattributed 0.069 ms |
+| 40-component P,T ElementInventory | Legacy NR | 1.252 ms | 0.150 ms / 12.0% | 0.150 ms | 12.0% | 27.3% | linear 0.056 ms; unattributed 0.041 ms |
+| 40-component P,T ElementInventory | Legacy TR | 1.871 ms | 0.699 ms / 37.4% | 0.699 ms | 37.4% | 48.5% | matrix 0.129 ms; linear 0.210 ms; unattributed 0.210 ms |
+| 40-component nested P,H ElementInventory | Legacy LM | 3.846 ms | 0.192 ms / 5.0% | 0.542 ms | 14.1% | 50.5% | matrix 0.031 ms; unattributed 0.066 ms |
+| 40-component nested P,H ElementInventory | Legacy NR | 3.316 ms | 0.141 ms / 4.3% | 0.419 ms | 12.6% | 31.9% | linear 0.050 ms; unattributed 0.045 ms |
+| 40-component nested P,H ElementInventory | Legacy TR | 4.823 ms | 0.266 ms / 5.5% | 1.141 ms | 23.7% | 42.9% | matrix 0.049 ms; linear 0.079 ms; unattributed 0.065 ms |
+
+In the same capture, norms, trial-vector construction, feasibility, and
+globalization were below `0.001 ms` at display precision in the 40-component
+accepted rows. The 15-component monolithic P,H rows are a separate profile:
+feasibility measured about `0.624 ms` of `1.025 ms` accepted LM wall and
+`1.339 ms` of `2.462 ms` accepted TR wall. Those figures are not pooled with
+the 40-component elemental rows.
+
+### Result and decision
+
+The benchmark answers the previous `solver overhead` question: it is not one
+single mysterious operation. On large elemental cases, linear systems and
+matrix algebra are measurable, while a material remainder still exists after
+those named stages. On the 15-component monolithic P,H route, feasibility is
+the largest named non-callback bucket. The very small norm, trial-vector, and
+globalization measurements do not justify standalone optimization.
+
+No algorithmic Legacy optimization is accepted by this story. The next
+experiment should target one matched 40-component matrix/linear/unattributed
+bucket, retain the same correctness matrix, and compare accepted plus failed
+attempt paths. The benchmark executable and the ordinary library build keep
+the diagnostic capture opt-in.
+
+### Correctness and coverage gate
+
+```powershell
+cargo check --bench equilibrium_legacy_overhead `
+  --no-default-features `
+  --features equilibrium-instrumentation --quiet
+cargo test --lib --no-default-features equilibrium_nonlinear -- --quiet
+cargo test --lib --no-default-features equilibrium_backend_adapter -- --quiet
+cargo test --lib --no-default-features equilibrium_solver_policy -- --quiet
+cargo test --lib --no-default-features nasa_tp1907_chon_graphite_tests -- --quiet
+```
+
+The benchmark's detail table is the required evidence gate for the next
+Legacy solver optimization. A change is accepted only when correctness,
+attempt classification, and the relevant profile's facade/backend wall all
+remain stable enough for a meaningful before/after comparison.
+
+## 92. PERF-LEGACY-05: Trust-region scalar model reduction avoids dense J^T J
+
+### Story name
+
+The Legacy Trust Region solver must calculate the scalar quadratic-model term
+without materializing a dense `J^T J` matrix when the algorithm only needs
+`p^T J^T J p`. The replacement must preserve the equation, step acceptance,
+backend order, and recovery behavior.
+
+### Command
+
+```powershell
+cargo rustc --release --bench equilibrium_legacy_overhead `
+  --no-default-features `
+  --features equilibrium-instrumentation `
+  --config 'profile.release.lto="off"' `
+  --config 'profile.release.codegen-units=16' `
+  -- --noplot
+```
+
+The focused dashboard is run directly after this build for repeatable local
+inspection. Before/after captures use the same release profile and machine.
+
+### Question / hypothesis
+
+Question: does the scalar-only Trust Region model-reduction expression spend
+avoidable time constructing a dense `J^T J` matrix?
+
+Hypothesis: replacing that construction with `Jp` followed by `(Jp)^T(Jp)`
+will remove the matrix-operation bucket while preserving the accepted
+solution. The wall-time win is expected to be case- and noise-dependent, so
+the bucket collapse is stronger evidence than one dashboard run.
+
+### Change under test
+
+The production expression now evaluates
+`p^T J^T J p = (Jp)^T(Jp)` directly. It does not change the Trust Region
+linear solve, the model equation, the trust-radius update, or the solver
+ordering. The stage instrument records the `Jp` product as matrix work and
+the two scalar products as norm work.
+
+### Release evidence
+
+The matched 40-component Legacy TR observations were:
+
+| profile | facade | accepted backend | matrix operations | linear system | unattributed solver remainder |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| P,T ElementInventory, before | 1.871 ms | 0.699 ms | 0.129 ms | 0.210 ms | 0.210 ms |
+| P,T ElementInventory, after run 1 | 2.017 ms | 0.631 ms | 0.001 ms | 0.196 ms | 0.224 ms |
+| P,T ElementInventory, after run 2 | 1.780 ms | 0.627 ms | 0.001 ms | 0.196 ms | 0.238 ms |
+| P,T ElementInventory, after run 3 | 1.714 ms | 0.589 ms | 0.001 ms | 0.196 ms | 0.237 ms |
+| nested P,H ElementInventory, before | 4.823 ms | 0.266 ms | 0.049 ms | 0.079 ms | 0.065 ms |
+| nested P,H ElementInventory, after run 1 | 5.171 ms | 0.237 ms | 0.001 ms | 0.076 ms | 0.074 ms |
+| nested P,H ElementInventory, after run 2 | 4.593 ms | 0.232 ms | 0.001 ms | 0.076 ms | 0.080 ms |
+| nested P,H ElementInventory, after run 3 | 4.644 ms | 0.223 ms | 0.001 ms | 0.076 ms | 0.082 ms |
+
+The matrix bucket collapsed to display noise in both large profiles. The
+after wall times suggest a useful improvement, but these dashboard runs are
+not a statistically controlled Criterion before/after series; no exact speedup
+percentage is claimed. The previous rejected experiment that cloned/reused a
+full dense transformation remains rejected and is not part of this result.
+
+### Correctness gate and decision
+
+```powershell
+cargo test --lib --no-default-features equilibrium_nonlinear -- --quiet
+cargo test --lib --no-default-features nasa_tp1907_chon_graphite_tests -- --quiet
+cargo test --lib --no-default-features nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_real_ph_solution_is_extensive_when_inventory_and_target_scale_together -- --quiet
+cargo check --bench equilibrium_legacy_overhead `
+  --no-default-features `
+  --features equilibrium-instrumentation --quiet
+```
+
+The gates passed: 28 nonlinear tests, 22 TP-1907 frozen tests, and the
+isolated TP-1906 extensivity test passed; the latter took 82.16 s in the debug
+test profile because it solves seven physical scales. The narrow optimization
+is accepted as correctness-clean and structurally justified. Broad Legacy
+orchestration remains deferred until a controlled benchmark shows a material
+facade-level gain; the next Legacy work must target a named material bucket,
+not generic `solver overhead`.
+
+## 93. PERF-LEGACY-06: Trust-region boundary Cauchy steps skip unused LU
+
+### Story name
+
+The Legacy Trust Region solver must not compute the Newton/LU step when the
+Cauchy step already reaches the trust-region boundary. The dogleg result,
+singular-Jacobian behavior when Newton data is required, and accepted solution
+must remain correct.
+
+### Question / hypothesis
+
+Question: how much of the measured Legacy TR linear-system bucket is spent on
+Newton data that is discarded because `||p_cauchy|| >= delta`?
+
+Hypothesis: calculating the Cauchy step first and delaying LU until the full
+Newton step or dogleg interpolation is needed will reduce linear-system wall
+time on boundary iterations without changing the selected step.
+
+### Change under test
+
+The solver now computes Cauchy data before Newton data. When Cauchy already
+lies on or beyond the trust boundary, it scales that step directly. Otherwise
+it performs the existing LU solve and retains the existing dogleg selection.
+The zero-Jacobian case still reaches LU and remains a singular-Jacobian error.
+
+### Command
+
+```powershell
+cargo rustc --release --bench equilibrium_legacy_overhead `
+  --no-default-features `
+  --features equilibrium-instrumentation `
+  --config "profile.release.lto='off'" `
+  --config "profile.release.codegen-units=16"
+```
+
+The resulting executable is run with `--noplot`; before/after captures use
+the same release profile and machine.
+
+### Release evidence
+
+| profile | facade | accepted TR wall | linear system | matrix | unattributed |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| P,T ElementInventory, before | 1.871 ms | 0.699 ms | 0.210 ms | 0.129 ms | 0.210 ms |
+| P,T ElementInventory, after A | 2.152 ms | 0.572 ms | 0.130 ms | 0.003 ms | 0.220 ms |
+| P,T ElementInventory, after B | 1.961 ms | 0.566 ms | 0.125 ms | 0.003 ms | 0.219 ms |
+| P,T ElementInventory, after C | 2.009 ms | 0.705 ms | 0.135 ms | 0.003 ms | 0.352 ms |
+| nested P,H ElementInventory, before | 4.823 ms | 0.266 ms | 0.079 ms | 0.049 ms | 0.065 ms |
+| nested P,H ElementInventory, after A | 5.241 ms | 0.227 ms | 0.060 ms | 0.003 ms | 0.080 ms |
+| nested P,H ElementInventory, after B | 4.627 ms | 0.221 ms | 0.060 ms | 0.001 ms | 0.080 ms |
+| nested P,H ElementInventory, after C | 4.699 ms | 0.224 ms | 0.061 ms | 0.005 ms | 0.077 ms |
+
+The new ordering reduces the observed linear bucket in the large profiles,
+while the dashboard remains noisy and the unattributed bucket is not reduced
+by this change. These are focused dashboard observations, not a controlled
+Criterion before/after series; no exact facade speedup is claimed.
+
+### Correctness gate and decision
+
+```powershell
+cargo test --lib --no-default-features equilibrium_nonlinear -- --quiet
+cargo test --lib --no-default-features nasa_tp1907_chon_graphite_tests -- --quiet
+cargo test --lib --no-default-features nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_real_ph_solution_is_extensive_when_inventory_and_target_scale_together -- --quiet
+cargo check --bench equilibrium_legacy_overhead `
+  --no-default-features `
+  --features equilibrium-instrumentation --quiet
+```
+
+The gates passed: 36 nonlinear tests, 22 TP-1907 frozen tests, and the
+isolated TP-1906 extensivity test passed. The optimization is accepted as a
+narrow TR linear-work reduction. Broad Legacy orchestration and parallel
+callback work remain deferred; the next candidate must be selected from the
+remaining detailed dashboard buckets.
+
+## 94. PERF-LEGACY-07: Large Legacy P,H non-solver budget is decomposed
+
+### Story name
+
+The large Legacy P,H ElementInventory cases must expose every material stage
+outside the nonlinear solver. A `workflow` or `recovery` parent row is useful
+for partitioning, but it is not an optimization target until its child timing
+and backend-attempt evidence are visible.
+
+### Question / hypothesis
+
+Question: for Legacy LM/NR/TR on a 40-component ElementInventory case, how much
+time remains outside nonlinear solving, and is it ordinary nested orchestration
+or extensive-normalization recovery?
+
+Hypothesis: ordinary nested P,H LM/NR contains a measurable numeric-closure
+cost, while TR's large P,H wall is caused by a recovery transaction and must be
+analyzed as separate recovery children rather than pooled with normal trials.
+
+### Command
+
+Release dashboard, ten repetitions per scenario, with the public facade and
+all diagnostic tables enabled:
+
+```powershell
+cargo rustc --release --bench equilibrium_baseline `
+  --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint" `
+  --config "profile.release.lto='off'" `
+  --config "profile.release.codegen-units=16"
+
+target\release\deps\equilibrium_baseline-<fresh-hash>.exe --noplot
+```
+
+### Release evidence
+
+The following is a fresh release capture. The macro table is additive only in
+the facade partition; nested child rows are inclusive observations and must
+not be summed.
+
+| case | facade | facade outside workflow | P,H workflow | trial / recovery child | inner nonlinear | inner outside nonlinear | named non-solver observation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| RP-1311/40 P,H Legacy LM | 13.78 ms | 1.79 ms | 11.99 ms | trial 11.52 ms | 7.32 ms | 2.87 ms | numeric closure 2.21 ms |
+| RP-1311/40 P,H Legacy NR | 10.81 ms | 1.74 ms | 9.07 ms | trial 8.60 ms | 4.47 ms | 2.81 ms | numeric closure 2.17 ms |
+| RP-1311/40 P,H Legacy TR | 15.74 ms | 1.15 ms | 14.59 ms | recovery 14.59 ms | 0.12 ms* | 14.47 ms* | recovery children below |
+
+The TR recovery transaction is decomposed by its own complete recovery wall:
+
+| recovery child | time | share |
+| --- | ---: | ---: |
+| physical failure | 1.89 ms | 12.9% |
+| normalization | 0.11 ms | 0.8% |
+| normalized discovery | 10.75 ms | 73.6% |
+| physical retry | 1.63 ms | 11.2% |
+| reconstruction | 0.00 ms | 0.0% |
+| recovery remainder | 0.21 ms | 1.5% |
+
+`recovery remainder` now contains only control work not assigned to a named
+child. The initial failed physical attempt has its own wall-time row and its
+backend-attempt table remains the authoritative place to inspect individual
+failed calls. Recovery child rows include their own solver work; therefore the
+starred TR complement is a conservative published nonlinear-envelope
+complement, not a claim that all normalized-discovery wall is non-solver work.
+
+The RP-1311/40 P,T LM/NR/TR controls are present as well (`1.35`, `1.30`, and
+`1.58 ms` in this capture). They are below the project materiality gate of
+`10 ms` and are retained for coverage, not optimization priority.
+
+### Decision
+
+Do not start a generic Legacy-orchestration refactor from the macro percentage.
+For the only ordinary large cases above the gate, numeric closure is visible at
+`2.21/2.17 ms` for LM/NR but remains below the current `10 ms` materiality
+threshold. For TR, the failed physical attempt is now separated and the true
+unassigned recovery remainder is only `0.21 ms`. No Legacy orchestration work
+is justified at this stage; facade resolution, request preparation,
+validation, and every other sub-`10 ms` aggregate remain out of scope.
+
+The benchmark now exposes the required macro, facade, P,H, inner/recovery,
+nonlinear-envelope, backend-attempt, and accepted-callback tables for every
+Legacy scenario in the matrix. This story is a measurement gate, not an
+algorithmic optimization acceptance.
+
+## 95. PERF-LEGACY-08/09: Numeric-closure clone elision and solver trial-buffer probe
+
+### Story name
+
+The numeric closure must not deep-copy a large thermochemistry payload twice
+when the phase bridge already owns a private working copy. A Legacy solver
+allocation change is worthwhile only when trial-vector construction is a
+material part of the measured nonlinear wall.
+
+### Question / hypothesis
+
+Question 1: does the phase bridge call the historical public Gibbs-closure
+factory in a way that repeats a large `SubsData` clone?
+
+Hypothesis 1: a crate-private in-place entry point, used only after the bridge
+has created its private working copy, removes the redundant clone while the
+public copy-on-entry contract remains unchanged.
+
+Question 2: can LM/NR/TR reuse one `Vec<f64>` for trial states without changing
+accepted candidates or line-search behavior?
+
+Hypothesis 2: allocation reuse might reduce Legacy solver overhead on the
+40-component profiles, but it must be rejected if the stage remains below
+measurement resolution or wall-time captures do not improve.
+
+### Change under test
+
+`PERF-LEGACY-08` factors the Gibbs-closure loop into a private local helper.
+`SubsData::calculate_dG0_fun_one_phase()` keeps its historical copy-on-entry
+behavior; the phase bridge calls a crate-private
+`calculate_dG0_fun_one_phase_in_place()` only on its already-cloned working
+payload. No equations, callback contract, solver order, or accepted-state
+rules changed.
+
+`PERF-LEGACY-09` temporarily reused a trial `Vec<f64>` in Legacy LM, NR, and
+TR. The probe was reverted after the detailed dashboard showed trial-vector
+work at `0.000 ms` for the large accepted rows and repeated facade/backend
+captures moved within ordinary run noise.
+
+### Command
+
+```powershell
+cargo rustc --release --bench equilibrium_baseline `
+  --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint" `
+  --config "profile.release.lto='off'" `
+  --config "profile.release.codegen-units=16"
+
+target\release\deps\equilibrium_baseline-<fresh-hash>.exe --noplot
+```
+
+The Legacy detail harness was also used for the trial-buffer decision:
+
+```powershell
+cargo bench --bench equilibrium_legacy_overhead `
+  --no-default-features `
+  --features equilibrium-instrumentation -- --noplot
+```
+
+### Release evidence
+
+Three fresh release captures after `PERF-LEGACY-08` gave the following
+RP-1311/40 nested P,H observations. Numeric-closure timing is an inclusive
+stage row; it must not be added to the nonlinear row or to another inclusive
+stage. Captures 1-3 were made while the temporary `PERF-LEGACY-09` probe was
+present; that probe does not touch closure construction.
+
+| capture | LM numeric closure | NR numeric closure | LM backend wall | NR backend wall |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 1.06 ms | 0.93 ms | 10.14 ms | 7.16 ms |
+| 2 | 1.03 ms | 0.94 ms | 10.15 ms | 7.20 ms |
+| 3 | 1.12 ms | 1.06 ms | 11.00 ms | 7.84 ms |
+| median | 1.06 ms | 0.94 ms | 10.15 ms | 7.20 ms |
+
+After removing the rejected trial-buffer probe, a current release smoke run
+reported `0.81 ms` numeric closure for both LM and NR, with facade walls
+`12.12 ms` and `9.09 ms` respectively and `dashboard_exit=0`. This is a
+current-tree consistency check, not an additional before/after sample.
+
+The previous retained Story 94 baseline named numeric closure at `2.21 ms`
+for LM and `2.17 ms` for NR. This supports removal of a repeated large
+payload clone and a substantial reduction of that named preparation stage;
+the release captures are not a controlled Criterion before/after series, so
+they do not claim the same percentage reduction for complete facade wall.
+
+The detailed Legacy harness measured trial-vector construction at `0.000 ms`
+at display precision in the large accepted rows. The corresponding LM/NR/TR
+facade and backend walls varied materially more than that stage across
+captures. The trial-buffer probe therefore has no accepted performance claim
+and its code was removed.
+
+### Correctness gate and decision
+
+```powershell
+cargo test --lib --no-default-features equilibrium_nonlinear -- --quiet
+cargo test --lib --no-default-features equilibrium_backend_adapter -- --quiet
+cargo test --lib --no-default-features phase_equilibrium_problem_tests -- --quiet
+cargo test --lib --no-default-features equilibrium_calculator -- --quiet
+cargo test --lib --no-default-features nasa_tp1907_chon_graphite_tests -- --quiet
+cargo test --lib --no-default-features nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_real_ph_solution_is_extensive_when_inventory_and_target_scale_together -- --quiet
+```
+
+The relevant gates passed: nonlinear `36/36`, backend adapter `7/7`, phase
+bridge `35/35`, calculator `28/28`, frozen TP-1907 `22 passed + 6 ignored`,
+and the TP-1906 extensive scale test `1/1`. A complete lib run also exposed
+three unrelated pre-existing Kinetics failures; none is in the changed
+ChemEquilibrium path.
+
+`PERF-LEGACY-08` is accepted narrowly as large-payload clone elision. The
+public API remains protected by its historical copy semantics. `PERF-LEGACY-09`
+is rejected as below the measurement/materiality threshold. The next useful
+nonlinear experiment is a shared numeric evaluation workspace for residual
+and Jacobian state, with matched allocation/callback evidence; callback
+parallelism remains deferred until callback work itself is a material budget.
+
+## 96. PERF-PH-12/13: Changing-temperature P,H Gibbs ownership and trial snapshot reuse
+
+### Story name
+
+Changing-temperature P,H evaluation must not clone an owned thermochemistry
+payload at the Gibbs refresh boundary, and a feasible trial must not be fully
+evaluated again when the nonlinear backend immediately requests its residual.
+
+### Command
+
+Release preparation benchmark with optional counters and allocation evidence:
+
+```powershell
+cargo rustc --release --bench equilibrium_ph_preparation `
+  --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-allocation" `
+  --config "profile.release.lto='off'" `
+  --config "profile.release.codegen-units=16"
+
+target\release\deps\equilibrium_ph_preparation-<fresh-hash>.exe --noplot
+```
+
+Correctness gates:
+
+```powershell
+cargo test --lib --no-default-features equilibrium_ph_thermochemistry -- --quiet
+cargo test --lib --no-default-features equilibrium_ph_formulation -- --quiet
+cargo test --lib --no-default-features equilibrium_ph_monolithic -- --quiet
+cargo test --lib --no-default-features equilibrium_nonlinear -- --quiet
+cargo test --lib --no-default-features phase_equilibrium_problem_tests -- --quiet
+cargo test --lib --no-default-features nasa_tp1907_chon_graphite_tests -- --quiet
+cargo test --lib --no-default-features nasa_tp1906_chon_graphite_ph_tests -- --quiet
+```
+
+### What we check
+
+Hypothesis 1: `PhaseGibbsSource::evaluate` already owns its private
+`SubsData`; calling the public `calculate_dG0_fun_one_phase()` adds a second
+copy-on-entry. The crate-private in-place factory should preserve values and
+errors while removing that redundant large-payload copy. The public API must
+retain its historical copy-on-entry behavior.
+
+Hypothesis 2: `is_feasible()` and `residual()` commonly receive the same exact
+trial vector. Reusing the complete `PhCandidateSnapshot` should remove the
+second Gibbs/enthalpy/mole/residual evaluation without accepting invalid
+trials, publishing rejected state, or memoizing a different vector.
+
+### Implementation
+
+`PhaseGibbsSource::evaluate` now calls
+`calculate_dG0_fun_one_phase_in_place()` on its mutex-protected, source-owned
+payload. The public `SubsData::calculate_dG0_fun_one_phase()` remains
+copy-on-entry for external callers.
+
+`PreparedMonolithicPhRunner` now keeps one local exact-vector cache. A feasible
+snapshot is stored only after the existing full candidate evaluation and mole
+checks pass. The following residual consumes it only when every coordinate is
+exactly equal. A failed feasibility evaluation, an invalid trial, a different
+vector, or any consumed entry falls back to the original evaluation path.
+
+### Release changing-target evidence
+
+The benchmark prepares a session, solves the declared first target, then
+solves a different second total-enthalpy target from that accepted state. It
+also prints allocation mode, point wall, exact candidate snapshot counts, and
+target-local allocated bytes. One current release capture:
+
+| case | preparation | first point | second point | first snapshots | second snapshots | first allocated bytes | second allocated bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| small3 molecular | 10.187 ms | 1.511 ms | 0.679 ms | 3 | 2 | 122720 | 95886 |
+| STANJAN-15 molecular | 377.227 ms | 35.710 ms | 5.228 ms | 32 | 20 | 3696563 | 1515919 |
+| STANJAN-15 elemental | 376.579 ms | 7.920 ms | 5.265 ms | 2 | 20 | 930799 | 1517445 |
+| RP-1311/40 elemental | 4716.048 ms | 51.761 ms | 9.913 ms | 2 | 3 | 7764103 | 1994519 |
+
+The second target is genuinely different, but it is not a refresh-only
+microbenchmark: prepared symbolic state and backend attempts can dominate it.
+The `0.000 ms` second Gibbs-snapshot rows in the detailed table mean that the
+prepared formulation reused its existing Gibbs capability; they do not prove
+that every numeric `PhaseGibbsSource` refresh is free. A matched old/new
+refresh-only capture is still needed for a percentage claim about PERF-PH-12.
+
+The snapshot counter is the useful structural evidence for PERF-PH-13. It is
+reported beside the changing-target wall and allocation numbers so a matched
+before/after run can distinguish fewer full chemical evaluations from solver
+iteration noise. This single capture is not a claim that the whole point wall
+has decreased monotonically: first/second wall values move with backend route,
+iterations, and basin selection.
+
+### Matched PERF-PH-13 comparison
+
+The same release profile, cases, public facade, prepared-session operation, and
+three process repetitions were run with `trial_cache_mode=disabled-baseline`
+and `trial_cache_mode=enabled`. The baseline was selected only through the
+internal `equilibrium-benchmark-no-trial-cache` feature; production builds use
+the enabled path.
+
+| case | baseline second point median | enabled second point median | enabled wall delta | baseline snapshots | enabled snapshots | enabled allocation delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| small3 molecular | 0.592 ms | 0.650 ms | +9.8% | 2 | 2 | 0.0% |
+| STANJAN-15 molecular | 5.244 ms | 5.515 ms | +5.2% | 26 | 20 | -4.8% |
+| STANJAN-15 elemental | 5.273 ms | 5.100 ms | -3.3% | 26 | 20 | -4.8% |
+| RP-1311/40 elemental | 10.347 ms | 10.037 ms | -3.0% | 3 | 3 | 0.0% |
+
+The wall result is mixed and remains within ordinary solver/run variation; it
+does not justify a percentage speedup claim. The structural result is clear
+for the STANJAN cases: six complete candidate snapshots and about `4.8%` of
+target-local allocation bytes disappear. RP-1311/40 does not exercise a
+material feasibility-to-residual reuse opportunity in this prepared route.
+Keep PERF-PH-13 as a narrow repeated-work reduction, and do not add a more
+general cache or optimize its small key vector without a new workload showing
+material benefit.
+
+### Correctness result
+
+All listed focused gates passed: thermochemistry `3/3`, formulation `12/12`,
+monolithic runner `5/5`, nonlinear `36/36`, phase bridge `35/35`, frozen
+TP-1907 `22 passed + 6 ignored`, and TP-1906 P,H frozen tests `22 passed + 6
+ignored`. The prepared-session benchmark completed every listed case and
+Criterion operation successfully.
+
+### Decision
+
+Accept PERF-PH-12 as a narrow ownership correction and PERF-PH-13 as a
+localized full-snapshot reuse. Neither change changes equations, solver order,
+acceptance tolerances, rollback, or the public copy-on-entry contract. The
+matched series confirms structural work reduction but no uniform wall-time
+speedup, so no facade percentage is reported. Further work should target a
+refresh-only P,H measurement and interval/failure gates, not a broader cache.
+
+## Story 97: PERF-PH-14 native-interval Gibbs closure reuse
+
+### Command
+
+```text
+cargo test --lib --no-default-features tp1907_gibbs_reuses_native_intervals_between_temperature_points -- --nocapture
+cargo test --lib --no-default-features nasa_tp1906_chon_graphite_ph_tests -- --quiet --test-threads=1
+cargo check --lib --no-default-features
+```
+
+### Question / hypothesis
+
+Does the private resolved P,H Gibbs source rebuild the complete set of callable
+closures only when the selected native coefficient interval changes, while
+preserving exact Gibbs values and the existing failure boundary? The useful
+performance unit here is a full closure rebuild, not the cost of copying a
+small temperature value.
+
+### What changed
+
+`PhaseGibbsSource` now stores the actual selected `(T_min, T_max)` interval for
+each component after a successful refresh. A new temperature reuses all
+closures only when it is contained in every stored interval. A crossing or an
+out-of-range temperature follows the existing `extract_all_thermal_coeffs`
+and in-place Gibbs factory path. The `ThermoCalculator` capability API and
+`SubsData` gained a read-only current-interval query so the cache does not
+guess from a fixture breakpoint or from a rounded temperature. The public
+`from_functions` capability path is unchanged.
+
+The common optional instrumentation gained
+`gibbs_interval_reuses()`, separate from `gibbs_coefficient_refreshes()`.
+The counter is disabled with the rest of equilibrium instrumentation in an
+ordinary library build.
+
+### Result
+
+The focused TP-1907 frozen probe evaluated one complete Gibbs vector at
+`700.0 K`, then at `700.5 K`, then in reverse at `699.5 K`. All returned
+values were finite. The result was:
+
+```text
+refreshes=2  reuses=4
+```
+
+The two refreshes are the independent `gas` and `graphite` phase sources on
+the first vector. Each later vector reuses one closure set per phase, hence
+four reuse events. This is an assertion over the observed counters, not a
+wall-time claim.
+
+The sequential frozen P,H module completed `7 passed; 0 failed; 6 ignored`.
+The library compile check passed. Existing warnings are unrelated deprecation
+and unused-code warnings.
+
+### Decision and remaining gates
+
+Accept the narrow interval-aware reuse as a production change: it removes
+complete closure construction from repeated in-interval temperatures without
+changing equations, solver order, public ownership, or acceptance behavior.
+Do not generalize it into a multi-temperature closure cache yet. Add the
+remaining correctness matrix before claiming full boundary coverage:
+crossing in both directions, components with different native intervals,
+out-of-range and invalid-source errors, recovery after a failed refresh, and
+agreement with the canonical P,T Gibbs/H/Cp values and provenance.
+### Story 98: PERF-PH-14 native Gibbs interval reuse pays for itself in a matched release probe
+
+**Name:** `PERF-PH-14 native Gibbs interval reuse`
+
+**Command:**
+
+```text
+cargo bench --bench equilibrium_gibbs_interval --no-default-features --features "equilibrium-instrumentation" -- --noplot
+cargo bench --bench equilibrium_gibbs_interval --no-default-features --features "equilibrium-instrumentation equilibrium-benchmark-no-gibbs-interval-reuse" -- --noplot
+```
+
+**Question / hypothesis:** When one resolved TP-1907 thermochemistry bundle is
+evaluated at many temperatures that remain inside the selected native NASA
+intervals, can the calculator reuse the already built Gibbs closures? The
+control build forces the pre-change behavior: refresh closures for every new
+temperature. The setup uses the public `EquilibriumCalculator` facade and a
+frozen TP-1907 gas-only molecular feed; P,T basin discovery is outside the
+timed sequence.
+
+**What is measured:** 384 Gibbs vectors, in the sequence
+`[700.0, 700.5, 699.5] K` repeated 128 times. The table reports wall time for
+the sequence, mean time per vector, and instrumentation evidence for closure
+refreshes and interval reuses. This is a focused thermochemistry benchmark,
+not a P,H or nonlinear-solver benchmark.
+
+**Result:** Five direct runs of each optimized binary produced the following
+range and mean:
+
+| mode | vectors | wall range | mean wall | mean/vector | refreshes | interval reuses |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| native interval reuse | 384 | 0.291--0.345 ms | 0.307 ms | 0.80 us | 2 | 766 |
+| refresh every temperature (control) | 384 | 6.492--7.315 ms | 6.805 ms | 17.72 us | 768 | 0 |
+
+The matched local speedup is approximately `22.2x`, or `95.5%` lower wall
+time for this Gibbs-evaluation sequence. The counters prove that the current
+path builds one closure set per phase on the first vector and reuses both
+phase sets for every subsequent temperature in the interval.
+
+**Decision:** Accept `PERF-PH-14` as a measured local optimization. Do not
+extrapolate the percentage to complete P,H wall time: nonlinear solve and
+other P,H stages are intentionally absent from this probe. Remaining
+correctness gates are interval crossing in both directions, heterogeneous
+component intervals, out-of-range and invalid-source errors, and failed
+refresh recovery. The benchmark is ready to serve as a regression baseline
+for later P,H changing-temperature measurements.
+
+### Story 99: PERF-PH-15 production P,H path reaches Gibbs interval reuse
+
+**Name:** `PERF-PH-15 changing-temperature P,H production comparison`
+
+**Command:**
+
+```text
+cargo bench --bench equilibrium_gibbs_interval --no-default-features --features "equilibrium-instrumentation" -- --noplot
+cargo bench --bench equilibrium_gibbs_interval --no-default-features --features "equilibrium-instrumentation equilibrium-benchmark-no-gibbs-interval-reuse" -- --noplot
+```
+
+**Question / hypothesis:** Is `PhaseGibbsSource` actually used by a
+production changing-temperature P,H route, and does its interval-aware reuse
+reduce complete facade wall time? The benchmark uses the public facade and
+compares the current native path with the matched control build that forces a
+Gibbs refresh for every changed temperature.
+
+**Cases:**
+
+| case | route | points | purpose |
+| --- | --- | ---: | --- |
+| TP-1907 | nested P,H | 3 | negative control: compatibility nested route does not consume `PhaseGibbsSource` |
+| STANJAN-15 | monolithic P,H | 3 | production caller of `ResolvedThermochemistry::evaluate_gibbs` |
+
+**Result:** The STANJAN-15 monolithic row consistently reported `1` Gibbs
+refresh and `41` interval reuses in the current build, versus `42` refreshes
+and `0` reuses in the control. One representative run was `136.293 ms`
+current versus `146.162 ms` control. However, ten alternating wall samples
+gave `138.836 ms` current versus `137.651 ms` control, a difference of
+`-0.86%` for the current path, which is within runtime noise. The nested
+TP-1907 row reported `0/0` in both builds, confirming that it is not a caller
+of this cache.
+
+**Decision:** Confirmed: the new Gibbs closure construction/reuse is on the
+production monolithic P,H path. The local closure optimization is accepted,
+but no complete P,H speedup is claimed: the 3-point range is dominated by
+nonlinear solve, orchestration, and validation. Any further performance work
+must target those larger stages or use a longer P,H range to amplify this
+small contribution. Correctness remained green for all three accepted points
+in both matched builds.
+
+### Story 100: PERF-NL-01 Legacy callback same-iterate measurement
+
+**Name:** `PERF-NL-01 shared numeric evaluation workspace gate`
+
+**Command:**
+
+```text
+cargo bench --bench equilibrium_legacy_callbacks --no-default-features --features "equilibrium-instrumentation" -- --noplot
+```
+
+The dashboard was executed from the optimized benchmark binary after Cargo
+finished its release/LTO build. The benchmark uses the public facade and one
+selected Legacy backend per case.
+
+**Question / hypothesis:** Do residual and Jacobian callbacks repeatedly
+receive the identical trial iterate, and is the duplicated numeric state
+construction large enough to justify a solver-attempt-local workspace? The
+measurement includes Legacy LM, NR, and TR; P,T and P,H; small, STANJAN-15,
+TP-1907/18, and RP-1311/40 cases. The accepted table and complete attempt
+ledger retain accepted, rejected, and failed attempts separately.
+
+**What was added:** The optional Legacy diagnostic scope now records adjacent
+residual/Jacobian callback pairs with the same floating-point bit signature.
+The report exposes `legacy_same_iterate_callback_pairs`; RST rows remain
+`n/a`. The production build without `equilibrium-instrumentation` does not
+compute this signature.
+
+**Representative release result:**
+
+| case | backend | route | backend wall | residual + Jacobian | same-iterate pairs | pair share |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| RP-1311/40, 40 components | Legacy LM | P,T | `0.175 ms` | `0.043 ms` | `10` | `100.0%` |
+| RP-1311/40, 40 components | Legacy TR | P,H nested | `0.504 ms` | `0.213 ms` | `42` | `100.0%` |
+| STANJAN-15, 15 components | Legacy LM | P,H monolithic | `1.370 ms` | `0.497 ms` | `35` | `100.0%` |
+| TP-1907/18, 18 components | Legacy TR | P,H nested | `0.155 ms` | `<0.001 ms` | `32` | `100.0%` |
+
+The exact pair count matched `min(residual_calls, jacobian_calls)` in the
+representative accepted rows, confirming the duplicate-evaluation hypothesis.
+However, even the largest measured callback budget was below `0.5 ms`, and
+all visible started-attempt rows remained below the project materiality gate
+of `10 ms` or `1%` of the complete request.
+
+**Correctness:** The focused diagnostic unit test passed. The benchmark
+completed all 36 configured facade operations with the existing accepted or
+expected failure outcomes. No equation, tolerance, backend order, callback
+contract, or continuation state was changed.
+
+**Decision:** Reject the shared numeric workspace implementation for the
+current fixture scale. Keep the counter as evidence for future scaling work;
+reopen the optimization only when a valid larger or sustained-throughput
+workload makes repeated callback state construction material. Do not infer
+that a `100%` pair share alone warrants a cache.
+
+### Story 101: PERF-RST-02 RST worker scheduling and Jacobian lock gate [HISTORICAL]
+
+**Status:** Historical pre-migration worker-scaling capture. The current
+`equilibrium_rst_workers` source now uses the prepared adapter and includes
+Backtracking LM; the tables below cover only the earlier four-method matrix.
+They remain useful for locating the old worker-scaling signal, but are not a
+complete current solver-policy or wall-time baseline. Current policy crossover
+evidence is Story 108, and current prepared-route medians are Story 103.
+
+**Name:** `PERF-RST-02 RST callback scheduling/materiality gate`
+
+**Command:**
+
+```text
+$env:RAYON_NUM_THREADS="1"
+$env:RST_WORKERS_FILTER="rp1311_40"
+$env:RST_WORKERS_REPORT_REPETITIONS="1"
+cargo bench --bench equilibrium_rst_workers --no-default-features --features "equilibrium-instrumentation" -- --noplot rp1311_40
+```
+
+The same optimized benchmark executable was then run in fresh processes with
+`RAYON_NUM_THREADS=2`, `4`, and unset (`default`, reported as 24 workers).
+The benchmark uses the normal `EquilibriumCalculator` facade and retains a
+separate stage and attempt tables. The stage table reports every existing
+facade, P,T/P,H workflow, and inner equilibrium timing against its local
+scope denominator; the attempt table reports every measured RST attempt,
+including rejected attempts. The focused target is registered in `Cargo.toml` as
+`equilibrium_rst_workers`; it does not alter solver policy or production
+closure selection.
+
+**Question / hypothesis:** Does the Rayon worker scheduler and the shared
+per-entry Jacobian write lock consume a material part of real RST runtime, so
+that lock-free indexed assembly or a sequential small-system closure is
+warranted? The test compares 15-component monolithic elemental P,H and
+18-/40-component elemental P,T cases across RST LM, Minpack LM, Nielsen LM,
+and Damped Newton. The macro table keeps facade/workflow/backend scopes
+compact. The stage table expands facade, P,T or P,H transaction, and inner
+equilibrium scopes into concrete rows with `stage ms`, `scope ms`, and `% of
+scope`. The attempt table keeps backend wall, residual, Jacobian, and solver
+overhead in separate columns and includes call counts.
+
+**Representative macro result:**
+
+| case | RST policy | workers | status | facade ms | workflow ms | RST backend ms |
+| --- | --- | ---: | --- | ---: | ---: | ---: |
+| RP-1311/40 elemental P,T | LM | 1 | accepted | `541.953` | `540.956` | `5.808` |
+| RP-1311/40 elemental P,T | LM | 2 | accepted | `340.495` | `339.489` | `2.885` |
+| RP-1311/40 elemental P,T | LM | 4 | accepted | `233.448` | `232.469` | `2.164` |
+| RP-1311/40 elemental P,T | LM | 24 | accepted | `174.988` | `173.945` | `4.070` |
+| STANJAN-15 elemental monolithic P,H | Minpack LM | 1 | accepted | `565.556` | `564.781` | `5.569` |
+| STANJAN-15 elemental monolithic P,H | Minpack LM | 2 | accepted | `316.834` | `315.994` | `3.062` |
+| STANJAN-15 elemental monolithic P,H | Minpack LM | 4 | accepted | `183.576` | `182.723` | `1.937` |
+| STANJAN-15 elemental monolithic P,H | Minpack LM | 24 | accepted | `116.966` | `116.058` | `3.714` |
+
+**Worker-attributed stage result (one diagnostic sample per fresh process):**
+
+| case | workers | scope | stage | stage ms | scope ms | % of scope |
+| --- | ---: | --- | --- | ---: | ---: | ---: |
+| RP-1311/40 elemental P,T | 1 | P,T workflow | RST preparation | `532.925` | `544.919` | `97.8%` |
+| RP-1311/40 elemental P,T | 1 | P,T workflow | nonlinear solve | `544.742` | `544.919` | `100.0%` |
+| RP-1311/40 elemental P,T | 2 | P,T workflow | RST preparation | `330.260` | `341.599` | `96.7%` |
+| RP-1311/40 elemental P,T | 2 | P,T workflow | nonlinear solve | `341.430` | `341.599` | `100.0%` |
+| RP-1311/40 elemental P,T | 4 | P,T workflow | RST preparation | `221.997` | `232.451` | `95.5%` |
+| RP-1311/40 elemental P,T | 4 | P,T workflow | nonlinear solve | `232.303` | `232.451` | `99.9%` |
+| RP-1311/40 elemental P,T | 24 | P,T workflow | RST preparation | `158.131` | `175.223` | `90.2%` |
+| RP-1311/40 elemental P,T | 24 | P,T workflow | nonlinear solve | `175.082` | `175.223` | `99.9%` |
+| STANJAN-15 elemental monolithic P,H | 1 | P,H transaction | monolithic RST preparation | `581.693` | `592.207` | `98.2%` |
+| STANJAN-15 elemental monolithic P,H | 1 | P,H transaction | monolithic backend execution | `5.947` | `592.207` | `1.0%` |
+| STANJAN-15 elemental monolithic P,H | 4 | P,H transaction | monolithic RST preparation | `177.807` | `184.215` | `96.5%` |
+| STANJAN-15 elemental monolithic P,H | 4 | P,H transaction | monolithic backend execution | `1.923` | `184.215` | `1.0%` |
+
+The executable prints all stage rows, including zero-valued stages. The table
+above keeps the material rows readable in this story record. `RST
+preparation` is the measured symbolic/problem preparation portion recorded by
+the RST adapter; `nonlinear solve` and `monolithic execution` are inclusive
+wall-clock scopes around the runner. Therefore these rows are intentionally
+not additive: the RST backend attempt table is the separate source for
+residual/Jacobian/solver-overhead time.
+
+**Attempt-level result:** RP-1311/40 LM at one worker spent `0.841 ms`
+(`14.5%`) in residual, `4.821 ms` (`83.0%`) in Jacobian, and `0.145 ms`
+(`2.5%`) in RST solver overhead across eight residual and eight Jacobian
+calls. At four workers the split was `0.543 ms` (`25.1%`), `1.425 ms`
+(`65.9%`), and `0.195 ms` (`9.0%`). STANJAN-15 Minpack LM at one worker
+spent `2.091 ms` residual, `3.228 ms` Jacobian, and `0.249 ms` overhead;
+all ten residual and ten Jacobian calls were retained in the attempt ledger.
+Nielsen LM and Damped Newton rejected on the representative fixtures; their
+attempt rows remain evidence of solver behavior, not accepted performance
+comparisons.
+
+**Correctness:** The focused release executable completed its configured
+facade operations with the existing accepted/rejected outcomes. No equations,
+seeds, tolerances, backend order, closure route, or solution publication
+logic changed. `cargo check --bench equilibrium_rst_workers --no-default-features
+--features equilibrium-instrumentation` passed.
+
+**Decision:** The RST callback and its remaining solver overhead are below the
+project `10 ms` optimization threshold. Reject lock-removal and sequential
+closure implementation for now. The request-level worker scaling is real,
+but the accepted RST attempt is only a few milliseconds while the facade and
+workflow are hundreds of milliseconds; this points to a separate
+orchestration/normalization or repeated-preparation budget. The worker-
+attributed stage table is now the instrument for the next runs: its rows are
+inclusive, so a parent such as `nonlinear solve` contains callback work and
+must not be added to its children. A future RST change requires comparing the
+same stage rows across fresh 1/2/4/default-worker processes and repeated
+samples first.
+
+### Story 102: PERF-RST-03 RST preparation decomposition [SUPERSEDED]
+
+**Name:** `PERF-RST-03 RST preparation substage attribution (historical)`
+
+**Status:** Superseded on 2026-09-17 by the prepared RST adapter migration.
+
+**Command:**
+
+```text
+$env:RAYON_NUM_THREADS="1"
+$env:RST_WORKERS_FILTER="rp1311_40_pt_element_inventory_rst_lm"
+$env:RST_WORKERS_REPORT_REPETITIONS="1"
+cargo bench --bench equilibrium_rst_workers --no-default-features --features "equilibrium-instrumentation" -- --noplot rp1311_40_pt_element_inventory_rst_lm
+```
+
+The command and table below belong to the pre-migration KiThe-side timing
+wrappers. They are retained as historical evidence only and must not be used
+as the current performance baseline. The prepared adapter now delegates graph
+construction and lambdification to RustedSciThe's
+`PreparedSymbolicNonlinearProblem`. RustedSciThe 0.4.18 exposes one aggregate
+`preparation_duration` for this direct Lambdify path, not separate public
+durations for symbolic differentiation, residual lambdification, and Jacobian
+lambdification. The current dashboard therefore prints one explicitly named
+`RST backend preparation (aggregate; internal split unavailable)` row. It no
+longer prints zero-valued child rows, which would falsely imply measured
+zero-cost work.
+
+**Historical question / hypothesis:** Which concrete operation owned the
+hundreds of milliseconds previously reported only as `RST preparation`, and
+did that owner change with P,T versus monolithic P,H or with the Rayon worker
+count?
+
+**Historical release diagnostic result:** A fresh optimized executable
+captured the following pre-migration split for RP-1311/40 P,T:
+
+| workers | RST preparation | equation generation | symbolic differentiation | residual lambdification | Jacobian lambdification | problem materialization |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | `539.271 ms` | `104.253 ms` | `415.322 ms` | `1.741 ms` | `17.926 ms` | `434.995 ms` |
+| 2 | `323.302 ms` | `102.742 ms` | `205.815 ms` | `1.158 ms` | `13.558 ms` | `220.537 ms` |
+| 4 | `229.110 ms` | `103.997 ms` | `112.770 ms` | `1.246 ms` | `11.067 ms` | `125.089 ms` |
+| 24 | `156.739 ms` | `103.518 ms` | `37.481 ms` | `1.426 ms` | `14.279 ms` | `53.193 ms` |
+
+For STANJAN-15 monolithic P,H at one worker, the historical RST preparation
+scope was
+`555.608 ms`: symbolic differentiation `536.590 ms`, Jacobian
+lambdification `6.980 ms`, equation generation `6.004 ms`, row scaling
+`0.768 ms`, and residual lambdification `1.825 ms`. The corresponding parent
+`problem materialization` was `545.398 ms`; it includes differentiation and
+lambdification and must not be added to them. The release samples show that
+equation generation is nearly worker-invariant, while symbolic differentiation
+is the stage that benefits from additional workers.
+
+**Historical correctness:** `cargo check --lib --no-default-features` and
+`cargo check --bench equilibrium_rst_workers --no-default-features
+--features equilibrium-instrumentation` passed for the old instrumentation.
+Those checks do not validate the current prepared adapter.
+
+**Decision:** The old table is closed as a historical measurement. The current
+optimization boundary is the aggregate RST preparation cost plus the native
+RST callback table. Further differentiation/lambdification optimization
+requires a RustedSciThe telemetry/API change; KiThe must not infer those
+sub-stages from aggregate timing.
+
+### Story 104: PERF-RST-04 prepared-backend release baseline [HISTORICAL]
+
+**Status:** Historical post-migration, parallel-default capture from
+2026-09-17. The architecture is current, but the numbers predate the measured
+Sequential production-default decision and omit the new crossover evidence.
+Use Story 103 for the current cold/warm Sequential baseline and Story 108 for
+the Sequential/Parallel policy measurement. Rerun this method matrix before
+using its medians to choose an RST solver.
+
+**Name:** `PERF-RST-04 prepared RST route baseline after migration`
+
+**Commands:**
+
+```text
+cargo bench --bench equilibrium_rst_preparation --no-default-features \
+  --features equilibrium-instrumentation -- --noplot
+```
+
+The older `equilibrium_rst_workers` command belongs to the historical
+pre-policy worker capture in Story 101. It is not a current Sequential versus
+Parallel experiment because the production adapter now selects Sequential
+explicitly.
+
+**Question / hypothesis:** After moving the production adapter to the
+parameterized prepared RST problem, what is the current cold-start wall time
+for representative P,T and P,H element-inventory cases, and does the
+diagnostic dashboard identify all available work without fabricating missing
+RST sub-stages?
+
+**Current release capture:** Criterion medians from the optimized benchmark
+run on 2026-09-17 are shown below. They are representative route/method
+baselines, not a claim that one method is accepted for every case.
+
+| case | RST method | route | benchmark outcome | Criterion median |
+| --- | --- | --- | --- | ---: |
+| `stanjan15_pt_molecular` | LM | P,T | returned | `11.018 ms` |
+| `tp1907_18_pt_molecular` | LM | P,T | returned | `16.080 ms` |
+| `rp1311_40_pt_molecular` | LM | P,T | returned | `190.710 ms` |
+| `stanjan15_ph_elemental` | Minpack LM | P,H monolithic | returned | `125.710 ms` |
+| `tp1907_18_ph_elemental` | LM | P,H nested | returned | `33.242 ms` |
+| `rp1311_40_ph_elemental` | LM | P,H nested | returned | `261.720 ms` |
+
+The same run also measured the RST alternatives. For P,T TP-1907/18, the
+medians were LM `16.080 ms`, Minpack LM `22.408 ms`, Nielsen LM `18.804 ms`,
+and Damped Newton `16.063 ms`. For P,T RP-1311/40 they were respectively
+`190.710 ms`, `187.370 ms`, `188.300 ms`, and `180.510 ms`. For large P,H,
+Minpack LM was `125.710 ms` on STANJAN-15 elemental, while TP-1907/18
+elemental was `35.524 ms` with Minpack LM and RP-1311/40 elemental was
+`272.400 ms`.
+
+The dashboard now has separate inclusive macro-stage and RST-attempt tables.
+The RST preparation row is explicitly aggregate when the dependency does not
+expose an internal split. Native callback telemetry remains separate and
+reports residual/Jacobian/linear-solve call counts, durations, termination,
+and solver overhead. Inclusive parent rows must not be added to their child
+rows.
+
+For the focused RP-1311/40 P,T worker run with one worker, the current tables
+reported `facade 543.353 ms`, `P,T workflow 542.422 ms`, and an RST
+preparation scope of `524.725 ms`. Its available rows were:
+
+| scope | stage or backend metric | time | local share |
+| --- | --- | ---: | ---: |
+| P,T RST preparation | equation generation | `101.066 ms` | `19.3%` |
+| P,T RST preparation | RST backend preparation aggregate | `423.628 ms` | `80.7%` |
+| RST attempt | residual callbacks (`18` calls) | `1.004 ms` | `12.6%` of backend |
+| RST attempt | Jacobian callbacks (`8` calls) | `6.810 ms` | `85.6%` of backend |
+| RST attempt | solver overhead | `0.082 ms` | `1.0%` of backend |
+
+This is intentionally not presented as a complete decomposition of the
+`423.628 ms`: the current RST dependency does not expose that internal split.
+It is, however, enough to distinguish KiThe/RST preparation cost from the
+actual nonlinear callbacks. The old symbolic-differentiation numbers in Story
+102 cannot be substituted into this table.
+
+**Correctness:** Focused RST adapter tests (`11 passed`),
+`cargo check --bench equilibrium_rst_workers --no-default-features
+--features equilibrium-instrumentation`, and `cargo fmt -- --check` passed.
+The TP-1907 matrix remains the acceptance gate; it characterizes per-method
+pass, accuracy-fail, and backend-fail outcomes rather than requiring every
+RST method to solve every topology.
+
+**Decision:** The prepared architecture and available telemetry are ready for
+performance work. Current KiThe measurements can optimize aggregate preparation
+and facade stages; a detailed split inside RST preparation is blocked on a
+future RustedSciThe preparation report. The next benchmark refresh must rerun
+the prepared-session cold/warm cases and update Story 103 before using its old
+numbers for decisions.
+
+### Story 103: PERF-PREP-03 final KiThe cold/warm payload experiment
+
+**Name:** `PERF-PREP-03 parameterized RST payload removes repeated symbolic preparation`
+
+**Commands:**
+
+```text
+cargo bench --bench equilibrium_prepared_session --no-default-features \
+  --features equilibrium-instrumentation -- --noplot
+cargo bench --bench equilibrium_ph_preparation --no-default-features \
+  --features equilibrium-instrumentation -- --noplot prepared_session_two_points
+```
+
+**Question / hypothesis:** Does the public KiThe prepared-session boundary
+reuse the parameterized residual/Jacobian payload when temperature changes in
+P,T and when `target_enthalpy` changes in monolithic P,H? The expected result
+is one symbolic payload build, numeric parameter refreshes on later points,
+unchanged accepted physical solutions, and a material reduction for repeated
+large requests.
+
+**Historical release capture (superseded by the 2026-09-17 refresh below):**
+The earlier optimized executables were run after the detailed RST preparation
+instrumentation was added. The P,T capture used
+the public `EquilibriumCalculator` facade and compared a two-point one-shot
+loop with one `PreparedEquilibriumPtSession`:
+
+| case | components | preparation | cold operation | hot point | saved vs cold |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `tp1907_18_elemental_pt` | 18 | 14.772 ms | 27.992 ms | 0.567 ms | 98.0% |
+| `rp1311_40_molecular_pt` | 40 | 155.155 ms | 162.602 ms | 2.804 ms | 98.3% |
+| `stanjan15_elemental_pt` | 15 | 8.583 ms | 13.607 ms | 0.651 ms | 95.2% |
+
+The equal two-point wall comparison was:
+
+| case | one-shot loop | prepared session | built-in range | session saving |
+| --- | ---: | ---: | ---: | ---: |
+| `tp1907_18_elemental_pt` | 57.747 ms | 27.561 ms | 29.739 ms | 52.3% |
+| `rp1311_40_molecular_pt` | 354.454 ms | 166.646 ms | 179.454 ms | 53.0% |
+| `stanjan15_elemental_pt` | 25.663 ms | 14.174 ms | 13.485 ms | 44.8% |
+
+For monolithic P,H, the second point used a different enthalpy target on the
+same prepared session:
+
+| case | one-shot two points | preparation | first point | second point | prepared total | saving |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `small3_molecular` | 18.044 ms | 7.236 ms | 1.037 ms | 0.463 ms | 8.736 ms | 51.6% |
+| `stanjan15_molecular` | 242.563 ms | 78.783 ms | 28.243 ms | 4.006 ms | 111.032 ms | 54.2% |
+| `stanjan15_elemental` | 210.935 ms | 77.749 ms | 5.401 ms | 3.641 ms | 86.791 ms | 58.9% |
+| `rp1311_40_elemental` | 2421.277 ms | 1185.289 ms | 49.382 ms | 9.224 ms | 1243.895 ms | 48.6% |
+
+The P,H capture reports `first_builds=0`, `first_reuses=1`,
+`second_builds=0`, and `second_reuses=1` for each prepared session. The
+`preparation_ms` value is paid once; the later target changes only numeric
+state and continuation seed. The large RP-1311/40 case therefore removes
+approximately `1177 ms` from this two-target workflow without changing the
+equations or solver policy.
+
+**2026-09-17 prepared-path refresh (historical parallel-default capture):**
+The first post-migration capture used the then-current parallel lambdification
+policy. Its numbers remain useful for comparison, but they are no longer the
+production baseline after the measured sequential-policy decision below. The
+P,T two-point macro capture was:
+
+| case | one-shot loop | prepared session | built-in range | session saving |
+| --- | ---: | ---: | ---: | ---: |
+| `small3_molecular_pt` | `1.245 ms` | `1.013 ms` | `0.999 ms` | `18.6%` |
+| `stanjan15_molecular_pt` | `22.625 ms` | `11.354 ms` | `11.804 ms` | `49.8%` |
+| `tp1907_18_elemental_pt` | `46.774 ms` | `23.979 ms` | `24.050 ms` | `48.7%` |
+| `rp1311_40_molecular_pt` | `371.540 ms` | `186.840 ms` | `186.320 ms` | `49.7%` |
+| `small3_elemental_pt` | `1.889 ms` | `1.561 ms` | `1.544 ms` | `17.4%` |
+| `stanjan15_elemental_pt` | `24.194 ms` | `12.381 ms` | `12.385 ms` | `48.8%` |
+
+For the public P,H prepared-session two-point Criterion group, the current
+medians are:
+
+| case | prepared two-point median | current Criterion change | stage sample: preparation / first / second |
+| --- | ---: | ---: | ---: |
+| `small3_molecular` | `9.722 ms` | `-1.2%` | `8.884 / 1.188 / 0.442 ms` |
+| `stanjan15_molecular` | `188.660 ms` | `+24.4%` | `97.195 / 54.217 / 9.878 ms` |
+| `stanjan15_elemental` | `139.820 ms` | `+21.0%` | `84.900 / 9.265 / 10.505 ms` |
+| `rp1311_40_elemental` | `1499.700 ms` | `+15.7%` | `1225.797 / 205.694 / 42.787 ms` |
+
+The P,H dashboard identifies the accepted methods and stage ownership. For
+example, the current STANJAN-15 molecular point accepted RST Backtracking LM;
+the large P,H cases remain preparation-dominated, while the changing-target
+solve is still much cheaper than rebuilding the formulation. The positive
+Criterion changes are a performance regression against the stored benchmark
+history, not a correctness failure; they require a separate cascade/backend
+attribution pass before more optimization is attempted.
+
+**2026-09-17 sequential production-default refresh:** The prepared RST
+adapter now constructs its symbolic payload with
+`LambdifyExecutionPolicy::Sequential`. The parallel policy remains available
+as an explicit RST option, but the current KiThe matrix is below the point
+where Rayon scheduling pays for itself. The fresh P,T two-point capture is:
+
+| case | one-shot loop | prepared session | built-in range | session saving |
+| --- | ---: | ---: | ---: | ---: |
+| `small3_molecular_pt` | `0.952 ms` | `0.380 ms` | `0.382 ms` | `60.1%` |
+| `stanjan15_molecular_pt` | `19.590 ms` | `9.549 ms` | `10.054 ms` | `51.3%` |
+| `tp1907_18_elemental_pt` | `40.260 ms` | `19.225 ms` | `19.797 ms` | `52.2%` |
+| `rp1311_40_molecular_pt` | `382.669 ms` | `177.238 ms` | `192.212 ms` | `53.7%` |
+| `small3_elemental_pt` | `0.819 ms` | `0.300 ms` | `0.338 ms` | `63.4%` |
+| `stanjan15_elemental_pt` | `21.239 ms` | `9.812 ms` | `11.898 ms` | `53.8%` |
+
+The fresh P,H Criterion medians for the prepared two-target workflow are:
+
+| case | prepared two-point median | stage sample: preparation / first / second |
+| --- | ---: | ---: |
+| `small3_molecular` | `8.123 ms` | `7.646 / 0.173 / 0.085 ms` |
+| `stanjan15_molecular` | `173.892 ms` | `82.654 / 47.431 / 8.918 ms` |
+| `stanjan15_elemental` | `132.829 ms` | `89.128 / 7.647 / 8.441 ms` |
+| `rp1311_40_elemental` | `1570.050 ms` | `1136.992 / 257.841 / 59.347 ms` |
+
+The stage columns are one diagnostic capture and are intentionally not added
+to the Criterion median: they are separate observations and the RP case has
+visible preparation variance. The important range result is stable: for
+medium and large P,T cases a prepared session cuts the two-point workflow by
+roughly `51--54%`, while the second P,H target reuses the prepared payload and
+is much cheaper than a fresh construction. The small cases also benefit from
+sequential execution because they avoid Rayon scheduling overhead.
+
+This capture makes Sequential the current KiThe production default. Before
+changing that decision, add explicit larger-system measurements (at least
+80--100 equations) comparing Sequential and Parallel; the present evidence
+does not claim that Sequential wins for arbitrarily large RST systems.
+
+**Correctness:** Both release benchmark commands completed successfully. The
+existing prepared P,T and prepared P,H tests remain the correctness gate and
+assert accepted temperatures/enthalpy, element balance where applicable,
+formulation reuse, and failed-target seed rollback. The complete post-
+migration correctness result is recorded in Story 106; the wider library
+suite was not globally green because of 18 unrelated failures.
+
+**Decision:** The KiThe-side experiment is complete. Parameterized payload
+reuse is a material optimization for repeated P,T/P,H calculations, but it
+does not remove the cold-start cost. Further improvements to the symbolic
+payload belong in RustedSciThe: reusable immutable expression/Jacobian/
+lambdified structures, efficient numeric parameter refresh, and a common
+opt-in diagnostic contract for all nonlinear backends. That work is recorded
+as a separate RST handoff rather than mixed into the KiThe facade. The KiThe
+default execution policy is Sequential for the current problem-size matrix;
+Parallel remains an explicit experiment/escape hatch until the larger-system
+threshold is measured.
+
+### Story 105: RST backtracking LM added to the production cascade
+
+**Name:** `PERF-RST-05 backtracking Levenberg-Marquardt cascade coverage`
+
+**Question / hypothesis:** Does the new RustedSciThe
+`BacktrackingLevenbergMarquardtMethod` work through KiThe's prepared symbolic
+adapter under the same bounds, residual/Jacobian payload, acceptance gate,
+and telemetry contract as the existing RST methods? It is placed after the
+established RST methods and before Legacy fallback as the closest RST
+counterpart to the robust legacy LM route; its position remains provisional
+until the matrix benchmark is complete.
+
+**Implementation contract:** The adapter maps the method in both production
+and test-history solve paths, exposes the stable name
+`rst_backtracking_levenberg_marquardt`, includes it in
+`RustedSciTheSolver::recommended_cascade()` after the established RST methods,
+and includes it in the RST
+preparation and worker-attribution benchmark matrices. It uses the same
+prepared `residual/Jacobian` binding and native RST statistics as every other
+RST backend.
+
+**Correctness command:**
+
+```text
+cargo test equilibrium_rst_backend --lib --no-default-features -- --nocapture
+cargo test equilibrium_rst_matrix_tests --lib --no-default-features -- --nocapture
+cargo test rusted_scithe_default_policy_has_a_stable_documented_backend_order --lib --no-default-features -- --nocapture
+```
+
+**Required current benchmark commands:**
+
+```text
+cargo bench --bench equilibrium_rst_preparation --no-default-features \
+  --features equilibrium-instrumentation -- --noplot
+$env:RST_CROSSOVER_PROBE_ONLY = "1"
+cargo bench --bench equilibrium_rst_policy_crossover --no-default-features \
+  -- --noplot
+Remove-Item Env:RST_CROSSOVER_PROBE_ONLY
+```
+
+`equilibrium_rst_workers` is retained as historical request-level evidence in
+Story 101. It is not a current Backtracking or Sequential-versus-Parallel
+acceptance command because the production adapter selects `Sequential`
+explicitly.
+
+**Acceptance:** The method must be judged by the same physical validation as
+the existing methods: finite published moles, physical element-balance
+error, residual tolerance, and topology. A backend that terminates but fails
+the common acceptance gate is recorded as `ACCURACY_FAIL`, not as a successful
+solver. Its residual/Jacobian calls, linear solves, and solver overhead must
+appear in the native RST attempt table.
+
+**Robustness role:** Backtracking LM is retained as a late rescue method, not
+as a first-choice performance method. Its line-search step reduction can
+accept a point after the earlier RST methods reject a candidate or encounter
+an ill-conditioned Jacobian. Therefore a few additional milliseconds can be
+the correct trade for turning a failed cascade into an accepted physical
+solution. The PERF-PH-14 A/B capture confirms a measurable wall-time cost,
+but does not justify removing the method merely from that cost.
+
+**Initial TP-1907 result:** On the upper-inventory `scale=1e8` frozen case,
+the method was reached as the last RST fallback and returned `ACCURACY_FAIL`
+after `500` iterations. The normalized route reported residuals around
+`8.75e1` and backend wall time around `326 ms`; the existing Trust-Region LM
+still passed before this fallback was reached. This is a correctness and
+ordering characterization, not evidence that backtracking LM should become
+the default first method.
+
+**Current TP-1907 release acceptance snapshot:** The same normalized problem,
+seed, bounds, and physical acceptance gate were used for every isolated
+backend. The facade test passes because at least one RST method and at least
+one Legacy method pass the physical gate; individual method failure is retained
+as diagnostic evidence.
+
+| backend | status | residual evidence | max physical balance | interpretation |
+| --- | --- | ---: | ---: | --- |
+| RST LM | `ACCURACY_FAIL` | rejected: `5.074e-8` best | n/a | above the `1e-12` candidate gate |
+| RST Backtracking LM | `ACCURACY_FAIL` | rejected: `8.726e1` best | n/a | stalled after the fallback budget |
+| RST Minpack LM | `ACCURACY_FAIL` | rejected: `1.787e-11` best | n/a | close, but above `1e-12` |
+| RST Nielsen LM | `ACCURACY_FAIL` | rejected: `9.435e-7` best | n/a | insufficient final residual |
+| RST Trust-Region LM | `PASS` | `2.712e-14` / `2.712e-14` | `1.192e-7` | accepted RST method |
+| RST Damped Newton | `ACCURACY_FAIL` | rejected: `6.312e1` best | n/a | failed to reach the physical candidate |
+| Legacy LM | `PASS` | `1.557e-14` / `1.557e-14` | `1.192e-7` | accepted Legacy method |
+| Legacy NR | `ACCURACY_FAIL` | `1.693e-14` / `1.693e-14` | `3.532e-6` | formal residual passes, balance fails |
+| Legacy TR | `PASS` | `1.474e-14` / `1.474e-14` | `1.192e-7` | accepted Legacy method |
+
+This confirms that solver termination or a small formal residual is not alone
+an acceptance proof: `Legacy NR` fails the physical balance gate, while RST
+Trust-Region LM supplies the passing RST route.
+
+### Story 106: post-migration full correctness matrix
+
+**Name:** `CORR-RST-06 prepared RST migration full-suite audit`
+
+**Command:**
+
+```text
+cargo test --lib --no-default-features -- --include-ignored --nocapture
+```
+
+**Question / hypothesis:** Does moving the production RST adapter to the
+prepared parameterized problem preserve the calculator and frozen-reference
+correctness contracts, especially the P,H lifecycle and graphite topology
+routes?
+
+**Observed full-suite result on 2026-09-17:** `2544 passed, 18 failed,
+0 ignored, 0 measured`. The complete library suite is therefore not globally
+green. The 18 failures are outside the equilibrium/RST migration scope:
+Kinetics, live-data, NIST fitting, User_PhaseOrSolution, GUI lifecycle, and
+settings tests.
+
+**Equilibrium-specific follow-up:** The two P,H frozen lifecycle tests listed
+by the full run were executed directly after the suite:
+
+```text
+cargo test --lib --no-default-features -- --include-ignored --exact \
+  Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::i5_nasa_tp1906_tp1907_chon_graphite_ph_production_lifecycle_characterization \
+  --nocapture
+cargo test --lib --no-default-features -- --exact \
+  Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_four_point_ph_lifecycle_preserves_pt_manifold_and_graphite_topology \
+  --nocapture
+```
+
+Both passed. The ignored characterization retained the expected graphite
+topology transitions, accepted P,H continuation in both directions, and
+finite scaled enthalpy errors. The focused RST adapter, TP-1907 backend
+matrix, and facade oracle gate also pass. Therefore this migration has no
+identified equilibrium correctness regression; the unrelated 18 failures
+remain separate technical debt and must not be counted as RST evidence.
+
+**Decision:** The prepared RST migration clears the equilibrium correctness
+gate. Continue with the prepared-session cold/warm benchmark refresh; do not
+claim a globally green library until the unrelated failures are handled.
+
+### Story 107: controlled P,H cascade attribution for Backtracking LM
+
+**Name:** `PERF-PH-14 repeated Backtracking LM contribution to prepared P,H wall time`
+
+**Command:**
+
+```text
+cargo bench --bench equilibrium_ph_preparation --no-default-features \
+  --features equilibrium-instrumentation -- --noplot prepared_session_two_points
+```
+
+**Question / hypothesis:** Does the new Backtracking LM account for the fresh
+P,H regression, or is the dominant change in prepared formulation/RST
+preparation or in the other backend attempts? Use the same public facade,
+prepared session, targets, seed, bounds, acceptance gate, and Legacy fallback;
+only remove Backtracking LM from the comparison cascade.
+
+**A/B diagnostic capture on 2026-09-17:**
+
+| case | policy | preparation | first point | second point | total | first backend | second backend |
+| --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| `small3_molecular` | production + Backtracking | `7.552 ms` | `1.256 ms` | `0.511 ms` | `9.319 ms` | RST Minpack LM | RST LM |
+| `small3_molecular` | production without Backtracking | `7.902 ms` | `1.269 ms` | `0.480 ms` | `9.651 ms` | RST Minpack LM | RST LM |
+| `stanjan15_molecular` | production + Backtracking | `112.231 ms` | `57.966 ms` | `9.891 ms` | `180.088 ms` | RST Backtracking LM | Legacy LM |
+| `stanjan15_molecular` | production without Backtracking | `110.938 ms` | `51.475 ms` | `8.189 ms` | `170.602 ms` | Legacy LM | Legacy LM |
+| `stanjan15_elemental` | production + Backtracking | `119.274 ms` | `10.758 ms` | `10.448 ms` | `140.480 ms` | RST Minpack LM | Legacy LM |
+| `stanjan15_elemental` | production without Backtracking | `116.755 ms` | `10.579 ms` | `8.862 ms` | `136.195 ms` | RST Minpack LM | Legacy LM |
+| `rp1311_40_elemental` | production + Backtracking | `1297.024 ms` | `190.742 ms` | `51.368 ms` | `1539.134 ms` | RST Minpack LM | RST Minpack LM |
+| `rp1311_40_elemental` | production without Backtracking | `1095.244 ms` | `235.139 ms` | `44.363 ms` | `1374.746 ms` | RST Minpack LM | RST Minpack LM |
+
+All rows were accepted. Removing Backtracking reduced the observed total by
+about `5.6%` for STANJAN molecular, `3.1%` for STANJAN elemental, and `10.7%`
+for RP-1311/40 in this single diagnostic capture. The RP difference is not a
+clean solver-only measurement because preparation varied by roughly `202 ms`.
+The result nevertheless proves that Backtracking is a measurable late-cascade
+cost and that its presence alone does not explain the full historical P,H
+regression. The accepted backend can also change between points, so the
+attempt table remains part of the evidence rather than just the final method
+name.
+
+**Superseding three-repeat capture on 2026-09-17:** The same public-facade
+case matrix, prepared-session operation, target pair, fallback family, and
+acceptance gate were run three times with and without Backtracking LM. The
+values below are means of the three complete workflows; the earlier table is
+retained as a single-capture historical observation.
+
+| case | production + Backtracking | production without Backtracking | delta |
+| --- | ---: | ---: | ---: |
+| `small3_molecular` | `8.593 ms` | `8.307 ms` | `+3.44%` |
+| `stanjan15_molecular` | `168.657 ms` | `161.942 ms` | `+4.15%` |
+| `stanjan15_elemental` | `127.178 ms` | `124.562 ms` | `+2.10%` |
+| `rp1311_40_elemental` | `1485.063 ms` | `1495.577 ms` | `-0.70%` |
+
+The repeated result confirms a modest Backtracking cost on the two STANJAN
+routes, while the RP-1311/40 difference is within preparation/attempt noise.
+It does not explain the old P,H regression and does not justify moving the
+rescue method earlier. The current benchmark source still includes
+Backtracking in both the production cascade and the full RST method matrices.
+
+**Decision:** Keep Backtracking LM in the production cascade for correctness
+and robustness coverage, but do not promote it earlier. The repeated A/B gate
+is complete; future changes to its implementation must preserve the accepted
+backend sequence and rerun this same three-repeat comparison.
+
+### Story 108: PERF-RST-06 Sequential versus Parallel Lambdify crossover
+
+**Name:** `PERF-RST-06 prepared RST callback execution-policy crossover`
+
+**Command:**
+
+```powershell
+$env:RST_CROSSOVER_PROBE_ONLY = "1"
+cargo bench --bench equilibrium_rst_policy_crossover --no-default-features -- --noplot
+Remove-Item Env:RST_CROSSOVER_PROBE_ONLY
+```
+
+**Question / hypothesis:** At what prepared-system size does RST's parallel
+Lambdify callback policy repay Rayon scheduling overhead? The fixture keeps the
+same variables, parameter binding, equations, and `min_work=1`; only
+`LambdifyExecutionPolicy::Sequential` versus `Parallel` changes. Preparation
+and repeated runtime callbacks are reported separately because preparation
+policy timing does not answer the solver-loop question.
+
+**Fixture and measurement:** The probe uses independent parameterized symbolic
+equations with sizes `3, 15, 18, 40, 64, 80, 100, 128, 256, 512, 1024`.
+Preparation values are the mean of three constructions. Callback values are
+the mean per `residual_into + jacobian_into` pair over three samples of forty
+repetitions. The callback ratio is `parallel / sequential`; values below `1`
+mean that Parallel is faster.
+
+**Optimized release probe result on 2026-09-17:**
+
+| equations | prep Sequential / Parallel | callbacks Sequential / Parallel | callback ratio | callback winner |
+| ---: | ---: | ---: | ---: | --- |
+| 3 | `0.292 / 0.137 ms` | `0.2 / 42.3 us` | `181.946x` | Sequential |
+| 15 | `0.382 / 0.258 ms` | `1.0 / 33.7 us` | `33.920x` | Sequential |
+| 18 | `0.333 / 0.340 ms` | `1.6 / 37.1 us` | `22.680x` | Sequential |
+| 40 | `0.628 / 0.494 ms` | `4.2 / 34.8 us` | `8.260x` | Sequential |
+| 64 | `0.891 / 0.781 ms` | `10.5 / 45.9 us` | `4.379x` | Sequential |
+| 80 | `0.995 / 1.011 ms` | `13.5 / 57.0 us` | `4.235x` | Sequential |
+| 100 | `1.374 / 1.220 ms` | `20.3 / 59.9 us` | `2.959x` | Sequential |
+| 128 | `1.744 / 1.706 ms` | `30.8 / 121.8 us` | `3.959x` | Sequential |
+| 256 | `4.488 / 4.082 ms` | `115.3 / 302.1 us` | `2.620x` | Sequential |
+| 512 | `13.121 / 12.910 ms` | `455.4 / 551.5 us` | `1.211x` | Sequential |
+| 1024 | `47.982 / 47.800 ms` | `1862.1 / 1544.5 us` | `0.829x` | Parallel |
+
+**Conclusion:** For this workload the crossover is bracketed by `512` and
+`1024` equations. Parallel preparation is roughly comparable and therefore is
+not the decision point; the crossover comes from callback arithmetic finally
+becoming large enough to amortize Rayon. Sequential remains the correct
+default for the current KiThe production matrix (`15--40` components and the
+tested large cases), while Parallel becomes a candidate for genuinely
+thousand-equation systems.
+
+This is a policy threshold measurement, not a chemical correctness test. The
+fixture has independent cubic scalar expressions and does not model phase
+control, dense coupling, or a real TP/RP graph. Before changing the default,
+repeat the same experiment with replicated real symbolic payloads and record
+the solver iteration wall time, not only isolated callback time.
+
+### Story 109: PERF-RST-07 current five-method prepared route matrix
+
+**Name:** `PERF-RST-07 current Sequential RST method suitability matrix`
+
+**Command:**
+
+```powershell
+$env:RST_PREPARATION_REPORT_ONLY = "1"
+cargo bench --bench equilibrium_rst_preparation --no-default-features `
+  --features equilibrium-instrumentation -- --noplot
+Remove-Item Env:RST_PREPARATION_REPORT_ONLY
+```
+
+For a terminal-sized solver summary, set the compact switch as well:
+
+```powershell
+$env:RST_PREPARATION_REPORT_ONLY = "1"
+$env:RST_PREPARATION_COMPACT = "1"
+cargo bench --bench equilibrium_rst_preparation --no-default-features `
+  --features equilibrium-instrumentation -- --noplot
+Remove-Item Env:RST_PREPARATION_REPORT_ONLY
+Remove-Item Env:RST_PREPARATION_COMPACT
+```
+
+To retain every stage and every backend attempt without terminal-width loss,
+redirect the full mode to a UTF-8 text file and inspect its sections separately:
+
+```powershell
+$env:RST_PREPARATION_REPORT_ONLY = "1"
+cargo bench --bench equilibrium_rst_preparation --no-default-features `
+  --features equilibrium-instrumentation -- --noplot `
+  *> .\target\rst-preparation-full.txt
+Remove-Item Env:RST_PREPARATION_REPORT_ONLY
+```
+
+The compact table is the current matrix summary; the file remains the
+authoritative detailed stage/attempt dashboard.
+
+**Question / hypothesis:** After the prepared RST migration and the
+Sequential production-policy decision, which of the five available RST
+methods can solve the same facade routes, and what is the current cold-route
+wall time? The matrix must distinguish physical acceptance from rejection
+time; a fast rejected method is not a successful solver.
+
+**Scope and measurement:** The report-only run used the normal
+`EquilibriumCalculator` facade, fixed `SolverPolicy::Single` routes, the same
+seeds/bounds/acceptance rules for each method, and the production prepared
+RST payload. It covered 51 fixed-policy routes, five methods, and three
+repetitions per route: 153 observations. Values below are medians of the three
+wall samples. `FAIL` means the isolated method did not publish an accepted
+solution; its wall time is retained only as rejection-cost evidence.
+
+**Current release summary (2026-09-17, latest compact rerun):**
+
+| route | RST LM | Backtracking LM | Minpack LM | Nielsen LM | Damped Newton |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| small3 molecular P,T | `0.34 P` | `0.35 P` | `0.42 P` | `0.55 P` | `0.51 P` |
+| small3 elemental P,T | `0.52 F` | `0.41 P` | `0.31 P` | `0.47 P` | `0.45 F` |
+| small3 elemental P,H | `9.73 P` | `10.25 P` | `7.82 P` | `8.41 F` | `7.94 P` |
+| STANJAN-15 molecular P,T | `10.67 P` | `42.77 P` | `10.88 P` | `27.24 F` | `23.60 F` |
+| STANJAN-15 elemental P,T | `12.65 P` | `28.10 F` | `12.19 P` | `10.92 P` | `23.46 F` |
+| STANJAN-15 molecular P,H | `748.98 F` | n/a | `413.24 P` | n/a | n/a |
+| STANJAN-15 elemental P,H | `519.88 F` | n/a | `122.65 P` | n/a | n/a |
+| TP-1907/18 molecular P,T | `16.21 F` | `19.50 F` | `24.12 F` | `24.39 F` | `15.96 F` |
+| TP-1907/18 elemental P,T | `38.94 F` | n/a | `40.33 F` | n/a | n/a |
+| TP-1907/18 elemental P,H | `39.51 F` | n/a | `47.56 F` | n/a | n/a |
+| RP-1311/40 molecular P,T | `208.13 F` | `320.83 F` | `224.61 P` | `208.28 F` | `201.53 F` |
+| RP-1311/40 elemental P,T | `187.19 P` | n/a | `267.25 P` | n/a | n/a |
+| RP-1311/40 elemental P,H | `534.81 P` | n/a | `492.86 P` | n/a | n/a |
+
+`P` means physically accepted; `F` means `failed:AllBackendsFailed` for the
+isolated policy. The P,H and larger ElementInventory rows intentionally use
+only the methods supported by the benchmark's fixed-policy route matrix.
+For rejected rows the compact report now prints `n/a (rejected)` for workflow
+time, because the facade never publishes a successful workflow timing after
+an early isolated-method rejection. The wall value remains rejection-cost
+evidence and must not be compared with an accepted workflow as if it were a
+successful solve.
+
+**Interpretation:** There is no universal fastest RST method. Minpack LM is
+the only accepted method in the 40-component molecular P,T row and is also
+the clear accepted method for STANJAN-15 P,H. Trust-Region LM remains the
+known accepted method for the TP-1907 upper-inventory gate. Nielsen LM is
+useful on small and STANJAN elemental P,T but rejects several molecular and
+P,H routes. Backtracking LM is accepted on small routes but is slower and
+does not rescue the TP-1907/RP-1311 molecular rows in this isolated matrix.
+
+The matrix therefore supports keeping the heterogeneous cascade and
+Backtracking as a late robustness candidate. It does not justify reordering
+the production cascade solely by median wall time. Preparation and callback
+policy are separate questions; use Story 108 for Sequential versus Parallel,
+and use the attempt table from this run for residual/Jacobian/solver-overhead
+attribution.
+
+### Story 110: PERF-PH-16 share resolved P,H recovery ownership
+
+**Name:** `PERF-PH-16 P,H recovery request shares resolved-system snapshot`
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features equilibrium_ph_workflow -- --nocapture
+cargo test --lib --no-default-features nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_frozen_ph_molecular_elemental_and_formal_routes_reuse_target -- --nocapture
+cargo bench --bench equilibrium_ph_preparation --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint" `
+  -- --noplot prepared_session_two_points
+```
+
+**Question / hypothesis:** Does P,H route fallback/recovery copy an entire
+resolved phase system merely to retain the original physical request? The
+correctness requirement is unchanged equations, route, accepted state,
+element balances, and rollback. The performance target is only the request
+ownership boundary; symbolic preparation and nonlinear execution are measured
+separately and are outside this change.
+
+**Change:** `ResolvedPhaseEnthalpyRequest` now stores its immutable
+`ResolvedPhaseSystem` behind `Arc`. `cloned_with_ph_solve_mode()` and the
+normalized recovery request therefore clone a shared handle. The request's
+target, composition seed, options, and recovery transaction semantics remain
+value-local. `ResolvedThermochemistry` and result publication were deliberately
+left unchanged for a separate measurement.
+
+**Correctness result, 2026-09-17:**
+
+| gate | result |
+| --- | --- |
+| P,H workflow unit suite | `35 passed, 0 failed` |
+| TP-1906 molecular, elemental, formal target-reuse route | `1 passed, 0 failed` |
+| equations, solver order, acceptance and balance contract | unchanged |
+
+**Focused release benchmark result:** Criterion measured the existing public
+facade prepared-session two-target workflow. The reported interval is the
+Criterion estimate; the change column is against its stored local baseline and
+is not a matched clean checkout A/B series.
+
+| case | current median | Criterion change | decision |
+| --- | ---: | ---: | --- |
+| `small3_molecular` | `9.0525 ms` | `-4.16%, p=0.01` | measurable local win |
+| `stanjan15_molecular` | `189.93 ms` | `-6.06%, p=0.03` | modest win |
+| `stanjan15_elemental` | `152.83 ms` | `+3.94%, p=0.03` | no material conclusion |
+| `rp1311_40_elemental` | `1.8074 s` | `-1.18%, p=0.63` | no detected change |
+
+The result is consistent with the hypothesis: sharing the resolved snapshot
+can matter on small and medium routes, but it cannot explain the large
+RP-1311/40 budget. That budget remains dominated by RST preparation and
+nonlinear/backend execution. This is a partial ownership optimization, not a
+completion of copy-on-failure.
+
+**Decision:** Keep the change. The next experiment must either share the
+large `ResolvedThermochemistry` payload or redesign the attempt boundary so a
+successful physical solve does not need a recovery-preserving request copy.
+Both require a new correctness gate before benchmarking; do not infer their
+value from the current wall table alone.
+
+### Story 112: PERF-PH-18 explain nested fixed-template preparation
+
+**Name:** `PERF-PH-18 nested P,H template preparation child attribution`
+
+**Command:**
+
+```powershell
+cargo check --bench equilibrium_ph_preparation --no-default-features `
+  --features equilibrium-instrumentation
+cargo test --lib --no-default-features equilibrium_ph_workflow -- --nocapture
+cargo test --lib --no-default-features equilibrium_ph_range -- --nocapture
+cargo bench --bench equilibrium_ph_preparation --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint" `
+  -- --noplot point
+```
+
+**Question / hypothesis:** What is hidden inside the large nested P,H
+`trial_preparation` macro-stage? The first fixed-layout template is built once
+and must be distinguished from later reused trials. Only a child stage large
+enough to matter should become an optimization target.
+
+**Instrumentation change:** `PhTrialTimingReport::template_preparation()` now
+retains the `EquilibriumTimingReport` produced while the fixed template is
+created. The benchmark prints a separate `PERF-PH-18` table with the template
+total, request, thermochemistry, equation, symbolic, numeric closure,
+numerical problem, RST, active-set, projection, and unattributed portions.
+Reused trials publish zero template cost. No numerical equations, solver order,
+seed, phase lifecycle, rollback, or acceptance rule changed.
+
+**Correctness result, 2026-09-18:**
+
+| gate | result |
+| --- | --- |
+| P,H workflow unit suite | `35 passed, 0 failed` |
+| P,H range unit suite | `6 passed, 0 failed` |
+| benchmark compilation | passed |
+| equations, solver order, acceptance and balance contract | unchanged |
+
+**Release capture result:**
+
+| case | point | template ms | symbolic-construction ms | other measured child stages | unattributed ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `tp1907_18_elemental` | `0` | `14.737` | `14.556` | each `<=0.021` | `0.118` |
+| `rp1311_40_elemental` | `0` | `259.279` | `258.780` | each `<=0.076` | `0.298` |
+
+All subsequent fixed-formulation trials in both cases reported
+`template_ms=0.000`. The symbolic-construction column is the KiThe timing
+around the RST prepared-problem call. Because the current RST release reports
+`backend_stage_breakdown_available=false`, it is an aggregate RST preparation
+measurement, not proof that differentiation, lambdification, or one specific
+RST subroutine owns the full time.
+
+**Decision:** The clone and all other KiThe child stages are not candidates for
+the next optimization. The next measurement belongs inside the RST prepared
+symbolic path: split graph construction, symbolic differentiation, residual
+and Jacobian lambdification, and problem materialization while keeping
+telemetry disabled by default. Only after that split should sequential versus
+parallel RST preparation or another RST optimization be attempted. The
+one-time cost is already amortized by prepared P,H ranges, so the benchmark
+must report both cold template cost and reused-point cost.
+
+### Story 111: PERF-PH-17 measure recovery request clone cost before optimizing
+
+**Name:** `PERF-PH-17 P,H recovery-preserving request clone attribution`
+
+**Command:**
+
+```powershell
+cargo check --bench equilibrium_ph_preparation --no-default-features `
+  --features equilibrium-instrumentation
+cargo test --lib --no-default-features equilibrium_ph_workflow -- --nocapture
+cargo test --lib --no-default-features equilibrium_ph_range -- --nocapture
+cargo test --lib --no-default-features nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_frozen_ph_molecular_elemental_and_formal_routes_reuse_target -- --nocapture
+cargo bench --bench equilibrium_ph_preparation --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint" `
+  -- --noplot point
+```
+
+**Question / hypothesis:** Is the request clone retained before every ordinary
+P,H attempt large enough to justify a copy-on-failure or shared
+`ResolvedThermochemistry` refactor? The measurement must be separate from
+`trial_preparation`, `scalar_orchestration`, and nonlinear execution. A stage
+below roughly one percent of a large case is not a useful optimization target
+unless a later structural change makes it grow.
+
+**Instrumentation change:** `PhTemperatureTimingReport` now exposes
+`recovery_request_clone()`. The single-point transaction measures the clone
+used as the working request; the range driver measures the clone retained for
+classified recovery. Timing is taken only when the existing equilibrium
+instrumentation is enabled and is zero otherwise. No solver, seed, bounds,
+rollback, recovery, or acceptance behavior changed.
+
+**Correctness result, 2026-09-18:**
+
+| gate | result |
+| --- | --- |
+| P,H workflow unit suite | `35 passed, 0 failed` |
+| P,H range unit suite | `6 passed, 0 failed` |
+| TP-1906 molecular, elemental, formal target-reuse route | `1 passed, 0 failed` |
+| benchmark compilation | passed |
+| equations, solver order, acceptance and balance contract | unchanged |
+
+**Release capture result:** The public-facade point capture measured one
+ordinary point for each representative route. `wall_ms` is the external
+point wall clock, `ph_total_ms` is the instrumented P,H transaction, and
+`recovery_clone_ms` is the isolated request-copy cost.
+
+| case | route | wall ms | P,H ms | clone ms | clone/P,H | clone/wall |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `small3_molecular` | monolithic | 8.317 | 8.088 | 0.021 | 0.3% | 0.3% |
+| `stanjan15_molecular` | monolithic | 160.007 | 159.297 | 0.029 | 0.0% | 0.0% |
+| `stanjan15_elemental` | monolithic | 112.686 | 111.874 | 0.039 | 0.0% | 0.0% |
+| `tp1907_18_elemental` | nested | 69.189 | 67.198 | 0.058 | 0.1% | 0.1% |
+| `rp1311_40_elemental` | nested | 214.829 | 200.537 | 0.104 | 0.1% | 0.0% |
+
+**Decision:** Do not optimize this clone now. Even on the largest measured
+case it is about one tenth of a millisecond and one tenth of one percent of
+the P,H budget. The earlier `Arc<ResolvedPhaseSystem>` ownership change stays
+in place, but another deep ownership experiment for
+`ResolvedThermochemistry` is not justified by this evidence. Continue with a
+stage that is already large in the telemetry; for monolithic STANJAN-15 that
+is RST symbolic preparation, while for nested RP-1311/40 it is trial
+preparation. If either macro-stage remains too broad, add a child timer there
+before changing code.
+
+### Story 113: PERF-RST-08 complete preparation evidence boundary
+
+**Name:** `PERF-RST-08 RST preparation evidence is detailed without fabricated zeros`
+
+**Commands:**
+
+```powershell
+cargo fmt --all -- --check
+cargo check --lib --no-default-features
+cargo check --bench equilibrium_rst_preparation --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint"
+cargo test --lib --no-default-features equilibrium_rst_backend_tests::rst_preparation_telemetry_reports_aggregate_when_backend_split_is_unavailable -- --nocapture
+```
+
+**Question / hypothesis:** Can one RST preparation report identify every
+measured KiThe child stage and the exact RST lifecycle boundary, without
+mistaking an unavailable backend sub-stage for zero cost? This is required
+before selecting another performance target.
+
+**Instrumentation and table contract:** `RstPreparationTimingReport` now
+retains RST's public effective backend, artifact action, optional AOT build
+duration, and optional generated residual/Jacobian job counts. The benchmark
+`equilibrium_rst_preparation` prints three complementary levels:
+
+| level | denominator / meaning |
+| --- | --- |
+| macro partition | external wall versus facade/workflow; orientation only |
+| concrete stage ownership | measured KiThe stages and the aggregate RST preparation call |
+| RST preparation evidence | backend metadata, build/jobs, and availability of an internal RST split |
+
+The concrete preparation rows include equation generation, temperature
+substitution, row scaling, enthalpy equation, variable materialization,
+parameter evaluation, log-mole bounds, the aggregate RST preparation call,
+and optional artifact build. RST differentiation/lambdification rows are
+printed only when the dependency reports them. With RustedSciThe 0.4.18
+direct Lambdify they are explicitly `unavailable`, not `0.00 ms`.
+
+**Correctness result, 2026-09-18:**
+
+| gate | result |
+| --- | --- |
+| library check | passed |
+| benchmark check with instrumentation and prettyprint | passed |
+| RST preparation telemetry regression | `1 passed, 0 failed` |
+| production equations, solver order, and acceptance behavior | unchanged |
+
+**Decision:** The KiThe-side preparation budget is now sufficiently detailed
+for the next optimization decision without another broad release run. The
+remaining unknown is specifically inside RST's aggregate prepared-symbolic
+call. It must be split in RustedSciThe into graph construction, symbolic
+differentiation, residual/Jacobian lambdification, and materialization before
+optimizing that call or drawing conclusions about its internal bottleneck.
+
+**Nested-template routing correction:** The release dashboard first exposed a
+second instrumentation gap: nested P,H preparation stores its cold RST build
+under `trial.template_preparation`, not under `trial.inner_timing`. The RST
+benchmark now records that scope separately. A fast dev-profile runtime check
+after the correction produced RP-1311/40 `trial-0 template RST preparation`
+rows with equation-generation and aggregate RST preparation values; these are
+sanity evidence only, not a release performance baseline. The release command
+above remains the authoritative performance capture command.
+
+### Story 114: PERF-RST-09 KiThe symbolic equation-builder decomposition
+
+**Name:** `PERF-RST-09 KiThe-owned equation preparation is separated from RST preparation`
+
+**Question / hypothesis:** Which part of the preparation budget belongs to
+KiThe, and which part begins only after KiThe has handed symbolic expressions
+to RustedSciThe? The hypothesis is that
+`multiphase_equilibrium_residual_generator_sym*` is KiThe work, while
+expression differentiation, lambdification, and prepared-problem
+materialization belong to RST.
+
+**Command:**
+
+```powershell
+$env:RST_PREPARATION_REPORT_ONLY='1'
+cargo bench --bench equilibrium_rst_preparation --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint" `
+  -- --noplot
+```
+
+**Ownership contract:**
+
+| dashboard row | owner | meaning |
+| --- | --- | --- |
+| `KiThe symbolic input validation` | KiThe | dimensions and input-shape checks |
+| `KiThe symbolic phase topology` | KiThe | species-to-phase map and reaction phase stoichiometry |
+| `KiThe symbolic variable expansion` | KiThe | construction of `y` and `exp(y)` expression nodes |
+| `KiThe symbolic phase totals` | KiThe | symbolic phase mole totals |
+| `KiThe symbolic activity offsets` | KiThe | phase-model pressure/reference-pressure terms |
+| `KiThe symbolic reaction rows` | KiThe | reaction-affinity expression assembly |
+| `KiThe symbolic element-balance rows` | KiThe | physical elemental-balance expression assembly |
+| `KiThe symbolic residual simplification` | KiThe | optional `.simplify()` pass, when enabled |
+| `equation generation` | KiThe | inclusive parent for the equation-generator call |
+| `RST backend preparation (aggregate)` | RST boundary | public prepared-symbolic construction call |
+
+The `equation generation` row is inclusive and must not be added to its
+KiThe child rows. The RST aggregate must likewise not be added to the KiThe
+rows. This prevents double counting while making the ownership boundary
+explicit.
+
+**Implementation result, 2026-09-18:** KiThe now measures all sub-stages
+available before the RST call for fixed P,T, monolithic P,H, nested P,H cold
+templates, and range preparation. The diagnostic collector is disabled by
+default and has no timing calls on the normal path. Existing correctness tests
+remain green, including five RST backend contract tests and the parity-test
+compilation.
+
+**Release result, 2026-09-18:** The optimized benchmark completed successfully
+(`Finished bench profile [optimized]`, exit code `0`). The report printed the
+macro table, concrete stage table, KiThe equation-builder child rows, RST
+metadata table, every backend attempt, and execution/reuse evidence. The
+release capture confirms the current RST public report exposes `lambdify`,
+`not-applicable` artifact action, no AOT job counts, and no internal
+differentiation/lambdification split. Therefore all unallocated preparation
+time after the KiThe child rows is currently an RST-side question, not an
+unmeasured KiThe stage.
+
+**Representative release medians:** The following values are medians of the
+three printed repetitions in the same optimized run. They use the named RST
+preparation scope as denominator; `equation generation` is inclusive and is
+not added to its child rows.
+
+| case / scope | KiThe reaction rows | KiThe simplification | KiThe equation generation | RST aggregate |
+| --- | ---: | ---: | ---: | ---: |
+| STANJAN-15 molecular P,T | `6.22 ms` | `5.95 ms` | `6.37 ms` | `2.74 ms` |
+| STANJAN-15 elemental P,T | `8.32 ms` | `7.93 ms` | `8.48 ms` | `3.80 ms` |
+| RP-1311/40 molecular P,T | `115.21 ms` | `109.21 ms` | `116.38 ms` | `62.81 ms` |
+| RP-1311/40 elemental P,T | `149.56 ms` | `142.14 ms` | `151.41 ms` | `81.96 ms` |
+| RP-1311/40 elemental P,H `trial-0 template` | `176.39 ms` | `166.83 ms` | `177.59 ms` | `66.79 ms` |
+
+The remaining KiThe child rows for the large cases are small: elemental
+balance assembly is about `1.0--1.7 ms`, while phase topology, variable
+expansion, phase totals, and activity offsets are below the displayed
+`0.1 ms` resolution. The immediate KiThe-side candidate is therefore the
+symbolic reaction-row builder and its simplification pass, not bounds,
+parameter evaluation, or elemental-balance assembly. The RST-side request
+remains necessary only to split its `62--82 ms` aggregate into graph
+construction, differentiation, lambdification, and materialization.
+
+**Route-specific qualification:** `symbolic residual simplification` is not a
+universal RST stage:
+
+| route | simplification behavior | release observation |
+| --- | --- | --- |
+| fixed P,T cold preparation | enabled | dominant KiThe cost for large systems |
+| nested P,H cold template | enabled in the fixed-temperature inner template | dominant KiThe child cost for RP-1311/40 |
+| monolithic P,H | intentionally disabled; raw expressions go directly to RST | `0.00 ms`; RST aggregate is about `100 ms` for STANJAN-15 |
+| prepared/range warm point | graph is reused and parameters are rebound | no repeated equation generation/simplification |
+| Legacy backend | no RST symbolic preparation | not applicable |
+
+This distinction is part of the optimization contract. Any future attempt to
+remove or reduce simplification must target the fixed-P,T/nested-template
+route, preserve the existing raw monolithic P,H route, and pass symbolic
+parity plus physical correctness tests before comparing release timings.
+
+**Decision:** KiThe-side preparation is now sufficiently decomposed for a
+performance decision. The next request belongs to RustedSciThe: expose child
+timings for graph construction, differentiation, residual lambdification,
+Jacobian lambdification, and prepared-problem materialization. Until then,
+optimize only a KiThe child row that is visibly large in the detailed table;
+do not infer an RST bottleneck from the aggregate label.
+
+### Story 115: PERF-RST-10 fixed-P,T raw-expression A/B experiment
+
+**Name:** `PERF-RST-10 removing fixed-P,T symbolic simplification is a gated experiment`
+
+**Question / hypothesis:** Can fixed-P,T send the same KiThe symbolic
+expression tree directly to RST, as monolithic P,H already does, without
+losing residual/Jacobian parity, solver acceptance, or physical correctness?
+
+**Experimental switch:** The production default is now the raw expression
+route. The old simplified route remains available for a matched baseline with:
+
+```powershell
+$env:KITHE_RST_SYMBOLIC_SIMPLIFICATION='simplified'
+cargo bench --profile release --bench equilibrium_rst_preparation `
+  --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint equilibrium-benchmark-simplified-symbolic" `
+  -- --noplot
+```
+
+The corresponding production benchmark prints
+`rst_symbolic_simplification=Raw (production)`. The environment variable
+`KITHE_RST_SYMBOLIC_SIMPLIFICATION=simplified` is a diagnostic baseline
+override; `raw`/`off` explicitly select production behavior. Monolithic P,H
+already used the raw generator and is unchanged.
+
+**Correctness gates:**
+
+| gate | result |
+| --- | --- |
+| TP-1907 upper-inventory acceptance matrix | passed; 1 test |
+| TP-1907 frozen group | `23 passed, 9 ignored, 0 failed` |
+| phase-bridge correctness group | `35 passed, 0 failed` |
+| ChemEquilibrium production gate | `992 passed, 0 failed, 74 ignored` |
+
+The broader crate run still has unrelated failures outside ChemEquilibrium,
+plus two TP-1906 tests blocked by a missing local thermochemistry library
+file. The relevant TP-1907, phase-bridge, and full ChemEquilibrium gates pass
+with the raw graph.
+
+**Release A/B result, three repetitions:**
+
+| case / scope | simplified total | raw total | raw simplification |
+| --- | ---: | ---: | ---: |
+| STANJAN-15 molecular P,T | `6.37 + 2.74 = 9.11 ms` | `0.36 + 2.80 = 3.16 ms` | `0.00 ms` |
+| RP-1311/40 elemental P,T | `151.41 + 81.96 = 233.37 ms` | `6.48 + 75.46 = 81.94 ms` | `0.00 ms` |
+| RP-1311/40 elemental P,H `trial-0 template` | `177.59 + 66.79 = 244.38 ms` | `6.61 + 75.92 = 82.53 ms` | `0.00 ms` |
+
+The raw route reduces cold preparation by roughly `65--66%` on the large
+cases. The RST aggregate does not increase materially and is slightly lower
+in this matched capture. This proves that the large KiThe simplification cost
+is avoidable for these cases; the full ChemEquilibrium gate confirms that the
+promotion preserves the current route's correctness contract.
+
+**Decision:** Promote raw fixed-P,T to the production default. Retain
+`equilibrium-benchmark-simplified-symbolic` and the environment override as a
+reproducible pre-change baseline. This is a preparation-path optimization,
+not an equation change: both modes start from the same KiThe graph and use the
+same RST solve/acceptance pipeline.
+
+### Story 116: PERF-RST-11 RST native telemetry is attached to the calculator report
+
+**Name:** `PERF-RST-11 RST 0.4.19 preparation and solver telemetry reaches the common equilibrium report`
+
+**Question / hypothesis:** Does the prepared RST adapter preserve the detailed
+telemetry now exposed by RustedSciThe, or does the calculator still collapse it
+to one opaque preparation row and broad solver wall time? The required result is
+an honest split: RST preparation children under the aggregate preparation row,
+and native nonlinear-solver counters under the common backend-attempt timing
+object. A stage that RST did not execute must remain unavailable rather than
+appearing as a zero-cost stage.
+
+**Commands:**
+
+```powershell
+cargo test --lib --no-default-features `
+  Thermodynamics::ChemEquilibrium::equilibrium_rst_backend_tests::rst_preparation_telemetry_reports_detailed_backend_stages `
+  -- --nocapture
+
+cargo test --lib --no-default-features `
+  Thermodynamics::ChemEquilibrium::equilibrium_rst_backend_tests::every_recommended_rst_strategy_solves_the_same_symbolic_problem `
+  -- --nocapture
+
+cargo check --benches --no-default-features
+```
+
+**Checks:**
+
+| area | assertion |
+| --- | --- |
+| RST preparation | `backend_stage_breakdown_available=true` for the enabled 0.4.19 preparation report |
+| RST preparation | differentiation, residual callback preparation, Jacobian callback preparation, input validation, prepared assembly, and unattributed time are forwarded when reported |
+| unavailable stages | `FinalValidation` and other non-applicable records remain `None`; they are not fabricated zeros |
+| RST solve | every recommended RST strategy exposes state/trial callback counters, linear factorization/system-solve timing, accepted/rejected steps, and per-iteration telemetry |
+| Legacy solve | RST-only fields remain `None`; existing Legacy callback timing is unchanged |
+| production history | RST iteration history remains disabled; only statistics needed for the common attempt report are retained |
+| benchmark integration | both preparation and worker dashboards compile with the detailed RST child rows |
+
+**Implementation result:** The adapter now opts into
+`PreparationTelemetryMode::Collect` only when `EquilibriumTimingMode::Enabled`
+is requested. It maps the RST records into `RstPreparationTimingReport`, keeps
+the public aggregate duration intact, and forwards `SolveStatistics` plus its
+`SolveAttemptStatistics` into `SolverEvaluationTiming`. The focused telemetry
+tests and bench compilation pass.
+
+**Performance follow-up:** No new release timing numbers are claimed by this
+Story. The next release benchmark must print the detailed rows before any RST
+preparation optimization is selected; old aggregate-only Story 114 numbers are
+not a baseline for the new child-stage attribution.
+
+### Story 117: PERF-RST-12 release attribution of RST preparation and solver work
+
+**Name:** `PERF-RST-12 release dashboard explains RP-1311/40 RST preparation and native solver time`
+
+**Question / hypothesis:** Does the new telemetry explain the large release
+budget in RP-1311/40, and does the native RST solver itself dominate the work?
+The relevant threshold is `10 ms`: sub-millisecond rows are recorded for
+completeness but are not optimization targets.
+
+**Commands:**
+
+```powershell
+$env:RST_PREPARATION_REPORT_ONLY='1'
+cargo bench --profile release --bench equilibrium_rst_preparation `
+  --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint" `
+  -- --noplot
+
+$env:RST_WORKERS_FILTER='rp1311_40'
+$env:RST_WORKERS_REPORT_REPETITIONS='3'
+cargo bench --profile release --bench equilibrium_rst_workers `
+  --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-prettyprint" `
+  -- --noplot
+```
+
+**Release observations, 2026-10-06:**
+
+| case / scope | aggregate | dominant child evidence |
+| --- | ---: | --- |
+| RP-1311/40 P,T elemental inventory preparation | `78.75--81.66 ms` | symbolic differentiation `56.47--57.91 ms`; Jacobian lambdification `7.95--11.41 ms`; input validation `6.36--6.89 ms`; prepared assembly `5.50--6.43 ms` |
+| RP-1311/40 nested P,H trial-0 template preparation | `77.14--78.65 ms` | symbolic differentiation `56.14--57.33 ms`; Jacobian lambdification `7.66--8.21 ms`; input validation `6.26--6.62 ms`; prepared assembly `5.52--6.37 ms` |
+| RP-1311/40 preparation residual | `0.25--0.30 ms` | unattributed time; not a bottleneck |
+
+**Native solver evidence for RP-1311/40 P,T element inventory:**
+
+| method | facade median | status | solver wall / callback split |
+| --- | ---: | --- | --- |
+| RST LM | `106.53 ms` | accepted | about `5.3--5.8 ms`; Jacobian `4.4--5.0 ms`, residual `0.74--0.76 ms`, overhead `0.08 ms` |
+| RST Minpack LM | `105.06 ms` | accepted | about `5.9--6.6 ms`; Jacobian `4.6--5.2 ms`, residual `0.71--0.77 ms`, overhead `0.04--0.06 ms` |
+| RST Backtracking LM | `232.35 ms` | rejected | two attempts; `49--67` residual calls per attempt and `710--901` rejected steps in native trace rows |
+| RST Nielsen LM | `223.42 ms` | rejected | two attempts; Jacobian callbacks dominate each attempt at about `90%` of backend wall |
+| RST Damped Newton | `200.89 ms` | rejected | two attempts; callback wall is small per attempt, but the method does not pass acceptance |
+
+The native telemetry table confirms that linear algebra is not the large
+budget: for accepted LM, factorization is about `0.04 ms` and system solve
+about `0.006 ms`. The dominant accepted-solver operation is Jacobian callback
+evaluation, but the dominant end-to-end cold cost remains RST symbolic
+preparation, especially symbolic differentiation. Failed methods are expensive
+because of repeated attempts and rejected steps, not because of preparation
+attribution ambiguity.
+
+**Decision:** The next optimization candidate is RST symbolic differentiation,
+with Jacobian lambdification second. Do not optimize linear solves or generic
+solver overhead yet. The current telemetry makes those paths measurable, but
+their observed cost is far below the `10 ms` threshold on the accepted large
+case.
+
+### Story 118: TP-1907 equilibrium output parity across RST symbolic frontends
+
+**Name:** `TP-1907 facade A/B compares ExprLegacy and AtomView equilibrium outputs`
+
+**Question / hypothesis:** Callback parity at one seed does not guarantee that
+the nonlinear solve publishes the same equilibrium. With the same physical
+problem, inventory, numerical seed, production cascade, and acceptance checks,
+do ExprLegacy and AtomView return matching component fractions, temperature,
+balance, and active topology? At the upper inventory limit, does each frontend
+still have an RST backend that passes physical acceptance?
+
+**Commands:**
+
+```powershell
+cargo test --lib --no-default-features `
+  Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_facade_atom_view_and_expr_legacy_match_published_equilibrium `
+  -- --nocapture
+
+cargo test --lib --no-default-features `
+  Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_upper_inventory_records_atom_view_acceptance_gap `
+  -- --nocapture
+
+cargo test --lib --no-default-features `
+  Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite_tests::tests::tp1907_atom_view_and_expr_legacy_have_componentwise_callback_parity_at_the_seed `
+  -- --nocapture
+```
+
+**Matched accepted-solution result, TP-1907 at 700 K, inventory scale `1e-3`:**
+
+| measure | ExprLegacy | AtomView | difference |
+| --- | ---: | ---: | ---: |
+| accepted RST backend | LM | LM | same |
+| temperature | `700.000000000 K` | `700.000000000 K` | `0 K` |
+| max absolute component mole-fraction difference | - | - | `2.288253e-12` |
+| max relative component-mole difference | - | - | `3.866215e-8` |
+| max physical element-balance error | `5.020315e-7` | `5.020315e-7` | same |
+| phase topology | gas + graphite | gas + graphite | same |
+
+Both routes pass through the normal facade and production cascade using the
+same elemental inventory and numerical seed. The per-component fractions are
+printed by the test; the maximum absolute difference is far below the existing
+`1e-8` fraction acceptance threshold.
+
+**Upper-inventory acceptance result, scale `1e8`:**
+
+The following table is the original RST 0.4.25 result; it is superseded by
+the RST 0.4.26 debug retest in Story 119 below.
+
+| frontend | RST backends passing physical acceptance | Legacy controls passing |
+| --- | ---: | ---: |
+| ExprLegacy | `1` (Trust-Region LM) | `2` |
+| AtomView | `0` | `2` |
+
+The callback-only parity test at the same upper-scale seed reports maximum
+relative residual drift `1.321652e-9` and maximum relative Jacobian drift
+`1.298984e-21` (global-magnitude normalized). Despite that close local parity,
+the full upper-inventory solve does not pass acceptance with any tested RST
+strategy through AtomView. Since AtomView has no accepted equilibrium at this
+scale, there are no valid final fractions to compare there. The matching
+Legacy controls show that the shared fixture and facade remain solvable.
+
+**Historical conclusion on RST 0.4.25:** For accepted solutions at the small
+inventory, frontend output differences are negligible. At `1e8`, AtomView
+callbacks were close at sampled states but no tested RST backend passed the
+facade acceptance matrix. Do not loosen physical tolerances to make this
+comparison green.
+
+### Story 119: TP-1907 staged AtomView failure localization
+
+**Name:** `TP-1907 staged frontend diagnostics separate callback parity from solver-path failure`
+
+**Question / hypothesis:** At inventory scale `1e8`, does AtomView first diverge
+while preparing/evaluating the symbolic callbacks, or only after a nonlinear
+method takes trial steps? Compare identical prepared equations at progressively
+more informative states, then run the same Trust-Region LM directly with RST
+Detailed telemetry on both physical and normalized fixed-active formulations.
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features `
+  tp1907_atom_view_failure_is_localized_by_stage_and_native_telemetry `
+  -- --nocapture
+```
+
+The diagnostic is isolated in
+`frozen_reference/nasa_tp1907_frontend_diagnostics.rs`. It compares callbacks
+at the physical seed, midpoint to ExprLegacy's accepted facade state, that
+accepted state, and the normalized seed. Direct solve traces include iteration
+residual norms, accept/reject status, callback counts/durations, and
+linear-operation telemetry; only the first and last five iterations print.
+
+**Observed callback parity at scale `1e8`:**
+
+| common evaluation point | residual L2, ExprLegacy / AtomView | max residual delta | max Jacobian delta | worst residual row |
+| --- | ---: | ---: | ---: | --- |
+| physical seed | `1.248644e2 / 1.248644e2` | `1.192093e-7` | `1.162098e-12` | 16 |
+| midpoint to accepted ExprLegacy state | `1.626005e8 / 1.626005e8` | `1.192093e-7` | `1.225270e-12` | 16 |
+| accepted ExprLegacy facade state | `1.250011e-6 / 1.364169e-6` | `1.192093e-7` | `1.153244e-12` | 16 |
+| normalized seed | `8.960091e1 / 8.960091e1` | `1.302993e-10` | `1.162098e-12` | 2 |
+
+The largest callback discrepancy is in residual row 16, within rows 13--17
+used for element balances in the exported TP-1907 system. The sampled states
+show no large callback or Jacobian mismatch.
+
+**Direct Trust-Region LM replay:**
+
+| formulation / frontend | termination | iterations | final residual L2 | key evidence |
+| --- | --- | ---: | ---: | --- |
+| physical / ExprLegacy | MaxIterations | 500 | `5.297682e1` | 915 residual and 415 Jacobian calls |
+| physical / AtomView | callback error | 11 residual calls | - | the solver passed an all-NaN 18-vector to the callback |
+| normalized / ExprLegacy | StepTooSmall | 32 | `8.583697e-4` | 61 residual and 29 Jacobian calls |
+| normalized / AtomView | StepTooSmall | 53 | `8.583697e-4` | 83 residual and 30 Jacobian calls |
+
+At the normalized direct-replay endpoints, residual vectors differ by at most
+`3.504897e-7`; `y17` (`graphite::C(gr)`) is `-27.9621` for ExprLegacy and
+`-157.4445` for AtomView. This is a large coordinate difference, but both
+coordinates exponentiate to amounts effectively indistinguishable from zero
+at the system scale. It is therefore not evidence by itself of a meaningful
+published-composition difference or a distinct physical state. The direct
+fixed-active replay remains a diagnostic slice, not the facade's full
+normalization/recovery workflow; its `StepTooSmall` outcome does not contradict
+the accepted ExprLegacy facade route. Frontend comparisons should prioritize
+published mole fractions, temperature, balances, and topology, with a stated
+floor for trace amounts, rather than raw log-moles alone.
+
+**Captured first failing trial:** A test-only recording wrapper retained the
+actual inputs to each RST callback. AtomView's first failing input has NaN in
+all 18 coordinates; evaluating that same input with ExprLegacy also returns a
+non-finite residual. The immediately preceding finite state has residual L2
+`7.682054e1`; its graphite coordinate is at the lower log-mole bound,
+`y17=-708.3964`. At that shared finite state both frontends report Jacobian
+maximum magnitude `8.946209e8`, estimated condition number `2.071418e9`, and
+gradient L2 `6.933567e6`. The finite residual/Jacobian callback values agree to
+the previously observed precision. Therefore AtomView did not produce the
+first NaN: a Trust-Region LM internal step/subproblem produced an all-NaN trial
+state, and the callback error is where it becomes visible. The exact internal
+operation that first makes the step non-finite (linear subproblem, damping, or
+trial assembly) still needs RST-side telemetry.
+
+**Conclusion and RST recommendation:** The first bad object is the Trust-Region
+LM trial vector, not an AtomView residual value computed from finite inputs.
+Add an explicit finite check immediately after the regularized linear solve,
+after constructing the nonlinear step, and before residual evaluation of
+`trial_x`. On failure, return a typed numerical-breakdown result containing
+iteration, current `x`/residual norm, Jacobian/gradient norms, damping and
+trust-region radius, linear-solve status, and the first non-finite step/trial
+coordinate. Keep this opt-in under Detailed telemetry. Also inspect why the
+method reaches this transition after the graphite coordinate saturates its
+lower bound. Do not label it an AtomView callback defect unless a finite input
+produces a frontend-only mismatch. Normalized fixed-active runs both stall at
+`8.6e-4`; their raw graphite log-coordinates differ, but both imply amounts
+effectively indistinguishable from zero at this scale. This is not evidence of
+a meaningful published-composition difference. No solver tolerance or
+physical acceptance criterion changed.
+
+**RST 0.4.26 debug retest: production facade at `1e8`:**
+
+```powershell
+cargo test -j 1 --lib --no-default-features `
+  tp1907_upper_inventory_facade_atom_view_and_expr_legacy_match_published_equilibrium `
+  -- --nocapture --test-threads=1
+
+cargo test -j 1 --lib --no-default-features `
+  tp1907_upper_inventory_records_frontend_acceptance_parity `
+  -- --nocapture --test-threads=1
+```
+
+The production facade now accepts both frontends with the same RST LM backend.
+At the common physical seed, residual relative drift is `1.321652e-9` and
+Jacobian relative drift is `2.942790e-24`. The public facade outputs agree:
+
+| Metric | ExprLegacy | AtomView | Difference |
+| --- | ---: | ---: | ---: |
+| recovered T | `700 K` | `700 K` | `0 K` |
+| maximum mole-fraction delta | - | - | `8.327e-16` |
+| maximum component relative delta | - | - | `5.223e-13` |
+| maximum physical balance error | `4.832e-5` | `4.834e-5` | both within `1e-12 * sum(b)` |
+| phase topology | gas + graphite | gas + graphite | equal |
+
+The isolated fixed-active backend matrix also accepts `rst-trust-region-lm`
+for both frontends (scaled residuals `1.730e-14` ExprLegacy and `3.079e-14`
+AtomView); all other tested RST methods retain their prior rejection status.
+The old `tp1907_upper_inventory_records_atom_view_acceptance_gap` expectation
+was stale and is replaced by an acceptance-parity regression.
+
+This closes the **published production-facade AtomView-vs-ExprLegacy parity**
+question at `1e8`, not every direct-solver diagnostic. The raw fixed-active
+Trust-Region replay still produces an all-NaN physical AtomView trial; the
+normalized direct replays still stop at residual `8.583697e-4`, with a large
+graphite log-coordinate difference representing a negligible amount. That
+low-level numerical edge case remains separately open and must not be confused
+with the accepted facade result.
+
+### Story 120: Public ExprLegacy versus AtomView facade benchmark
+
+**Name:** `Public frontend selection is honored; AtomView parity and speed depend on the solve route`
+
+**Question / hypothesis:** When selected through the public calculator builder,
+does AtomView preserve the ExprLegacy published result and improve end-to-end
+time on representative normal-scale cases? The `1e8` stress case remains a
+separate numerical failure investigation.
+
+**Command (optimized release profile):**
+
+```powershell
+$env:RST_FRONTEND_AB_ONLY='1'
+cargo bench --bench equilibrium_rst_preparation --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-rst-frontends" `
+  -- equilibrium_rst_frontend_ab --noplot
+```
+
+Each pair selects the frontend through the public facade builder and holds the
+case, RST Minpack LM, seed, bounds, and acceptance policy fixed. Criterion's
+central facade estimate and the separate one-shot diagnostic preparation
+measurement are not additive. Accepted pairs are compared by recovered
+temperature, phase count, and published mole fractions; gates are
+`|delta T| <= 1e-3 K`, maximum absolute mole-fraction difference `<= 1e-8`, and
+equal phase count. AtomView is exercised through the production route, not a
+test-only scoped override.
+
+**Historical release results (RST 0.4.25):** central Criterion estimate;
+preparation is a separate single diagnostic observation. The STANJAN-15 P,H
+failure below was fixed in RST 0.4.26 and is superseded by the retest below;
+the other measurements remain historical performance data, not a current
+0.4.26 baseline.
+
+| normal-scale case | status | facade estimate ExprLegacy / AtomView | RST preparation ExprLegacy / AtomView | max `|delta x|` | max `|delta T|` |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Small3 P,T molecular | both pass | `0.560 / 0.452 ms` | `0.310 / 0.420 ms` | `3.23e-14` | `0 K` |
+| STANJAN-15 P,T element inventory | both pass | `10.059 / 8.533 ms` | `5.077 / 3.521 ms` | `3.67e-13` | `0 K` |
+| RP-1311/40 P,T element inventory | both pass | `197.13 / 132.14 ms` | `100.032 / 37.059 ms` | `2.10e-12` | `0 K` |
+| STANJAN-15 P,H molecular, monolithic | Expr passes; AtomView fails | `378.57 / failed` | `108.338 / failed` | n/a | n/a |
+| RP-1311/40 P,H element inventory | both pass | `341.52 / 251.82 ms` | `n/a / n/a` | `2.07e-12` | `1.54e-9 K` |
+
+On RST 0.4.25, the AtomView STANJAN-15 P,H attempt failed at normalized basin discovery:
+Minpack LM reaches its 50-iteration limit (88 residual and 38 Jacobian calls);
+the candidate residual norm is `1.5655`, above the `1e-6` acceptance
+tolerance. This is a real route-level failure, not a parity pass. The
+RP-1311/40 P,H pair passes output comparisons, but its preparation timing is
+unavailable (`n/a`, not zero). Among P,T cases, RP-1311/40 is the strongest
+measured gain: facade estimate `197.13 -> 132.14 ms`; the independent
+preparation observation is `100.032 -> 37.059 ms`. The one-shot preparation
+diagnostics and Criterion estimates are separate measurements and should not
+be combined arithmetically.
+
+**Measurement correction:** the earlier Story 120 capture claimed all five
+pairs passed and described an internal scoped override. That selector did not
+reach monolithic P,H graph construction, so the earlier STANJAN-15 P,H row
+was not a valid frontend A/B comparison. The public-selector capture above
+supersedes its measurements and conclusion. P,T results were also recaptured
+through the public API.
+
+**Historical conclusion on RST 0.4.25:** AtomView was output-equivalent on the
+measured P,T cases and RP-1311/40 P,H, but failed the STANJAN-15 monolithic P,H
+acceptance gate. These normal-scale observations did not explain the separate
+upper-scale `1e8` failure from Story 119.
+
+**Historical targeted failure trace (RST 0.4.25, optimized release):**
+
+```powershell
+$env:RST_FRONTEND_AB_ONLY='1'
+$env:RST_FRONTEND_CASE='stanjan15_ph_molecular'
+$env:RST_FRONTEND_REPORT_ONLY='1'
+cargo bench --bench equilibrium_rst_preparation --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-rst-frontends" `
+  -- equilibrium_rst_frontend_ab --noplot
+```
+
+This runs one common facade case for both frontends and prints detailed
+per-iteration RST counters; it skips Criterion sampling. ExprLegacy was
+accepted (`T=2499.999999638 K`). AtomView produced two rejected candidates in
+the physical and normalized-recovery attempts:
+
+| AtomView attempt | RST termination | iterations | accepted / rejected steps | candidate residual L2 | acceptance limit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| physical | `MaxIterations` | 50 | `37 / 13` | `1.5655113` | `1e-6` |
+| normalized recovery | `Converged` | 49 | `38 / 11` | `2.8657492e-2` | `1e-6` |
+
+Most iterations accepted a trial; rejected steps were intermittent rather than
+a sustained rejection storm. The second attempt's backend termination label
+does not mean the equilibrium candidate passed: the facade correctly applies
+its stricter common acceptance gate and rejects the residual. Detailed RST
+telemetry exposes per-iteration callback counts, accepted/rejected steps, and
+stage durations, but not residual norms or iterate coordinates. Therefore
+this trace confirmed a convergence/acceptance gap on RST 0.4.25. The callback
+comparison and retest below localize it to the AtomView small-constant defect;
+no KiThe tolerance or solver setting was changed.
+
+**RST 0.4.26 retest and regression gates:**
+
+```powershell
+$env:RST_FRONTEND_AB_ONLY='1'
+$env:RST_FRONTEND_CASE='stanjan15_ph_molecular'
+$env:RST_FRONTEND_REPORT_ONLY='1'
+cargo bench -j 1 --bench equilibrium_rst_preparation --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-rst-frontends" `
+  -- equilibrium_rst_frontend_ab --noplot
+```
+
+The report-only production-facade A/B now accepts both frontends with the same
+RST Minpack LM, seed, bounds, and unchanged acceptance gate:
+
+| frontend | status | one-shot facade time | RST preparation | recovered T | phase count | max mole-fraction delta vs ExprLegacy |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| ExprLegacy | accepted | `349.250 ms` | `93.762 ms` | `2499.999999638 K` | 1 | reference |
+| AtomView | accepted | `130.454 ms` | `40.974 ms` | `2499.999999638 K` | 1 | `1.804112e-16` |
+
+These are the latest one-shot diagnostic timings from a repeated release
+capture, not Criterion estimates. An earlier release capture measured
+`330.645 / 127.589 ms` facade time and `95.891 / 39.594 ms` preparation for
+ExprLegacy / AtomView respectively; both captures agree on acceptance and
+published output. The normal
+`lib` regression `stanjan15_tiny_constant_and_public_ph_facade_are_frontend_equivalent`
+asserts that the parsed coefficient `-5.09024475e-16` and the amplified term
+`-5.09024475e-16 * T^4` at `T=2500` survive AtomView Lambdification and agree
+with ExprLegacy within eight `f64` epsilons. It also gates STANJAN initial
+residual/Jacobian parity at `1e-12` and requires both public P,H facade routes
+to be accepted, have matching phase topology, recover temperature within
+`1e-3 K`, and match mole fractions within `1e-8`. The benchmark now separately
+asserts that both frontends are accepted for this case.
+
+On the full STANJAN symbolic callbacks, the initial-state max differences are
+`1.42e-14` for residual and `1.22e-15` for Jacobian; at the AtomView diagnostic
+endpoint they are `2.32e-14` and `8.53e-13`. The old low-level iteration-trace
+helper in `stanjan15_atom_view_diagnostics.rs` uses a manually assembled
+`solve_resolved_ph` request and its own 50-iteration path; it is retained only
+for characterization and is not the public-facade acceptance gate. The
+production-facade A/B and the new regression above are the authoritative
+checks for the former failure.
+
+**Conclusion on RST 0.4.26:** the normal-scale STANJAN-15 P,H AtomView failure
+is resolved. The prior residual/Jacobian discrepancy came from AtomView
+dropping very small nonzero constants; the minimal probe and STANJAN callback
+parity now pass. The production-facade AtomView-vs-ExprLegacy comparison at
+`1e8` is covered by the debug retest in Story 119: both frontends are accepted
+and their published outputs agree within the stated tolerances. The isolated
+raw Trust-Region replay remains an open diagnostic edge case, not a
+production-facade acceptance failure.
+
+**Current three-pass release refresh (RST 0.4.26, 2026-10-20):**
+
+```powershell
+$env:RST_FRONTEND_AB_ONLY='1'
+cargo bench --bench equilibrium_rst_preparation --no-default-features `
+  --features "equilibrium-instrumentation equilibrium-benchmark-rst-frontends" `
+  -- --noplot
+```
+
+The release bench uses three explicitly separated evidence passes:
+
+1. End-to-end public-facade Criterion A/B: fixed RST Minpack LM, same facade
+   inputs, seeds, bounds, and acceptance policy; only ExprLegacy vs AtomView
+   changes. A Criterion estimate is emitted only if both routes are accepted
+   and their published outputs pass the parity gate.
+2. One-shot preparation attribution: KiThe equation/formulation stages plus
+   RST symbolic differentiation, residual/Jacobian lambdification, validation,
+   and other reported preparation children. Aggregate and child times are
+   nested and must not be added. Missing telemetry is printed as unavailable.
+3. KiThe-native Legacy LM control on the same six facade requests. This is a
+   whole-route control, not an algorithm-identical RST comparison; it does not
+   attribute time to RST symbolic preparation.
+
+Criterion used 10 samples, 1 s warmup, and a 2 s target measurement per entry.
+The values below are estimates with Criterion confidence intervals. The
+native column is a different solver implementation, so interpret it as a
+facade-route reference rather than a frontend-only speed comparison.
+
+| Case | RST Minpack + ExprLegacy | RST Minpack + AtomView | KiThe Legacy LM | AtomView reduction vs ExprLegacy |
+| --- | ---: | ---: | ---: | ---: |
+| Small3 P,T molecular | `0.549 ms [0.540, 0.558]` | `0.479 ms [0.473, 0.488]` | `0.400 ms [0.396, 0.405]` | `12.8%` |
+| STANJAN-15 P,T ElementInventory | `11.579 ms [11.465, 11.705]` | `10.315 ms [10.170, 10.495]` | `6.355 ms [6.298, 6.414]` | `10.9%` |
+| RP-1311/40 P,T ElementInventory | `216.614 ms [215.246, 218.078]` | `157.658 ms [151.384, 164.908]` | `106.568 ms [104.165, 109.652]` | `27.2%` |
+| STANJAN-15 monolithic P,H molecular | `408.353 ms [403.297, 413.563]` | `155.899 ms [147.352, 166.798]` | `6.396 ms [6.346, 6.451]` | `61.8%` |
+| RP-1311/40 nested P,H ElementInventory | `395.928 ms [392.006, 400.057]` | `290.647 ms [288.158, 293.960]` | `116.335 ms [114.189, 119.419]` | `26.6%` |
+
+All five measured frontend pairs passed the same output gate: equal phase
+count, `|delta T| <= 1e-3 K`, and maximum absolute mole-fraction delta
+`<= 1e-8`. Report-only captures showed matching temperatures and maximum
+mole-fraction deltas between `1.11e-16` and `1.80e-16` for these pairs.
+
+**Unpaired 18-component diagnostic:** TP-1907/18 P,T ElementInventory is not
+a performance result. RST Minpack + ExprLegacy failed acceptance: physical
+candidate residual `5.1315e-3` exceeded `1e-6`, and normalized recovery
+residual `3.7149e-4` exceeded `1e-12`. RST Minpack + AtomView and KiThe Legacy
+LM were accepted, but there is no ExprLegacy reference with which to assert
+output parity. The final run therefore emitted no Criterion estimate for
+this case. A one-sided AtomView estimate from an interrupted exploratory run
+is explicitly excluded.
+
+**Preparation-stage evidence (separate one-shot release observations):**
+
+| Case / stage, ms (ExprLegacy -> AtomView) | ExprLegacy | AtomView | Change |
+| --- | ---: | ---: | ---: |
+| STANJAN-15 P,T RST preparation aggregate | `3.669` | `2.575` | `-29.8%` |
+| STANJAN-15 P,T symbolic differentiation | `2.531` | `0.694` | `-72.6%` |
+| STANJAN-15 P,T residual / Jacobian lambdification | `0.056 / 0.305` | `0.077 / 0.293` | `+36.1% / -4.2%` |
+| STANJAN-15 P,H RST preparation aggregate | `83.487` | `31.338` | `-62.5%` |
+| STANJAN-15 P,H symbolic differentiation | `72.902` | `15.156` | `-79.2%` |
+| STANJAN-15 P,H residual / Jacobian lambdification | `1.021 / 2.719` | `0.483 / 1.242` | `-52.7% / -54.3%` |
+| RP-1311/40 P,T RST preparation aggregate | `84.928` | `31.037` | `-63.5%` |
+| RP-1311/40 P,T symbolic differentiation | `61.359` | `11.885` | `-80.6%` |
+| RP-1311/40 P,T residual / Jacobian lambdification | `0.686 / 9.033` | `0.589 / 5.691` | `-14.1% / -37.0%` |
+
+RST input validation was effectively unchanged on the large P,T cases
+(`6.319 / 6.222 ms` for RP-1311/40). RP-1311/40 P,H preparation attribution
+was unavailable on both routes; its facade and Criterion measurements remain
+valid, but no internal-stage conclusion is drawn. These single-shot stage
+observations are not Criterion estimates and are not summed with the full
+facade times.
+
+**Conclusion:** AtomView is output-equivalent and faster than ExprLegacy on
+the five matched workloads. The main measured preparation gain is symbolic
+differentiation; the largest end-to-end gains are STANJAN-15 P,H and
+RP-1311/40 P,T. This run does not establish a universal AtomView default:
+Minpack's unpaired TP-1907/18 ExprLegacy failure needs a separate correctness
+investigation, and the native LM figures use a different nonlinear method.

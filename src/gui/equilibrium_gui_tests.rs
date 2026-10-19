@@ -626,7 +626,7 @@ fn element_mode_exposes_candidate_preview_controls_in_egui() {
         .get_by_role_and_label(Role::Button, "Setup")
         .click_accesskit();
     harness.run();
-    harness.get_by_label("Search by elements");
+    harness.get_by_label("Find species by elements");
     harness.get_by_label("Candidate preview is required before phase assignment");
     harness.get_by_role_and_label(Role::Button, "Preview candidates");
     harness.get_by_label("Exact set");

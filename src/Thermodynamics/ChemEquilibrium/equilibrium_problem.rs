@@ -91,9 +91,10 @@
 //!     └── Returns PreparedEquilibriumProblem
 //!     │
 //!     v
-//!   EquilibriumLogMoles::from_problem(problem)
-//!     ├── Copies data into mutable solver state
-//!     └── Ready for solve()
+//!   PreparedEquilibriumRunner / PreparedPhaseControlRunner
+//!     ├── Applies the explicit backend policy
+//!     ├── Runs the ordered cascade and candidate acceptance gate
+//!     └── Adds bounded phase lifecycle evidence when requested
 //!     │
 //!     v
 //!   EquilibriumSolution (after successful solve)
@@ -134,7 +135,9 @@
 //!
 //! # Related Modules
 //!
-//! - [`equilibrium_log_moles`](super::equilibrium_log_moles) — mutable solver that consumes problems
+//! - [`equilibrium_prepared_runner`](super::equilibrium_prepared_runner) — immutable fixed-formulation execution
+//! - [`prepared_phase_control_runner`](super::prepared_phase_control_runner) — immutable bounded active-set execution
+//! - [`equilibrium_log_moles`](super::equilibrium_log_moles) — retained mutable compatibility host
 //! - [`equilibrium_component`](super::equilibrium_component) — component descriptor types
 //! - [`equilibrium_ids`](super::equilibrium_ids) — typed index wrappers
 //! - [`equilibrium_validation`](super::equilibrium_validation) — acceptance gate for solutions
@@ -426,8 +429,11 @@ pub struct PreparedEquilibriumProblem {
 /// silently pass arbitrary arrays around as if they were a stable contract.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResidualScalingContract {
-    /// Row-scale factors: `scale[i]` multiplies residual/Jacobian row `i`.
-    /// Each factor must be finite and strictly positive.
+    /// Row denominators: `scale[i]` divides residual/Jacobian row `i`.
+    ///
+    /// The mathematical diagonal used by the scaled problem is therefore
+    /// `W[i, i] = 1 / scale[i]`, and `F_scaled = W * F_raw`. Each denominator
+    /// must be finite and strictly positive.
     scale: Vec<f64>,
 }
 

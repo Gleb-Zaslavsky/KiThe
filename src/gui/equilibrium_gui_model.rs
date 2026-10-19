@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
+use crate::Thermodynamics::ChemEquilibrium::prelude::ElementInventory;
+
 /// Current on-disk schema version for an equilibrium GUI document.
 ///
 /// Phase-model variants use serde's explicit names. Adding `IdealSolution`
@@ -273,8 +275,7 @@ impl Default for PhTemperatureBoundsDraft {
     }
 }
 
-/// Inventory input mode. Element mode becomes runnable only after candidate
-/// selection has produced explicit phase assignments.
+/// Inventory input mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EquilibriumInventoryDraft {
@@ -285,6 +286,13 @@ pub enum EquilibriumInventoryDraft {
         elements: Vec<String>,
         candidate_policy: CandidatePolicyDraft,
         assignments: Vec<PhaseDraft>,
+    },
+    /// Direct physical elemental totals plus a separately declared species
+    /// universe. The phase component amounts are ignored for this mode; the
+    /// physical input is carried by `amounts` and reaches the facade as `b`.
+    ElementInventory {
+        amounts: Vec<ElementAmountDraft>,
+        phases: Vec<PhaseDraft>,
     },
 }
 
@@ -304,6 +312,22 @@ pub struct PhaseDraft {
     pub physical_state: GuiPhysicalState,
     pub model: GuiPhaseModel,
     pub components: Vec<ComponentDraft>,
+}
+
+/// One editable physical elemental total in mol-atom units.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ElementAmountDraft {
+    pub element: String,
+    pub amount: String,
+}
+
+impl Default for ElementAmountDraft {
+    fn default() -> Self {
+        Self {
+            element: "H".into(),
+            amount: "2.0".into(),
+        }
+    }
 }
 
 impl Default for PhaseDraft {
@@ -548,6 +572,9 @@ pub enum GuiTraceSeedPolicyDraft {
 pub struct EquilibriumSolverConfigDraft {
     pub selection: EquilibriumSolverDraft,
     pub overrides: EquilibriumSolverOverridesDraft,
+    /// RST symbolic preparation frontend; old saved documents default to ExprLegacy.
+    #[serde(default)]
+    pub rst_symbolic_frontend: GuiRstSymbolicFrontend,
     /// P,H orchestration route. `Auto` retains the production fallback policy;
     /// explicit routes are advanced diagnostic choices.
     #[serde(default)]
@@ -559,9 +586,17 @@ impl Default for EquilibriumSolverConfigDraft {
         Self {
             selection: EquilibriumSolverDraft::default(),
             overrides: EquilibriumSolverOverridesDraft::default(),
+            rst_symbolic_frontend: GuiRstSymbolicFrontend::default(),
             ph_solve_mode: GuiPhSolveMode::Auto,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuiRstSymbolicFrontend {
+    #[default]
+    ExprLegacy,
+    AtomView,
 }
 
 /// Typed UI representation of the P,H orchestration policy.
@@ -853,6 +888,10 @@ pub enum ValidatedInventory {
         candidate_policy: ValidatedCandidatePolicy,
         assignments: Vec<ValidatedPhase>,
     },
+    ElementInventory {
+        inventory: ElementInventory,
+        phases: Vec<ValidatedPhase>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -905,6 +944,7 @@ pub enum ValidatedPhaseMode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatedSolver {
     pub selection: EquilibriumSolverDraft,
+    pub rst_symbolic_frontend: GuiRstSymbolicFrontend,
     pub ph_solve_mode: GuiPhSolveMode,
     pub tolerance: Option<f64>,
     pub max_iterations: Option<usize>,
@@ -1166,7 +1206,7 @@ impl EquilibriumInventoryDraft {
     ) -> Option<ValidatedInventory> {
         match self {
             Self::ExplicitPhases { phases } => {
-                validate_phases(phases, report).map(ValidatedInventory::ExplicitPhases)
+                validate_phases(phases, report, true).map(ValidatedInventory::ExplicitPhases)
             }
             Self::ElementCandidates {
                 elements,
@@ -1204,7 +1244,7 @@ impl EquilibriumInventoryDraft {
                 let validated_assignments = if assignments.is_empty() {
                     Vec::new()
                 } else {
-                    validate_phases(assignments, report).unwrap_or_default()
+                    validate_phases(assignments, report, true).unwrap_or_default()
                 };
                 if for_run && assignments.is_empty() {
                     report.push(
@@ -1219,6 +1259,49 @@ impl EquilibriumInventoryDraft {
                     assignments: validated_assignments,
                 })
             }
+            Self::ElementInventory { amounts, phases } => {
+                let mut entries = Vec::with_capacity(amounts.len());
+                let mut seen = HashSet::new();
+                for (index, amount) in amounts.iter().enumerate() {
+                    let element = amount.element.trim();
+                    if element.is_empty() {
+                        report.push(
+                            format!("inventory.amounts[{index}].element"),
+                            ValidationIssueKind::MissingValue,
+                            "element symbol must not be empty",
+                        );
+                        continue;
+                    }
+                    if !seen.insert(element.to_string()) {
+                        report.push(
+                            format!("inventory.amounts[{index}].element"),
+                            ValidationIssueKind::Duplicate,
+                            format!("element '{element}' is listed more than once"),
+                        );
+                    }
+                    if let Some(value) = parse_positive(
+                        &amount.amount,
+                        &format!("inventory.amounts[{index}].amount"),
+                        report,
+                    ) {
+                        entries.push((element.to_string(), value));
+                    }
+                }
+                let inventory = ElementInventory::from_amounts(entries).map_err(|error| {
+                    report.push(
+                        "inventory.amounts",
+                        ValidationIssueKind::InvalidValue,
+                        format!("element inventory is invalid: {error}"),
+                    );
+                });
+                let validated_phases = validate_phases(phases, report, false);
+                match (inventory.ok(), validated_phases) {
+                    (Some(inventory), Some(phases)) => {
+                        Some(ValidatedInventory::ElementInventory { inventory, phases })
+                    }
+                    _ => None,
+                }
+            }
         }
     }
 }
@@ -1226,6 +1309,7 @@ impl EquilibriumInventoryDraft {
 fn validate_phases(
     phases: &[PhaseDraft],
     report: &mut EquilibriumGuiValidationReport,
+    require_positive_moles: bool,
 ) -> Option<Vec<ValidatedPhase>> {
     if phases.is_empty() {
         report.push(
@@ -1319,7 +1403,7 @@ fn validate_phases(
             components,
         });
     }
-    if !any_positive_moles {
+    if require_positive_moles && !any_positive_moles {
         report.push(
             "inventory",
             ValidationIssueKind::InvalidValue,
@@ -1547,6 +1631,7 @@ impl EquilibriumSolverConfigDraft {
         }
         Some(ValidatedSolver {
             selection: self.selection.clone(),
+            rst_symbolic_frontend: self.rst_symbolic_frontend,
             ph_solve_mode: self.ph_solve_mode,
             tolerance,
             max_iterations,
@@ -1954,6 +2039,26 @@ mod tests {
     }
 
     #[test]
+    fn legacy_documents_default_rst_frontend_to_expr_legacy() {
+        let document = EquilibriumGuiDocument::new();
+        let mut json: serde_json::Value =
+            serde_json::to_value(&document).expect("default document serializes");
+        json["config"]["solver"]
+            .as_object_mut()
+            .expect("solver settings serialize as an object")
+            .remove("rst_symbolic_frontend");
+
+        let restored = EquilibriumGuiDocument::from_json(
+            &serde_json::to_string(&json).expect("legacy document serializes"),
+        )
+        .expect("legacy document without frontend setting loads");
+        assert_eq!(
+            restored.config.solver.rst_symbolic_frontend,
+            GuiRstSymbolicFrontend::ExprLegacy
+        );
+    }
+
+    #[test]
     fn cascade_budget_override_requires_positive_limits() {
         let mut document = EquilibriumGuiDocument::new();
         document.config.solver.overrides.cascade_budget = Some(GuiSolverCascadeBudgetDraft {
@@ -2265,6 +2370,76 @@ mod tests {
                 .iter()
                 .any(|issue| issue.field == "inventory.assignments")
         );
+    }
+
+    #[test]
+    fn direct_element_inventory_keeps_totals_separate_from_species_universe() {
+        let mut document = EquilibriumGuiDocument::new();
+        document.config.inventory = EquilibriumInventoryDraft::ElementInventory {
+            amounts: vec![
+                ElementAmountDraft {
+                    element: "H".into(),
+                    amount: "2".into(),
+                },
+                ElementAmountDraft {
+                    element: "O".into(),
+                    amount: "1".into(),
+                },
+            ],
+            phases: vec![PhaseDraft {
+                id: "gas".into(),
+                physical_state: GuiPhysicalState::Gas,
+                model: GuiPhaseModel::IdealGas,
+                components: vec![ComponentDraft {
+                    substance: "H2O".into(),
+                    initial_moles: "0".into(),
+                    source_library: None,
+                }],
+            }],
+        };
+
+        let validated = document
+            .validate_for_run()
+            .expect("direct elemental totals and a species universe must validate");
+        let ValidatedInventory::ElementInventory { inventory, phases } = validated.inventory else {
+            panic!("direct mode must preserve its physical inventory variant");
+        };
+        assert_eq!(
+            inventory.entries().collect::<Vec<_>>(),
+            vec![("H", 2.0), ("O", 1.0)]
+        );
+        assert_eq!(phases[0].components[0].substance, "H2O");
+
+        let json = document.to_json().expect("direct inventory serializes");
+        let restored = EquilibriumGuiDocument::from_json(&json).expect("direct inventory restores");
+        assert_eq!(restored, document);
+    }
+
+    #[test]
+    fn direct_element_inventory_rejects_unknown_or_duplicate_totals() {
+        let mut document = EquilibriumGuiDocument::new();
+        document.config.inventory = EquilibriumInventoryDraft::ElementInventory {
+            amounts: vec![
+                ElementAmountDraft {
+                    element: "Xx".into(),
+                    amount: "1".into(),
+                },
+                ElementAmountDraft {
+                    element: "H".into(),
+                    amount: "1".into(),
+                },
+                ElementAmountDraft {
+                    element: "H".into(),
+                    amount: "2".into(),
+                },
+            ],
+            phases: vec![PhaseDraft::default()],
+        };
+        let report = document
+            .validate_for_run()
+            .expect_err("invalid direct elemental totals must stop before request construction");
+        assert!(report.contains_kind(ValidationIssueKind::Duplicate));
+        assert!(report.contains_kind(ValidationIssueKind::InvalidValue));
     }
 
     #[test]

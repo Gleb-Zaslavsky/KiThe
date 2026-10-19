@@ -51,6 +51,9 @@ Target total enthalpy in joules for the P,H constraint.
 ## field.moles
 Initial amount in moles; it must be finite and non-negative.
 
+## field.element_amount
+Element symbol in the physical inventory; the amount is entered separately in mol-atom.
+
 ## field.element
 Chemical element symbol used by element-based candidate search.
 
@@ -99,6 +102,12 @@ Enter phase-qualified substances and their physical initial amounts directly.
 ## inventory.elements
 Use the requested elemental inventory to search permitted libraries for
 candidates. Candidate search does not create synthetic thermodynamic species.
+
+## inventory.element_inventory
+Enter physical elemental totals in mol-atom units. The phases above define the species universe.
+
+## inventory.add_element_total
+Add another physical elemental total to the inventory.
 
 ## inventory.state
 Select gas, liquid, or solid semantics for this phase.
@@ -165,6 +174,15 @@ Use the production nonlinear backend cascade and fallback policy.
 
 ## solver.backend
 Use one concrete nonlinear backend for diagnosis or a custom cascade.
+
+## solver.rst_frontend
+Choose how RST prepares symbolic residuals and Jacobians; the setting applies only when an RST backend is selected.
+
+## solver.rst_expr_legacy
+Use the established ExprLegacy symbolic preparation path. This is the default.
+
+## solver.rst_atom_view
+Use the AtomView-native symbolic preparation path for RST.
 
 ## solver.custom
 Create an editable ordered nonlinear fallback cascade.

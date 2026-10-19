@@ -11,7 +11,9 @@
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{GibbsFn, Phase, R};
+#[cfg(test)]
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::GibbsFn;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{Phase, R};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use nalgebra::{
     DMatrix, DVector,
@@ -46,6 +48,7 @@ impl CanonicalPhaseState {
     /// Every declared phase must have a positive total in this representation.
     /// The outer active-set workflow maintains trace coordinates for absent
     /// phases precisely so the log-mole and activity contracts remain defined.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_log_moles(
         log_moles: &[f64],
@@ -59,16 +62,52 @@ impl CanonicalPhaseState {
         active: &[bool],
         candidates: &[bool],
     ) -> Result<Self, ReactionExtentError> {
+        let standard_gibbs = gibbs
+            .iter()
+            .map(|gibbs| gibbs(temperature))
+            .collect::<Vec<_>>();
+        Self::from_standard_gibbs(
+            log_moles,
+            &standard_gibbs,
+            phases,
+            species_phase,
+            element_composition,
+            temperature,
+            pressure,
+            reference_pressure,
+            active,
+            candidates,
+        )
+    }
+
+    /// Reconstructs and validates a stability snapshot from already evaluated
+    /// standard-state Gibbs energies at the candidate's own temperature.
+    ///
+    /// This is the production P,H boundary. It avoids wrapping numeric Gibbs
+    /// values in constant callbacks only to evaluate those callbacks again.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_standard_gibbs(
+        log_moles: &[f64],
+        standard_gibbs: &[f64],
+        phases: &[Phase],
+        species_phase: &[usize],
+        element_composition: &DMatrix<f64>,
+        temperature: f64,
+        pressure: f64,
+        reference_pressure: f64,
+        active: &[bool],
+        candidates: &[bool],
+    ) -> Result<Self, ReactionExtentError> {
         let species_count = log_moles.len();
-        if gibbs.len() != species_count
+        if standard_gibbs.len() != species_count
             || species_phase.len() != species_count
             || element_composition.nrows() != species_count
             || active.len() != phases.len()
             || candidates.len() != phases.len()
         {
             return Err(ReactionExtentError::DimensionMismatch(format!(
-                "phase stability has {species_count} log-moles, {} Gibbs functions, {} phase labels, {} element rows, {} phases, {} active flags, and {} candidate flags",
-                gibbs.len(),
+                "phase stability has {species_count} log-moles, {} standard Gibbs values, {} phase labels, {} element rows, {} phases, {} active flags, and {} candidate flags",
+                standard_gibbs.len(),
                 species_phase.len(),
                 element_composition.nrows(),
                 phases.len(),
@@ -125,11 +164,10 @@ impl CanonicalPhaseState {
         }
 
         let rt = R * temperature;
-        let mut standard_gibbs = Vec::with_capacity(species_count);
         let mut chemical_potentials = Vec::with_capacity(species_count);
         for species in 0..species_count {
             let phase = species_phase[species];
-            let g0 = gibbs[species](temperature);
+            let g0 = standard_gibbs[species];
             if !g0.is_finite() {
                 return Err(ReactionExtentError::InvalidDG0 {
                     species_index: species,
@@ -150,14 +188,13 @@ impl CanonicalPhaseState {
                     message: format!("species {species} produced a non-finite chemical potential"),
                 });
             }
-            standard_gibbs.push(g0);
             chemical_potentials.push(chemical_potential);
         }
 
         Ok(Self {
             moles,
             phase_totals,
-            standard_gibbs,
+            standard_gibbs: standard_gibbs.to_vec(),
             chemical_potentials,
             species_phase: species_phase.to_vec(),
             element_composition: element_composition.clone(),
@@ -1858,6 +1895,21 @@ mod tests {
         assert!(
             (state.chemical_potentials()[1] - (20.0 + R * 1000.0 * 0.75_f64.ln())).abs() < 1e-9
         );
+
+        let numeric_state = CanonicalPhaseState::from_standard_gibbs(
+            &[0.25_f64.ln(), 0.75_f64.ln()],
+            &[10.0, 20.0],
+            &phases,
+            &[0, 0],
+            &DMatrix::from_row_slice(2, 1, &[1.0, 1.0]),
+            1000.0,
+            101_325.0,
+            101_325.0,
+            &[true],
+            &[true],
+        )
+        .unwrap();
+        assert_eq!(state, numeric_state);
     }
 
     #[test]

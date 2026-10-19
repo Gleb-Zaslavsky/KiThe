@@ -25,6 +25,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_active_set::independent_column_basis;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::EquilibriumCandidateSelectionReport;
 pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_component::{
@@ -37,8 +38,9 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_seed::{
     ElementFeasibleSeedSettings, build_element_feasible_seed,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::PhaseIndex;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::record_phase_equilibrium_build;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-    EquilibriumSolverSettings, GibbsFn,
+    EquilibriumSolverSettings, GibbsFn, compute_element_totals,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
@@ -46,14 +48,14 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
     EquilibriumPreparationError, ReactionExtentError,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::PreparedEquilibriumRunner;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::{
+    PreparedEquilibriumDefaultRoute, PreparedEquilibriumRunner,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, EquilibriumProblem, EquilibriumSolution, LogMolesInitialGuess,
     PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    RstPreparedProblem, prepare_rst_symbolic_problem_from_prepared,
-};
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RstPreparedProblem;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::EquilibriumSolveReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::MultiStartSolveReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
@@ -71,6 +73,7 @@ use crate::Thermodynamics::User_substances2::SearchSummaryRow;
 use crate::Thermodynamics::phase_layout::{
     PhaseComponentId, PhaseId as SemanticPhaseId, SystemLayout,
 };
+#[cfg(test)]
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, linalg::SVD};
 use std::time::{Duration, Instant};
@@ -658,8 +661,10 @@ pub struct PhaseEquilibriumProblemBundle {
     metadata: PhaseEquilibriumMetadata,
     /// Immutable thermochemical preparation evidence.
     report: PhaseEquilibriumBuildReport,
-    /// RST builds its own Jacobian from these expressions. Keeping them beside
-    /// the numeric G0 closures avoids reopening mutable SubsData during solve.
+    /// Baked symbolic expressions are retained only by test builds for the
+    /// independent algebraic oracle. Production RST uses its parameterized
+    /// `g0_i` graph and numeric values from `PreparedEquilibriumProblem`.
+    #[cfg(test)]
     symbolic_standard_gibbs: Vec<Expr>,
     /// Private working copies used to select the correct coefficient interval
     /// at each temperature-range point without mutating resolved input data.
@@ -689,11 +694,8 @@ impl PhaseEquilibriumProblemBundle {
         &self.timing
     }
 
-    /// Returns the prepared symbolic snapshot for bridge-level tests.
-    ///
-    /// Production fixed solves consume this snapshot through
-    /// `PreparedEquilibriumRunner`; keeping this accessor test-only prevents
-    /// callers from depending on the RST representation as public API.
+    /// Returns the baked symbolic snapshot for the independent bridge oracle.
+    /// This accessor and its storage are compiled only for tests.
     #[cfg(test)]
     pub(crate) fn symbolic_standard_gibbs(&self) -> &[Expr] {
         &self.symbolic_standard_gibbs
@@ -735,9 +737,15 @@ impl PhaseEquilibriumProblemBundle {
                 crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::
                 PreparedEquilibriumProblem::new(self.problem)
             })?;
-        let mut runner = PreparedEquilibriumRunner::new(prepared, self.symbolic_standard_gibbs)?;
+        let mut runner = PreparedEquilibriumRunner::new_production(prepared)?
+            .with_timing_enabled(self.timing.enabled());
         configure(runner.configure());
         let outcome = timing.measure(EquilibriumTimingStage::NonlinearSolve, || runner.solve())?;
+        timing.record(
+            EquilibriumTimingStage::RstPreparation,
+            outcome.rst_preparation_duration,
+        );
+        timing.record_rst_preparation_timing(outcome.rst_preparation_timing);
         timing.record(
             EquilibriumTimingStage::Validation,
             outcome.validation_duration,
@@ -774,11 +782,17 @@ impl PhaseEquilibriumProblemBundle {
             .measure(EquilibriumTimingStage::NumericalProblemPreparation, || {
                 PreparedEquilibriumProblem::new(self.problem)
             })?;
-        let mut runner = PreparedEquilibriumRunner::new(prepared, self.symbolic_standard_gibbs)?;
+        let mut runner = PreparedEquilibriumRunner::new_production(prepared)?
+            .with_timing_enabled(self.timing.enabled());
         configure(runner.configure());
         let outcome = timing.measure(EquilibriumTimingStage::NonlinearSolve, || {
             runner.solve_from_initial_guesses(initial_guesses)
         })?;
+        timing.record(
+            EquilibriumTimingStage::RstPreparation,
+            outcome.rst_preparation_duration,
+        );
+        timing.record_rst_preparation_timing(outcome.rst_preparation_timing);
         timing.record(
             EquilibriumTimingStage::Validation,
             outcome.validation_duration,
@@ -803,6 +817,7 @@ impl PhaseEquilibriumProblemBundle {
         self,
         prepare_rst: bool,
         timing_mode: EquilibriumTimingMode,
+        rst_frontend: crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RstSymbolicFrontend,
     ) -> Result<PreparedPhaseEquilibriumTemplate, ReactionExtentError> {
         let prior_timing = self.timing;
         let started = Instant::now();
@@ -813,14 +828,17 @@ impl PhaseEquilibriumProblemBundle {
                 PreparedEquilibriumProblem::new(self.problem)
             })?;
         let rst_problem = if prepare_rst {
-            Some(
-                timing.measure(EquilibriumTimingStage::SymbolicConstruction, || {
-                    prepare_rst_symbolic_problem_from_prepared(
+            let (problem, rst_timing) = timing
+                .measure(EquilibriumTimingStage::SymbolicConstruction, || {
+                    crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::prepare_rst_symbolic_problem_from_prepared_with_options(
                         &prepared,
-                        &self.symbolic_standard_gibbs,
+                        timing_mode,
+                        rst_frontend,
                     )
-                })?,
-            )
+                })?;
+            timing.record(EquilibriumTimingStage::RstPreparation, rst_timing.total());
+            timing.record_rst_preparation_timing(rst_timing);
+            Some(problem)
         } else {
             None
         };
@@ -832,7 +850,6 @@ impl PhaseEquilibriumProblemBundle {
             prepared,
             metadata: self.metadata,
             report: self.report,
-            symbolic_standard_gibbs: self.symbolic_standard_gibbs,
             thermo_payloads: self.thermo_payloads,
             rst_problem,
             timing: timing.finish(),
@@ -871,9 +888,9 @@ impl PhaseEquilibriumProblemBundle {
         let timing_enabled = self.timing.enabled();
         let mut runner = PreparedPhaseControlRunner::new_with_diagnostics(
             self.problem,
-            self.symbolic_standard_gibbs.clone(),
             timing_enabled,
             diagnostics,
+            PreparedEquilibriumDefaultRoute::ProductionDefault,
         )?;
         configure_phase_control(runner.configure_phase_control());
         Ok(PreparedPhaseControlTemplate {
@@ -953,9 +970,9 @@ impl PhaseEquilibriumProblemBundle {
             timing.measure(EquilibriumTimingStage::NumericalProblemPreparation, || {
                 PreparedPhaseControlRunner::new_with_diagnostics(
                     self.problem,
-                    self.symbolic_standard_gibbs,
                     timing_enabled,
                     diagnostics,
+                    PreparedEquilibriumDefaultRoute::ProductionDefault,
                 )
             })?;
         configure_solver(runner.configure_solver());
@@ -972,6 +989,15 @@ impl PhaseEquilibriumProblemBundle {
             outcome.projection_build,
         );
         timing.record(
+            EquilibriumTimingStage::ActiveSetFormulationBuild,
+            outcome.formulation_build,
+        );
+        timing.record(
+            EquilibriumTimingStage::RstPreparation,
+            outcome.rst_preparation,
+        );
+        timing.record_rst_preparation_timing(outcome.rst_preparation_timing);
+        timing.record(
             EquilibriumTimingStage::Validation,
             outcome.validation_duration,
         );
@@ -983,7 +1009,6 @@ impl PhaseEquilibriumProblemBundle {
             outcome.solution,
             outcome.solve_report,
             outcome.keq_validation_status,
-            outcome.phase_control_report,
             outcome.acceptance_report,
             outcome.phase_statuses,
             timing_report,
@@ -1014,7 +1039,6 @@ pub(crate) struct PreparedPhaseEquilibriumTemplate {
         crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::PreparedEquilibriumProblem,
     metadata: PhaseEquilibriumMetadata,
     report: PhaseEquilibriumBuildReport,
-    symbolic_standard_gibbs: Vec<Expr>,
     thermo_payloads: Vec<SubsData>,
     rst_problem: Option<RstPreparedProblem>,
     timing: EquilibriumTimingReport,
@@ -1105,10 +1129,14 @@ impl PreparedPhaseControlTemplate {
     ) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
         let started = Instant::now();
         let mut timing = EquilibriumTimingCollector::new(timing_mode);
-        let gibbs = self.refresh_gibbs(conditions.temperature(), &mut timing)?;
-        // The phase-control runner retains the initial symbolic capability
-        // snapshot. Canonical RST fixed-P,T problems parameterize `G0_i`, so
-        // a range point needs only refreshed numeric thermochemistry.
+        let gibbs = refresh_gibbs_from_payloads(
+            &mut self.thermo_payloads,
+            &self.metadata,
+            conditions.temperature(),
+            &mut timing,
+        )?;
+        // Canonical RST fixed-P,T problems parameterize `G0_i`, so a range
+        // point needs only refreshed numeric thermochemistry.
         self.runner
             .retarget_numeric(conditions, seed, gibbs.clone())?;
         if let Some(phase_set) = continuation_phase_set {
@@ -1130,6 +1158,15 @@ impl PreparedPhaseControlTemplate {
             outcome.projection_build,
         );
         timing.record(
+            EquilibriumTimingStage::ActiveSetFormulationBuild,
+            outcome.formulation_build,
+        );
+        timing.record(
+            EquilibriumTimingStage::RstPreparation,
+            outcome.rst_preparation,
+        );
+        timing.record_rst_preparation_timing(outcome.rst_preparation_timing);
+        timing.record(
             EquilibriumTimingStage::Validation,
             outcome.validation_duration,
         );
@@ -1141,7 +1178,6 @@ impl PreparedPhaseControlTemplate {
             outcome.solution,
             outcome.solve_report,
             outcome.keq_validation_status,
-            outcome.phase_control_report,
             outcome.acceptance_report,
             outcome.phase_statuses,
             timing.finish(),
@@ -1185,11 +1221,25 @@ impl PreparedPhaseControlTemplate {
             outcome.projection_build,
         );
         timing.record(
+            EquilibriumTimingStage::ActiveSetFormulationBuild,
+            outcome.formulation_build,
+        );
+        timing.record(
+            EquilibriumTimingStage::RstPreparation,
+            outcome.rst_preparation,
+        );
+        timing.record_rst_preparation_timing(outcome.rst_preparation_timing);
+        timing.record(
             EquilibriumTimingStage::Validation,
             outcome.validation_duration,
         );
         timing.set_total(started.elapsed());
-        let gibbs = self.refresh_gibbs(outcome.solution.conditions().temperature(), &mut timing)?;
+        let gibbs = refresh_gibbs_from_payloads(
+            &mut self.thermo_payloads,
+            &self.metadata,
+            outcome.solution.conditions().temperature(),
+            &mut timing,
+        )?;
         let report = self
             .report
             .at_conditions(outcome.solution.conditions(), &gibbs)?;
@@ -1199,65 +1249,11 @@ impl PreparedPhaseControlTemplate {
             outcome.solution,
             outcome.solve_report,
             outcome.keq_validation_status,
-            outcome.phase_control_report,
             outcome.acceptance_report,
             outcome.phase_statuses,
             timing.finish(),
         )
         .map(|solution| solution.with_diagnostics(outcome.diagnostics))
-    }
-
-    fn refresh_gibbs(
-        &mut self,
-        temperature: f64,
-        timing: &mut EquilibriumTimingCollector,
-    ) -> Result<Vec<GibbsFn>, ReactionExtentError> {
-        let mut phase_functions = Vec::with_capacity(self.thermo_payloads.len());
-        for payload in &mut self.thermo_payloads {
-            timing.measure(EquilibriumTimingStage::ThermochemistryPreparation, || {
-                payload.extract_all_thermal_coeffs(temperature)
-            })?;
-            let functions = timing
-                .measure(EquilibriumTimingStage::NumericClosureConstruction, || {
-                    payload.calculate_dG0_fun_one_phase()
-                })?;
-            phase_functions.push(
-                functions
-                    .into_iter()
-                    .map(|(substance, function)| {
-                        (
-                            substance,
-                            std::sync::Arc::from(function)
-                                as std::sync::Arc<dyn Fn(f64) -> f64 + Send + Sync>,
-                        )
-                    })
-                    .collect::<HashMap<_, _>>(),
-            );
-        }
-
-        self.metadata
-            .components()
-            .iter()
-            .map(|component| {
-                let phase_index = self
-                    .metadata
-                    .phase_index(&component.id().phase)
-                    .ok_or_else(|| ReactionExtentError::InvalidProblem {
-                        field: "temperature_range_phase",
-                        message: format!("missing phase for component '{}'", component.label()),
-                    })?
-                    .index();
-                let function = phase_functions
-                    .get(phase_index)
-                    .and_then(|functions| functions.get(component.substance()))
-                    .ok_or_else(|| ReactionExtentError::InvalidProblem {
-                        field: "temperature_range_gibbs",
-                        message: format!("missing Gibbs closure for '{}'", component.label()),
-                    })?;
-                let function = std::sync::Arc::clone(function);
-                Ok(Rc::new(move |temperature: f64| function(temperature)) as GibbsFn)
-            })
-            .collect()
     }
 }
 
@@ -1332,7 +1328,12 @@ impl PreparedPhaseEquilibriumTemplate {
         let retarget_seed = seeds[0].clone();
         let started = Instant::now();
         let mut timing = EquilibriumTimingCollector::new(timing_mode);
-        let gibbs = self.refresh_gibbs(conditions.temperature(), &mut timing)?;
+        let gibbs = refresh_gibbs_from_payloads(
+            &mut self.thermo_payloads,
+            &self.metadata,
+            conditions.temperature(),
+            &mut timing,
+        )?;
         let prepared = self
             .prepared
             .retarget_with_gibbs(conditions, retarget_seed, gibbs)?;
@@ -1350,8 +1351,8 @@ impl PreparedPhaseEquilibriumTemplate {
         let report = self
             .report
             .at_conditions(conditions, prepared.problem().gibbs())?;
-        let mut runner =
-            PreparedEquilibriumRunner::new(prepared, self.symbolic_standard_gibbs.clone())?;
+        let mut runner = PreparedEquilibriumRunner::new_production(prepared)?
+            .with_timing_enabled(self.timing.enabled());
         *runner.configure() = settings.clone();
         let outcome = timing.measure(EquilibriumTimingStage::NonlinearSolve, || {
             if seeds.len() == 1 {
@@ -1391,60 +1392,6 @@ impl PreparedPhaseEquilibriumTemplate {
         };
         bundle.into_multiphase_solution()
     }
-
-    /// Selects the coefficient interval for each phase-local working copy and
-    /// rebuilds only numeric Gibbs closures. The resolved repository payloads
-    /// are never changed.
-    fn refresh_gibbs(
-        &mut self,
-        temperature: f64,
-        timing: &mut EquilibriumTimingCollector,
-    ) -> Result<Vec<GibbsFn>, ReactionExtentError> {
-        let mut phase_functions = Vec::with_capacity(self.thermo_payloads.len());
-        for payload in &mut self.thermo_payloads {
-            timing.measure(EquilibriumTimingStage::ThermochemistryPreparation, || {
-                payload.extract_all_thermal_coeffs(temperature)
-            })?;
-            let functions = timing
-                .measure(EquilibriumTimingStage::NumericClosureConstruction, || {
-                    payload.calculate_dG0_fun_one_phase()
-                })?;
-            phase_functions.push(
-                functions
-                    .into_iter()
-                    .map(|(substance, function)| {
-                        (
-                            substance,
-                            std::sync::Arc::from(function)
-                                as std::sync::Arc<dyn Fn(f64) -> f64 + Send + Sync>,
-                        )
-                    })
-                    .collect::<HashMap<_, _>>(),
-            );
-        }
-
-        let mut gibbs = Vec::with_capacity(self.metadata.components().len());
-        for component in self.metadata.components() {
-            let phase_index = self
-                .metadata
-                .phase_index(&component.id().phase)
-                .ok_or_else(|| ReactionExtentError::InvalidProblem {
-                    field: "temperature_range_phase",
-                    message: format!("missing phase for component '{}'", component.label()),
-                })?
-                .index();
-            let function = phase_functions
-                .get(phase_index)
-                .and_then(|functions| functions.get(component.substance()))
-                .ok_or_else(|| ReactionExtentError::InvalidProblem {
-                    field: "temperature_range_gibbs",
-                    message: format!("missing Gibbs closure for '{}'", component.label()),
-                })?;
-            let function = std::sync::Arc::clone(function);
-            gibbs.push(Rc::new(move |temperature: f64| function(temperature)) as GibbsFn);
-        }
-        Ok(gibbs)
-    }
 }
 
 /// Immutable accepted result of a phase-system equilibrium solve.
@@ -1472,6 +1419,32 @@ pub struct PhaseEquilibriumSolutionBundle {
 }
 
 impl PhaseEquilibriumSolutionBundle {
+    /// Moves the accepted bundle payload into the public result builder.
+    ///
+    /// The bundle is consumed exactly once, so the immutable solution layer
+    /// does not need to clone evidence that already has a single owner.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        PhaseEquilibriumMetadata,
+        PhaseEquilibriumBuildReport,
+        EquilibriumSolution,
+        EquilibriumSolveReport,
+        Option<MultiStartSolveReport>,
+        Option<EquilibriumConstantCrossValidationStatus>,
+        EquilibriumTimingReport,
+    ) {
+        (
+            self.metadata,
+            self.build_report,
+            self.solution,
+            self.solve_report,
+            self.multi_start_report,
+            self.keq_validation_status,
+            self.timing,
+        )
+    }
+
     /// Phase-qualified layout and lookup provenance for this accepted result.
     pub fn metadata(&self) -> &PhaseEquilibriumMetadata {
         &self.metadata
@@ -1546,6 +1519,7 @@ pub(crate) fn build_phase_equilibrium_problem_with_timing(
     request: PhaseEquilibriumBuildRequest<'_>,
     timing_mode: EquilibriumTimingMode,
 ) -> Result<PhaseEquilibriumProblemBundle, ReactionExtentError> {
+    record_phase_equilibrium_build();
     let started = Instant::now();
     let mut timing = EquilibriumTimingCollector::new(timing_mode);
     let metadata = request.metadata.clone();
@@ -1588,6 +1562,7 @@ pub(crate) fn build_phase_equilibrium_problem_with_timing(
     let component_count = metadata.components().len();
     let mut element_composition = DMatrix::zeros(component_count, element_labels.len());
     let mut gibbs = Vec::with_capacity(component_count);
+    #[cfg(test)]
     let mut symbolic_standard_gibbs = Vec::with_capacity(component_count);
     let mut component_reports = Vec::with_capacity(component_count);
     let mut composition_by_substance = HashMap::<String, HashMap<String, f64>>::new();
@@ -1661,19 +1636,22 @@ pub(crate) fn build_phase_equilibrium_problem_with_timing(
 
         let function = std::sync::Arc::clone(function);
         gibbs.push(Rc::new(move |temperature: f64| function(temperature)) as GibbsFn);
-        let symbolic = phase
-            .symbolic_gibbs_functions
-            .get(component.substance())
-            .ok_or_else(|| ReactionExtentError::InvalidProblem {
-                field: "symbolic_standard_gibbs",
-                message: format!(
-                    "missing symbolic standard Gibbs expression for component '{}' from {}:{}",
-                    component.label(),
-                    thermo_source.library(),
-                    thermo_source.record_key()
-                ),
-            })?;
-        symbolic_standard_gibbs.push(symbolic.clone());
+        #[cfg(test)]
+        {
+            let symbolic = phase
+                .symbolic_gibbs_functions
+                .get(component.substance())
+                .ok_or_else(|| ReactionExtentError::InvalidProblem {
+                    field: "symbolic_standard_gibbs",
+                    message: format!(
+                        "missing symbolic standard Gibbs expression for component '{}' from {}:{}",
+                        component.label(),
+                        thermo_source.library(),
+                        thermo_source.record_key()
+                    ),
+                })?;
+            symbolic_standard_gibbs.push(symbolic.clone());
+        }
         component_reports.push(EquilibriumBridgeComponentReport {
             component: component.clone(),
             // Filled after the complete real-component matrix has been built.
@@ -1688,9 +1666,12 @@ pub(crate) fn build_phase_equilibrium_problem_with_timing(
     let (initial_moles, element_totals, input_kind, seed_evidence) = match &request.physical_input {
         PhaseEquilibriumPhysicalInput::Composition(composition) => {
             let initial_moles = composition.moles().to_vec();
-            let totals = element_totals(&initial_moles, &element_composition);
+            let totals = compute_element_totals(&element_composition, &initial_moles)?
+                .iter()
+                .copied()
+                .collect::<Vec<_>>();
             let inventory_scale = totals.iter().copied().fold(0.0_f64, f64::max);
-            let balance = max_element_balance_error(&element_composition, &initial_moles, &totals);
+            let balance = max_element_balance_error(&totals, &totals);
             (
                 initial_moles,
                 totals,
@@ -1712,7 +1693,8 @@ pub(crate) fn build_phase_equilibrium_problem_with_timing(
                 match numerical_seed {
                     Some(seed) => {
                         let seed_moles = seed.moles().to_vec();
-                        let reconstructed = element_totals(&seed_moles, &element_composition);
+                        let reconstructed =
+                            compute_element_totals(&element_composition, &seed_moles)?;
                         for (element, (actual, expected)) in
                             reconstructed.iter().zip(totals.iter()).enumerate()
                         {
@@ -1731,7 +1713,7 @@ pub(crate) fn build_phase_equilibrium_problem_with_timing(
                             seed_moles,
                             PhaseEquilibriumSeedSource::SuppliedNumericalSeed,
                             None,
-                            max_element_balance_error(&element_composition, seed.moles(), &totals),
+                            max_element_balance_error(reconstructed.as_slice(), &totals),
                         )
                     }
                     None => {
@@ -1812,6 +1794,7 @@ pub(crate) fn build_phase_equilibrium_problem_with_timing(
         problem,
         metadata,
         report,
+        #[cfg(test)]
         symbolic_standard_gibbs,
         thermo_payloads,
         timing: timing.finish(),
@@ -1821,6 +1804,7 @@ pub(crate) fn build_phase_equilibrium_problem_with_timing(
 #[derive(Clone)]
 struct PreparedPhaseThermochemistry {
     gibbs_functions: HashMap<String, std::sync::Arc<dyn Fn(f64) -> f64 + Send + Sync>>,
+    #[cfg(test)]
     symbolic_gibbs_functions: HashMap<String, Expr>,
     element_compositions: HashMap<String, HashMap<String, f64>>,
 }
@@ -1841,8 +1825,9 @@ fn prepare_phase_thermochemistry(
     })?;
     let gibbs_functions = timing
         .measure(EquilibriumTimingStage::NumericClosureConstruction, || {
-            working.calculate_dG0_fun_one_phase()
+            working.calculate_dG0_fun_one_phase_in_place()
         })?;
+    #[cfg(test)]
     let symbolic_gibbs_functions = timing
         .measure(EquilibriumTimingStage::SymbolicConstruction, || {
             working.calculate_dG0_sym_one_phase()
@@ -1883,9 +1868,66 @@ fn prepare_phase_thermochemistry(
                 )
             })
             .collect(),
+        #[cfg(test)]
         symbolic_gibbs_functions,
         element_compositions,
     })
+}
+
+/// Refreshes phase-local thermochemistry and returns closures in canonical
+/// component order. Only the private working payloads are mutated; resolved
+/// repository data remains untouched across temperature-range points.
+fn refresh_gibbs_from_payloads(
+    thermo_payloads: &mut [SubsData],
+    metadata: &PhaseEquilibriumMetadata,
+    temperature: f64,
+    timing: &mut EquilibriumTimingCollector,
+) -> Result<Vec<GibbsFn>, ReactionExtentError> {
+    let mut phase_functions = Vec::with_capacity(thermo_payloads.len());
+    for payload in thermo_payloads {
+        timing.measure(EquilibriumTimingStage::ThermochemistryPreparation, || {
+            payload.extract_all_thermal_coeffs(temperature)
+        })?;
+        let functions = timing
+            .measure(EquilibriumTimingStage::NumericClosureConstruction, || {
+                payload.calculate_dG0_fun_one_phase_in_place()
+            })?;
+        phase_functions.push(
+            functions
+                .into_iter()
+                .map(|(substance, function)| {
+                    (
+                        substance,
+                        std::sync::Arc::from(function)
+                            as std::sync::Arc<dyn Fn(f64) -> f64 + Send + Sync>,
+                    )
+                })
+                .collect::<HashMap<_, _>>(),
+        );
+    }
+
+    metadata
+        .components()
+        .iter()
+        .map(|component| {
+            let phase_index = metadata
+                .phase_index(&component.id().phase)
+                .ok_or_else(|| ReactionExtentError::InvalidProblem {
+                    field: "temperature_range_phase",
+                    message: format!("missing phase for component '{}'", component.label()),
+                })?
+                .index();
+            let function = phase_functions
+                .get(phase_index)
+                .and_then(|functions| functions.get(component.substance()))
+                .ok_or_else(|| ReactionExtentError::InvalidProblem {
+                    field: "temperature_range_gibbs",
+                    message: format!("missing Gibbs closure for '{}'", component.label()),
+                })?;
+            let function = std::sync::Arc::clone(function);
+            Ok(Rc::new(move |temperature: f64| function(temperature)) as GibbsFn)
+        })
+        .collect()
 }
 
 fn thermo_source_for(
@@ -1912,29 +1954,13 @@ fn thermo_source_for(
         })
 }
 
-fn element_totals(initial_moles: &[f64], element_composition: &DMatrix<f64>) -> Vec<f64> {
-    (0..element_composition.ncols())
-        .map(|element| {
-            initial_moles
-                .iter()
-                .enumerate()
-                .map(|(component, amount)| amount * element_composition[(component, element)])
-                .sum()
-        })
-        .collect()
-}
-
 /// Largest absolute conservation residual for one physical mole vector.
 ///
 /// Kept beside bridge construction rather than the nonlinear validation layer:
 /// it characterizes a pre-solver seed and must not imply that the seed itself
 /// was accepted equilibrium output.
-fn max_element_balance_error(
-    element_composition: &DMatrix<f64>,
-    moles: &[f64],
-    totals: &[f64],
-) -> f64 {
-    element_totals(moles, element_composition)
+fn max_element_balance_error(actual_totals: &[f64], totals: &[f64]) -> f64 {
+    actual_totals
         .iter()
         .zip(totals)
         .map(|(actual, expected)| (actual - expected).abs())
@@ -1970,38 +1996,7 @@ fn deterministic_element_basis(
         });
     }
 
-    let mut columns = Vec::with_capacity(full_rank);
-    let mut current_rank = 0;
-    for candidate_column in 0..element_composition.ncols() {
-        let mut candidate = columns.clone();
-        candidate.push(candidate_column);
-        let candidate_matrix = DMatrix::from_fn(
-            element_composition.nrows(),
-            candidate.len(),
-            |row, column| element_composition[(row, candidate[column])],
-        );
-        let rank = SVD::new(candidate_matrix, false, false)
-            .singular_values
-            .iter()
-            .filter(|&&value| value > tolerance)
-            .count();
-        if rank > current_rank {
-            columns.push(candidate_column);
-            current_rank = rank;
-        }
-        if current_rank == full_rank {
-            break;
-        }
-    }
-    if current_rank != full_rank {
-        return Err(ReactionExtentError::InvalidProblem {
-            field: "element_basis",
-            message: format!(
-                "could not select {full_rank} independent element columns; found {current_rank}"
-            ),
-        });
-    }
-    Ok(columns)
+    independent_column_basis(element_composition, full_rank, tolerance, "element_basis")
 }
 
 fn activity_model_for(model: PhaseModel) -> PhaseActivityModel {

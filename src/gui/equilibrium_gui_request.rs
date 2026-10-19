@@ -22,9 +22,9 @@ use crate::Thermodynamics::ChemEquilibrium::prelude::{
 use crate::gui::equilibrium_gui_model::{
     EquilibriumSolverDraft, GuiInitialPhasePolicyDraft, GuiKeqValidationMode, GuiPhSolveMode,
     GuiPhaseLifecycleTrace, GuiPhaseModel, GuiPhysicalState, GuiRangeLifecycleTrace,
-    GuiSolverBackend, ValidatedCandidatePolicy, ValidatedEquilibriumGuiConfig, ValidatedInventory,
-    ValidatedLookup, ValidatedPhaseMode, ValidatedProblem, ValidatedSolver, ValidatedTemperature,
-    ValidatedTraceSeedPolicy,
+    GuiRstSymbolicFrontend, GuiSolverBackend, ValidatedCandidatePolicy,
+    ValidatedEquilibriumGuiConfig, ValidatedInventory, ValidatedLookup, ValidatedPhaseMode,
+    ValidatedProblem, ValidatedSolver, ValidatedTemperature, ValidatedTraceSeedPolicy,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -54,8 +54,13 @@ pub fn build_equilibrium_calculator(
         ..
     } = config;
     let (phases, sparse_initial_moles, component_libraries) = phases_and_inventory(&inventory)?;
-    let mut builder =
-        EquilibriumCalculator::from_phases(phases).initial_phase_moles(sparse_initial_moles);
+    let mut builder = EquilibriumCalculator::from_phases(phases);
+    if !sparse_initial_moles.is_empty() {
+        builder = builder.initial_phase_moles(sparse_initial_moles);
+    }
+    if let ValidatedInventory::ElementInventory { inventory, .. } = &inventory {
+        builder = builder.element_inventory(inventory.clone());
+    }
     if let Some(repository) = repository {
         builder = builder.with_repository(repository);
     }
@@ -388,7 +393,9 @@ fn phases_and_inventory(
     let phases = match inventory {
         ValidatedInventory::ExplicitPhases(phases) => phases,
         ValidatedInventory::ElementCandidates { assignments, .. } => assignments,
+        ValidatedInventory::ElementInventory { phases, .. } => phases,
     };
+    let include_initial_moles = !matches!(inventory, ValidatedInventory::ElementInventory { .. });
     if phases.is_empty() {
         return Err(EquilibriumGuiRequestError::FeatureUnavailable(
             "element candidate preview has no confirmed phase assignments",
@@ -412,10 +419,12 @@ fn phases_and_inventory(
             map_phase_model(phase.model),
         )?;
         for component in &phase.components {
-            initial.push((
-                PhaseComponentId::new(phase_id.clone(), component.substance.clone()),
-                component.initial_moles,
-            ));
+            if include_initial_moles {
+                initial.push((
+                    PhaseComponentId::new(phase_id.clone(), component.substance.clone()),
+                    component.initial_moles,
+                ));
+            }
             if let Some(source_library) = &component.source_library {
                 component_libraries.insert(component.substance.clone(), source_library.clone());
             }
@@ -430,6 +439,14 @@ fn build_solve_options(
     diagnostics: &crate::gui::equilibrium_gui_model::ValidatedDiagnostics,
 ) -> Result<EquilibriumSolveOptions, EquilibriumGuiRequestError> {
     let mut options = EquilibriumSolveOptions::new();
+    options = options.with_rst_symbolic_frontend(match solver.rst_symbolic_frontend {
+        GuiRstSymbolicFrontend::ExprLegacy => {
+            crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RstSymbolicFrontend::ExprLegacy
+        }
+        GuiRstSymbolicFrontend::AtomView => {
+            crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RstSymbolicFrontend::AtomView
+        }
+    });
     match &solver.selection {
         EquilibriumSolverDraft::ProductionDefault => {
             options = options.with_production_cascade();
@@ -619,6 +636,49 @@ mod tests {
     }
 
     #[test]
+    fn direct_element_inventory_builds_and_executes_through_the_facade() {
+        let mut document = EquilibriumGuiDocument::new();
+        document.config.inventory =
+            crate::gui::equilibrium_gui_model::EquilibriumInventoryDraft::ElementInventory {
+                amounts: vec![
+                    crate::gui::equilibrium_gui_model::ElementAmountDraft {
+                        element: "H".into(),
+                        amount: "2".into(),
+                    },
+                    crate::gui::equilibrium_gui_model::ElementAmountDraft {
+                        element: "O".into(),
+                        amount: "1".into(),
+                    },
+                ],
+                phases: vec![crate::gui::equilibrium_gui_model::PhaseDraft {
+                    id: "gas".into(),
+                    physical_state: crate::gui::equilibrium_gui_model::GuiPhysicalState::Gas,
+                    model: crate::gui::equilibrium_gui_model::GuiPhaseModel::IdealGas,
+                    components: vec![crate::gui::equilibrium_gui_model::ComponentDraft {
+                        substance: "H2O".into(),
+                        initial_moles: "0".into(),
+                        source_library: None,
+                    }],
+                }],
+            };
+        document.config.lookup = EquilibriumLookupDraft::Explicit {
+            priority_libraries: vec!["NASA_gas".into()],
+            permitted_libraries: vec!["NASA_gas".into()],
+            explicit_search_instructions: Default::default(),
+            search_in_nist: false,
+        };
+        let validated = document
+            .validate_for_run()
+            .expect("direct elemental GUI document validates");
+        let request = build_equilibrium_facade_request(validated, None)
+            .expect("direct elemental GUI request builds");
+        let outcome = request
+            .solve()
+            .expect("direct elemental GUI request solves through the facade");
+        assert!(matches!(outcome, EquilibriumGuiSolveOutcome::Point(_)));
+    }
+
+    #[test]
     fn descending_range_becomes_a_facade_request() {
         let mut document = EquilibriumGuiDocument::new();
         let EquilibriumProblemDraft::FixedPt { temperature, .. } = &mut document.config.problem
@@ -662,6 +722,21 @@ mod tests {
             map_solver_backend(GuiSolverBackend::LegacyNr),
             SolverBackend::Legacy(LegacyEquilibriumSolver::NR)
         ));
+    }
+
+    #[test]
+    fn rst_frontend_selection_crosses_gui_validation_into_public_solve_options() {
+        use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RstSymbolicFrontend;
+
+        let mut document = EquilibriumGuiDocument::new();
+        document.config.solver.rst_symbolic_frontend = GuiRstSymbolicFrontend::AtomView;
+        let validated = document.validate_for_run().expect("GUI document validates");
+        let options = build_solve_options(&validated.solver, &validated.diagnostics)
+            .expect("frontend maps to solve options");
+        assert_eq!(
+            options.rst_symbolic_frontend(),
+            RstSymbolicFrontend::AtomView
+        );
     }
 
     #[test]

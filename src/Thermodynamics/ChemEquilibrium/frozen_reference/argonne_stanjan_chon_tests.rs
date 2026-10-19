@@ -12,11 +12,15 @@ mod tests {
     };
     use crate::Thermodynamics::ChemEquilibrium::frozen_reference_argonne_stanjan_chon::{
         ResolvedArgonneStanjanChonFixture, STANJAN_DECLARED_SPECIES, STANJAN_LOCAL_GAS_SPECIES,
-        StanjanChonComparisonReport, StanjanChonMagnitudeClass, load_argonne_stanjan_chon_dataset,
-        stanjan_conditions, verify_element_equivalent_feeds,
+        STANJAN_REFERENCE_PRESSURE_PA, StanjanChonComparisonReport, StanjanChonMagnitudeClass,
+        load_argonne_stanjan_chon_dataset, stanjan_conditions, verify_element_equivalent_feeds,
     };
     use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
         ResolvedPhaseEquilibriumRequest, solve_resolved_pt,
+    };
+    use crate::Thermodynamics::ChemEquilibrium::prelude::{
+        ElementInventory, EquilibriumCalculator, EquilibriumCalculatorOutcome,
+        PhaseEquilibriumInputKind,
     };
     use crate::Thermodynamics::thermo_lib_api::{ThermoData, ThermoRepository};
     use crate::library_manager::with_library_manager;
@@ -304,5 +308,52 @@ mod tests {
         assert!(pentane.relative_error.is_none());
         assert_eq!(before_local, local_library_snapshot());
         assert_eq!(before_frozen, frozen_dataset_snapshot());
+    }
+
+    #[test]
+    #[ignore = "release I5 Argonne/STANJAN ElementInventory facade characterization"]
+    fn i5_argonne_stanjan_chon_element_inventory_facade_matches_frozen_reference()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let before_local = local_library_snapshot();
+        let before_frozen = frozen_dataset_snapshot();
+        let dataset = dataset();
+        let reference = &dataset.rows()[0];
+        let inventory =
+            ElementInventory::from_amounts([("C", 6.0), ("H", 16.0), ("O", 20.0), ("N", 75.2)])
+                .expect("the element-equivalent STANJAN feed must validate");
+
+        let outcome = EquilibriumCalculator::builder()
+            .ideal_gas_phase("gas", STANJAN_LOCAL_GAS_SPECIES)
+            .expect("the STANJAN facade universe must validate")
+            .element_inventory(inventory)
+            .prefer_libraries(["NASA_gas"])
+            .offline_only()
+            .pressure_pa(reference.pressure_pa)
+            .reference_pressure_pa(STANJAN_REFERENCE_PRESSURE_PA)
+            .at_temperature(reference.temperature_k)
+            .production_cascade()
+            .solve()?;
+        let EquilibriumCalculatorOutcome::PtPoint(point) = outcome else {
+            unreachable!("at_temperature selects the typed P,T outcome");
+        };
+        assert_eq!(
+            point.solution().build_report().input_kind(),
+            PhaseEquilibriumInputKind::ElementInventory
+        );
+        assert_eq!(
+            point.solution().build_report().element_totals(),
+            [6.0, 16.0, 75.2, 20.0]
+        );
+        let fixture =
+            ResolvedArgonneStanjanChonFixture::resolve_offline(local_repository(), reference)
+                .expect("the exact STANJAN universe must resolve offline");
+        let report =
+            StanjanChonComparisonReport::from_solution(&dataset, &fixture, point.solution())
+                .expect("facade result must align with frozen STANJAN identities");
+        render_comparison(&report);
+        assert_stanjan_external_regression_envelope(&report);
+        assert_eq!(before_local, local_library_snapshot());
+        assert_eq!(before_frozen, frozen_dataset_snapshot());
+        Ok(())
     }
 }

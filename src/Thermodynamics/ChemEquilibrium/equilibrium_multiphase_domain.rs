@@ -13,8 +13,15 @@
 //!                                  +--> physical element totals
 //! ```
 
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventory;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_seed::{
+    ElementFeasibleSeedSettings, build_element_feasible_seed,
+};
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::compute_element_totals;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
-use crate::Thermodynamics::User_PhaseOrSolution::{PhaseModel, PhaseSpec};
+use crate::Thermodynamics::User_PhaseOrSolution::{
+    PhaseModel, PhaseSpec, ResolvedPhaseSystem, element_composition_and_molar_mass,
+};
 use crate::Thermodynamics::phase_layout::{PhaseComponentId, SystemLayout};
 use crate::Thermodynamics::physical_state::PhysicalState;
 use nalgebra::DMatrix;
@@ -117,6 +124,26 @@ impl MultiphaseEquilibriumLayout {
     pub fn component_count(&self) -> usize {
         self.system_layout.component_count()
     }
+}
+
+/// Derives the first numerical composition for an elemental request without
+/// preparing thermochemistry. The full bridge remains responsible for Gibbs
+/// closures, provenance, and the authoritative physical `b`; this helper only
+/// reuses the resolved element matrix for the answer-independent seed.
+pub(crate) fn initial_composition_from_element_inventory(
+    resolved: &ResolvedPhaseSystem,
+    inventory: &ElementInventory,
+) -> Result<MultiphaseInitialComposition, ReactionExtentError> {
+    let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
+    let (element_composition, _, element_labels) =
+        element_composition_and_molar_mass(resolved.phase_data(), layout.system_layout(), None)?;
+    let element_totals = inventory.aligned_to(&element_labels)?;
+    let seed = build_element_feasible_seed(
+        &element_composition,
+        &element_totals,
+        ElementFeasibleSeedSettings::default(),
+    )?;
+    MultiphaseInitialComposition::from_dense(&layout, seed.physical_moles().to_vec())
 }
 
 /// Physical mole numbers aligned to a [`MultiphaseEquilibriumLayout`].
@@ -239,14 +266,10 @@ impl MultiphaseInitialComposition {
                 message: "element composition must contain only finite values".into(),
             });
         }
-        let mut totals = vec![0.0; element_composition.ncols()];
-        for component in 0..element_composition.nrows() {
-            for element in 0..element_composition.ncols() {
-                totals[element] +=
-                    self.moles[component] * element_composition[(component, element)];
-            }
-        }
-        Ok(totals)
+        Ok(compute_element_totals(element_composition, &self.moles)?
+            .iter()
+            .copied()
+            .collect())
     }
 }
 

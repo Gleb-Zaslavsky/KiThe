@@ -652,6 +652,14 @@ mod tests {
             discovery_backend: SolverBackend::Legacy(Solvers::NR),
             physical_retry_backend: None,
             physical_retry_failure: Some("physical retry remained ill-conditioned".to_string()),
+            physical_failure_attempts: Vec::new(),
+            normalized_discovery_attempts: Vec::new(),
+            physical_retry_attempts: Vec::new(),
+            physical_failure_duration: std::time::Duration::ZERO,
+            normalization_duration: std::time::Duration::ZERO,
+            normalized_discovery_duration: std::time::Duration::ZERO,
+            physical_retry_duration: std::time::Duration::ZERO,
+            reconstruction_duration: std::time::Duration::ZERO,
             reconstructed_physical_boundary: true,
         };
 

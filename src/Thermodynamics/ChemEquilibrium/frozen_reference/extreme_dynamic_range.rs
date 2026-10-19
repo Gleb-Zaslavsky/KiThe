@@ -57,7 +57,7 @@ mod tests {
             EquilibriumConditions::new(T_K, P_PA, P0_PA).unwrap(),
         )
         .unwrap();
-        let mut runner = PreparedPhaseControlRunner::new(problem, Vec::new(), false).unwrap();
+        let mut runner = PreparedPhaseControlRunner::new(problem, false).unwrap();
         let settings = runner.configure_solver();
         settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
         settings.solver_params.tol = 1e-11;
@@ -65,7 +65,11 @@ mod tests {
         let outcome = runner.solve()?;
         assert!(outcome.acceptance_report.complementarity.satisfied);
         assert_eq!(
-            outcome.phase_control_report.final_phase_set.active_mask(),
+            outcome
+                .acceptance_report
+                .phase_control
+                .final_phase_set
+                .active_mask(),
             vec![true]
         );
         let balance = outcome.solution.moles().iter().sum::<f64>() - total_moles;

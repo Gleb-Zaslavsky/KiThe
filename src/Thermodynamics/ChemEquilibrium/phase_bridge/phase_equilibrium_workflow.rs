@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::{
     ElementInventoryCandidateSelection, EquilibriumCandidatePhasePlan,
@@ -23,6 +24,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
     EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_extensive_normalization::ExtensiveNormalization;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::EquilibriumInstrumentationMode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     EquilibriumSolverSettings, Solvers,
 };
@@ -51,8 +53,9 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
     InitialPhaseSet, PhaseManager, PhaseSet,
 };
-use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::PhaseEquilibriumBuildRequest;
-use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::SupportedPhaseModelPolicy;
+use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
+    PhaseEquilibriumBuildRequest, PhaseEquilibriumProblemBundle, SupportedPhaseModelPolicy,
+};
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::ExtensiveNormalizationRecoveryEvidence;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::MultiphaseEquilibriumSolution;
 use crate::Thermodynamics::User_PhaseOrSolution::{
@@ -126,6 +129,7 @@ impl Default for ExtensiveNormalizationPolicy {
 pub struct EquilibriumSolveOptions {
     settings: EquilibriumSolverSettings,
     timing_mode: EquilibriumTimingMode,
+    instrumentation_mode: EquilibriumInstrumentationMode,
     diagnostics: EquilibriumDiagnosticsOptions,
     execution_control: Option<EquilibriumExecutionControl>,
     extensive_normalization: ExtensiveNormalizationPolicy,
@@ -141,6 +145,8 @@ pub struct EquilibriumSolveOptions {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EquilibriumSolveOptionsSnapshot {
     pub preferred_legacy_backend: String,
+    #[serde(default)]
+    pub rst_symbolic_frontend: String,
     pub effective_backend_order: Vec<String>,
     pub max_iterations: usize,
     pub tolerance: f64,
@@ -149,6 +155,7 @@ pub struct EquilibriumSolveOptionsSnapshot {
     pub continuation_seed_policy: String,
     pub equilibrium_constant_validation_mode: String,
     pub timing_mode: String,
+    pub instrumentation_mode: String,
     pub diagnostics_mode: String,
     pub diagnostics_max_events: usize,
     pub diagnostics_range_policy: String,
@@ -177,6 +184,7 @@ impl Default for EquilibriumSolveOptions {
         Self {
             settings: EquilibriumSolverSettings::default(),
             timing_mode: EquilibriumTimingMode::default(),
+            instrumentation_mode: EquilibriumInstrumentationMode::default(),
             diagnostics: EquilibriumDiagnosticsOptions::default(),
             execution_control: None,
             extensive_normalization: ExtensiveNormalizationPolicy::default(),
@@ -199,6 +207,7 @@ impl EquilibriumSolveOptions {
         Ok(Self {
             settings,
             timing_mode: EquilibriumTimingMode::default(),
+            instrumentation_mode: EquilibriumInstrumentationMode::default(),
             diagnostics: EquilibriumDiagnosticsOptions::default(),
             execution_control: None,
             extensive_normalization: ExtensiveNormalizationPolicy::default(),
@@ -290,6 +299,23 @@ impl EquilibriumSolveOptions {
         self
     }
 
+    /// Selects the symbolic frontend used when an RST backend is prepared.
+    /// ExprLegacy remains the default; AtomView is an explicit opt-in.
+    pub fn with_rst_symbolic_frontend(
+        mut self,
+        frontend: crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RstSymbolicFrontend,
+    ) -> Self {
+        self.settings.rst_symbolic_frontend = frontend;
+        self
+    }
+
+    /// Returns the RST symbolic frontend selected for this solve.
+    pub fn rst_symbolic_frontend(
+        &self,
+    ) -> crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RstSymbolicFrontend {
+        self.settings.rst_symbolic_frontend
+    }
+
     /// Installs an explicit ordered backend policy after validating it.
     pub fn with_solver_policy(mut self, policy: SolverPolicy) -> Result<Self, ReactionExtentError> {
         self.settings.solver_policy = Some(policy);
@@ -329,6 +355,18 @@ impl EquilibriumSolveOptions {
         self
     }
 
+    /// Enables fine-grained evaluation counters for the enclosing facade
+    /// operation. The default keeps all counter hooks inactive.
+    pub fn with_instrumentation_mode(mut self, mode: EquilibriumInstrumentationMode) -> Self {
+        self.instrumentation_mode = mode;
+        self
+    }
+
+    /// Returns the fine-grained instrumentation policy for this request.
+    pub fn instrumentation_mode(&self) -> EquilibriumInstrumentationMode {
+        self.instrumentation_mode
+    }
+
     /// Enables bounded typed diagnostics for this solve transaction.
     ///
     /// Diagnostics remain observational: they never change the numerical
@@ -359,6 +397,7 @@ impl EquilibriumSolveOptions {
             .unwrap_or_else(|| SolverPolicy::production_default(self.settings.solver));
         EquilibriumSolveOptionsSnapshot {
             preferred_legacy_backend: format!("{:?}", self.settings.solver),
+            rst_symbolic_frontend: format!("{:?}", self.settings.rst_symbolic_frontend),
             effective_backend_order: policy
                 .ordered_backends()
                 .into_iter()
@@ -374,6 +413,7 @@ impl EquilibriumSolveOptions {
                 self.settings.keq_validation_mode
             ),
             timing_mode: format!("{:?}", self.timing_mode),
+            instrumentation_mode: format!("{:?}", self.instrumentation_mode),
             diagnostics_mode: format!("{:?}", self.diagnostics.mode()),
             diagnostics_max_events: self.diagnostics.max_events(),
             diagnostics_range_policy: format!("{:?}", self.diagnostics.range_policy()),
@@ -902,7 +942,7 @@ impl PhaseEquilibriumPipelineRequest {
         let Self {
             spec,
             initial_composition,
-            candidate_selection: _,
+            candidate_selection,
             conditions,
             model_policy,
             solve_options,
@@ -933,35 +973,48 @@ impl PhaseEquilibriumPipelineRequest {
             }
             None => SubstanceSystemFactory::resolve_phase_system(spec)?,
         };
-        let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
-        let initial_composition = match initial_composition {
+        let range_request = match initial_composition {
             PipelineInitialComposition::Dense(initial_moles) => {
-                MultiphaseInitialComposition::from_dense(&layout, initial_moles)?
+                let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
+                let initial_composition =
+                    MultiphaseInitialComposition::from_dense(&layout, initial_moles)?;
+                TemperatureRangeRequest::new(
+                    &resolved,
+                    initial_composition,
+                    conditions.pressure(),
+                    conditions.reference_pressure(),
+                    temperatures,
+                )?
             }
             PipelineInitialComposition::Sparse(entries) => {
-                MultiphaseInitialComposition::from_sparse(&layout, entries)?
+                let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
+                let initial_composition =
+                    MultiphaseInitialComposition::from_sparse(&layout, entries)?;
+                TemperatureRangeRequest::new(
+                    &resolved,
+                    initial_composition,
+                    conditions.pressure(),
+                    conditions.reference_pressure(),
+                    temperatures,
+                )?
             }
-            PipelineInitialComposition::ElementInventory(_) => {
-                return Err(PhaseEquilibriumPipelineError::Solve(
-                    ReactionExtentError::InvalidProblem {
-                        field: "element_inventory_temperature_range",
-                        message: "element-defined temperature ranges require the prepared range migration and are not available yet".to_string(),
-                    },
-                ));
+            PipelineInitialComposition::ElementInventory(element_inventory) => {
+                TemperatureRangeRequest::from_element_inventory(
+                    &resolved,
+                    element_inventory,
+                    conditions.pressure(),
+                    conditions.reference_pressure(),
+                    temperatures,
+                )?
             }
         };
-        let request = TemperatureRangeRequest::new(
-            &resolved,
-            initial_composition,
-            conditions.pressure(),
-            conditions.reference_pressure(),
-            temperatures,
-        )
-        .map(|request| {
-            request
-                .with_model_policy(model_policy)
-                .with_solve_options(solve_options)
-        })?;
+        let request = range_request
+            .with_model_policy(model_policy)
+            .with_solve_options(solve_options);
+        let request = match candidate_selection {
+            Some(selection) => request.with_candidate_selection(selection),
+            None => request,
+        };
         let request = match phase_control_policy {
             Some(policy) => request.with_phase_control_policy(policy),
             None => request,
@@ -1289,9 +1342,49 @@ fn solve_resolved_pt_from_element_inventory_with_selection(
 pub(crate) fn solve_resolved_pt_transaction(
     request: ResolvedPhaseEquilibriumRequest<'_>,
 ) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
-    match solve_resolved_pt_once(request.clone()) {
+    solve_resolved_pt_transaction_with_optional_bundle(request, None)
+}
+
+/// Runs a point transaction whose first physical attempt already owns a
+/// canonical bridge prepared by the caller.
+///
+/// The elemental P,T calculator needs the bridge once to derive its numerical
+/// seed. Passing that same bundle into the transaction avoids rebuilding the
+/// identical thermochemical and numerical problem immediately afterward.
+/// Recovery deliberately remains request-based: a normalized retry must build
+/// its own transformed problem and retains the existing recovery contract.
+pub(crate) fn solve_resolved_pt_transaction_with_bundle(
+    request: ResolvedPhaseEquilibriumRequest<'_>,
+    bundle: PhaseEquilibriumProblemBundle,
+) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
+    solve_resolved_pt_transaction_with_optional_bundle(request, Some(bundle))
+}
+
+fn solve_resolved_pt_transaction_with_optional_bundle(
+    request: ResolvedPhaseEquilibriumRequest<'_>,
+    bundle: Option<PhaseEquilibriumProblemBundle>,
+) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
+    let transaction_started = std::time::Instant::now();
+    match solve_resolved_pt_once_with_bundle(request.clone(), bundle) {
         Ok(solution) => Ok(solution),
-        Err(physical_error) => recover_resolved_pt_after_numerical_failure(request, physical_error),
+        Err(physical_error) => {
+            if request.solve_options.timing_mode() == EquilibriumTimingMode::Enabled {
+                recover_resolved_pt_after_numerical_failure(request, physical_error).map(
+                    |solution| {
+                        // Recovery timing owns the whole fallback transaction,
+                        // including the rejected physical-coordinate attempt.
+                        // Otherwise that failed attempt leaks into the facade
+                        // wall time and appears as an unexplained outer gap.
+                        let elapsed = transaction_started.elapsed();
+                        solution
+                            .with_timing_stage(EquilibriumTimingStage::Recovery, elapsed)
+                            .with_timing_total(elapsed)
+                    },
+                )
+            } else {
+                recover_resolved_pt_after_numerical_failure(request, physical_error)
+            }
+        }
     }
 }
 
@@ -1350,16 +1443,29 @@ fn build_phase_equilibrium_request<'a>(
 fn solve_resolved_pt_once(
     request: ResolvedPhaseEquilibriumRequest<'_>,
 ) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
+    solve_resolved_pt_once_with_bundle(request, None)
+}
+
+fn solve_resolved_pt_once_with_bundle(
+    request: ResolvedPhaseEquilibriumRequest<'_>,
+    initial_bundle: Option<PhaseEquilibriumProblemBundle>,
+) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
     let timing_mode = request.solve_options.timing_mode();
     let diagnostics = request.solve_options.diagnostics_options().clone();
     let started = std::time::Instant::now();
     match request.solve_mode.clone() {
         PhaseEquilibriumSolveMode::FixedDeclaredPhases => {
-            let bundle = crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::
-                build_phase_equilibrium_problem_with_timing(
-                    build_phase_equilibrium_request(&request, request.initial_composition.clone())?,
-                    timing_mode,
-                )?;
+            let bundle = match initial_bundle {
+                Some(bundle) => bundle,
+                None => crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::
+                    build_phase_equilibrium_problem_with_timing(
+                        build_phase_equilibrium_request(
+                            &request,
+                            request.initial_composition.clone(),
+                        )?,
+                        timing_mode,
+                    )?,
+            };
             let settings = request.solve_options.into_settings();
             let solved = if request.multi_start_seeds.is_empty() {
                 bundle.solve_with(|configured| *configured = settings)
@@ -1380,11 +1486,17 @@ fn solve_resolved_pt_once(
                         .to_string(),
                 });
             }
-            let bundle = crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::
-                build_phase_equilibrium_problem_with_timing(
-                    build_phase_equilibrium_request(&request, request.initial_composition.clone())?,
-                    timing_mode,
-                )?;
+            let bundle = match initial_bundle {
+                Some(bundle) => bundle,
+                None => crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::
+                    build_phase_equilibrium_problem_with_timing(
+                        build_phase_equilibrium_request(
+                            &request,
+                            request.initial_composition.clone(),
+                        )?,
+                        timing_mode,
+                    )?,
+            };
             let settings = request.solve_options.into_settings();
             bundle
                 .solve_with_bounded_phase_control_with_diagnostics_and_seed(
@@ -1413,6 +1525,27 @@ const EXTENSIVE_RECOVERY_MIN_SCALE_FACTOR: f64 = 10.0;
 // published when the ordinary production tolerance is sufficient for solve
 // acceptance but not for strict extensive equivalence.
 const EXTENSIVE_RECOVERY_MAX_SOLVER_TOLERANCE: f64 = 1.0e-12;
+const EXTENSIVE_RECOVERY_RELATIVE_TRACE_FRACTION: f64 = 1.0e-12;
+
+pub(crate) fn normalized_recovery_trace_policy(
+    normalization: ExtensiveNormalization,
+    physical_policy: TraceSpeciesSeedPolicy,
+) -> Result<TraceSpeciesSeedPolicy, ReactionExtentError> {
+    let normalized_policy = normalization.normalize_trace_seed_policy(physical_policy)?;
+    match normalized_policy {
+        TraceSpeciesSeedPolicy::Absolute { floor } => {
+            // A physical absolute floor can become far below the useful
+            // numerical basin after extensive normalization. The floor is a
+            // seed-only device, so use a scale-free normalized fraction while
+            // retaining the transformed physical floor as the lower bound.
+            Ok(TraceSpeciesSeedPolicy::RelativeToLargestInitialMole {
+                fraction: EXTENSIVE_RECOVERY_RELATIVE_TRACE_FRACTION,
+                minimum_floor: floor,
+            })
+        }
+        relative => Ok(relative),
+    }
+}
 
 fn is_materially_extensive_scaled(scale: f64) -> bool {
     scale.is_finite() && scale > 0.0 && scale.ln().abs() > EXTENSIVE_RECOVERY_MIN_SCALE_FACTOR.ln()
@@ -1433,6 +1566,7 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
     request: ResolvedPhaseEquilibriumRequest<'a>,
     physical_error: ReactionExtentError,
 ) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
+    let normalization_started = std::time::Instant::now();
     let normalization = match &request.physical_input {
         ResolvedPhaseEquilibriumPhysicalInput::Composition => {
             ExtensiveNormalization::from_physical_moles(request.initial_composition.moles())?
@@ -1491,9 +1625,10 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
         // successful physical retry retains ordinary diagnostics; an explicit
         // reconstruction retains typed recovery provenance instead.
         .with_diagnostics(EquilibriumDiagnosticsOptions::disabled())
-        .with_trace_seed_policy(
-            normalization.normalize_trace_seed_policy(request.solve_options.trace_seed_policy())?,
-        );
+        .with_trace_seed_policy(normalized_recovery_trace_policy(
+            normalization,
+            request.solve_options.trace_seed_policy(),
+        )?);
     let recovery_tolerance = normalized_options
         .reproducibility_snapshot()
         .tolerance
@@ -1512,6 +1647,8 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
         recovery_basin_seed: normalized_basin_seed,
         continuation_phase_set: request.continuation_phase_set.clone(),
     };
+    let normalization_duration = normalization_started.elapsed();
+    let physical_failure_attempts = physical_error.backend_attempt_reports();
     let normalized_solution = match solve_resolved_pt_once(normalized_request) {
         Ok(solution) => solution,
         Err(recovery) => {
@@ -1523,6 +1660,7 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
         }
     };
     let discovery_backend = normalized_solution.solve_report().accepted_backend.clone();
+    let normalized_discovery_attempts = normalized_solution.solve_report().attempts.clone();
 
     let mut physical_retry = request.clone();
     physical_retry.solve_options = physical_retry
@@ -1556,8 +1694,12 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
     match solve_resolved_pt_once(physical_retry) {
         Ok(physical_solution) => {
             let physical_retry_backend = physical_solution.solve_report().accepted_backend.clone();
+            let physical_retry_attempts = physical_solution.solve_report().attempts.clone();
             Ok(attach_extensive_normalization_recovery(
-                physical_solution,
+                physical_solution.with_timing_stage(
+                    EquilibriumTimingStage::Normalization,
+                    normalization_duration,
+                ),
                 ExtensiveNormalizationRecoveryEvidence {
                     physical_inventory_scale: normalization.physical_inventory_scale(),
                     trigger_kind,
@@ -1565,6 +1707,14 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
                     discovery_backend,
                     physical_retry_backend: Some(physical_retry_backend),
                     physical_retry_failure: None,
+                    physical_failure_attempts: physical_failure_attempts.clone(),
+                    normalized_discovery_attempts: normalized_discovery_attempts.clone(),
+                    physical_retry_attempts,
+                    physical_failure_duration: Duration::ZERO,
+                    normalization_duration,
+                    normalized_discovery_duration: Duration::ZERO,
+                    physical_retry_duration: Duration::ZERO,
+                    reconstruction_duration: Duration::ZERO,
                     reconstructed_physical_boundary: false,
                 },
                 request.solve_options.diagnostics_options(),
@@ -1588,7 +1738,10 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
             })();
             match physical_publication {
                 Ok(physical_solution) => Ok(attach_extensive_normalization_recovery(
-                    physical_solution,
+                    physical_solution.with_timing_stage(
+                        EquilibriumTimingStage::Normalization,
+                        normalization_duration,
+                    ),
                     ExtensiveNormalizationRecoveryEvidence {
                         physical_inventory_scale: normalization.physical_inventory_scale(),
                         trigger_kind,
@@ -1596,6 +1749,14 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
                         discovery_backend,
                         physical_retry_backend: None,
                         physical_retry_failure: Some(retry_message),
+                        physical_failure_attempts,
+                        normalized_discovery_attempts,
+                        physical_retry_attempts: physical_retry_error.backend_attempt_reports(),
+                        physical_failure_duration: Duration::ZERO,
+                        normalization_duration,
+                        normalized_discovery_duration: Duration::ZERO,
+                        physical_retry_duration: Duration::ZERO,
+                        reconstruction_duration: Duration::ZERO,
                         reconstructed_physical_boundary: true,
                     },
                     request.solve_options.diagnostics_options(),
@@ -1995,6 +2156,54 @@ mod tests {
                 .iter()
                 .all(|moles| moles.is_finite() && *moles >= 0.0)
         );
+    }
+
+    #[test]
+    fn element_inventory_pipeline_solves_temperature_range_with_accepted_continuation() {
+        let spec = SubstanceSystemSpecBuilder::new(SubstancesContainer::SinglePhase(vec![
+            "H2".to_string(),
+            "O2".to_string(),
+            "H2O".to_string(),
+        ]))
+        .with_library_priorities(vec!["NASA_gas".to_string()])
+        .with_search_in_nist(false)
+        .build()
+        .expect("element-defined range spec must validate");
+        let inventory = ElementInventory::from_amounts([("H", 4.0), ("O", 2.0)])
+            .expect("element inventory must validate");
+        let range = PhaseEquilibriumPipelineRequest::from_element_inventory(
+            spec,
+            inventory,
+            EquilibriumConditions::new(1_100.0, 101_325.0, 101_325.0)
+                .expect("range conditions must validate"),
+        )
+        .solve_temperature_range(
+            TemperatureGrid::new(vec![1_100.0, 1_200.0]).expect("temperature grid must validate"),
+        )
+        .expect("element-defined temperature range must solve");
+
+        assert_eq!(range.report().point_count(), 2);
+        assert!(!range.report().phase_control_enabled());
+        assert!(!range.points()[0].report().used_continuation_seed());
+        assert!(range.points()[1].report().used_continuation_seed());
+        for point in range.points() {
+            let solution = point.solution();
+            let report = solution.build_report();
+            assert_eq!(
+                report.input_kind(),
+                PhaseEquilibriumInputKind::ElementInventory
+            );
+            assert_eq!(report.element_labels(), ["H", "O"]);
+            assert_eq!(report.element_totals(), [4.0, 2.0]);
+            assert!(
+                solution
+                    .accepted_solution()
+                    .validation()
+                    .max_abs_element_balance_error
+                    < 1e-8,
+                "element inventory must remain conserved at every accepted range point"
+            );
+        }
     }
 
     #[test]
@@ -2730,6 +2939,26 @@ mod tests {
     }
 
     #[test]
+    fn normalized_recovery_uses_a_relative_seed_after_absolute_floor_scaling() {
+        let normalization = ExtensiveNormalization::from_physical_moles(&[4.0e4, 2.0e4])
+            .expect("positive physical inventory must normalize");
+        let policy = normalized_recovery_trace_policy(
+            normalization,
+            TraceSpeciesSeedPolicy::Absolute { floor: 1.0e-30 },
+        )
+        .expect("absolute trace policy must normalize");
+
+        assert!(matches!(
+            policy,
+            TraceSpeciesSeedPolicy::RelativeToLargestInitialMole {
+                fraction,
+                minimum_floor,
+            } if fraction == EXTENSIVE_RECOVERY_RELATIVE_TRACE_FRACTION
+                && (minimum_floor - 1.0e-30 / 6.0e4).abs() <= 1.0e-48
+        ));
+    }
+
+    #[test]
     fn extensive_recovery_authorizes_only_retryable_numerical_failures() {
         let retryable = [
             ReactionExtentError::AllBackendsFailed { attempts: vec![] },
@@ -2843,6 +3072,28 @@ mod tests {
 
         assert_eq!(settings.solver, Solvers::TR);
         assert!(settings.solver_policy.is_none());
+    }
+
+    #[test]
+    fn rst_symbolic_frontend_is_publicly_selectable_and_defaults_to_expr_legacy() {
+        use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RstSymbolicFrontend;
+
+        let defaults = EquilibriumSolveOptions::new();
+        assert_eq!(
+            defaults.rst_symbolic_frontend(),
+            RstSymbolicFrontend::ExprLegacy
+        );
+        assert_eq!(
+            defaults.reproducibility_snapshot().rst_symbolic_frontend,
+            "ExprLegacy"
+        );
+
+        let atom = defaults.with_rst_symbolic_frontend(RstSymbolicFrontend::AtomView);
+        assert_eq!(atom.rst_symbolic_frontend(), RstSymbolicFrontend::AtomView);
+        assert_eq!(
+            atom.reproducibility_snapshot().rst_symbolic_frontend,
+            "AtomView"
+        );
     }
 
     #[test]

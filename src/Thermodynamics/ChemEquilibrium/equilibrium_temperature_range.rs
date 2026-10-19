@@ -16,15 +16,14 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
     MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
+    initial_composition_from_element_inventory,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     DEFAULT_TRACE_MOLE_FLOOR, EquilibriumConditions, LogMolesInitialGuess, TraceSpeciesSeedPolicy,
 };
 
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
-    EquilibriumTimingMode, EquilibriumTimingReport,
-};
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingReport;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::PhaseSet;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
     PhaseEquilibriumBuildRequest, SupportedPhaseModelPolicy,
@@ -456,9 +455,10 @@ impl<'a> TemperatureRangeRequest<'a> {
 
     /// Creates a temperature range request from a closed elemental inventory.
     ///
-    /// The first real-component seed is built once during request assembly;
-    /// every prepared formulation and recovery attempt retains the original
-    /// inventory as the physical conservation source.
+    /// The first real-component seed is built once from the resolved element
+    /// matrix during request assembly; no thermochemical bridge is prepared
+    /// until `solve`. Every formulation and recovery attempt retains the
+    /// original inventory as the physical conservation source.
     pub fn from_element_inventory(
         resolved: &'a ResolvedPhaseSystem,
         element_inventory: ElementInventory,
@@ -466,26 +466,9 @@ impl<'a> TemperatureRangeRequest<'a> {
         reference_pressure: f64,
         temperatures: TemperatureGrid,
     ) -> Result<Self, ReactionExtentError> {
-        let first_conditions =
-            EquilibriumConditions::new(temperatures.values()[0], pressure, reference_pressure)?;
-        let bundle = build_phase_equilibrium_problem_with_timing(
-            PhaseEquilibriumBuildRequest::from_element_inventory(
-                resolved,
-                first_conditions,
-                element_inventory.clone(),
-                TraceSpeciesSeedPolicy::Absolute {
-                    floor: DEFAULT_TRACE_MOLE_FLOOR,
-                },
-                SupportedPhaseModelPolicy::default(),
-            )?,
-            EquilibriumTimingMode::Disabled,
-        )?;
-        let layout = crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::
-            MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())?;
-        let initial_composition = MultiphaseInitialComposition::from_dense(
-            &layout,
-            bundle.problem().initial_moles().to_vec(),
-        )?;
+        EquilibriumConditions::new(temperatures.values()[0], pressure, reference_pressure)?;
+        let initial_composition =
+            initial_composition_from_element_inventory(resolved, &element_inventory)?;
 
         Ok(Self {
             resolved,
@@ -635,8 +618,11 @@ impl<'a> TemperatureRangeRequest<'a> {
                 execution_control,
             );
         }
-        let mut template = bundle
-            .into_temperature_template(self.solve_options.prepares_rst_backend(), timing_mode)?;
+        let mut template = bundle.into_temperature_template(
+            self.solve_options.prepares_rst_backend(),
+            timing_mode,
+            self.solve_options.rst_symbolic_frontend(),
+        )?;
         let initial_formulation_timing = template.build_timing();
         let symbolic_problem_reused = template.symbolic_problem_reused();
         let mut seed = LogMolesInitialGuess::from_moles_with_policy(
@@ -1044,6 +1030,7 @@ mod tests {
                     outcome: crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptOutcome::Failed {
                         kind: crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptFailureKind::Solver,
                         reason: "step too small".to_string(),
+                        elapsed_micros: 0,
                     },
                     metrics: None,
                 }],

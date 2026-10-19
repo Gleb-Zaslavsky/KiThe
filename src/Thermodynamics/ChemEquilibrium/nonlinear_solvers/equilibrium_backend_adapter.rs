@@ -16,6 +16,9 @@
 //!
 //! # Key Structures
 //!
+//! `BackendSolveError` carries the typed backend error together with any
+//! metrics collected before the backend stopped.
+//!
 //! | Structure | Role |
 //! |-----------|------|
 //! | [`BackendSolveRequest`] | Bundles initial guess, residual, Jacobian, feasibility, params |
@@ -72,6 +75,10 @@
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
     EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::{
+    LegacySolverDiagnosticsSnapshot, begin_legacy_solver_diagnostics,
+    finish_legacy_solver_diagnostics,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_legacy_backend::solve_legacy_backend;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     SolverParams, recoverable_backend_failure_kind,
@@ -82,11 +89,13 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, SolverAttemptMetrics, SolverAttemptOutcome, SolverAttemptReport,
-    SolverBackend, SolverCascadeBudget, SolverPolicy,
+    SolverBackend, SolverCascadeBudget, SolverEvaluationTiming, SolverPolicy, SolverTermination,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
+use RustedSciThe::numerical::SolverTelemetryMode;
 use log::info;
 use nalgebra::DMatrix;
+use std::time::Instant;
 
 type ResidualFn<'a> = dyn Fn(&[f64]) -> Result<Vec<f64>, ReactionExtentError> + 'a;
 type JacobianFn<'a> = dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError> + 'a;
@@ -142,12 +151,22 @@ pub(crate) struct BackendSolveRequest<'a> {
     pub system: PreparedNonlinearSystem<'a>,
     pub params: &'a SolverParams,
     pub max_iterations: usize,
+    pub rst_telemetry_mode: SolverTelemetryMode,
 }
 
 /// Uniform output of one backend attempt.
 #[derive(Debug, Clone)]
 pub(crate) struct BackendSolveResult {
     pub solution: Vec<f64>,
+    pub metrics: Option<SolverAttemptMetrics>,
+}
+
+/// Backend error plus any diagnostics collected before the backend stopped.
+/// Keeping these together prevents failed Legacy attempts from becoming a
+/// wall-only row in the cascade ledger.
+#[derive(Debug)]
+pub(crate) struct BackendSolveError {
+    pub error: ReactionExtentError,
     pub metrics: Option<SolverAttemptMetrics>,
 }
 
@@ -158,7 +177,63 @@ pub(crate) trait EquilibriumNonlinearBackend {
     fn solve(
         &self,
         request: BackendSolveRequest<'_>,
-    ) -> Result<BackendSolveResult, ReactionExtentError>;
+    ) -> Result<BackendSolveResult, BackendSolveError>;
+}
+
+fn legacy_solver_metrics(
+    diagnostics: LegacySolverDiagnosticsSnapshot,
+    elapsed: std::time::Duration,
+    termination: SolverTermination,
+    backend_converged: bool,
+) -> SolverAttemptMetrics {
+    let callback_micros = diagnostics
+        .residual_micros
+        .saturating_add(diagnostics.jacobian_micros);
+    let accounted_micros = callback_micros.saturating_add(diagnostics.linear_system_micros);
+    SolverAttemptMetrics {
+        termination,
+        backend_converged,
+        iterations: diagnostics.jacobian_calls,
+        residual_evaluations: diagnostics.residual_calls,
+        jacobian_evaluations: diagnostics.jacobian_calls,
+        linear_solves: diagnostics.linear_system_solves,
+        counters_collected: true,
+        timings_collected: true,
+        elapsed_millis: elapsed.as_millis(),
+        elapsed_micros: elapsed.as_micros(),
+        evaluation_timing: Some(SolverEvaluationTiming {
+            residual_evaluation_micros: diagnostics.residual_micros,
+            jacobian_evaluation_micros: diagnostics.jacobian_micros,
+            legacy_same_iterate_callback_pairs: Some(diagnostics.same_iterate_callback_pairs),
+            linear_system_micros: Some(diagnostics.linear_system_micros),
+            solver_overhead_micros: elapsed.as_micros().saturating_sub(accounted_micros),
+            matrix_operations_micros: diagnostics.matrix_operations_micros,
+            norm_micros: diagnostics.norm_micros,
+            trial_vector_micros: diagnostics.trial_vector_micros,
+            feasibility_micros: diagnostics.feasibility_micros,
+            globalization_micros: diagnostics.globalization_micros,
+            state_residual_evaluations: None,
+            trial_residual_evaluations: None,
+            state_jacobian_evaluations: None,
+            trial_jacobian_evaluations: None,
+            linear_factorization_micros: None,
+            linear_system_solve_micros: None,
+            linear_factorizations: None,
+            accepted_steps: None,
+            rejected_steps: None,
+            reusable_trial_points: None,
+            iteration_telemetry: None,
+        }),
+    }
+}
+
+fn legacy_failure_termination(error: &ReactionExtentError) -> SolverTermination {
+    match error {
+        ReactionExtentError::SolveError(crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::SolveError::MaxIterations) => {
+            SolverTermination::MaxIterations
+        }
+        _ => SolverTermination::Stagnation,
+    }
 }
 
 impl EquilibriumNonlinearBackend for SolverBackend {
@@ -169,51 +244,107 @@ impl EquilibriumNonlinearBackend for SolverBackend {
     fn solve(
         &self,
         request: BackendSolveRequest<'_>,
-    ) -> Result<BackendSolveResult, ReactionExtentError> {
+    ) -> Result<BackendSolveResult, BackendSolveError> {
         if request.initial_guess.len() != request.system.dimension {
-            return Err(ReactionExtentError::DimensionMismatch(format!(
-                "nonlinear initial guess has {} entries, prepared system requires {}",
-                request.initial_guess.len(),
-                request.system.dimension
-            )));
+            return Err(BackendSolveError {
+                error: ReactionExtentError::DimensionMismatch(format!(
+                    "nonlinear initial guess has {} entries, prepared system requires {}",
+                    request.initial_guess.len(),
+                    request.system.dimension
+                )),
+                metrics: None,
+            });
         }
         match *self {
-            SolverBackend::Legacy(legacy_backend) => solve_legacy_backend(
-                legacy_backend,
-                request.initial_guess,
-                request.system.residual,
-                request.system.jacobian,
-                request.system.feasible,
-                request.params,
-                request.max_iterations,
-            )
-            .map(|solution| BackendSolveResult {
-                solution,
-                metrics: None,
-            }),
+            SolverBackend::Legacy(legacy_backend) => {
+                let Some(diagnostics_session) = begin_legacy_solver_diagnostics() else {
+                    return solve_legacy_backend(
+                        legacy_backend,
+                        request.initial_guess,
+                        request.system.residual,
+                        request.system.jacobian,
+                        request.system.feasible,
+                        request.params,
+                        request.max_iterations,
+                    )
+                    .map(|solution| BackendSolveResult {
+                        solution,
+                        metrics: None,
+                    })
+                    .map_err(|error| BackendSolveError {
+                        error,
+                        metrics: None,
+                    });
+                };
+                let started = Instant::now();
+                let solution_result = solve_legacy_backend(
+                    legacy_backend,
+                    request.initial_guess,
+                    request.system.residual,
+                    request.system.jacobian,
+                    request.system.feasible,
+                    request.params,
+                    request.max_iterations,
+                );
+                let diagnostics = finish_legacy_solver_diagnostics(diagnostics_session);
+                let elapsed = started.elapsed();
+                match solution_result {
+                    Ok(solution) => Ok(BackendSolveResult {
+                        solution,
+                        metrics: Some(legacy_solver_metrics(
+                            diagnostics,
+                            elapsed,
+                            SolverTermination::Converged,
+                            true,
+                        )),
+                    }),
+                    Err(error) => Err(BackendSolveError {
+                        metrics: Some(legacy_solver_metrics(
+                            diagnostics,
+                            elapsed,
+                            legacy_failure_termination(&error),
+                            false,
+                        )),
+                        error,
+                    }),
+                }
+            }
             SolverBackend::RustedSciThe(rst_solver) => match request.system.rst_problem {
                 Some(problem) => rst_solver
                     .solve(
                         problem,
                         &request.initial_guess,
-                        &RustedSciTheSolveContract::new(
-                            request.params.tol,
-                            request.max_iterations,
-                        )?,
+                        &RustedSciTheSolveContract::new(request.params.tol, request.max_iterations)
+                            .map(|contract| {
+                                contract.with_telemetry_mode(request.rst_telemetry_mode)
+                            })
+                            .map_err(|error| BackendSolveError {
+                                error,
+                                metrics: None,
+                            })?,
                     )
                     .map(|outcome| BackendSolveResult {
                         solution: outcome.solution,
                         metrics: Some(outcome.metrics),
+                    })
+                    .map_err(|error| BackendSolveError {
+                        error,
+                        metrics: None,
                     }),
-                None => Err(ReactionExtentError::InvalidProblem {
-                    field: "rst_symbolic_problem",
-                    message: "RST backend selected without a prepared symbolic problem".to_string(),
+                None => Err(BackendSolveError {
+                    error: ReactionExtentError::InvalidProblem {
+                        field: "rst_symbolic_problem",
+                        message: "RST backend selected without a prepared symbolic problem"
+                            .to_string(),
+                    },
+                    metrics: None,
                 }),
             },
         }
     }
 }
 
+#[cfg(test)]
 pub(crate) fn solve_backend_cascade_with_control(
     backends: &[&dyn EquilibriumNonlinearBackend],
     initial_guess: Vec<f64>,
@@ -226,6 +357,36 @@ pub(crate) fn solve_backend_cascade_with_control(
     solver_params: &SolverParams,
     rst_problem: Option<&RstPreparedProblem>,
     execution_control: Option<&EquilibriumExecutionControl>,
+) -> Result<(Vec<f64>, EquilibriumCandidateReport, EquilibriumSolveReport), ReactionExtentError> {
+    solve_backend_cascade_with_control_and_telemetry(
+        backends,
+        initial_guess,
+        f,
+        j,
+        feasible,
+        validate_candidate,
+        policy,
+        budget,
+        solver_params,
+        rst_problem,
+        execution_control,
+        SolverTelemetryMode::Off,
+    )
+}
+
+pub(crate) fn solve_backend_cascade_with_control_and_telemetry(
+    backends: &[&dyn EquilibriumNonlinearBackend],
+    initial_guess: Vec<f64>,
+    f: &dyn Fn(&[f64]) -> Result<Vec<f64>, ReactionExtentError>,
+    j: Option<&dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError>>,
+    feasible: &dyn Fn(&[f64]) -> bool,
+    validate_candidate: &dyn Fn(&[f64]) -> Result<EquilibriumCandidateReport, ReactionExtentError>,
+    policy: SolverPolicy,
+    budget: SolverCascadeBudget,
+    solver_params: &SolverParams,
+    rst_problem: Option<&RstPreparedProblem>,
+    execution_control: Option<&EquilibriumExecutionControl>,
+    rst_telemetry_mode: SolverTelemetryMode,
 ) -> Result<(Vec<f64>, EquilibriumCandidateReport, EquilibriumSolveReport), ReactionExtentError> {
     if backends.is_empty() {
         return Err(ReactionExtentError::InvalidProblem {
@@ -284,6 +445,7 @@ pub(crate) fn solve_backend_cascade_with_control(
             ));
             control.check_cancelled()?;
         }
+        let backend_started = Instant::now();
         let result = backend.solve(BackendSolveRequest {
             initial_guess: initial_guess.clone(),
             system: PreparedNonlinearSystem {
@@ -295,7 +457,9 @@ pub(crate) fn solve_backend_cascade_with_control(
             },
             params: solver_params,
             max_iterations,
+            rst_telemetry_mode,
         });
+        let backend_elapsed_micros = backend_started.elapsed().as_micros();
         if let Some(control) = execution_control {
             control.report(EquilibriumProgressEvent::new(
                 EquilibriumProgressStage::InnerBackendAttemptFinished,
@@ -332,7 +496,8 @@ pub(crate) fn solve_backend_cascade_with_control(
                     metrics: candidate.metrics,
                 }),
             },
-            Err(e) => {
+            Err(backend_error) => {
+                let BackendSolveError { error: e, metrics } = backend_error;
                 let Some(kind) = recoverable_backend_failure_kind(&e) else {
                     return if attempts.is_empty() {
                         Err(e)
@@ -351,8 +516,9 @@ pub(crate) fn solve_backend_cascade_with_control(
                         // contract, so keep their wording independent of
                         // a private Debug implementation.
                         reason: e.to_string(),
+                        elapsed_micros: backend_elapsed_micros,
                     },
-                    metrics: None,
+                    metrics,
                 });
             }
         }
@@ -366,12 +532,17 @@ mod tests {
     use super::*;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::BackendFailureKind;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
+        RstPreparedProblem, RstSymbolicProblem, RustedSciTheSolver,
+    };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverBackend;
+    use RustedSciThe::symbolic::symbolic_engine::Expr;
 
     #[derive(Clone, Copy)]
     enum FakeBackendBehavior {
         Succeed,
         Fail,
+        FailAfterDelay,
     }
 
     struct FakeBackend {
@@ -387,7 +558,7 @@ mod tests {
         fn solve(
             &self,
             request: BackendSolveRequest<'_>,
-        ) -> Result<BackendSolveResult, ReactionExtentError> {
+        ) -> Result<BackendSolveResult, BackendSolveError> {
             match self.behavior {
                 FakeBackendBehavior::Succeed => Ok(BackendSolveResult {
                     solution: request.initial_guess,
@@ -398,15 +569,32 @@ mod tests {
                         residual_evaluations: 1,
                         jacobian_evaluations: 1,
                         linear_solves: 1,
+                        counters_collected: true,
+                        timings_collected: false,
                         elapsed_millis: 0,
+                        elapsed_micros: 0,
                         evaluation_timing: None,
                     }),
                 }),
-                FakeBackendBehavior::Fail => Err(ReactionExtentError::BackendFailure {
-                    backend: "fake".to_string(),
-                    kind: BackendFailureKind::NumericalBreakdown,
-                    message: "forced fake failure".to_string(),
+                FakeBackendBehavior::Fail => Err(BackendSolveError {
+                    error: ReactionExtentError::BackendFailure {
+                        backend: "fake".to_string(),
+                        kind: BackendFailureKind::NumericalBreakdown,
+                        message: "forced fake failure".to_string(),
+                    },
+                    metrics: None,
                 }),
+                FakeBackendBehavior::FailAfterDelay => {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    Err(BackendSolveError {
+                        error: ReactionExtentError::BackendFailure {
+                            backend: "fake".to_string(),
+                            kind: BackendFailureKind::NumericalBreakdown,
+                            message: "forced delayed fake failure".to_string(),
+                        },
+                        metrics: None,
+                    })
+                }
             }
         }
     }
@@ -420,6 +608,7 @@ mod tests {
             system: PreparedNonlinearSystem::new(1, &residual, None, &feasible, None).unwrap(),
             params: &SolverParams::default(),
             max_iterations: 1,
+            rst_telemetry_mode: SolverTelemetryMode::Off,
         };
 
         let backend = FakeBackend {
@@ -432,6 +621,60 @@ mod tests {
     }
 
     #[test]
+    fn calculator_telemetry_mode_reaches_the_rst_backend_attempt() {
+        let rst_problem = RstPreparedProblem::new(
+            RstSymbolicProblem::from_expressions(
+                vec![Expr::parse_expression("x - 1.0")],
+                vec!["x".to_string()],
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let residual = |values: &[f64]| Ok(vec![values[0] - 1.0]);
+        let feasible = |_values: &[f64]| true;
+        let reject = |_values: &[f64]| {
+            Err(ReactionExtentError::ResidualEvaluation(
+                "intentional telemetry probe rejection".to_string(),
+            ))
+        };
+        let backend = SolverBackend::RustedSciThe(RustedSciTheSolver::LevenbergMarquardt);
+        let backends: [&dyn EquilibriumNonlinearBackend; 1] = [&backend];
+        let error = solve_backend_cascade_with_control_and_telemetry(
+            &backends,
+            vec![0.0],
+            &residual,
+            None,
+            &feasible,
+            &reject,
+            SolverPolicy::Single(backend),
+            SolverCascadeBudget::new(1, 20, 20),
+            &SolverParams::default(),
+            Some(&rst_problem),
+            None,
+            SolverTelemetryMode::Detailed,
+        )
+        .expect_err("the candidate is deliberately rejected after solving");
+        let reports = error.backend_attempt_reports();
+        let metrics = reports[0]
+            .metrics
+            .as_ref()
+            .expect("RST attempt telemetry must survive candidate rejection");
+
+        assert!(metrics.counters_collected);
+        assert!(metrics.timings_collected);
+        assert!(metrics.residual_evaluations > 0);
+        assert!(
+            metrics
+                .evaluation_timing
+                .as_ref()
+                .unwrap()
+                .iteration_telemetry
+                .is_some()
+        );
+    }
+
+    #[test]
     fn fake_backend_can_force_a_repeatable_failure() {
         let residual = |values: &[f64]| Ok(values.to_vec());
         let feasible = |_values: &[f64]| true;
@@ -440,6 +683,7 @@ mod tests {
             system: PreparedNonlinearSystem::new(1, &residual, None, &feasible, None).unwrap(),
             params: &SolverParams::default(),
             max_iterations: 1,
+            rst_telemetry_mode: SolverTelemetryMode::Off,
         };
 
         let backend = FakeBackend {
@@ -448,8 +692,154 @@ mod tests {
         };
         assert!(matches!(
             backend.solve(request),
-            Err(ReactionExtentError::BackendFailure { .. })
+            Err(BackendSolveError {
+                error: ReactionExtentError::BackendFailure { .. },
+                ..
+            })
         ));
+    }
+
+    #[test]
+    fn cascade_retains_wall_time_for_failed_attempt_without_metrics() {
+        let residual = |values: &[f64]| Ok(values.to_vec());
+        let feasible = |_values: &[f64]| true;
+        let validate =
+            |_values: &[f64]| -> Result<EquilibriumCandidateReport, ReactionExtentError> {
+                panic!("failed backend must not reach candidate validation")
+            };
+        let backend = FakeBackend {
+            backend: SolverBackend::Legacy(Solvers::LM),
+            behavior: FakeBackendBehavior::FailAfterDelay,
+        };
+        let backends: [&dyn EquilibriumNonlinearBackend; 1] = [&backend];
+        let error = solve_backend_cascade_with_control(
+            &backends,
+            vec![1.0],
+            &residual,
+            None,
+            &feasible,
+            &validate,
+            SolverPolicy::Single(backend.backend),
+            SolverCascadeBudget::new(1, 4, 4),
+            &SolverParams::default(),
+            None,
+            None,
+        )
+        .expect_err("forced backend failure must reject the cascade");
+        let ReactionExtentError::AllBackendsFailed { attempts } = error else {
+            panic!("expected an all-backends failure, got {error:?}")
+        };
+        let SolverAttemptOutcome::Failed { elapsed_micros, .. } = attempts[0].outcome else {
+            panic!("expected a failed attempt, got {:?}", attempts[0].outcome)
+        };
+        assert!(
+            elapsed_micros >= 1_000,
+            "failed attempt wall time must include backend execution: {elapsed_micros} us"
+        );
+    }
+
+    #[test]
+    fn failed_legacy_attempt_preserves_callback_metrics() {
+        use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::capture;
+
+        let residual = |_values: &[f64]| {
+            Err(ReactionExtentError::ResidualEvaluation(
+                "forced legacy residual failure".to_string(),
+            ))
+        };
+        let jacobian = |_values: &[f64]| Ok(DMatrix::identity(1, 1));
+        let feasible = |_values: &[f64]| true;
+        let backend = SolverBackend::Legacy(Solvers::LM);
+        let (result, _) = capture(|| {
+            backend.solve(BackendSolveRequest {
+                initial_guess: vec![0.0],
+                system: PreparedNonlinearSystem::new(
+                    1,
+                    &residual,
+                    Some(&jacobian),
+                    &feasible,
+                    None,
+                )
+                .unwrap(),
+                params: &SolverParams::default(),
+                max_iterations: 4,
+                rst_telemetry_mode: SolverTelemetryMode::Off,
+            })
+        });
+        let error = result.expect_err("forced residual failure must be returned");
+        let metrics = error
+            .metrics
+            .expect("failed Legacy attempt must retain diagnostics");
+        assert!(!metrics.backend_converged);
+        assert_eq!(metrics.residual_evaluations, 1);
+        assert!(metrics.evaluation_timing.is_some());
+    }
+
+    #[test]
+    fn legacy_solver_diagnostics_are_scoped_to_calculator_capture() {
+        use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::capture;
+
+        let residual = |values: &[f64]| Ok(vec![values[0] - 1.0]);
+        let jacobian = |_values: &[f64]| Ok(DMatrix::identity(1, 1));
+        let feasible = |_values: &[f64]| true;
+        for backend in [
+            SolverBackend::Legacy(Solvers::LM),
+            SolverBackend::Legacy(Solvers::NR),
+            SolverBackend::Legacy(Solvers::TR),
+        ] {
+            let solve = || {
+                backend.solve(BackendSolveRequest {
+                    initial_guess: vec![0.0],
+                    system: PreparedNonlinearSystem::new(
+                        1,
+                        &residual,
+                        Some(&jacobian),
+                        &feasible,
+                        None,
+                    )
+                    .unwrap(),
+                    params: &SolverParams::default(),
+                    max_iterations: 20,
+                    rst_telemetry_mode: SolverTelemetryMode::Off,
+                })
+            };
+
+            let (captured, _) = capture(solve);
+            let metrics = captured
+                .unwrap()
+                .metrics
+                .expect("capture must attach legacy solver diagnostics");
+            assert!(metrics.residual_evaluations > 0);
+            assert!(metrics.jacobian_evaluations > 0);
+            if !matches!(backend, SolverBackend::Legacy(Solvers::TR)) {
+                assert!(metrics.linear_solves > 0);
+            }
+            let timing = metrics
+                .evaluation_timing
+                .expect("capture must attach legacy timing split");
+            assert!(timing.linear_system_micros.is_some());
+        }
+
+        let uncaptured = SolverBackend::Legacy(Solvers::LM)
+            .solve(BackendSolveRequest {
+                initial_guess: vec![0.0],
+                system: PreparedNonlinearSystem::new(
+                    1,
+                    &residual,
+                    Some(&jacobian),
+                    &feasible,
+                    None,
+                )
+                .unwrap(),
+                params: &SolverParams::default(),
+                max_iterations: 20,
+                rst_telemetry_mode: SolverTelemetryMode::Off,
+            })
+            .unwrap();
+        assert!(
+            uncaptured.metrics.is_none(),
+            "legacy diagnostics must stay disabled outside calculator capture"
+        );
     }
 
     #[test]
@@ -475,13 +865,16 @@ mod tests {
             system: PreparedNonlinearSystem::new(2, &residual, None, &feasible, None).unwrap(),
             params: &SolverParams::default(),
             max_iterations: 1,
+            rst_telemetry_mode: SolverTelemetryMode::Off,
         };
         let backend = SolverBackend::Legacy(Solvers::LM);
 
         assert!(matches!(
             backend.solve(request),
-            Err(ReactionExtentError::DimensionMismatch(message))
-                if message.contains("prepared system requires 2")
+            Err(BackendSolveError {
+                error: ReactionExtentError::DimensionMismatch(message),
+                ..
+            }) if message.contains("prepared system requires 2")
         ));
     }
 }

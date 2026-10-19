@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::EquilibriumConstantCrossValidationStatus;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::EquilibriumDiagnosticsReport;
@@ -19,7 +20,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumConditions, EquilibriumSolution,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
-    EquilibriumSolveReport, MultiStartSolveReport, SolverBackend,
+    EquilibriumSolveReport, MultiStartSolveReport, SolverAttemptReport, SolverBackend,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
     EquilibriumTimingCollector, EquilibriumTimingReport, EquilibriumTimingStage,
@@ -67,6 +68,28 @@ pub struct ExtensiveNormalizationRecoveryEvidence {
     pub physical_retry_backend: Option<SolverBackend>,
     /// Why the optional physical retry could not be used for publication.
     pub physical_retry_failure: Option<String>,
+    /// Backend attempts from the original physical solve that triggered
+    /// normalization recovery, including rejected candidates and failures.
+    pub physical_failure_attempts: Vec<SolverAttemptReport>,
+    /// Backend attempts from normalized basin discovery.
+    pub normalized_discovery_attempts: Vec<SolverAttemptReport>,
+    /// Backend attempts from the optional physical-coordinate retry. This is
+    /// empty when publication used reconstruction after a failed retry.
+    pub physical_retry_attempts: Vec<SolverAttemptReport>,
+    /// Wall time of the original physical-coordinate attempt that triggered
+    /// normalization recovery, including all failed backend attempts.
+    pub physical_failure_duration: Duration,
+    /// Wall time spent constructing the normalized recovery request.
+    pub normalization_duration: Duration,
+    /// Wall time of the normalized basin-discovery solve, including its
+    /// backend cascade. Nonlinear child time is available in its own report.
+    pub normalized_discovery_duration: Duration,
+    /// Wall time of the optional physical-coordinate retry, including its
+    /// backend cascade.
+    pub physical_retry_duration: Duration,
+    /// Wall time spent rebuilding and publishing the physical boundary after
+    /// a failed physical retry.
+    pub reconstruction_duration: Duration,
     /// `true` when the accepted normalized state was reconstructed through the
     /// explicit physical publication boundary.
     pub reconstructed_physical_boundary: bool,
@@ -111,8 +134,6 @@ pub struct MultiphaseEquilibriumSolution {
     multi_start_report: Option<MultiStartSolveReport>,
     /// Optional independent equilibrium-constant cross-validation status.
     keq_validation_status: Option<EquilibriumConstantCrossValidationStatus>,
-    /// Bounded active-set transition evidence when phase control was used.
-    phase_control_report: Option<PhaseControlledSolveReport>,
     /// Combined numerical and complementarity evidence when phase control was
     /// used to reach a stable phase set.
     acceptance_report: Option<MultiphaseAcceptanceReport>,
@@ -135,13 +156,15 @@ impl MultiphaseEquilibriumSolution {
     pub fn from_fixed_active_bundle(
         bundle: PhaseEquilibriumSolutionBundle,
     ) -> Result<Self, ReactionExtentError> {
-        let metadata = bundle.metadata().clone();
-        let build_report = bundle.build_report().clone();
-        let accepted_solution = bundle.solution().clone();
-        let solve_report = bundle.solve_report().clone();
-        let multi_start_report = bundle.multi_start_report().cloned();
-        let keq_validation_status = bundle.keq_validation_status().cloned();
-        let timing = *bundle.timing_report();
+        let (
+            metadata,
+            build_report,
+            accepted_solution,
+            solve_report,
+            multi_start_report,
+            keq_validation_status,
+            timing,
+        ) = bundle.into_parts();
 
         Self::from_parts(
             metadata,
@@ -150,7 +173,6 @@ impl MultiphaseEquilibriumSolution {
             solve_report,
             multi_start_report,
             keq_validation_status,
-            None,
             None,
             None,
             timing,
@@ -179,7 +201,6 @@ impl MultiphaseEquilibriumSolution {
             None,
             None,
             None,
-            None,
             timing,
             None,
         )
@@ -197,18 +218,10 @@ impl MultiphaseEquilibriumSolution {
         accepted_solution: EquilibriumSolution,
         solve_report: EquilibriumSolveReport,
         keq_validation_status: Option<EquilibriumConstantCrossValidationStatus>,
-        phase_control_report: PhaseControlledSolveReport,
         acceptance_report: MultiphaseAcceptanceReport,
         phase_statuses: Vec<PhaseStatus>,
         timing: EquilibriumTimingReport,
     ) -> Result<Self, ReactionExtentError> {
-        if acceptance_report.phase_control != phase_control_report {
-            return Err(ReactionExtentError::InvalidCandidate {
-                field: "multiphase_acceptance",
-                message: "acceptance report does not retain the published phase-control report"
-                    .to_string(),
-            });
-        }
         Self::from_parts(
             metadata,
             build_report,
@@ -216,7 +229,6 @@ impl MultiphaseEquilibriumSolution {
             solve_report,
             None,
             keq_validation_status,
-            Some(phase_control_report),
             Some(acceptance_report),
             Some(phase_statuses),
             timing,
@@ -231,7 +243,6 @@ impl MultiphaseEquilibriumSolution {
         solve_report: EquilibriumSolveReport,
         multi_start_report: Option<MultiStartSolveReport>,
         keq_validation_status: Option<EquilibriumConstantCrossValidationStatus>,
-        phase_control_report: Option<PhaseControlledSolveReport>,
         acceptance_report: Option<MultiphaseAcceptanceReport>,
         phase_statuses: Option<Vec<PhaseStatus>>,
         timing: EquilibriumTimingReport,
@@ -317,7 +328,6 @@ impl MultiphaseEquilibriumSolution {
             solve_report,
             multi_start_report,
             keq_validation_status,
-            phase_control_report,
             acceptance_report,
             timing,
             diagnostics,
@@ -415,14 +425,12 @@ impl MultiphaseEquilibriumSolution {
             normalization.denormalize_phase_totals(&self.numerical_phase_totals)?;
         self.build_report = physical_build_report;
 
-        if let Some(report) = &mut self.phase_control_report {
-            denormalize_phase_control_report(report, normalization.physical_inventory_scale());
-        }
         if let Some(acceptance) = &mut self.acceptance_report {
-            if let Some(report) = &self.phase_control_report {
-                acceptance.phase_control = report.clone();
-                acceptance.final_validation = report.final_validation.clone();
-            }
+            denormalize_phase_control_report(
+                &mut acceptance.phase_control,
+                normalization.physical_inventory_scale(),
+            );
+            acceptance.final_validation = acceptance.phase_control.final_validation.clone();
         }
         // Diagnostic events may contain extensive values. Until every event
         // variant owns a typed unit, dropping them is safer than publishing a
@@ -622,9 +630,9 @@ impl MultiphaseEquilibriumSolution {
 
     /// Number of accepted phase transitions represented by this solution.
     pub fn phase_control_transitions(&self) -> usize {
-        self.phase_control_report
+        self.acceptance_report
             .as_ref()
-            .map_or(0, |report| report.transitions.len())
+            .map_or(0, |report| report.phase_control.transitions.len())
     }
 
     /// Explicit multi-start seed comparison evidence, when requested.
@@ -640,7 +648,9 @@ impl MultiphaseEquilibriumSolution {
     /// Bounded phase-control evidence when this result was solved through the
     /// active-set outer loop.
     pub fn phase_control_report(&self) -> Option<&PhaseControlledSolveReport> {
-        self.phase_control_report.as_ref()
+        self.acceptance_report
+            .as_ref()
+            .map(|report| &report.phase_control)
     }
 
     /// Final complementarity/validation evidence when phase control was used.
@@ -695,7 +705,8 @@ impl MultiphaseEquilibriumSolution {
                 ),
             });
         }
-        if let Some(report) = &self.phase_control_report {
+        if let Some(acceptance) = &self.acceptance_report {
+            let report = &acceptance.phase_control;
             rows.push(MultiphaseEquilibriumSummaryRow {
                 section: "phase_control",
                 label: "iterations".to_string(),
@@ -895,7 +906,6 @@ mod tests {
             gas.solve_report().clone(),
             None,
             gas.keq_validation_status().cloned(),
-            None,
             None,
             None,
             crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::

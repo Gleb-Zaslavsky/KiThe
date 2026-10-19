@@ -20,13 +20,15 @@ use crate::gui::equilibrium_gui_help::{
     text_with_fallback as help_text, tooltip as help_tooltip,
 };
 use crate::gui::equilibrium_gui_model::{
-    ComponentDraft, EquilibriumGuiDocument, EquilibriumGuiDocumentError, EquilibriumInventoryDraft,
-    EquilibriumLookupDraft, EquilibriumPhaseModeDraft, EquilibriumProblemDraft,
-    EquilibriumSolverDraft, GuiInitialPhasePolicyDraft, GuiInterpolationSpace,
-    GuiKeqValidationMode, GuiPhSolveMode, GuiPhaseLifecycleTrace, GuiPhaseModel, GuiPhysicalState,
-    GuiPlotScale, GuiPlotTarget, GuiRangeLifecycleTrace, GuiResamplingDraft, GuiResultBasis,
-    GuiResultTableDensity, GuiSolverBackend, GuiSolverCascadeBudgetDraft, GuiTraceSeedPolicyDraft,
-    PhTemperatureBoundsDraft, TemperatureDraft, ValidatedEquilibriumGuiConfig, ValidationIssue,
+    ComponentDraft, ElementAmountDraft, EquilibriumGuiDocument, EquilibriumGuiDocumentError,
+    EquilibriumInventoryDraft, EquilibriumLookupDraft, EquilibriumPhaseModeDraft,
+    EquilibriumProblemDraft, EquilibriumSolverDraft, GuiInitialPhasePolicyDraft,
+    GuiInterpolationSpace, GuiKeqValidationMode, GuiPhSolveMode, GuiPhaseLifecycleTrace,
+    GuiPhaseModel, GuiPhysicalState, GuiPlotScale, GuiPlotTarget, GuiRangeLifecycleTrace,
+    GuiResamplingDraft, GuiResultBasis, GuiResultTableDensity, GuiRstSymbolicFrontend,
+    GuiSolverBackend, GuiSolverCascadeBudgetDraft, GuiTraceSeedPolicyDraft,
+    PhTemperatureBoundsDraft, PhaseDraft, TemperatureDraft, ValidatedEquilibriumGuiConfig,
+    ValidationIssue,
 };
 use crate::gui::equilibrium_gui_plot::{EquilibriumGuiKiThePlotWindow, EquilibriumGuiPlotData};
 use crate::gui::equilibrium_gui_request::{
@@ -219,6 +221,20 @@ impl EquilibriumApp {
         // The application path uses the facade. The legacy request builder is
         // retained only for compatibility tests and low-level diagnostics.
         let request = build_equilibrium_facade_request(validated, None)?;
+        let EquilibriumGuiSolveRequest::Facade(builder) = &request;
+        if let Err(error) = builder.validate_element_inventory() {
+            self.validation_issues.push(ValidationIssue {
+                    field: "inventory.amounts".into(),
+                    kind: crate::gui::equilibrium_gui_model::ValidationIssueKind::Incompatible,
+                    message: format!(
+                        "element inventory is not representable by the declared species universe: {error}"
+                    ),
+                });
+            self.prepared_request = None;
+            self.prepared_fingerprint = None;
+            self.status = "Cannot prepare request: element inventory is not representable".into();
+            return Err(error.into());
+        }
         self.prepared_fingerprint = Some(self.document_fingerprint());
         self.prepared_request = Some(request);
         self.status = "Canonical request prepared; solver worker is not started".into();
@@ -228,6 +244,11 @@ impl EquilibriumApp {
     #[cfg(test)]
     pub(crate) fn prepared_request(&self) -> Option<&EquilibriumGuiSolveRequest> {
         self.prepared_request.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_issues(&self) -> &[ValidationIssue] {
+        &self.validation_issues
     }
 
     pub fn prepared_request_is_current(&self) -> bool {
@@ -540,6 +561,16 @@ impl EquilibriumApp {
             EquilibriumInventoryDraft::ExplicitPhases { .. } => {
                 "explicit-inventory".hash(&mut hasher);
             }
+            EquilibriumInventoryDraft::ElementInventory { amounts, phases } => {
+                if let Ok(json) = serde_json::to_string(&(
+                    amounts,
+                    phases,
+                    &self.document.config.lookup,
+                    &self.document.config.problem,
+                )) {
+                    json.hash(&mut hasher);
+                }
+            }
         }
         hasher.finish()
     }
@@ -554,6 +585,7 @@ impl EquilibriumApp {
                 .flat_map(|phase| phase.components.iter())
                 .any(|component| component.substance == record_key),
             EquilibriumInventoryDraft::ExplicitPhases { .. } => false,
+            EquilibriumInventoryDraft::ElementInventory { .. } => false,
         }
     }
 
@@ -1134,6 +1166,14 @@ impl EquilibriumApp {
                     .map(|phase| phase.components.len())
                     .sum::<usize>(),
             ),
+            EquilibriumInventoryDraft::ElementInventory { phases, .. } => (
+                "element inventory",
+                phases.len(),
+                phases
+                    .iter()
+                    .map(|phase| phase.components.len())
+                    .sum::<usize>(),
+            ),
         };
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("Ready to prepare: {mode}"));
@@ -1273,6 +1313,14 @@ impl EquilibriumApp {
                     self.document.config.inventory,
                     EquilibriumInventoryDraft::ExplicitPhases { .. }
                 );
+                let candidates = matches!(
+                    self.document.config.inventory,
+                    EquilibriumInventoryDraft::ElementCandidates { .. }
+                );
+                let elemental = matches!(
+                    self.document.config.inventory,
+                    EquilibriumInventoryDraft::ElementInventory { .. }
+                );
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.label("Inventory input");
                     ui.horizontal(|ui| {
@@ -1286,16 +1334,62 @@ impl EquilibriumApp {
                             self.invalidate_prepared_request();
                         }
                         if ui
-                            .selectable_label(!explicit, "Search by elements")
+                            .selectable_label(candidates, "Find species by elements")
                             .on_hover_text(help_tooltip(self.help_language, "inventory.elements"))
                             .clicked()
-                            && explicit
+                            && !candidates
                         {
                             self.document.config.inventory =
                                 EquilibriumInventoryDraft::ElementCandidates {
                                     elements: vec!["C".into(), "H".into(), "O".into()],
                                     candidate_policy: Default::default(),
                                     assignments: Vec::new(),
+                                };
+                            self.invalidate_prepared_request();
+                        }
+                        if ui
+                            .selectable_label(elemental, "Element inventory")
+                            .on_hover_text(help_tooltip(
+                                self.help_language,
+                                "inventory.element_inventory",
+                            ))
+                            .clicked()
+                            && !elemental
+                        {
+                            self.document.config.inventory =
+                                EquilibriumInventoryDraft::ElementInventory {
+                                    amounts: vec![
+                                        ElementAmountDraft {
+                                            element: "H".into(),
+                                            amount: "2.0".into(),
+                                        },
+                                        ElementAmountDraft {
+                                            element: "O".into(),
+                                            amount: "1.0".into(),
+                                        },
+                                    ],
+                                    phases: vec![PhaseDraft {
+                                        id: "gas".into(),
+                                        physical_state: GuiPhysicalState::Gas,
+                                        model: GuiPhaseModel::IdealGas,
+                                        components: vec![
+                                            ComponentDraft {
+                                                substance: "H2".into(),
+                                                initial_moles: "0.0".into(),
+                                                source_library: None,
+                                            },
+                                            ComponentDraft {
+                                                substance: "O2".into(),
+                                                initial_moles: "0.0".into(),
+                                                source_library: None,
+                                            },
+                                            ComponentDraft {
+                                                substance: "H2O".into(),
+                                                initial_moles: "0.0".into(),
+                                                source_library: None,
+                                            },
+                                        ],
+                                    }],
                                 };
                             self.invalidate_prepared_request();
                         }
@@ -1315,7 +1409,8 @@ impl EquilibriumApp {
                     | EquilibriumInventoryDraft::ElementCandidates {
                         assignments: phases,
                         ..
-                    } => {
+                    }
+                    | EquilibriumInventoryDraft::ElementInventory { phases, .. } => {
                         let mut remove_phase = None;
                         let mut move_phase = None;
                         let phase_count = phases.len();
@@ -1453,12 +1548,14 @@ impl EquilibriumApp {
                                                         &mut component.substance,
                                                         self.help_language,
                                                     );
-                                                    labeled_text_with_language(
-                                                        ui,
-                                                        "Moles",
-                                                        &mut component.initial_moles,
-                                                        self.help_language,
-                                                    );
+                                                    if !elemental {
+                                                        labeled_text_with_language(
+                                                            ui,
+                                                            "Moles",
+                                                            &mut component.initial_moles,
+                                                            self.help_language,
+                                                        );
+                                                    }
                                                     if let Some(source_library) =
                                                         &component.source_library
                                                     {
@@ -1674,6 +1771,58 @@ impl EquilibriumApp {
                                 assignments.len()
                             ));
                         }
+                        if let EquilibriumInventoryDraft::ElementInventory { amounts, .. } =
+                            &mut self.document.config.inventory
+                        {
+                            ui.separator();
+                            ui.label("Physical elemental totals [mol-atom]");
+                            let amount_count = amounts.len();
+                            let mut remove_amount = None;
+                            for (index, amount) in amounts.iter_mut().enumerate() {
+                                ui.push_id(("equilibrium-element-amount", index), |ui| {
+                                    ui.horizontal(|ui| {
+                                        labeled_text_with_tooltip(
+                                            ui,
+                                            "Element",
+                                            &mut amount.element,
+                                            "field.element",
+                                            self.help_language,
+                                        );
+                                        labeled_text_with_language(
+                                            ui,
+                                            "Amount [mol-atom]",
+                                            &mut amount.amount,
+                                            self.help_language,
+                                        );
+                                        if amount_count > 1
+                                            && ui
+                                                .button("Remove")
+                                                .on_hover_text(help_tooltip(
+                                                    self.help_language,
+                                                    "list.remove",
+                                                ))
+                                                .clicked()
+                                        {
+                                            remove_amount = Some(index);
+                                        }
+                                    });
+                                });
+                            }
+                            if ui
+                                .button("Add element total")
+                                .on_hover_text(help_tooltip(
+                                    self.help_language,
+                                    "inventory.add_element_total",
+                                ))
+                                .clicked()
+                            {
+                                amounts.push(Default::default());
+                            }
+                            if let Some(index) = remove_amount {
+                                amounts.remove(index);
+                            }
+                            ui.label("Species and phases above define the calculation universe; these totals define b. Component moles are ignored in this mode.");
+                        }
                     }
                 }
                 self.render_candidate_preview(ui);
@@ -1724,6 +1873,7 @@ impl EquilibriumApp {
                 .map(|phase| phase.id.clone())
                 .collect::<Vec<_>>(),
             EquilibriumInventoryDraft::ExplicitPhases { .. } => Vec::new(),
+            EquilibriumInventoryDraft::ElementInventory { .. } => Vec::new(),
         };
         let mut target_phase = self.candidate_target_phase.clone();
         if !phase_ids.iter().any(|phase_id| phase_id == &target_phase) {
@@ -2030,7 +2180,8 @@ impl EquilibriumApp {
             | EquilibriumInventoryDraft::ElementCandidates {
                 assignments: phases,
                 ..
-            } => phases,
+            }
+            | EquilibriumInventoryDraft::ElementInventory { phases, .. } => phases,
         };
         ui.collapsing("Declared component lookup", |ui| {
             egui::Grid::new("equilibrium-declared-lookup")
@@ -2192,6 +2343,24 @@ impl EquilibriumApp {
                 invalidate |= self.document.config.solver.ph_solve_mode != previous_mode;
                 ui.separator();
             }
+            ui.label("RST symbolic frontend")
+                .on_hover_text(help_tooltip(self.help_language, "solver.rst_frontend"));
+            let previous_frontend = self.document.config.solver.rst_symbolic_frontend;
+            ui.horizontal(|ui| {
+                ui.selectable_value(
+                    &mut self.document.config.solver.rst_symbolic_frontend,
+                    GuiRstSymbolicFrontend::ExprLegacy,
+                    "ExprLegacy",
+                )
+                .on_hover_text(help_tooltip(self.help_language, "solver.rst_expr_legacy"));
+                ui.selectable_value(
+                    &mut self.document.config.solver.rst_symbolic_frontend,
+                    GuiRstSymbolicFrontend::AtomView,
+                    "AtomView",
+                )
+                .on_hover_text(help_tooltip(self.help_language, "solver.rst_atom_view"));
+            });
+            invalidate |= self.document.config.solver.rst_symbolic_frontend != previous_frontend;
             let selection = &mut self.document.config.solver.selection;
             let production = matches!(selection, EquilibriumSolverDraft::ProductionDefault);
             if ui

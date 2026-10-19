@@ -1983,6 +1983,7 @@ fn live_temperature_range_failure_diagnostics_preserve_backend_metrics() {
                 outcome: SolverAttemptOutcome::Failed {
                     kind: SolverAttemptFailureKind::ResidualEvaluation,
                     reason: "symbolic residual returned NaN".to_string(),
+                    elapsed_micros: 0,
                 },
                 metrics: Some(SolverAttemptMetrics {
                     termination: SolverTermination::Stagnation,
@@ -1991,7 +1992,10 @@ fn live_temperature_range_failure_diagnostics_preserve_backend_metrics() {
                     residual_evaluations: 4,
                     jacobian_evaluations: 3,
                     linear_solves: 3,
+                    counters_collected: true,
+                    timings_collected: false,
                     elapsed_millis: 17,
+                    elapsed_micros: 17_000,
                     evaluation_timing: None,
                 }),
             }],
@@ -2797,13 +2801,11 @@ fn live_damped_newton_parameterized_graph_matches_baked_graph_outcome() {
         RustedSciTheSolver::DampedNewton,
     ));
 
-    let (parameterized_prepared, parameterized_symbols, parameterized_seed) = build_prepared();
-    let parameterized_graph =
-        prepare_rst_symbolic_problem_from_prepared(&parameterized_prepared, &parameterized_symbols)
-            .expect("parameterized real RST graph must build");
-    let mut parameterized_runner =
-        PreparedEquilibriumRunner::new(parameterized_prepared, parameterized_symbols)
-            .expect("parameterized real RST runner must build");
+    let (parameterized_prepared, _parameterized_symbols, parameterized_seed) = build_prepared();
+    let parameterized_graph = prepare_rst_symbolic_problem_from_prepared(&parameterized_prepared)
+        .expect("parameterized real RST graph must build");
+    let mut parameterized_runner = PreparedEquilibriumRunner::new(parameterized_prepared)
+        .expect("parameterized real RST runner must build");
     parameterized_runner.configure().solver_policy = Some(policy.clone());
     let parameterized =
         parameterized_runner.solve_from_seed_with_rst(parameterized_seed, &parameterized_graph);
@@ -2811,8 +2813,8 @@ fn live_damped_newton_parameterized_graph_matches_baked_graph_outcome() {
     let (baked_prepared, baked_symbols, baked_seed) = build_prepared();
     let baked_graph = prepare_baked_rst_symbolic_problem_for_test(&baked_prepared, &baked_symbols)
         .expect("baked real RST graph must build");
-    let mut baked_runner = PreparedEquilibriumRunner::new(baked_prepared, baked_symbols)
-        .expect("baked real RST runner must build");
+    let mut baked_runner =
+        PreparedEquilibriumRunner::new(baked_prepared).expect("baked real RST runner must build");
     baked_runner.configure().solver_policy = Some(policy);
     let baked = baked_runner.solve_from_seed_with_rst(baked_seed, &baked_graph);
 

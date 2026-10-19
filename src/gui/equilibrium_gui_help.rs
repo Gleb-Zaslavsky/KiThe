@@ -69,6 +69,8 @@ pub const EQUILIBRIUM_TOOLTIP_CATALOG: &[EquilibriumTooltipDescriptor] = tooltip
     "mode.ph",
     "inventory.explicit",
     "inventory.elements",
+    "inventory.element_inventory",
+    "inventory.add_element_total",
     "inventory.state",
     "inventory.model",
     "candidate.matching",
@@ -120,6 +122,7 @@ pub const EQUILIBRIUM_TOOLTIP_CATALOG: &[EquilibriumTooltipDescriptor] = tooltip
     "field.substance",
     "field.moles",
     "field.element",
+    "field.element_amount",
     "field.phase_epsilon",
     "field.dg_create",
     "field.dg_keep",
@@ -169,6 +172,9 @@ pub const EQUILIBRIUM_TOOLTIP_CATALOG: &[EquilibriumTooltipDescriptor] = tooltip
     "solver.ph_nested",
     "solver.production",
     "solver.backend",
+    "solver.rst_frontend",
+    "solver.rst_expr_legacy",
+    "solver.rst_atom_view",
     "solver.custom",
     "solver.trace_absolute",
     "solver.trace_relative",
@@ -309,6 +315,10 @@ pub fn legacy_tooltip(language: EquilibriumHelpLanguage, control_key: &str) -> &
         "inventory.elements" => {
             "Search selected catalogs for candidates matching the chosen elements."
         }
+        "inventory.element_inventory" => {
+            "Enter physical elemental totals in mol-atom units. The phases above define the species universe."
+        }
+        "inventory.add_element_total" => "Add another physical elemental total to the inventory.",
         "preset.ideal_gas" => "Replace the inventory with a small valid ideal-gas example.",
         "diagnostics.timing" => "Retain stage and per-point timing in the diagnostic report.",
         "diagnostics.phase_trace" => "Select how much phase lifecycle evidence is retained.",
@@ -375,6 +385,9 @@ pub fn legacy_tooltip(language: EquilibriumHelpLanguage, control_key: &str) -> &
         "temperature.point" => "Решить одну точку при фиксированной температуре в кельвинах.",
         "temperature.range" => "Решить упорядоченную температурную сетку в кельвинах.",
         "field.element" => "Химический символ элемента для поиска кандидатов.",
+        "field.element_amount" => {
+            "Химический символ элемента в физическом inventory; amount задается отдельно в mol-atom."
+        }
         "field.trace_floor" => "Абсолютный положительный seed следового вещества в молях.",
         "field.trace_fraction" => "Следовой seed как доля наибольшего начального количества.",
         "field.trace_minimum_floor" => "Нижняя граница относительного следового seed.",
@@ -663,6 +676,14 @@ mod tests {
                     );
                 }
             }
+        }
+        for language in [
+            EquilibriumHelpLanguage::English,
+            EquilibriumHelpLanguage::Russian,
+        ] {
+            let numerics = text(language, "Numerics");
+            assert!(numerics.contains("RST symbolic frontend"));
+            assert!(numerics.contains("AtomView"));
         }
     }
 

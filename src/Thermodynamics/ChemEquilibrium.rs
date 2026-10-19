@@ -258,6 +258,9 @@ pub mod equilibrium_extensive_normalization;
 mod equilibrium_golden_fixtures_tests;
 /// Typed, validated input data for the canonical equilibrium formulation.
 pub mod equilibrium_ids;
+/// Opt-in fine-grained evaluation counters for characterization and benchmarks.
+#[path = "ChemEquilibrium/postprocessing_and_logging/equilibrium_instrumentation.rs"]
+pub mod equilibrium_instrumentation;
 /// Temporary adapter around the historical hand-written nonlinear methods.
 #[path = "ChemEquilibrium/nonlinear_solvers/equilibrium_legacy_backend.rs"]
 pub(crate) mod equilibrium_legacy_backend;
@@ -393,6 +396,9 @@ pub(crate) mod prepared_phase_control_runner;
 /// peer production orchestration modules. New code should prefer [`prelude`].
 pub mod legacy {
     /// Historical standalone Newton/LM/TR implementation.
+    #[deprecated(
+        note = "use the typed equilibrium_nonlinear solvers through the production equilibrium facade"
+    )]
     pub mod nr {
         pub use super::super::NR_Legacy::*;
     }
@@ -426,6 +432,7 @@ pub mod prelude {
         EquilibriumCalculatorError, EquilibriumCalculatorOutcome, EquilibriumCalculatorPhPoint,
         EquilibriumCalculatorPhRange, EquilibriumCalculatorPoint, EquilibriumCalculatorPreset,
         EquilibriumCalculatorTemperatureRange, EquilibriumSpeciesUniversePolicy,
+        PreparedEquilibriumPhSession, PreparedEquilibriumPtSession,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::{
         CandidateRejection, CandidateRejectionReason, CandidateSelectionError,
@@ -469,12 +476,17 @@ pub mod prelude {
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_ids::{
         ElementId, PhaseIndex, ReactionId, SpeciesId,
     };
+    pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::{
+        EquilibriumEvaluationCounters, EquilibriumInstrumentationMode,
+        EquilibriumInstrumentationReport, capture as capture_equilibrium_instrumentation,
+        capture_if_enabled as capture_equilibrium_instrumentation_if_enabled,
+    };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
         MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
-        EquilibriumPreparationError, PhMonolithicSeedFailure, ReactionExtentError,
-        ReactionExtentErrorKind,
+        EquilibriumPreparationError, MultiStartSeedFailure, PhMonolithicSeedFailure,
+        ReactionExtentError, ReactionExtentErrorKind,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_options::{
         PhAcceptanceOptions, PhMonolithicOptions, PhMonolithicSeedAttemptReport,
@@ -516,7 +528,9 @@ pub mod prelude {
         EquilibriumPhaseSpecSnapshot, EquilibriumRecordIdentity, EquilibriumReproducibilityCapsule,
         PhaseStabilitySemantics, ReproducibilityCapsuleError, ThermoCatalogSnapshot,
     };
-    pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RustedSciTheSolver;
+    pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
+        RstSymbolicFrontend, RustedSciTheSolver,
+    };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
         EquilibriumSolveReport, MultiStartAttemptReport, MultiStartSolveReport,
         SolverAttemptMetrics, SolverAttemptOutcome, SolverAttemptReport, SolverBackend,
@@ -534,7 +548,8 @@ pub mod prelude {
         TemperatureRangeRequest, TemperatureRangeSolution, TemperatureRangeSolveReport,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
-        EquilibriumTimingMode, EquilibriumTimingReport,
+        EquilibriumTimingMode, EquilibriumTimingReport, RstPreparationArtifactAction,
+        RstPreparationBackendKind, RstPreparationTimingReport,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::EquilibriumCandidateReport;
     /// Immutable phase-control and TPD evidence emitted by accepted solves.

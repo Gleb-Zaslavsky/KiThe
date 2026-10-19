@@ -232,7 +232,8 @@ fn default_widget_census_is_independent_from_the_tooltip_catalog() {
         "Components and phases",
         "Inventory input",
         "Explicit species",
-        "Search by elements",
+        "Find species by elements",
+        "Element inventory",
         "Simple ideal-gas preset",
         "Validate document",
         "Prepare canonical request",
@@ -246,6 +247,90 @@ fn default_widget_census_is_independent_from_the_tooltip_catalog() {
             "{advanced_only} must not leak into the default Setup viewport"
         );
     }
+}
+
+#[test]
+fn direct_element_inventory_story_separates_physical_totals_from_species_universe() {
+    let app = Rc::new(RefCell::new(EquilibriumApp::new()));
+    let app_for_ui = Rc::clone(&app);
+    let mut open = true;
+    let mut harness = Harness::new_ui(move |ui| {
+        app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+    });
+
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Element inventory")
+        .click_accesskit();
+    harness.run();
+
+    harness.get_by_label("Physical elemental totals [mol-atom]");
+    harness.get_by_label(
+        "Species and phases above define the calculation universe; these totals define b. Component moles are ignored in this mode.",
+    );
+    assert!(matches!(
+        app.borrow().document.config.inventory,
+        EquilibriumInventoryDraft::ElementInventory { .. }
+    ));
+    assert!(app.borrow().document.validate_for_run().is_ok());
+}
+
+#[test]
+fn direct_element_inventory_story_reports_nonrepresentable_b_before_solving() {
+    let mut document = EquilibriumGuiDocument::new();
+    document.config.inventory = EquilibriumInventoryDraft::ElementInventory {
+        amounts: vec![super::equilibrium_gui_model::ElementAmountDraft {
+            element: "C".into(),
+            amount: "1".into(),
+        }],
+        phases: vec![PhaseDraft {
+            id: "gas".into(),
+            physical_state: GuiPhysicalState::Gas,
+            model: GuiPhaseModel::IdealGas,
+            components: vec![ComponentDraft {
+                substance: "H2O".into(),
+                initial_moles: "0".into(),
+                source_library: None,
+            }],
+        }],
+    };
+    let mut app = EquilibriumApp::new();
+    app.document = document;
+    let error = app
+        .prepare_request()
+        .expect_err("nonrepresentable b must fail during request preparation");
+    assert!(!error.to_string().is_empty());
+    assert!(app.validation_issues().iter().any(|issue| {
+        issue.field == "inventory.amounts" && issue.message.contains("not representable")
+    }));
+    assert!(app.prepared_request().is_none());
+}
+
+#[test]
+fn direct_element_inventory_story_covers_rendered_hovers_and_unavailable_actions() {
+    let app = Rc::new(RefCell::new(EquilibriumApp::new()));
+    let app_for_ui = Rc::clone(&app);
+    let mut open = true;
+    let mut harness = Harness::new_ui(move |ui| {
+        app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+    });
+
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Element inventory")
+        .click_accesskit();
+    harness.run();
+
+    harness.get_by_label("Element inventory").hover();
+    harness.run();
+    harness.get_by_label("Add element total");
+    harness.get_by_label("Add element total").hover();
+    harness.run();
+
+    assert!(harness.query_by_label("Preview candidates").is_none());
+    assert!(harness.query_by_label("Assign").is_none());
+    assert!(harness.query_by_label("Unassign").is_none());
+    assert!(app.borrow().document.validate_for_run().is_ok());
 }
 
 #[test]
@@ -299,6 +384,22 @@ fn conditional_widget_census_covers_problem_inventory_solver_phase_and_output_st
     };
     harness.run();
     harness.get_by_label("Element matching");
+
+    app.borrow_mut().document.config.inventory = EquilibriumInventoryDraft::ElementInventory {
+        amounts: vec![
+            super::equilibrium_gui_model::ElementAmountDraft {
+                element: "H".into(),
+                amount: "2".into(),
+            },
+            super::equilibrium_gui_model::ElementAmountDraft {
+                element: "O".into(),
+                amount: "1".into(),
+            },
+        ],
+        phases: vec![PhaseDraft::default()],
+    };
+    harness.run();
+    harness.get_by_label("Physical elemental totals [mol-atom]");
 
     // Bounded control exposes lifecycle controls that fixed mode must not show.
     app.borrow_mut().document.config.phase_mode = EquilibriumPhaseModeDraft::Bounded {
@@ -473,6 +574,12 @@ fn hover_tooltips_cover_combo_options_and_dynamic_rows() {
         .get_by_role_and_label(Role::Button, "Solver")
         .click_accesskit();
     harness.run();
+    harness.get_by_label("ExprLegacy").hover();
+    harness.run();
+    harness.get_by_label_contains("established ExprLegacy");
+    harness.get_by_label("AtomView").hover();
+    harness.run();
+    harness.get_by_label_contains("AtomView-native");
     harness.get_by_label("Concrete backend").click_accesskit();
     harness.run();
     harness.get_by_label("Legacy LM fallback").hover();

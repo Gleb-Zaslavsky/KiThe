@@ -1,12 +1,52 @@
 [package]
 name = "KiThe"
-version = "0.3.12"
+version = "0.3.13"
 edition = "2024"
 author = "Gleb Zaslavsky"
 license = "MIT"
 keywords = [ "thermodynamics", "chemistry", "CFD", "chemical_kinetics"]
 description = "A numerical suite for chemical kinetics and thermodynamics, combustion, heat and mass transfer,chemical equilibrium, chemical engeneering"
 repository = "https://github.com/Gleb-Zaslavsky/KiThe"
+
+exclude = [
+
+     # Internal development documentation
+    "**/*TODO*.md",
+    "**/*STORY*.md",
+    "**/*task*.md",
+
+    # Keep public/project documentation
+    "!/README.md",
+    "!/Thermodynamics/ChemEquilibrium/ARCHITECTURE_RU.md",
+    "!/*PHASE_ARCHITECTURE_RU.md",
+    "!/*PHASE_ARCHITECTURE.md",
+
+    # Development artefacts
+    "/plans/**",
+    "/plots/**",
+    "/pic/**",
+    "/.vscode/**",
+
+    "/*.png",
+    "**/*.pickle",
+]
+
+[features]
+default = []
+equilibrium-instrumentation = []
+# Adds a compact `tabled` view to the equilibrium baseline benchmark.
+equilibrium-benchmark-prettyprint = []
+# Forces the pre-change fixed-P,T simplification policy for an A/B baseline.
+# Production fixed-P,T uses raw symbolic expressions by default.
+equilibrium-benchmark-simplified-symbolic = []
+# Enables allocation call/byte counters in the prepared P,H benchmark only.
+equilibrium-benchmark-allocation = []
+# Internal control build for matched P,H trial-cache measurements.
+equilibrium-benchmark-no-trial-cache = []
+# Internal control build for matched Gibbs interval-reuse measurements.
+equilibrium-benchmark-no-gibbs-interval-reuse = []
+# Enables a scoped AtomView/ExprLegacy frontend override for matched RST benchmarks.
+equilibrium-benchmark-rst-frontends = []
 
 [dependencies]
 regex = "1.12.4"
@@ -16,14 +56,14 @@ strum = "0.28.0"
 strum_macros = "0.28.0"
 serde_json = "1.0.151"
 loc = "0.5.0"
-RustedSciThe = "0.4.15"
+RustedSciThe = "0.4.26"
 rayon = "1.11.0"
 nalgebra = { version = "0.35.0", features = ["serde"] }
 prettytable-rs = "0.10.0"
 simplelog = "0.12.2"
 log = "0.4.34"
 approx = "0.5.1"
-reqwest = { version = "0.13.4", features = ["blocking"] }
+reqwest = { version = "0.13.5", features = ["blocking"] }
 scraper = "0.27.0"
 url = "2.5.8"
 thiserror = "2.0.20"
@@ -31,16 +71,16 @@ enum_dispatch = "0.3.13"
 tempfile = "3.26.0"
 reborrow = "0.5.5"
 nom = "8.0.0"
-eframe = "0.35.0"
-egui = "0.35.0"
-egui_plot = "0.36.0"
-egui_kittest = "0.35.0"
-egui_extras = { version = "0.35.0", features = ["image"] }
+eframe = "0.36.2"
+egui = "0.36.2"
+egui_plot = "0.37.0"
+egui_kittest = "0.36.0"
+egui_extras = { version = "0.36.2", features = ["image"] }
 rfd = "0.17.2"
 plotters = "0.3"
 chrono = "0.4.41"
 dialoguer = "0.12.0"
-polars ={ version = "0.53.0", features = ["lazy", "csv", "parquet", "rolling_window", "polars-ops"] }
+polars ={ version = "0.55.2", features = ["lazy", "csv", "parquet", "rolling_window", "polars-ops"] }
 ndarray = "0.17.2"
 
 ndarray-stats = "0.7.0"
@@ -51,10 +91,49 @@ bspline = "1.1.0"
 
 
 lstsq = "0.8.0"
-KiThePlot = "0.6.0"
+KiThePlot = "0.7.0"
 
 [build-dependencies]
 winres = "0.1"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "equilibrium_baseline"
+harness = false
+
+[[bench]]
+name = "equilibrium_rst_preparation"
+harness = false
+
+[[bench]]
+name = "equilibrium_prepared_session"
+harness = false
+
+[[bench]]
+name = "equilibrium_ph_preparation"
+harness = false
+
+[[bench]]
+name = "equilibrium_gibbs_interval"
+harness = false
+
+[[bench]]
+name = "equilibrium_legacy_callbacks"
+harness = false
+
+[[bench]]
+name = "equilibrium_legacy_overhead"
+harness = false
+
+[[bench]]
+name = "equilibrium_rst_workers"
+harness = false
+
+[[bench]]
+name = "equilibrium_rst_policy_crossover"
+harness = false
 
 
 
@@ -65,5 +144,3 @@ panic = "abort"
 [profile.dev]
 opt-level = 0
 debug = false 
-
-

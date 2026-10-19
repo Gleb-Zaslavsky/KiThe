@@ -1388,10 +1388,10 @@ workstream and agreeing on its contract.
   `std::error::Error` contracts. Nested `SubsDataError` and `SolveError`
   sources now remain discoverable through `source()` instead of forcing GUI or
   workflow code to parse `Debug` output.
-- [ ] Remove the deprecated threshold-based `equilibrium_logmole_residual2` /
-  `equilibrium_logmole_jacobian2` pair after any external experimental users
-  migrate to the canonical validated log-moles formulation. The core solver
-  and all new tests already avoid this alternate activity-mask model.
+- [x] Remove the deprecated threshold-based `equilibrium_logmole_residual2` /
+  `equilibrium_logmole_jacobian2` pair. Repository caller audit found no
+  production or supported external call sites; the canonical evaluator and
+  explicit active-set phase-control coverage remain.
 - [ ] Migrate every equilibrium consumer from `CustomSubstance` and
   `ThermodynamicsCalculatorTrait` to the narrow phase interfaces and the
   `phase_equilibrium_adapter`.

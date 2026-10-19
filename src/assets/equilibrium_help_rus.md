@@ -110,6 +110,8 @@ opt-in и не подменяет локальную запись молча.
 scaling` меняет численные координаты, но не физические единицы. `Trace seed
 policy` задает положительные log-mole seeds и не добавляет inventory.
 `Cascade total iterations` ограничивает общую работу fallback, сохраняя evidence.
+`RST symbolic frontend` выбирает `ExprLegacy` (по умолчанию) или `AtomView` для
+подготовки символьных residual/Jacobian. Настройка не влияет на каскад без RST.
 
 ### Контракт элементов управления
 
@@ -117,6 +119,7 @@ policy` задает положительные log-mole seeds и не доба�
 | --- | --- | --- | --- |
 | Solver policy | По умолчанию production cascade | Всегда | Инвалидирует запрос |
 | Backend и custom cascade | Поддерживаемые уникальные backends | Single backend / custom cascade | Инвалидирует запрос |
+| RST symbolic frontend | ExprLegacy по умолчанию; AtomView включается явно | Всегда | Инвалидирует запрос |
 | P,H route | По умолчанию Auto | Только P,H | Инвалидирует запрос |
 | Tolerance, iteration и scaling overrides | Пустое поле использует production defaults; overrides конечны и положительны | Advanced numerics | Инвалидирует запрос |
 | Trace-seed policy | Не добавляет физический inventory | Advanced numerics | Инвалидирует запрос |

@@ -111,6 +111,7 @@ impl ValidatedReactionBasis {
         }
 
         let reactions = normalize_reactions(reactions, tolerances.coefficient_zero)?;
+        validate_reaction_independence(&reactions, tolerances.coefficient_zero)?;
         let conservation = element_composition.transpose() * &reactions;
         let max_conservation_residual = conservation
             .iter()
@@ -220,6 +221,27 @@ fn normalize_reactions(
         }
     }
     Ok(reactions)
+}
+
+fn validate_reaction_independence(
+    reactions: &DMatrix<f64>,
+    tolerance: f64,
+) -> Result<(), ReactionExtentError> {
+    if reactions.ncols() == 0 {
+        return Ok(());
+    }
+    let singular_values = reactions.clone().svd(false, false).singular_values;
+    let rank = singular_values
+        .iter()
+        .filter(|&&value| value > tolerance)
+        .count();
+    if rank != reactions.ncols() {
+        return Err(invalid_basis(format!(
+            "reaction columns are not independent: numerical rank {rank}, expected {}",
+            reactions.ncols()
+        )));
+    }
+    Ok(())
 }
 
 fn invalid_basis(message: impl Into<String>) -> ReactionExtentError {

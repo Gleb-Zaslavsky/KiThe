@@ -134,7 +134,7 @@ fn ternary_runner(
         .unwrap(),
     )
     .unwrap();
-    let mut runner = PreparedPhaseControlRunner::new(problem, Vec::new(), false).unwrap();
+    let mut runner = PreparedPhaseControlRunner::new(problem, false).unwrap();
     let settings = runner.configure_solver();
     settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
     settings.solver_params.tol = 1.0e-11;
@@ -198,15 +198,24 @@ fn production_gas_to_liquid_activation_reaches_accepted_ternary_flash_state() {
         .expect("gas-only state must activate unstable liquid");
 
     assert_eq!(
-        outcome.phase_control_report.initial_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .initial_phase_set
+            .active_mask(),
         vec![true, false]
     );
     assert_eq!(
-        outcome.phase_control_report.final_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         vec![true, true]
     );
     let activation = outcome
-        .phase_control_report
+        .acceptance_report
+        .phase_control
         .transitions
         .iter()
         .find(|transition| !transition.activated.is_empty())
@@ -236,15 +245,24 @@ fn production_liquid_to_gas_activation_reaches_accepted_ternary_flash_state() {
         .expect("liquid-only state must activate unstable gas");
 
     assert_eq!(
-        outcome.phase_control_report.initial_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .initial_phase_set
+            .active_mask(),
         vec![false, true]
     );
     assert_eq!(
-        outcome.phase_control_report.final_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         vec![true, true]
     );
     let activation = outcome
-        .phase_control_report
+        .acceptance_report
+        .phase_control
         .transitions
         .iter()
         .find(|transition| !transition.activated.is_empty())
@@ -281,16 +299,25 @@ fn production_liquid_to_gas_lifecycle_deactivates_the_exhausted_liquid_phase() {
         .solve()
         .expect("liquid-only state above the bubble boundary must reach stable gas");
     assert_eq!(
-        outcome.phase_control_report.initial_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .initial_phase_set
+            .active_mask(),
         vec![false, true]
     );
     assert_eq!(
-        outcome.phase_control_report.final_phase_set.active_mask(),
+        outcome
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         vec![true, false]
     );
     assert!(
         outcome
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .transitions
             .iter()
             .any(|transition| !transition.activated.is_empty()),
@@ -298,7 +325,8 @@ fn production_liquid_to_gas_lifecycle_deactivates_the_exhausted_liquid_phase() {
     );
     assert!(
         outcome
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .transitions
             .iter()
             .any(|transition| !transition.deactivated.is_empty()),
@@ -324,7 +352,11 @@ fn production_temperature_continuation_uses_only_the_previously_accepted_state()
         .solve()
         .expect("the independent first point must establish a two-phase state");
     assert_eq!(
-        first.phase_control_report.final_phase_set.active_mask(),
+        first
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         vec![true, true]
     );
     assert_two_phase_solution_matches_independent_flash(
@@ -337,7 +369,11 @@ fn production_temperature_continuation_uses_only_the_previously_accepted_state()
     // The runner may continue only from this accepted output.  No rejected
     // inner iterate is visible or eligible to seed the next temperature.
     let accepted_seed = LogMolesInitialGuess::new(first.solution.log_moles().to_vec()).unwrap();
-    let accepted_phase_set = first.phase_control_report.final_phase_set.clone();
+    let accepted_phase_set = first
+        .acceptance_report
+        .phase_control
+        .final_phase_set
+        .clone();
     let records = load_nist_ternary_vle_antoine_gauge().unwrap();
     runner
         .retarget_numeric(
@@ -359,17 +395,26 @@ fn production_temperature_continuation_uses_only_the_previously_accepted_state()
         .solve()
         .expect("accepted two-phase continuation must reduce to its stable gas topology");
     assert_eq!(
-        second.phase_control_report.initial_phase_set.active_mask(),
+        second
+            .acceptance_report
+            .phase_control
+            .initial_phase_set
+            .active_mask(),
         vec![true, true],
         "the second point must begin from the first accepted phase topology"
     );
     assert_eq!(
-        second.phase_control_report.final_phase_set.active_mask(),
+        second
+            .acceptance_report
+            .phase_control
+            .final_phase_set
+            .active_mask(),
         vec![true, false]
     );
     assert!(
         second
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .transitions
             .iter()
             .any(|transition| !transition.deactivated.is_empty()),
@@ -400,7 +445,8 @@ fn i5_nist_ternary_antoine_gauge_production_lifecycle_characterization() {
     let gas_to_liquid = gas_runner.solve().unwrap();
     assert_eq!(
         gas_to_liquid
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         vec![true, true]
@@ -424,7 +470,8 @@ fn i5_nist_ternary_antoine_gauge_production_lifecycle_characterization() {
     let liquid_to_gas = liquid_runner.solve().unwrap();
     assert_eq!(
         liquid_to_gas
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         vec![true, true]
@@ -449,7 +496,8 @@ fn i5_nist_ternary_antoine_gauge_production_lifecycle_characterization() {
     let disappearance = disappearance_runner.solve().unwrap();
     assert_eq!(
         disappearance
-            .phase_control_report
+            .acceptance_report
+            .phase_control
             .final_phase_set
             .active_mask(),
         vec![true, false]
@@ -488,11 +536,23 @@ fn print_lifecycle_row(
     println!(
         "  {story:<29} {temperature_k:>7.3}  {:<10?} {:<7} {:<6} {beta:>8.5}  {:>9}  {:>11} {:>11}",
         flash.phase_class,
-        phase_mask_label(&outcome.phase_control_report.initial_phase_set.active_mask()),
-        phase_mask_label(&outcome.phase_control_report.final_phase_set.active_mask()),
+        phase_mask_label(
+            &outcome
+                .acceptance_report
+                .phase_control
+                .initial_phase_set
+                .active_mask()
+        ),
+        phase_mask_label(
+            &outcome
+                .acceptance_report
+                .phase_control
+                .final_phase_set
+                .active_mask()
+        ),
         tpd_cell(minimum_tpds.first().copied().flatten()),
         tpd_cell(minimum_tpds.get(1).copied().flatten()),
-        outcome.phase_control_report.transitions.len(),
+        outcome.acceptance_report.phase_control.transitions.len(),
     );
 }
 

@@ -897,6 +897,11 @@ fn append_error_attempts(
                 append_error_attempts(attempt.cause(), output);
             }
         }
+        ReactionExtentError::MultiStartSeedRecoveryFailed { attempts } => {
+            for attempt in attempts {
+                append_error_attempts(attempt.cause(), output);
+            }
+        }
         _ => {}
     }
 }

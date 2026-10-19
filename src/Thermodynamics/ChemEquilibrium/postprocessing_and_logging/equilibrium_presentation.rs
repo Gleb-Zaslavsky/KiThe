@@ -8,7 +8,7 @@
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
-    EquilibriumSolveReport, SolverAttemptOutcome, SolverAttemptReport,
+    EquilibriumSolveReport, SolverAttemptOutcome, SolverAttemptReport, SolverIterationTelemetry,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::MultiphaseEquilibriumSolution;
 use std::fmt::Write;
@@ -108,6 +108,20 @@ pub struct EquilibriumBackendAttemptPresentationRow {
     pub jacobian_evaluation_micros: Option<u128>,
     /// Solver-internal time outside callbacks, when the backend provides a split.
     pub solver_overhead_micros: Option<u128>,
+    /// Optional state/trial callback counters from a detailed backend.
+    pub state_residual_evaluations: Option<usize>,
+    pub trial_residual_evaluations: Option<usize>,
+    pub state_jacobian_evaluations: Option<usize>,
+    pub trial_jacobian_evaluations: Option<usize>,
+    /// Optional linear-operation sub-stages and step counters.
+    pub linear_factorization_micros: Option<u128>,
+    pub linear_system_solve_micros: Option<u128>,
+    pub linear_factorizations: Option<usize>,
+    pub accepted_steps: Option<usize>,
+    pub rejected_steps: Option<usize>,
+    pub reusable_trial_points: Option<usize>,
+    /// Optional per-iteration backend trace.
+    pub iteration_telemetry: Option<Vec<SolverIterationTelemetry>>,
     /// Stable human-readable detail for a failed, rejected, or skipped attempt.
     pub detail: Option<String>,
 }
@@ -319,6 +333,11 @@ fn collect_backend_attempts<'a>(
                 collect_backend_attempts(attempt.cause(), output);
             }
         }
+        ReactionExtentError::MultiStartSeedRecoveryFailed { attempts } => {
+            for attempt in attempts {
+                collect_backend_attempts(attempt.cause(), output);
+            }
+        }
         ReactionExtentError::PhAutoFallbackFailed { monolithic, nested } => {
             collect_backend_attempts(monolithic, output);
             collect_backend_attempts(nested, output);
@@ -360,6 +379,17 @@ fn backend_attempt_row(
         residual_evaluation_micros: timing.map(|timing| timing.residual_evaluation_micros),
         jacobian_evaluation_micros: timing.map(|timing| timing.jacobian_evaluation_micros),
         solver_overhead_micros: timing.map(|timing| timing.solver_overhead_micros),
+        state_residual_evaluations: timing.and_then(|timing| timing.state_residual_evaluations),
+        trial_residual_evaluations: timing.and_then(|timing| timing.trial_residual_evaluations),
+        state_jacobian_evaluations: timing.and_then(|timing| timing.state_jacobian_evaluations),
+        trial_jacobian_evaluations: timing.and_then(|timing| timing.trial_jacobian_evaluations),
+        linear_factorization_micros: timing.and_then(|timing| timing.linear_factorization_micros),
+        linear_system_solve_micros: timing.and_then(|timing| timing.linear_system_solve_micros),
+        linear_factorizations: timing.and_then(|timing| timing.linear_factorizations),
+        accepted_steps: timing.and_then(|timing| timing.accepted_steps),
+        rejected_steps: timing.and_then(|timing| timing.rejected_steps),
+        reusable_trial_points: timing.and_then(|timing| timing.reusable_trial_points),
+        iteration_telemetry: timing.and_then(|timing| timing.iteration_telemetry.clone()),
         detail,
     }
 }
@@ -425,7 +455,9 @@ fn optional_display<T: std::fmt::Display>(value: Option<T>) -> String {
 mod tests {
     use super::*;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers;
-    use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::PhMonolithicSeedFailure;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
+        MultiStartSeedFailure, PhMonolithicSeedFailure,
+    };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
         SolverAttemptFailureKind, SolverAttemptMetrics, SolverBackend, SolverEvaluationTiming,
         SolverPolicy, SolverTermination,
@@ -448,6 +480,7 @@ mod tests {
                     outcome: SolverAttemptOutcome::Failed {
                         kind: SolverAttemptFailureKind::Backend,
                         reason: "step rejected".to_string(),
+                        elapsed_micros: 0,
                     },
                     metrics: Some(SolverAttemptMetrics {
                         termination: SolverTermination::Stagnation,
@@ -456,11 +489,32 @@ mod tests {
                         residual_evaluations: 8,
                         jacobian_evaluations: 7,
                         linear_solves: 7,
+                        counters_collected: true,
+                        timings_collected: true,
                         elapsed_millis: 12,
+                        elapsed_micros: 12_000,
                         evaluation_timing: Some(SolverEvaluationTiming {
                             residual_evaluation_micros: 20,
                             jacobian_evaluation_micros: 30,
+                            legacy_same_iterate_callback_pairs: None,
+                            linear_system_micros: None,
                             solver_overhead_micros: 40,
+                            matrix_operations_micros: 0,
+                            norm_micros: 0,
+                            trial_vector_micros: 0,
+                            feasibility_micros: 0,
+                            globalization_micros: 0,
+                            state_residual_evaluations: None,
+                            trial_residual_evaluations: None,
+                            state_jacobian_evaluations: None,
+                            trial_jacobian_evaluations: None,
+                            linear_factorization_micros: None,
+                            linear_system_solve_micros: None,
+                            linear_factorizations: None,
+                            accepted_steps: None,
+                            rejected_steps: None,
+                            reusable_trial_points: None,
+                            iteration_telemetry: None,
                         }),
                     }),
                 },
@@ -523,6 +577,7 @@ mod tests {
                 outcome: SolverAttemptOutcome::Failed {
                     kind: SolverAttemptFailureKind::Solver,
                     reason: "iteration limit".to_string(),
+                    elapsed_micros: 0,
                 },
                 metrics: None,
             }],
@@ -540,6 +595,33 @@ mod tests {
         assert_eq!(rows[0].attempt_index, 0);
         assert_eq!(rows[0].backend, "Legacy(LM)");
         assert_eq!(rows[1].attempt_index, 1);
+        assert_eq!(rows[1].backend, "Legacy(NR)");
+    }
+
+    #[test]
+    fn multi_start_seed_failure_flattens_every_preserved_backend_trace() {
+        let failure = |solver| ReactionExtentError::AllBackendsFailed {
+            attempts: vec![SolverAttemptReport {
+                backend: SolverBackend::Legacy(solver),
+                outcome: SolverAttemptOutcome::Failed {
+                    kind: SolverAttemptFailureKind::Solver,
+                    reason: "iteration limit".to_string(),
+                    elapsed_micros: 0,
+                },
+                metrics: None,
+            }],
+        };
+        let error = ReactionExtentError::MultiStartSeedRecoveryFailed {
+            attempts: vec![
+                MultiStartSeedFailure::new(0, failure(Solvers::LM)),
+                MultiStartSeedFailure::new(1, failure(Solvers::NR)),
+            ],
+        };
+
+        let rows = backend_attempt_rows_from_error(&error)
+            .expect("multi-start recovery must expose its preserved backend traces");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].backend, "Legacy(LM)");
         assert_eq!(rows[1].backend, "Legacy(NR)");
     }
 
@@ -574,6 +656,17 @@ mod tests {
                 residual_evaluation_micros: None,
                 jacobian_evaluation_micros: None,
                 solver_overhead_micros: None,
+                state_residual_evaluations: None,
+                trial_residual_evaluations: None,
+                state_jacobian_evaluations: None,
+                trial_jacobian_evaluations: None,
+                linear_factorization_micros: None,
+                linear_system_solve_micros: None,
+                linear_factorizations: None,
+                accepted_steps: None,
+                rejected_steps: None,
+                reusable_trial_points: None,
+                iteration_telemetry: None,
                 detail: None,
             }],
             timing: Vec::new(),

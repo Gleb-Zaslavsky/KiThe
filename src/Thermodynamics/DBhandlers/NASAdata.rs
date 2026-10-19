@@ -1031,6 +1031,10 @@ impl ThermoCalculator for NASAdata {
         Ok(flag)
     }
 
+    fn current_coeffs_temperature_interval(&self) -> Result<Option<(f64, f64)>, ThermoError> {
+        Ok(self.current_T_range)
+    }
+
     fn valid_temperature_interval(&self) -> Result<(f64, f64), ThermoError> {
         let bounds = self
             .coeffs_map

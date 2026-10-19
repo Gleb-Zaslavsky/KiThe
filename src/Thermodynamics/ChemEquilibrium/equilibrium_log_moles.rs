@@ -189,7 +189,9 @@
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::{
     PhaseActivityModel, phase_activity_models,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::EquilibriumNonlinearBackend;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::{
+    EquilibriumNonlinearBackend, solve_backend_cascade_with_control_and_telemetry,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::{
     EquilibriumConstantCrossValidationStatus, EquilibriumConstantCrossValidationTolerances,
     classify_equilibrium_constant_cross_validation,
@@ -202,15 +204,17 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::{
     EquilibriumConstantValidationMode, EquilibriumConstantValidationTolerances,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::EquilibriumExecutionControl;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::rst_solver_telemetry_mode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
     ReactionBasis, ReactionExtentError, compute_reaction_basis,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_prepared_runner::PreparedEquilibriumRunner;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     DEFAULT_TRACE_MOLE_FLOOR, EquilibriumConditions, EquilibriumProblem, EquilibriumSolution,
     LogMolesInitialGuess, PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    RstPreparedProblem, prepare_rst_symbolic_problem,
+    RstPreparedProblem, RstSymbolicFrontend, prepare_rst_symbolic_problem,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, SolverAttemptFailureKind, SolverAttemptReport, SolverBackend,
@@ -300,6 +304,8 @@ pub struct EquilibriumSolverSettings {
     /// exists and `solver_policy` is `None`, it becomes the first legacy
     /// fallback after the RST cascade.
     pub solver: Solvers,
+    /// Symbolic frontend used for RST backend preparation.
+    pub rst_symbolic_frontend: RstSymbolicFrontend,
     /// Whether to enable row scaling of the residual and Jacobian.
     /// When `true`, each residual/Jacobian row is divided by its scale factor.
     pub scaling_flag: bool,
@@ -310,7 +316,9 @@ pub struct EquilibriumSolverSettings {
     /// beginning with [`Self::solver`] while callers migrate to typed policies.
     pub solver_policy: Option<SolverPolicy>,
     /// Optional resource limits for a solver cascade. `None` derives a budget
-    /// from the current policy and legacy per-backend iteration setting.
+    /// from the current policy and legacy per-backend iteration setting. For
+    /// explicit multi-start recovery, this budget is applied independently to
+    /// each seed's inner backend cascade.
     pub solver_budget: Option<SolverCascadeBudget>,
     /// Controls whether the accepted solution is additionally checked by the
     /// independent equilibrium-constant validator.
@@ -331,6 +339,7 @@ impl Default for EquilibriumSolverSettings {
         Self {
             solver_params: SolverParams::default(),
             solver: Solvers::LM,
+            rst_symbolic_frontend: RstSymbolicFrontend::ExprLegacy,
             scaling_flag: false,
             trace_seed_policy: TraceSpeciesSeedPolicy::Absolute {
                 floor: DEFAULT_TRACE_MOLE_FLOOR,
@@ -458,11 +467,13 @@ impl Default for SolverParams {
         }
     }
 }
-/// Central orchestrator for chemical equilibrium calculations.
+/// Deprecated mutable compatibility host for chemical equilibrium calculations.
 ///
 /// This struct owns all equilibrium data (elemental composition, stoichiometry,
 /// Gibbs functions, solver settings), manages the solve lifecycle, and publishes
-/// results. It is the primary entry point for the canonical equilibrium solver.
+/// results for the historical mutable API. The typed resolved-phase pipeline is
+/// the production orchestration boundary; this host remains for compatibility,
+/// characterization, and legacy range workflows.
 ///
 /// # Dataflow
 ///
@@ -1076,7 +1087,9 @@ impl EquilibriumLogMoles {
     ///
     /// The hook receives only [`EquilibriumSolverSettings`], so callers can
     /// tune policies and budgets without mutating the already validated
-    /// chemistry, phase layout, or thermodynamic conditions.
+    /// chemistry, phase layout, or thermodynamic conditions. The typed entry
+    /// point solves through [`PreparedEquilibriumRunner`] directly; it does
+    /// not construct the deprecated mutable compatibility host.
     pub fn solve_problem_with<F>(
         problem: EquilibriumProblem,
         configure: F,
@@ -1084,10 +1097,10 @@ impl EquilibriumLogMoles {
     where
         F: FnOnce(&mut EquilibriumSolverSettings),
     {
-        let mut solver = Self::from_problem(problem)?;
-        configure(&mut solver.solver_settings);
-        solver.solve()?;
-        solver.accepted_solution()
+        let prepared = PreparedEquilibriumProblem::new(problem)?;
+        let mut runner = PreparedEquilibriumRunner::new(prepared)?;
+        configure(runner.configure());
+        Ok(runner.solve()?.solution)
     }
 
     /// Returns an immutable snapshot only when the current candidate passed
@@ -2064,6 +2077,87 @@ impl EquilibriumLogMoles {
         Ok(())
     }
 
+    /// Runs the deprecated serial phase-control range through one reusable
+    /// prepared runner. The compatibility host still owns the legacy sweep
+    /// publication contract: failed points are recorded and later points may
+    /// continue from the last accepted seed and phase set.
+    pub(crate) fn try_solve_prepared_phase_control_range(
+        &mut self,
+        t_start: f64,
+        t_end: f64,
+        t_step: f64,
+    ) -> Result<Option<Vec<(f64, Vec<f64>)>>, ReactionExtentError> {
+        self.refresh_temperature_gibbs(t_start)?;
+        let Some(mut runner) = self.try_build_prepared_phase_control_runner()? else {
+            return Ok(None);
+        };
+
+        let now = Instant::now();
+        let configured_seed = self.initial_guess.clone();
+        let mut temperature = t_start;
+        let mut rows = Vec::new();
+        let mut failures = Vec::new();
+        let mut snapshots = Vec::new();
+        let mut first_point = true;
+
+        while temperature < t_end {
+            let attempt_seed = continuation_seed_for_point(
+                self.solver_settings.continuation_seed_policy,
+                &configured_seed,
+                &self.initial_guess,
+            )
+            .unwrap_or(self.resolved_initial_guess()?.0);
+            if !first_point {
+                self.refresh_temperature_gibbs(temperature)?;
+            }
+            let conditions = EquilibriumConditions::new(temperature, self.P, self.p0)?;
+            runner.retarget_numeric(
+                conditions,
+                LogMolesInitialGuess::new(attempt_seed)?,
+                self.gibbs.clone(),
+            )?;
+
+            match runner.solve() {
+                Ok(outcome) => {
+                    let next_phase_set = outcome
+                        .acceptance_report
+                        .phase_control
+                        .final_phase_set
+                        .clone();
+                    self.publish_prepared_phase_control_outcome(outcome)?;
+                    let snapshot = self.snapshot_published_solution(temperature)?;
+                    if self.solver_settings.continuation_seed_policy
+                        == ContinuationSeedPolicy::PreviousAccepted
+                    {
+                        self.initial_guess = Some(snapshot.log_moles.clone());
+                    } else {
+                        self.initial_guess = configured_seed.clone();
+                    }
+                    rows.push((temperature, snapshot.moles.clone()));
+                    snapshots.push(snapshot);
+                    runner.set_continuation_phase_set(next_phase_set)?;
+                    runner.set_boundary_recovery_enabled(false);
+                }
+                Err(error) => {
+                    error!(
+                        "phase-controlled prepared range calculation failed at T = {temperature} K: {error}"
+                    );
+                    failures.push(temperature_failure(temperature, &error));
+                }
+            }
+
+            first_point = false;
+            temperature += t_step;
+        }
+
+        info!(
+            "total elapsed time prepared phase-controlled serial solver {} ms",
+            now.elapsed().as_millis()
+        );
+        self.publish_temperature_sweep(rows, failures, snapshots)
+            .map(Some)
+    }
+
     /// Atomically publishes the complete outcome of one serial temperature sweep.
     ///
     /// Validates and builds the mole series table first, then updates all sweep-related
@@ -2165,6 +2259,13 @@ impl EquilibriumLogMoles {
         T_step: f64,
     ) -> Result<Vec<(f64, Vec<f64>)>, ReactionExtentError> {
         Self::validate_temperature_range(T_start, T_end, T_step)?;
+        if self.phase_manager.max_phase_iterations > 0 {
+            if let Some(rows) =
+                self.try_solve_prepared_phase_control_range(T_start, T_end, T_step)?
+            {
+                return Ok(rows);
+            }
+        }
         let now = Instant::now();
         let mut temperature = T_start;
         let mut rows = Vec::new();
@@ -2694,11 +2795,11 @@ impl EquilibriumLogMoles {
     /// Resolves the backend policy, budget, and delegates to the cascade solver.
     ///
     /// This is the bridge between the solver's mutable state and the stateless
-    /// [`solve_backend_cascade`] function. It:
+    /// [`solve_backend_cascade_with_control`] function. It:
     /// 1. Resolves the ordered backend list from the policy.
     /// 2. Computes the cascade budget (explicit or derived from `SolverParams`).
     /// 3. Converts backends to trait-object references.
-    /// 4. Delegates to [`solve_backend_cascade`] which runs each backend in order.
+    /// 4. Delegates to the backend adapter, which runs each backend in order.
     pub(crate) fn solver_impl(
         &self,
         initial_guess: Vec<f64>,
@@ -2736,7 +2837,7 @@ impl EquilibriumLogMoles {
             .map(|backend| backend as &dyn EquilibriumNonlinearBackend)
             .collect();
 
-        Self::solve_backend_cascade(
+        solve_backend_cascade_with_control_and_telemetry(
             &backend_refs,
             initial_guess,
             f,
@@ -2747,85 +2848,11 @@ impl EquilibriumLogMoles {
             budget,
             &self.solver_settings.solver_params,
             rst_problem,
-        )
-    }
-
-    /// Runs the explicit backend policy and records every numerical outcome.
-    ///
-    /// This is the stateless cascade entry point. It iterates through backends in
-    /// policy order, calling each one's `solve()` method. After each attempt, the
-    /// candidate is validated via the `validate_candidate` closure. The first backend
-    /// whose candidate passes acceptance wins. If all backends fail, an
-    /// `AllBackendsFailed` error is returned with the full attempt trace.
-    pub(crate) fn solve_backend_cascade(
-        backends: &[&dyn EquilibriumNonlinearBackend],
-        initial_guess: Vec<f64>,
-        f: &dyn Fn(&[f64]) -> Result<Vec<f64>, ReactionExtentError>,
-        j: Option<&dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError>>,
-        feasible: &dyn Fn(&[f64]) -> bool,
-        validate_candidate: &dyn Fn(
-            &[f64],
-        )
-            -> Result<EquilibriumCandidateReport, ReactionExtentError>,
-        policy: SolverPolicy,
-        budget: SolverCascadeBudget,
-        solver_params: &SolverParams,
-        rst_problem: Option<&RstPreparedProblem>,
-    ) -> Result<(Vec<f64>, EquilibriumCandidateReport, EquilibriumSolveReport), ReactionExtentError>
-    {
-        Self::solve_backend_cascade_with_control(
-            backends,
-            initial_guess,
-            f,
-            j,
-            feasible,
-            validate_candidate,
-            policy,
-            budget,
-            solver_params,
-            rst_problem,
             None,
+            rst_solver_telemetry_mode(false),
         )
     }
 
-    /// Backend cascade entry point with optional execution control (progress, cancellation).
-    ///
-    /// The compatibility wrapper [`solve_backend_cascade`] keeps old internal callers
-    /// small. This typed path adds per-attempt progress reporting and cancellation
-    /// checks via [`EquilibriumExecutionControl`], without making the numerical backend
-    /// own UI state. The cascade itself is stateless and lives in the backend adapter;
-    /// this method remains only so the historical host can migrate incrementally.
-    pub(crate) fn solve_backend_cascade_with_control(
-        backends: &[&dyn EquilibriumNonlinearBackend],
-        initial_guess: Vec<f64>,
-        f: &dyn Fn(&[f64]) -> Result<Vec<f64>, ReactionExtentError>,
-        j: Option<&dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError>>,
-        feasible: &dyn Fn(&[f64]) -> bool,
-        validate_candidate: &dyn Fn(
-            &[f64],
-        )
-            -> Result<EquilibriumCandidateReport, ReactionExtentError>,
-        policy: SolverPolicy,
-        budget: SolverCascadeBudget,
-        solver_params: &SolverParams,
-        rst_problem: Option<&RstPreparedProblem>,
-        execution_control: Option<&EquilibriumExecutionControl>,
-    ) -> Result<(Vec<f64>, EquilibriumCandidateReport, EquilibriumSolveReport), ReactionExtentError>
-    {
-        crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::solve_backend_cascade_with_control(
-            backends,
-            initial_guess,
-            f,
-            j,
-            feasible,
-            validate_candidate,
-            policy,
-            budget,
-            solver_params,
-            rst_problem,
-            execution_control,
-        )
-    }
     /// Validates and publishes a reconstructed physical-mole state from log-moles.
     ///
     /// Converts `log_moles` to physical moles via [`reconstructed_mole_state`] and
@@ -3072,7 +3099,7 @@ mod solver_budget_tests {
         };
 
         assert_eq!(attempts.len(), 2);
-        let SolverAttemptOutcome::Failed { kind, reason } = &attempts[0].outcome else {
+        let SolverAttemptOutcome::Failed { kind, reason, .. } = &attempts[0].outcome else {
             panic!(
                 "expected the first backend to fail, got {:?}",
                 attempts[0].outcome
@@ -3214,9 +3241,9 @@ mod solver_budget_tests {
 
 #[cfg(test)]
 mod solver_cascade_story_tests {
-    use super::{EquilibriumLogMoles, SolverParams};
+    use super::SolverParams;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::{
-        BackendSolveRequest, BackendSolveResult, EquilibriumNonlinearBackend,
+        BackendSolveError, BackendSolveRequest, BackendSolveResult, EquilibriumNonlinearBackend,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
         EquilibriumExecutionControl, EquilibriumProgressStage,
@@ -3250,13 +3277,14 @@ mod solver_cascade_story_tests {
         fn solve(
             &self,
             request: BackendSolveRequest<'_>,
-        ) -> Result<BackendSolveResult, ReactionExtentError> {
+        ) -> Result<BackendSolveResult, BackendSolveError> {
             match &self.behavior {
-                FakeBackendBehavior::RecoverableFailure => {
-                    Err(ReactionExtentError::ResidualEvaluation(
+                FakeBackendBehavior::RecoverableFailure => Err(BackendSolveError {
+                    error: ReactionExtentError::ResidualEvaluation(
                         "forced recoverable failure".to_string(),
-                    ))
-                }
+                    ),
+                    metrics: None,
+                }),
                 FakeBackendBehavior::Success { solution } => {
                     let _ = request;
                     Ok(BackendSolveResult {
@@ -3269,7 +3297,10 @@ mod solver_cascade_story_tests {
                                 residual_evaluations: 1,
                                 jacobian_evaluations: 1,
                                 linear_solves: 1,
+                                counters_collected: true,
+                                timings_collected: false,
                                 elapsed_millis: 0,
+                                elapsed_micros: 0,
                                 evaluation_timing: None,
                             },
                         ),
@@ -3306,7 +3337,7 @@ mod solver_cascade_story_tests {
         let policy =
             SolverPolicy::Cascade(backends.iter().map(|backend| backend.backend()).collect());
 
-        EquilibriumLogMoles::solve_backend_cascade(
+        crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::solve_backend_cascade_with_control(
             &backends,
             vec![0.0],
             &residual,
@@ -3316,6 +3347,7 @@ mod solver_cascade_story_tests {
             policy,
             budget,
             &SolverParams::default(),
+            None,
             None,
         )
     }
@@ -3346,7 +3378,7 @@ mod solver_cascade_story_tests {
         let residual = |values: &[f64]| Ok(values.to_vec());
         let jacobian = |_values: &[f64]| Ok(DMatrix::identity(1, 1));
         let feasible = |_values: &[f64]| true;
-        let result = EquilibriumLogMoles::solve_backend_cascade_with_control(
+        let result = crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::solve_backend_cascade_with_control(
             &backends,
             vec![0.0],
             &residual,
@@ -3641,72 +3673,6 @@ mod continuation_seed_policy_tests {
     }
 }
 
-#[cfg(test)]
-mod activity_contract_regression_tests {
-    #![allow(deprecated)]
-    use super::{
-        GibbsFn, Phase, PhaseKind, equilibrium_logmole_residual2,
-        evaluate_equilibrium_logmole_residual, reaction_phase_stoichiometry,
-    };
-    use nalgebra::DMatrix;
-    use std::rc::Rc;
-
-    #[test]
-    fn deprecated_residual_path_matches_the_canonical_activity_contract() {
-        let reactions = DMatrix::from_row_slice(2, 1, &[-1.0, 1.0]);
-        let elements = DMatrix::from_row_slice(2, 1, &[1.0, 1.0]);
-        let element_totals = vec![2.0];
-        let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0)];
-        let phases = vec![
-            Phase {
-                kind: PhaseKind::IdealGas,
-                species: vec![0],
-            },
-            Phase {
-                kind: PhaseKind::IdealSolution,
-                species: vec![1],
-            },
-        ];
-        let species_phase = vec![0, 1];
-        let delta_n = reaction_phase_stoichiometry(&reactions, &phases);
-        let y = vec![0.0, 0.0];
-
-        let canonical = evaluate_equilibrium_logmole_residual(
-            &y,
-            &reactions,
-            &elements,
-            &element_totals,
-            &gibbs,
-            &phases,
-            500.0,
-            202_650.0,
-            101_325.0,
-            &species_phase,
-            &delta_n,
-        )
-        .unwrap();
-        let legacy = equilibrium_logmole_residual2(
-            reactions,
-            elements,
-            element_totals,
-            gibbs,
-            phases,
-            500.0,
-            202_650.0,
-            101_325.0,
-            1e-30,
-            1e-30,
-        )
-        .unwrap();
-        let legacy = legacy(&y).unwrap();
-
-        assert_eq!(canonical.len(), legacy.len());
-        for (lhs, rhs) in canonical.iter().zip(legacy.iter()) {
-            assert!((lhs - rhs).abs() <= 1e-12);
-        }
-    }
-}
-
 /// Reconstructs finite, strictly positive physical mole values from log-moles.
 ///
 /// The logarithmic formulation intentionally represents trace species, but it
@@ -3996,19 +3962,6 @@ pub fn reaction_phase_stoichiometry(
     delta_n
 }
 
-// The threshold-based residual/Jacobian pair below is retained temporarily as
-// a deprecated compatibility surface. The canonical solver never selects it;
-// new code must use the validated log-mole formulation without activity masks.
-#[inline]
-fn species_active(n: f64, eps: f64) -> bool {
-    n > eps
-}
-
-#[inline]
-fn phase_active(n: f64, eps: f64) -> bool {
-    n > eps
-}
-
 /// Validates the square log-mole equilibrium system before numerical closures
 /// capture its data. The formulation has one equation per species: independent
 /// reaction equations plus elemental-balance equations must equal `m`.
@@ -4091,8 +4044,8 @@ pub(crate) fn validate_residual_conditions(
 /// [`evaluate_equilibrium_logmole_residual`] entry point on a prepared problem.
 ///
 pub fn equilibrium_logmole_residual(
-    reactions: DMatrix<f64>,  // m × r
-    elements: DMatrix<f64>,   // m × E
+    reactions: DMatrix<f64>,  // species x reactions
+    elements: DMatrix<f64>,   // species x elements
     element_totals: Vec<f64>, // E
     gibbs: Vec<GibbsFn>,      // m
     phases: Vec<Phase>,
@@ -4316,125 +4269,6 @@ pub fn evaluate_equilibrium_logmole_residual_with_standard_gibbs(
     Ok(residual)
 }
 
-/// Deprecated threshold-based residual retained only for compatibility with
-/// experiments outside the canonical equilibrium path.
-#[deprecated(note = "use evaluate_equilibrium_logmole_residual instead")]
-pub fn equilibrium_logmole_residual2(
-    reactions: DMatrix<f64>,  // m × r
-    elements: DMatrix<f64>,   // m × E
-    element_totals: Vec<f64>, // E
-    gibbs: Vec<GibbsFn>,      // m
-    phases: Vec<Phase>,
-    temperature: f64,
-    pressure: f64,
-    p0: f64,
-    subs_eps: f64,
-    phase_eps: f64,
-) -> Result<Box<dyn Fn(&[f64]) -> Result<Vec<f64>, ReactionExtentError>>, ReactionExtentError> {
-    let m = reactions.nrows();
-    let r = reactions.ncols();
-    let e = elements.ncols();
-
-    let species_phase = species_to_phase_map(&phases, m)?;
-    let delta_n = reaction_phase_stoichiometry(&reactions, &phases);
-    let rt = R * temperature;
-
-    Ok(Box::new(move |y: &[f64]| {
-        if y.len() != m {
-            return Err(ReactionExtentError::ResidualEvaluation(
-                "log-mole vector length mismatch".to_string(),
-            ));
-        }
-
-        // --- species moles ---
-        let mut n = vec![0.0; m];
-        let mut active = vec![false; m];
-        for i in 0..m {
-            n[i] = y[i].exp();
-            active[i] = species_active(n[i], subs_eps);
-        }
-
-        // --- phase totals ---
-        let mut n_phase = vec![0.0; phases.len()];
-        let mut phase_active_mask = vec![false; phases.len()];
-        for i in 0..m {
-            if active[i] {
-                n_phase[species_phase[i]] += n[i];
-            }
-        }
-        for j in 0..phases.len() {
-            phase_active_mask[j] = phase_active(n_phase[j], phase_eps);
-        }
-
-        // --- phase offsets ---
-        let phi = phase_activity_models(&phases)
-            .into_iter()
-            .map(|model| model.log_phase_offset(pressure, p0))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut f = vec![0.0; m];
-
-        // -------------------------
-        // Reaction equilibrium eqs
-        // -------------------------
-        for k in 0..r {
-            let mut sum_ln_n = 0.0;
-            let mut sum_ln_n_phase = 0.0;
-            let mut sum_phi = 0.0;
-            let mut dg0 = 0.0;
-
-            for i in 0..m {
-                if !active[i] {
-                    continue;
-                }
-                let nu = reactions[(i, k)];
-                if nu != 0.0 {
-                    sum_ln_n += nu * y[i];
-                    dg0 += nu * gibbs[i](temperature);
-                }
-            }
-
-            for j in 0..phases.len() {
-                if !phase_active_mask[j] {
-                    continue;
-                }
-                let dnk = delta_n[k][j];
-                if dnk != 0.0 {
-                    sum_ln_n_phase += dnk * n_phase[j].ln();
-                    sum_phi += dnk * phi[j];
-                }
-            }
-
-            let ln_k = -dg0 / rt;
-            f[k] = sum_ln_n - sum_ln_n_phase + sum_phi - ln_k;
-        }
-
-        // -------------------------
-        // Element balance eqs
-        // -------------------------
-        for el in 0..e {
-            let mut sum = 0.0;
-            for i in 0..m {
-                if active[i] {
-                    sum += elements[(i, el)] * n[i];
-                }
-            }
-            f[r + el] = sum - element_totals[el];
-        }
-
-        // -------------------------
-        // Inactive species constraints
-        // -------------------------
-        for i in 0..m {
-            if !active[i] {
-                f[i] = y[i]; // push to -∞
-            }
-        }
-
-        Ok(f)
-    }))
-}
-
 /// Creates a scaled residual closure for improved numerical conditioning.
 ///
 /// The scale vector must have one entry per residual row. Scaling is applied
@@ -4511,8 +4345,8 @@ pub fn evaluate_equilibrium_logmole_jacobian(
 /// species ordering.
 pub fn equilibrium_logmole_jacobian(
     y: &[f64],
-    reactions: &DMatrix<f64>, // m × r
-    elements: &DMatrix<f64>,  // m × E
+    reactions: &DMatrix<f64>, // species x reactions
+    elements: &DMatrix<f64>,  // species x elements
     species_phase: &[usize],
     delta_n: &[Vec<f64>],
     n_phases: usize,
@@ -4571,80 +4405,6 @@ pub fn equilibrium_logmole_jacobian(
     for el in 0..e {
         for i in 0..m {
             jmat[(r + el, i)] = elements[(i, el)] * n[i];
-        }
-    }
-
-    Ok(jmat)
-}
-
-/// Deprecated threshold-based Jacobian paired with
-/// [`equilibrium_logmole_residual2`].
-#[deprecated(note = "use evaluate_equilibrium_logmole_jacobian instead")]
-pub fn equilibrium_logmole_jacobian2(
-    y: &[f64],
-    reactions: &DMatrix<f64>, // m × r
-    elements: &DMatrix<f64>,  // m × E
-    species_phase: &[usize],
-    delta_n: &[Vec<f64>],
-    n_phases: usize,
-    subs_eps: f64,
-    phase_eps: f64,
-) -> Result<DMatrix<f64>, ReactionExtentError> {
-    let m = reactions.nrows();
-    let r = reactions.ncols();
-    let e = elements.ncols();
-
-    let mut n = vec![0.0; m];
-    let mut active = vec![false; m];
-    for i in 0..m {
-        n[i] = y[i].exp();
-        active[i] = species_active(n[i], subs_eps);
-    }
-
-    let mut n_phase = vec![0.0; n_phases];
-    let mut phase_active_mask = vec![false; n_phases];
-    for i in 0..m {
-        if active[i] {
-            n_phase[species_phase[i]] += n[i];
-        }
-    }
-    for j in 0..n_phases {
-        phase_active_mask[j] = phase_active(n_phase[j], phase_eps);
-    }
-
-    let mut jmat = DMatrix::<f64>::zeros(m, m);
-
-    // --- reaction equilibrium rows ---
-    for k in 0..r {
-        for i in 0..m {
-            if !active[i] {
-                continue;
-            }
-            let nu = reactions[(i, k)];
-
-            let phase = species_phase[i];
-            if phase_active_mask[phase] {
-                let term = delta_n[k][phase] * n[i] / n_phase[phase];
-                jmat[(k, i)] = nu - term;
-            } else {
-                jmat[(k, i)] = nu;
-            }
-        }
-    }
-
-    // --- element balances ---
-    for el in 0..e {
-        for i in 0..m {
-            if active[i] {
-                jmat[(r + el, i)] = elements[(i, el)] * n[i];
-            }
-        }
-    }
-
-    // --- inactive species diagonal ---
-    for i in 0..m {
-        if !active[i] {
-            jmat[(i, i)] = 1.0;
         }
     }
 

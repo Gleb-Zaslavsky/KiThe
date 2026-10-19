@@ -168,12 +168,14 @@ mod tests {
         // cannot be consumed by the GUI or an external application.
         let inventory = ElementInventory::from_amounts([("H", 2.0), ("O", 1.0)])
             .expect("public elemental inventory must validate");
-        let carrier = FormalElementCarrier::new("H", 2.0)
-            .expect("public formal carrier must validate");
+        let carrier =
+            FormalElementCarrier::new("H", 2.0).expect("public formal carrier must validate");
         let _: ElementInventoryError = ElementInventoryError::EmptyInventory;
         let _: MultiphaseInitialComposition;
-        let _: fn(EquilibriumCalculatorBuilder, MultiphaseInitialComposition)
-            -> EquilibriumCalculatorBuilder = |builder, seed| builder.element_numerical_seed(seed);
+        let _: fn(
+            EquilibriumCalculatorBuilder,
+            MultiphaseInitialComposition,
+        ) -> EquilibriumCalculatorBuilder = |builder, seed| builder.element_numerical_seed(seed);
         let _ph_range_seed = PhRangeRequest::with_initial_composition;
         let _temperature_range_seed = TemperatureRangeRequest::with_initial_composition;
 

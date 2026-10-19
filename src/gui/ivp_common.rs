@@ -2,8 +2,8 @@ use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     ColumnMeta, ColumnNature, History, TGADataset, TGADomainError, TGASchema, Unit,
 };
 use crate::Kinetics::solid_state_kinetics_IVP::{KineticModelIVP, KineticModelNames};
-use RustedSciThe::numerical::ODE_api2::SolverType;
-use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
+use RustedSciThe::numerical::ODE_api2::{NonStiffMethod, SolverType};
+use RustedSciThe::numerical::Radau::prelude::*;
 use egui_extras::{Column as TableColumn, TableBuilder};
 use nalgebra::{DMatrix, DVector};
 use polars::prelude::{Column as PolarsColumn, DataFrame, IntoLazy};
@@ -27,14 +27,14 @@ pub enum SolverTypeShotcut {
 impl SolverTypeShotcut {
     pub fn get_solvertype(&self) -> SolverType {
         match self {
-            Self::RadauOrder3 => SolverType::Radau(RadauOrder::Order3),
-            Self::RadauOrder5 => SolverType::Radau(RadauOrder::Order5),
-            Self::RadauOrder7 => SolverType::Radau(RadauOrder::Order7),
-            Self::LSODE => SolverType::LSODE2,
-            Self::NonstiffRK45 => SolverType::NonStiff("RK45".to_string()),
-            Self::NonStiffDoPri => SolverType::NonStiff("DOPRI".to_string()),
-            Self::NonStiffAB4 => SolverType::NonStiff("AB4".to_string()),
-            Self::BDF => SolverType::BDF,
+            Self::RadauOrder3 => SolverType::Radau,
+            Self::RadauOrder5 => SolverType::Radau,
+            Self::RadauOrder7 => SolverType::Radau,
+            Self::LSODE => SolverType::Lsode2,
+            Self::NonstiffRK45 => SolverType::NonStiff(NonStiffMethod::Rk45),
+            Self::NonStiffDoPri => SolverType::NonStiff(NonStiffMethod::Dopri),
+            Self::NonStiffAB4 => SolverType::NonStiff(NonStiffMethod::Ab4),
+            Self::BDF => SolverType::Bdf,
             Self::BackwardEuler => SolverType::BackwardEuler,
         }
     }

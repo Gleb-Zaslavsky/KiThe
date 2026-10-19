@@ -81,7 +81,6 @@
 //!     │
 //!     v
 //!   Used by: evaluate_equilibrium_logmole_residual()
-//!   Used by: equilibrium_logmole_residual2() (deprecated)
 //!   Used by: RST symbolic engine
 //! ```
 //!

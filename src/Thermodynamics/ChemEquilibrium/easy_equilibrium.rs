@@ -81,7 +81,7 @@
 //! ```
 //!
 use crate::Thermodynamics::User_substances::{DataType, SubsData};
-use RustedSciThe::numerical::optimization::minimize_scalar::{ClosureFunction, ScalarRootFinder};
+use RustedSciThe::numerical::Nonlinear_systems::scalar_root::{ClosureFunction, ScalarRootFinder};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 use std::collections::HashMap;

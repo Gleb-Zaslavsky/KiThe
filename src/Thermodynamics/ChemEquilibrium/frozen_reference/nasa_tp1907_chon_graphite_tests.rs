@@ -2,6 +2,9 @@
 
 #[cfg(test)]
 mod tests {
+    #[path = "../nasa_tp1907_frontend_diagnostics.rs"]
+    mod frontend_diagnostics;
+
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
@@ -31,6 +34,13 @@ mod tests {
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
         LogMolesInitialGuess, PreparedEquilibriumProblem, TraceSpeciesSeedPolicy,
+    };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
+        RustedSciTheSolveContract, RustedSciTheSolver, prepare_rst_symbolic_problem_from_prepared,
+        prepare_rst_symbolic_problem_from_prepared_with_frontend, with_test_rst_frontend,
+    };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
+        SolverAttemptOutcome, SolverBackend, SolverPolicy,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_range::{
         TemperatureGrid, TemperatureRangePointPreparation, TemperatureRangeRequest,
@@ -68,10 +78,6 @@ mod tests {
         EquilibriumSolveOptions, ExtensiveNormalizationPolicy, ResolvedPhaseEquilibriumRequest,
         solve_resolved_pt,
     };
-    use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RustedSciTheSolver;
-    use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
-        SolverBackend, SolverPolicy,
-    };
     use crate::Thermodynamics::ChemEquilibrium::prelude::PhaseControlPolicy;
     use crate::Thermodynamics::ChemEquilibrium::prepared_phase_control_runner::{
         PreparedPhaseControlOutcome, PreparedPhaseControlRunner,
@@ -80,6 +86,14 @@ mod tests {
     use crate::Thermodynamics::phase_layout::PhaseId;
     use crate::Thermodynamics::thermo_lib_api::{ThermoData, ThermoRepository};
     use crate::library_manager::with_library_manager;
+    use RustedSciThe::numerical::Nonlinear_systems::prelude::{
+        JacobianProvider, LambdifyExecutionPolicy, NonlinearProblem, SymbolicLambdifyFrontend,
+        SymbolicNonlinearProblem, SymbolicProblemOptions,
+    };
+    use RustedSciThe::symbolic::symbolic_engine::Expr;
+    use nalgebra::DVector;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::time::Instant;
 
     // Regression guards selected after repeated debug/release characterization.
     // They are not NASA TP-1907 source uncertainty or physical acceptance tolerances.
@@ -202,7 +216,10 @@ mod tests {
                     .conditions_at(temperature_k, 101_325.0)
                     .expect("TP-1907 fixed-active temperature must be supported"),
                 scaled_initial_composition(fixture, inventory_scale),
-                TraceSpeciesSeedPolicy::Absolute { floor: 1.0e-30 },
+                // This is a seed-only basin hint for the fixed-active
+                // diagnostic, not a physical phase threshold. The physical
+                // inventory and all frozen thermochemistry remain unchanged.
+                TraceSpeciesSeedPolicy::Absolute { floor: 1.0e-20 },
                 Default::default(),
             )
             .expect("TP-1907 fixed-active request must validate"),
@@ -243,10 +260,15 @@ mod tests {
                     .conditions_at(temperature_k, 101_325.0)
                     .expect("TP-1907 normalized temperature must be supported"),
                 normalized,
+                // Keep the normalized diagnostic seed scale-free. The
+                // minimum floor is only a lower bound for trace species.
                 normalization
-                    .normalize_trace_seed_policy(TraceSpeciesSeedPolicy::Absolute {
-                        floor: 1.0e-30,
-                    })
+                    .normalize_trace_seed_policy(
+                        TraceSpeciesSeedPolicy::RelativeToLargestInitialMole {
+                            fraction: 1.0e-12,
+                            minimum_floor: 1.0e-20,
+                        },
+                    )
                     .expect("TP-1907 trace floor must normalize"),
                 Default::default(),
             )
@@ -290,6 +312,27 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("+")
+    }
+
+    fn l2_norm(values: &[f64]) -> f64 {
+        values.iter().map(|value| value * value).sum::<f64>().sqrt()
+    }
+
+    fn stable_equation_hash(equations: &[String]) -> u64 {
+        // FNV-1a with length separators keeps the fixture hash independent of
+        // Rust's randomized hashers and unambiguous for concatenated strings.
+        let mut hash = 0xcbf29ce484222325_u64;
+        for equation in equations {
+            for byte in (equation.len() as u64).to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x100000001b3_u64);
+            }
+            for byte in equation.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x100000001b3_u64);
+            }
+        }
+        hash
     }
 
     fn smallest_active_phase_total(solution: &MultiphaseEquilibriumSolution) -> f64 {
@@ -539,7 +582,7 @@ mod tests {
     fn strict_fixed_active_runner(
         prepared: PreparedEquilibriumProblem,
     ) -> PreparedEquilibriumRunner {
-        let mut runner = PreparedEquilibriumRunner::new(prepared, Vec::new())
+        let mut runner = PreparedEquilibriumRunner::new(prepared)
             .expect("prepared TP-1907 runner must construct");
         let settings = runner.configure();
         settings.solver = Solvers::LM;
@@ -619,7 +662,7 @@ mod tests {
             },
             &[true, false],
         )?;
-        let mut runner = PreparedPhaseControlRunner::new(problem, Vec::new(), false)?;
+        let mut runner = PreparedPhaseControlRunner::new(problem, false)?;
         let settings = runner.configure_solver();
         settings.solver = Solvers::LM;
         settings.solver_params.tol = 1.0e-10;
@@ -743,10 +786,14 @@ mod tests {
     fn solve_prepared_with_legacy_lm(
         prepared: PreparedEquilibriumProblem,
     ) -> crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumSolution {
-        let mut runner = PreparedEquilibriumRunner::new(prepared, Vec::new())
+        let mut runner = PreparedEquilibriumRunner::new(prepared)
             .expect("prepared TP-1907 runner must construct");
         let settings = runner.configure();
         settings.solver = Solvers::LM;
+        // The metamorphic case deliberately changes reaction-coordinate
+        // norms. Apply the canonical row scaling so the reference solver
+        // measures the same dimensionless formulation in every basis.
+        settings.scaling_flag = true;
         // Basis invariance is a formulation test, so solve more tightly than
         // the ordinary production tolerance before comparing coordinates.
         settings.solver_params.tol = 1.0e-10;
@@ -1398,6 +1445,13 @@ mod tests {
                 );
             }
             let validation = solution.accepted_solution().validation();
+            println!(
+                "TP-1907 frozen facade candidate scale={scale:e} class={class} route={route} backend={:?} attempts={} residual={:.3e} balance={:.3e}",
+                solution.solve_report().accepted_backend,
+                solution.solve_report().started_attempt_count(),
+                validation.residual_l2_norm,
+                validation.max_abs_element_balance_error,
+            );
             assert!(
                 validation.residual_l2_norm < 1.0e-5,
                 "{class} {route} residual={:e}",
@@ -1410,7 +1464,9 @@ mod tests {
             );
             assert_tp1907_external_regression_envelope(&fixture, reference, solution);
             println!(
-                "TP-1907 frozen facade scale={scale:e} class={class} route={route} total_b={:.6e} residual={:.3e} balance={:.3e}",
+                "TP-1907 frozen facade scale={scale:e} class={class} route={route} backend={:?} attempts={} total_b={:.6e} residual={:.3e} balance={:.3e}",
+                solution.solve_report().accepted_backend,
+                solution.solve_report().started_attempt_count(),
                 reference_b.iter().sum::<f64>(),
                 validation.residual_l2_norm,
                 validation.max_abs_element_balance_error,
@@ -1419,6 +1475,267 @@ mod tests {
 
         assert_eq!(before_local, local_library_snapshot());
         assert_eq!(before_frozen, frozen_snapshot());
+    }
+
+    fn run_tp1907_upper_backend_acceptance_matrix() -> (usize, usize) {
+        let fixture = fixture();
+        let frozen_dataset = dataset();
+        let reference = frozen_dataset
+            .rows()
+            .iter()
+            .find(|row| row.temperature_k == 700.0)
+            .expect("TP-1907 frozen P,T row at 700 K must remain available");
+        let initial = scaled_initial_composition(&fixture, 1.0e8);
+        let (inventory, _element_labels, reference_b) =
+            frozen_element_inventory(&fixture, &initial);
+        let (element_matrix, _, _) = element_composition_and_molar_mass(
+            fixture.resolved().phase_data(),
+            fixture.resolved().layout(),
+            None,
+        )
+        .expect("TP-1907 backend matrix element composition must remain available");
+        let oracle_options = EquilibriumSolveOptions::default()
+            .with_max_iterations(500)
+            .expect("TP-1907 backend matrix oracle iteration budget must validate")
+            .with_tolerance(1.0e-12)
+            .expect("TP-1907 backend matrix oracle tolerance must validate");
+        let molecular = calculator_tp1907_builder(&fixture, repository())
+            .solve_options(oracle_options)
+            .solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::TR)))
+            .expect("TP-1907 backend matrix oracle policy must validate")
+            .at_temperature(reference.temperature_k)
+            .initial_moles(initial.moles().to_vec())
+            .solve()
+            .expect("TP-1907 Legacy(TR) molecular oracle must solve");
+        let molecular = match molecular {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected TP-1907 molecular oracle point, got {other:?}"),
+        };
+        let molecular_solution = molecular.solution();
+        let expected_topology = molecular_solution
+            .metadata()
+            .phases()
+            .iter()
+            .map(|phase| {
+                (
+                    phase.id().clone(),
+                    molecular_solution.phase_status(phase.id()),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let backends = [
+            (
+                "rst-lm",
+                "RST",
+                SolverBackend::RustedSciThe(RustedSciTheSolver::LevenbergMarquardt),
+            ),
+            (
+                "rst-backtracking-lm",
+                "RST",
+                SolverBackend::RustedSciThe(RustedSciTheSolver::BacktrackingLevenbergMarquardt),
+            ),
+            (
+                "rst-minpack-lm",
+                "RST",
+                SolverBackend::RustedSciThe(RustedSciTheSolver::MinpackLevenbergMarquardt),
+            ),
+            (
+                "rst-nielsen-lm",
+                "RST",
+                SolverBackend::RustedSciThe(RustedSciTheSolver::NielsenLevenbergMarquardt),
+            ),
+            (
+                "rst-trust-region-lm",
+                "RST",
+                SolverBackend::RustedSciThe(RustedSciTheSolver::TrustRegionLevenbergMarquardt),
+            ),
+            (
+                "rst-damped-newton",
+                "RST",
+                SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton),
+            ),
+            ("legacy-lm", "Legacy", SolverBackend::Legacy(Solvers::LM)),
+            ("legacy-nr", "Legacy", SolverBackend::Legacy(Solvers::NR)),
+            ("legacy-tr", "Legacy", SolverBackend::Legacy(Solvers::TR)),
+        ];
+
+        println!("TP-1907 upper inventory facade backend acceptance matrix");
+        println!(
+            "| backend | family | status | scaled residual | raw residual | max physical balance | max component rel | max fraction error | topology |"
+        );
+        println!("|---|---|---|---:|---:|---:|---:|---:|---|");
+        let format_metric = |value: f64| {
+            if value.is_finite() {
+                format!("{value:.3e}")
+            } else {
+                "-".to_owned()
+            }
+        };
+
+        let mut rst_passes = 0;
+        let mut legacy_passes = 0;
+        let options = EquilibriumSolveOptions::default()
+            .with_max_iterations(500)
+            .expect("TP-1907 backend matrix iteration budget must validate")
+            .with_tolerance(1.0e-12)
+            .expect("TP-1907 backend matrix tolerance must validate");
+
+        for (name, family, backend) in backends {
+            let outcome = calculator_tp1907_builder(&fixture, repository())
+                .solve_options(options.clone())
+                .solver_policy(SolverPolicy::Single(backend))
+                .expect("TP-1907 single-backend policy must validate")
+                .at_temperature(reference.temperature_k)
+                .element_inventory(inventory.clone())
+                .element_numerical_seed(initial.clone())
+                .solve();
+
+            let (
+                status,
+                scaled_residual,
+                raw_residual,
+                max_balance,
+                max_component_relative,
+                max_fraction_error,
+                topology,
+                detail,
+            ) = match outcome {
+                Ok(EquilibriumCalculatorOutcome::PtPoint(point)) => {
+                    let solution = point.solution();
+                    let validation = solution.accepted_solution().validation();
+                    let moles = solution.component_moles();
+                    let max_balance = (0..element_matrix.ncols())
+                        .map(|element| {
+                            (0..element_matrix.nrows())
+                                .map(|species| element_matrix[(species, element)] * moles[species])
+                                .sum::<f64>()
+                                - reference_b[element]
+                        })
+                        .map(f64::abs)
+                        .fold(0.0_f64, f64::max);
+                    let mut max_component_relative = 0.0_f64;
+                    let mut component_accuracy = true;
+                    for (&expected, &actual) in molecular_solution
+                        .component_moles()
+                        .iter()
+                        .zip(moles.iter())
+                    {
+                        let absolute = (expected - actual).abs();
+                        let relative = absolute / expected.abs().max(actual.abs()).max(1.0e-30);
+                        max_component_relative = max_component_relative.max(relative);
+                        component_accuracy &= relative <= 1.0e-5 || absolute <= 1.0e-10;
+                    }
+                    let mut max_fraction_error = 0.0_f64;
+                    let mut fraction_accuracy = true;
+                    for component in molecular_solution.metadata().components() {
+                        let expected_fraction = molecular_solution
+                            .mole_fraction_for(component.id())
+                            .expect("molecular fraction must exist");
+                        let actual_fraction = solution
+                            .mole_fraction_for(component.id())
+                            .expect("backend fraction must exist");
+                        let error = (expected_fraction - actual_fraction).abs();
+                        max_fraction_error = max_fraction_error.max(error);
+                        fraction_accuracy &= error <= 1.0e-8;
+                    }
+                    let topology_accuracy = expected_topology
+                        .iter()
+                        .all(|(phase, expected)| solution.phase_status(phase) == *expected);
+                    let finite_non_negative =
+                        moles.iter().all(|value| value.is_finite() && *value >= 0.0);
+                    let accuracy = validation.residual_l2_norm <= 1.0e-5
+                        && validation.raw_residual_l2_norm <= 1.0e-5
+                        && max_balance <= 1.0e-6
+                        && component_accuracy
+                        && fraction_accuracy
+                        && topology_accuracy
+                        && finite_non_negative;
+                    let status = if accuracy {
+                        if family == "RST" {
+                            rst_passes += 1;
+                        } else {
+                            legacy_passes += 1;
+                        }
+                        "PASS"
+                    } else {
+                        "ACCURACY_FAIL"
+                    };
+                    (
+                        status,
+                        validation.residual_l2_norm,
+                        validation.raw_residual_l2_norm,
+                        max_balance,
+                        max_component_relative,
+                        max_fraction_error,
+                        topology_accuracy,
+                        String::new(),
+                    )
+                }
+                Ok(other) => (
+                    "HARD_FAIL",
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN,
+                    false,
+                    format!("unexpected facade outcome: {other:?}"),
+                ),
+                Err(error) => {
+                    let attempts = match &error {
+                        crate::Thermodynamics::ChemEquilibrium::equilibrium_calculator::EquilibriumCalculatorError::Solve(
+                            solve_error,
+                        )
+                        | crate::Thermodynamics::ChemEquilibrium::equilibrium_calculator::EquilibriumCalculatorError::Preparation(
+                            solve_error,
+                        ) => solve_error.backend_attempt_reports(),
+                        _ => Vec::new(),
+                    };
+                    let accuracy_failure = attempts.iter().any(|attempt| {
+                        matches!(
+                            attempt.outcome,
+                            SolverAttemptOutcome::RejectedCandidate { .. }
+                        )
+                    });
+                    (
+                        if accuracy_failure {
+                            "ACCURACY_FAIL"
+                        } else {
+                            "HARD_FAIL"
+                        },
+                        f64::NAN,
+                        f64::NAN,
+                        f64::NAN,
+                        f64::NAN,
+                        f64::NAN,
+                        false,
+                        attempts
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    )
+                }
+            };
+            println!(
+                "| {name} | {family} | {status} | {} | {} | {} | {} | {} | {topology} |",
+                format_metric(scaled_residual),
+                format_metric(raw_residual),
+                format_metric(max_balance),
+                format_metric(max_component_relative),
+                format_metric(max_fraction_error),
+            );
+            if !detail.is_empty() {
+                println!("  {name} detail: {detail}");
+            }
+        }
+
+        assert!(
+            legacy_passes > 0,
+            "TP-1907 upper inventory failed: no Legacy backend passed the physical acceptance matrix"
+        );
+        (rst_passes, legacy_passes)
     }
 
     #[test]
@@ -1458,7 +1775,1451 @@ mod tests {
 
     #[test]
     fn tp1907_frozen_facade_upper_inventory_matches_the_same_oracle() {
-        assert_tp1907_facade_inventory_scale(1.0e8, "upper");
+        let (rst_passes, _) = run_tp1907_upper_backend_acceptance_matrix();
+        assert!(
+            rst_passes > 0,
+            "TP-1907 upper inventory failed: no RST backend passed the physical acceptance matrix"
+        );
+    }
+
+    #[test]
+    fn tp1907_atom_view_and_expr_legacy_have_componentwise_callback_parity_at_the_seed() {
+        let fixture = fixture();
+        let prepared = prepared_fixed_tp1907_problem_at_scale(&fixture, 700.0, 1.0e8);
+        let (legacy, _) = prepare_rst_symbolic_problem_from_prepared_with_frontend(
+            &prepared,
+            crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingMode::Disabled,
+            SymbolicLambdifyFrontend::ExprLegacy,
+        )
+        .expect("TP-1907 ExprLegacy parity problem must prepare");
+        let (atom, _) = prepare_rst_symbolic_problem_from_prepared_with_frontend(
+            &prepared,
+            crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingMode::Disabled,
+            SymbolicLambdifyFrontend::AtomViewNative,
+        )
+        .expect("TP-1907 AtomView parity problem must prepare");
+        let seed = prepared.problem().initial_log_moles().as_slice();
+        let legacy_residual = legacy.residual_for_test(seed).unwrap();
+        let atom_residual = atom.residual_for_test(seed).unwrap();
+        let residual_drift = legacy_residual
+            .iter()
+            .zip(atom_residual.iter())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f64, f64::max);
+        let residual_scale = legacy_residual
+            .iter()
+            .chain(atom_residual.iter())
+            .map(|value| value.abs())
+            .fold(1.0_f64, f64::max);
+        let residual_relative_drift = residual_drift / residual_scale;
+        let legacy_jacobian = legacy.jacobian_for_test(seed).unwrap();
+        let atom_jacobian = atom.jacobian_for_test(seed).unwrap();
+        let jacobian_drift = legacy_jacobian
+            .iter()
+            .zip(atom_jacobian.iter())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f64, f64::max);
+        let jacobian_scale = legacy_jacobian
+            .iter()
+            .chain(atom_jacobian.iter())
+            .map(|value| value.abs())
+            .fold(1.0_f64, f64::max);
+        let jacobian_relative_drift = jacobian_drift / jacobian_scale;
+
+        println!(
+            "TP-1907 upper seed frontend parity max_residual_abs={residual_drift:.6e} max_residual_relative={residual_relative_drift:.6e} max_jacobian_abs={jacobian_drift:.6e} max_jacobian_relative={jacobian_relative_drift:.6e}"
+        );
+        assert!(residual_relative_drift <= 2e-9);
+        assert!(jacobian_relative_drift <= 1e-12);
+        assert!(legacy_residual.len() == atom_residual.len());
+        assert!(legacy_jacobian.shape() == atom_jacobian.shape());
+    }
+
+    #[test]
+    fn tp1907_upper_inventory_facade_atom_view_and_expr_legacy_match_published_equilibrium() {
+        let fixture = fixture();
+        let temperature_k = 700.0;
+        let scale = 1.0e8;
+        let initial = scaled_initial_composition(&fixture, scale);
+        let (inventory, _element_labels, reference_b) =
+            frozen_element_inventory(&fixture, &initial);
+        let solve = |frontend| {
+            with_test_rst_frontend(frontend, || {
+                calculator_tp1907_pt_with_element_seed(
+                    &fixture,
+                    repository(),
+                    temperature_k,
+                    inventory.clone(),
+                    initial.clone(),
+                )
+            })
+        };
+        let expr_point = solve(SymbolicLambdifyFrontend::ExprLegacy);
+        let atom_point = solve(SymbolicLambdifyFrontend::AtomViewNative);
+        let expr = expr_point.solution();
+        let atom = atom_point.solution();
+        let expr_components = expr.metadata().components();
+        let atom_components = atom.metadata().components();
+        assert_eq!(expr_components.len(), atom_components.len());
+
+        let mut max_fraction_difference = 0.0_f64;
+        let mut max_component_relative_difference = 0.0_f64;
+        for (expr_component, atom_component) in expr_components.iter().zip(atom_components) {
+            assert_eq!(expr_component.id(), atom_component.id());
+            let expr_fraction = expr
+                .mole_fraction_for(expr_component.id())
+                .expect("ExprLegacy fraction must exist");
+            let atom_fraction = atom
+                .mole_fraction_for(atom_component.id())
+                .expect("AtomView fraction must exist");
+            max_fraction_difference =
+                max_fraction_difference.max((expr_fraction - atom_fraction).abs());
+        }
+        for (&expr_moles, &atom_moles) in expr.component_moles().iter().zip(atom.component_moles())
+        {
+            let relative = (expr_moles - atom_moles).abs()
+                / expr_moles.abs().max(atom_moles.abs()).max(1.0e-30);
+            max_component_relative_difference = max_component_relative_difference.max(relative);
+        }
+        let topology_matches = expr
+            .metadata()
+            .phases()
+            .iter()
+            .all(|phase| expr.phase_status(phase.id()) == atom.phase_status(phase.id()));
+        let temperature_difference =
+            (expr.conditions().temperature() - atom.conditions().temperature()).abs();
+        let expr_validation = expr.accepted_solution().validation();
+        let atom_validation = atom.accepted_solution().validation();
+        let expr_backend = expr.solve_report().accepted_backend;
+        let atom_backend = atom.solve_report().accepted_backend;
+
+        println!(
+            "TP-1907 facade frontend A/B scale={scale:.1e} ExprLegacy_backend={expr_backend:?} AtomView_backend={atom_backend:?} ExprLegacy_T={:.9} K AtomView_T={:.9} K delta_T={temperature_difference:.3e} max_abs_fraction_delta={max_fraction_difference:.6e} max_component_relative_delta={max_component_relative_difference:.6e} ExprLegacy_balance={:.6e} AtomView_balance={:.6e} topology_matches={topology_matches}",
+            expr.conditions().temperature(),
+            atom.conditions().temperature(),
+            expr_validation.max_abs_element_balance_error,
+            atom_validation.max_abs_element_balance_error,
+        );
+        for component in expr_components {
+            let expr_fraction = expr
+                .mole_fraction_for(component.id())
+                .expect("ExprLegacy fraction must exist");
+            let atom_fraction = atom
+                .mole_fraction_for(component.id())
+                .expect("AtomView fraction must exist");
+            println!(
+                "  {:32} ExprLegacy={expr_fraction:.12e} AtomView={atom_fraction:.12e} abs_delta={:.6e}",
+                component.label(),
+                (expr_fraction - atom_fraction).abs(),
+            );
+        }
+        assert_eq!(expr.conditions().temperature(), temperature_k);
+        assert_eq!(atom.conditions().temperature(), temperature_k);
+        assert_eq!(expr_backend, atom_backend);
+        let balance_tolerance = 1.0e-12 * reference_b.iter().sum::<f64>();
+        assert!(expr_validation.max_abs_element_balance_error <= balance_tolerance);
+        assert!(atom_validation.max_abs_element_balance_error <= balance_tolerance);
+        assert!(topology_matches);
+        assert!(max_fraction_difference <= 1.0e-8);
+        assert!(max_component_relative_difference <= 1.0e-5);
+    }
+
+    #[test]
+    fn tp1907_upper_inventory_records_frontend_acceptance_parity() {
+        let expr = with_test_rst_frontend(SymbolicLambdifyFrontend::ExprLegacy, || {
+            run_tp1907_upper_backend_acceptance_matrix()
+        });
+        let atom = with_test_rst_frontend(SymbolicLambdifyFrontend::AtomViewNative, || {
+            run_tp1907_upper_backend_acceptance_matrix()
+        });
+        println!(
+            "TP-1907 upper inventory frontend acceptance ExprLegacy RST_passes={} Legacy_passes={} AtomView RST_passes={} Legacy_passes={}",
+            expr.0, expr.1, atom.0, atom.1
+        );
+        assert!(expr.0 > 0, "ExprLegacy must retain its accepted RST route");
+        assert!(
+            expr.1 > 0 && atom.1 > 0,
+            "legacy controls must pass for both runs"
+        );
+        assert_eq!(
+            expr.0, atom.0,
+            "RST frontend acceptance count changed at the upper inventory scale"
+        );
+        assert!(atom.0 > 0, "AtomView must retain an accepted RST backend");
+        assert_eq!(
+            expr.1, atom.1,
+            "legacy control acceptance changed by frontend"
+        );
+    }
+
+    /// Exports the accepted KiThe facade state as a deterministic RST parity
+    /// fixture. This is intentionally ignored: it is a diagnostic hand-off,
+    /// not another production solve or correctness gate.
+    #[test]
+    #[ignore = "emit the full KiThe/RST parity fixture for the RustedSciThe test suite"]
+    fn tp1907_upper_inventory_emits_paste_ready_rst_parity_fixture() {
+        let fixture = fixture();
+        let inventory_scale = 1.0e8;
+        let temperature_k = 700.0;
+        let pressure_pa = TP1907_REFERENCE_PRESSURE_PA;
+        let initial_composition = scaled_initial_composition(&fixture, inventory_scale);
+        let (inventory, element_labels, element_totals_b) =
+            frozen_element_inventory(&fixture, &initial_composition);
+        let normalization = ExtensiveNormalization::from_element_inventory(&inventory)
+            .expect("TP-1907 parity inventory normalization must validate");
+        let prepared =
+            prepared_fixed_tp1907_problem_at_scale(&fixture, temperature_k, inventory_scale);
+        let rst_problem = prepare_rst_symbolic_problem_from_prepared(&prepared)
+            .expect("TP-1907 parity RST problem must prepare");
+        let (equations, variables, parameter_values, parameters) =
+            rst_problem.symbolic_payload_for_test();
+        let initial_log_moles = prepared.problem().initial_log_moles().as_slice().to_vec();
+        let bounds = rst_problem.log_mole_bounds_for_test();
+        let (element_matrix, _, matrix_element_labels) = element_composition_and_molar_mass(
+            fixture.resolved().phase_data(),
+            fixture.resolved().layout(),
+            None,
+        )
+        .expect("TP-1907 parity element matrix must remain available");
+        assert_eq!(element_labels, matrix_element_labels);
+        assert_eq!(variables.len(), 18);
+        assert_eq!(equations.len(), 18);
+        assert_eq!(initial_log_moles.len(), 18);
+        assert_eq!(element_totals_b.len(), element_labels.len());
+
+        let options = EquilibriumSolveOptions::default()
+            .with_max_iterations(500)
+            .expect("TP-1907 parity iteration budget must validate")
+            .with_tolerance(1.0e-12)
+            .expect("TP-1907 parity tolerance must validate");
+        RustedSciTheSolver::begin_history_capture_for_test();
+        let outcome = calculator_tp1907_builder(&fixture, repository())
+            .solve_options(options)
+            .solver_policy(SolverPolicy::Single(SolverBackend::RustedSciThe(
+                RustedSciTheSolver::TrustRegionLevenbergMarquardt,
+            )))
+            .expect("TP-1907 parity solver policy must validate")
+            .at_temperature(temperature_k)
+            .element_inventory(inventory.clone())
+            .element_numerical_seed(initial_composition.clone())
+            .solve()
+            .expect("TP-1907 accepting RST facade route must solve");
+        let captured_results = RustedSciTheSolver::take_history_capture_for_test();
+        let point = match outcome {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected TP-1907 parity point, got {other:?}"),
+        };
+        let solution = point.solution();
+        let accepted = solution.accepted_solution();
+        let y_final = accepted.log_moles().to_vec();
+        let physical_moles = y_final.iter().map(|value| value.exp()).collect::<Vec<_>>();
+        let numerical_moles = accepted.moles().to_vec();
+        let published_moles = solution.component_moles().to_vec();
+        assert_eq!(y_final.len(), 18);
+        assert!(y_final.iter().all(|value| value.is_finite()));
+        assert!(
+            physical_moles
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+        );
+
+        let raw_residual = rst_problem
+            .residual_for_test(&y_final)
+            .expect("TP-1907 parity raw residual must be evaluable");
+        let raw_jacobian = rst_problem
+            .jacobian_for_test(&y_final)
+            .expect("TP-1907 parity raw Jacobian must be evaluable");
+        let row_scale = prepared
+            .residual_scale()
+            .expect("TP-1907 parity row scaling must remain available");
+        let scaled_residual = prepared
+            .scaled_residual(&y_final, &row_scale)
+            .expect("TP-1907 parity scaled residual must be evaluable");
+        let analytic_scaled_jacobian = prepared
+            .scaled_jacobian(&y_final, &row_scale)
+            .expect("TP-1907 parity scaled Jacobian must be evaluable");
+        assert_eq!(raw_residual.len(), 18);
+        assert_eq!(raw_jacobian.nrows(), 18);
+        assert_eq!(raw_jacobian.ncols(), 18);
+        assert_eq!(scaled_residual.len(), 18);
+        assert_eq!(analytic_scaled_jacobian.nrows(), 18);
+        assert_eq!(analytic_scaled_jacobian.ncols(), 18);
+
+        let raw_jt_f = raw_jacobian.transpose() * &raw_residual;
+        let scaled_jt_f = analytic_scaled_jacobian.transpose()
+            * nalgebra::DVector::from_vec(scaled_residual.clone());
+        let numerical_balance = (0..element_matrix.ncols())
+            .map(|element| {
+                (0..element_matrix.nrows())
+                    .map(|species| element_matrix[(species, element)] * physical_moles[species])
+                    .sum::<f64>()
+                    - element_totals_b[element]
+            })
+            .collect::<Vec<_>>();
+        let max_abs_element_balance_error = numerical_balance
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+        let published_balance = (0..element_matrix.ncols())
+            .map(|element| {
+                (0..element_matrix.nrows())
+                    .map(|species| element_matrix[(species, element)] * published_moles[species])
+                    .sum::<f64>()
+                    - element_totals_b[element]
+            })
+            .collect::<Vec<_>>();
+        let max_abs_published_element_balance_error = published_balance
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+        let validation = accepted.validation();
+        let graphite = PhaseId::new(Some(TP1907_GRAPHITE_PHASE.to_owned()));
+        let graphite_status = solution.phase_status(&graphite);
+        let graphite_total = solution.phase_total(&graphite);
+        let graphite_tpd = graphite_final_tpd(solution);
+
+        let contract = RustedSciTheSolveContract::new(1.0e-12, 500)
+            .expect("TP-1907 parity RST contract must validate");
+        let direct_result = RustedSciTheSolver::TrustRegionLevenbergMarquardt
+            .solve_with_history_for_test(&rst_problem, &initial_log_moles, &contract)
+            .expect("TP-1907 direct RST parity replay must return a result");
+        let normalization_scale = normalization.physical_inventory_scale();
+        let normalized_result = captured_results
+            .iter()
+            .filter(|result| format!("{:?}", result.termination) == "Converged")
+            .max_by_key(|result| result.iterations)
+            .expect("TP-1907 facade recovery must capture a converged normalized RST attempt");
+        let normalized_reconstructed_y = normalized_result
+            .x
+            .iter()
+            .map(|value| value + normalization_scale.ln())
+            .collect::<Vec<_>>();
+        let max_normalized_reconstructed_y_error = y_final
+            .iter()
+            .zip(normalized_reconstructed_y.iter())
+            .map(|(&facade, &reconstructed)| (facade - reconstructed).abs())
+            .fold(0.0_f64, f64::max);
+        let max_facade_direct_y_error = y_final
+            .iter()
+            .zip(direct_result.x.iter())
+            .map(|(&facade, &direct)| (facade - direct).abs())
+            .fold(0.0_f64, f64::max);
+
+        let format_vec = |values: &[f64]| {
+            values
+                .iter()
+                .map(|value| format!("{value:.17e}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let format_matrix = |matrix: &nalgebra::DMatrix<f64>| {
+            matrix
+                .row_iter()
+                .map(|row| {
+                    format!(
+                        "    vec![{}]",
+                        row.iter()
+                            .map(|value| format!("{value:.17e}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",\n")
+        };
+        let phase_status_rows = solution
+            .phases()
+            .iter()
+            .map(|phase| {
+                let phase_id = format!("{:?}", phase.id());
+                let physical_state = format!("{:?}", phase.physical_state());
+                let phase_model = format!("{:?}", phase.phase_model());
+                let activity_model = format!("{:?}", phase.activity_model());
+                let status = format!("{:?}", solution.phase_status(phase.id()));
+                format!(
+                    "    ({phase_id:?}.to_string(), {physical_state:?}.to_string(), {phase_model:?}.to_string(), {activity_model:?}.to_string(), {status:?}.to_string(), {:?}),",
+                    solution.phase_total(phase.id())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let accepted_backend_name = format!("{:?}", solution.solve_report().accepted_backend);
+        let recovery_used = solution.extensive_normalization_recovery().is_some();
+        let recovery_discovery_backend = solution
+            .extensive_normalization_recovery()
+            .map(|evidence| format!("{:?}", evidence.discovery_backend));
+        let recovery_physical_retry_backend = solution
+            .extensive_normalization_recovery()
+            .and_then(|evidence| evidence.physical_retry_backend.as_ref())
+            .map(|backend| format!("{:?}", backend));
+        let reconstructed_physical_boundary = solution
+            .extensive_normalization_recovery()
+            .map(|evidence| evidence.reconstructed_physical_boundary)
+            .unwrap_or(false);
+
+        println!("TP1907 KiThe/RST strict parity fixture");
+        println!("// source: NASA TP-1907 CHON + graphite, accepted fixed P,T facade route");
+        println!(
+            "// requested policy: elemental ElementInventory -> explicit Single RST Trust-Region LM"
+        );
+        println!(
+            "// actual accepted route: physical attempt -> extensive normalization -> normalized RST discovery -> failed physical retry -> reconstructed physical publication"
+        );
+        println!(
+            "// temperature_k: {temperature_k:.17e}; pressure_pa: {pressure_pa:.17e}; inventory_scale: {inventory_scale:.17e}"
+        );
+        println!(
+            "// The fixture is emitted from the accepted facade state; no second solver determines y_final."
+        );
+        println!(
+            "// Coordinates: y[i] = ln(n[i]); n[i] = exp(y[i]); no dependent-variable elimination."
+        );
+        println!(
+            "// Rows 0..13 are reaction-affinity equations; rows 13..18 are elemental balances A*n-b."
+        );
+        println!("// F_raw(y) = [reaction-affinity rows; A*n-b].");
+        println!(
+            "// residual_row_scale_w is denominator D: F_scaled[i] = F_raw[i] / D[i], W=diag(1/D)."
+        );
+        println!(
+            "// Reaction D rows are reaction-norm scales; balance D rows are abs(b[e]) with unit fallback at zero."
+        );
+        println!(
+            "// Bounds are adapter log-mole roundoff bounds; exp(y) is strictly positive before publication."
+        );
+        println!(
+            "// Published inactive-phase amounts may be zero; phase control is external active-set/TPD logic."
+        );
+        println!(
+            "// At this point graphite must be active and its final TPD is checked by the facade acceptance report."
+        );
+        println!(
+            "// This is the same 18-variable/18-row prepared graph exported by the RST adapter."
+        );
+        println!(
+            "// The facade acceptance report may retain normalized-recovery solver norms; the raw/scaled vectors and physical balances below are freshly recomputed on this physical y_final."
+        );
+        println!("let accepted_backend: &str = {accepted_backend_name:?};");
+        println!(
+            "let active_topology: &str = {:?};",
+            active_phase_topology(solution)
+        );
+        println!(
+            "let started_backend_attempts: usize = {};",
+            solution.started_backend_attempts()
+        );
+        println!("let used_extensive_normalization_recovery: bool = {recovery_used};");
+        println!("let normalization_scale: f64 = {normalization_scale:.17e};");
+        println!(
+            "let recovery_discovery_backend: Option<&str> = {:?};",
+            recovery_discovery_backend.as_deref()
+        );
+        println!(
+            "let recovery_physical_retry_backend: Option<&str> = {:?};",
+            recovery_physical_retry_backend.as_deref()
+        );
+        println!("let reconstructed_physical_boundary: bool = {reconstructed_physical_boundary};");
+        println!(
+            "// accepted backend: {:?}; started attempts: {}; active topology: {}.",
+            solution.solve_report().accepted_backend,
+            solution.started_backend_attempts(),
+            active_phase_topology(solution)
+        );
+        println!(
+            "// extensive normalization/recovery evidence: {:?}",
+            solution.extensive_normalization_recovery()
+        );
+        println!(
+            "let equations_fnv1a64: &str = \"0x{:016x}\";",
+            stable_equation_hash(&equations)
+        );
+        println!(
+            "let equations: Vec<String> = vec![{}];",
+            equations
+                .iter()
+                .map(|value| format!("{value:?}.to_string()"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "let variables: Vec<String> = vec![{}];",
+            variables
+                .iter()
+                .map(|value| format!("{value:?}.to_string()"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "let equation_parameters: Vec<String> = vec![{}];",
+            parameters
+                .iter()
+                .map(|value| format!("{value:?}.to_string()"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "let equation_parameter_values: Vec<f64> = vec![{}];",
+            format_vec(&parameter_values)
+        );
+        println!(
+            "let element_labels: Vec<String> = vec![{}];",
+            element_labels
+                .iter()
+                .map(|value| format!("{value:?}.to_string()"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "let element_totals_b: Vec<f64> = vec![{}];",
+            format_vec(&element_totals_b)
+        );
+        println!(
+            "let species_order: Vec<String> = vec![{}];",
+            prepared
+                .problem()
+                .species()
+                .iter()
+                .map(|value| format!("{value:?}.to_string()"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!("let element_composition_a_element_by_species: Vec<Vec<f64>> = vec![");
+        for element in 0..element_matrix.ncols() {
+            println!(
+                "    vec![{}], // A[{}={}]",
+                (0..element_matrix.nrows())
+                    .map(|species| format!("{:.17e}", element_matrix[(species, element)]))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                element,
+                element_labels[element]
+            );
+        }
+        println!("];");
+        println!(
+            "let species_phase: Vec<usize> = vec![{}];",
+            prepared
+                .species_phase()
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "let residual_row_scale_w: Vec<f64> = vec![{}];",
+            format_vec(&row_scale)
+        );
+        println!(
+            "let initial_log_moles: Vec<f64> = vec![{}];",
+            format_vec(&initial_log_moles)
+        );
+        println!(
+            "let log_mole_bounds: Option<Vec<(f64, f64)>> = {};",
+            bounds.as_ref().map_or_else(
+                || "None".to_owned(),
+                |values| format!(
+                    "Some(vec![{}])",
+                    values
+                        .iter()
+                        .map(|(lower, upper)| format!("({lower:.17e}, {upper:.17e})"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            )
+        );
+        println!("let y_final: Vec<f64> = vec![{}];", format_vec(&y_final));
+        println!(
+            "let physical_moles_from_y_final: Vec<f64> = vec![{}];",
+            format_vec(&physical_moles)
+        );
+        println!(
+            "let numerical_moles_from_accepted_solution: Vec<f64> = vec![{}];",
+            format_vec(&numerical_moles)
+        );
+        println!(
+            "let published_component_moles: Vec<f64> = vec![{}];",
+            format_vec(&published_moles)
+        );
+        println!(
+            "let phase_status_rows: Vec<(String, String, String, String, String, Option<f64>)> = vec!["
+        );
+        print!("{phase_status_rows}");
+        println!("];");
+        println!(
+            "let graphite_status: Option<String> = {:?};",
+            graphite_status.map(|status| format!("{status:?}"))
+        );
+        println!("let graphite_total: Option<f64> = {:?};", graphite_total);
+        println!("let graphite_final_minimum_tpd: f64 = {graphite_tpd:.17e};");
+        println!(
+            "let raw_residual: Vec<f64> = vec![{}];",
+            format_vec(raw_residual.as_slice())
+        );
+        println!(
+            "let scaled_residual: Vec<f64> = vec![{}];",
+            format_vec(scaled_residual.as_slice())
+        );
+        println!(
+            "let raw_jacobian: Vec<Vec<f64>> = vec![\n{}\n];",
+            format_matrix(&raw_jacobian)
+        );
+        println!(
+            "let scaled_jacobian: Vec<Vec<f64>> = vec![\n{}\n];",
+            format_matrix(&analytic_scaled_jacobian)
+        );
+        println!(
+            "let jt_f_raw: Vec<f64> = vec![{}];",
+            format_vec(raw_jt_f.as_slice())
+        );
+        println!(
+            "let jt_f_scaled: Vec<f64> = vec![{}];",
+            format_vec(scaled_jt_f.as_slice())
+        );
+        println!(
+            "let raw_residual_l2: f64 = {:.17e};",
+            l2_norm(raw_residual.as_slice())
+        );
+        println!(
+            "let scaled_residual_l2: f64 = {:.17e};",
+            l2_norm(scaled_residual.as_slice())
+        );
+        println!(
+            "let raw_element_balance: Vec<f64> = vec![{}];",
+            format_vec(&numerical_balance)
+        );
+        println!("let max_abs_element_balance_error: f64 = {max_abs_element_balance_error:.17e};");
+        println!(
+            "let published_element_balance: Vec<f64> = vec![{}];",
+            format_vec(&published_balance)
+        );
+        println!(
+            "let max_abs_published_element_balance_error: f64 = {max_abs_published_element_balance_error:.17e};"
+        );
+        println!(
+            "// KiThe validation: scaled residual L2 = {:.17e}; raw residual L2 = {:.17e}; max reported physical balance = {:.17e}.",
+            validation.residual_l2_norm,
+            validation.raw_residual_l2_norm,
+            validation.max_abs_element_balance_error
+        );
+        println!(
+            "// Current facade publication acceptance uses published moles: max |A*n_published-b| <= 1e-6. A strict RST exp(y_final) transfer check must use max_abs_element_balance_error separately."
+        );
+        println!(
+            "// Proposed transfer acceptance: raw/scaled residual L2 <= 1e-5, physical max |A*n-b| <= 1e-6, finite/non-negative publication, exact ordering/topology, TPD phase-control checks."
+        );
+        println!(
+            "// In this run exp(y_final) balance is {:.17e}, while published balance is {:.17e}; retain both values to expose log/exp round-trip error rather than silently substituting publication moles.",
+            max_abs_element_balance_error, max_abs_published_element_balance_error
+        );
+        println!(
+            "// Direct RST replay starts from the original physical seed, while y_final is the accepted facade state; this is not asserted equal because facade basin preparation/recovery may change coordinates."
+        );
+        println!("let max_facade_direct_y_error: f64 = {max_facade_direct_y_error:.17e};");
+        println!(
+            "// Direct raw RST replay termination = {:?}; residual_l2 = {:.17e}.",
+            direct_result.termination, direct_result.residual_norm
+        );
+        println!(
+            "let normalized_discovery_reconstructed_y: Vec<f64> = vec![{}];",
+            format_vec(&normalized_reconstructed_y)
+        );
+        println!(
+            "let max_normalized_reconstructed_y_error: f64 = {max_normalized_reconstructed_y_error:.17e};"
+        );
+        println!(
+            "// The normalized discovery replay uses the same elemental inventory scaling and numerical seed as the accepted recovery route; its denormalized y is compared with y_final below."
+        );
+        println!(
+            "// RST 0.4.17 history exposes iteration, post-step residual norm, step norm, and accepted flag only."
+        );
+        println!(
+            "// lambda, regularization form, trial alpha, exact residual-before/after for internal retries, and per-iteration termination are not public in this version; they are emitted as None below rather than inferred."
+        );
+        println!(
+            "#[derive(Debug, Clone)] struct IterationTraceRow {{ iteration: usize, residual_norm_before: Option<f64>, lambda: Option<f64>, regularization: Option<&'static str>, trial_alpha: Option<f64>, accepted: bool, residual_norm_after: f64, step_norm: f64, termination: Option<&'static str> }}"
+        );
+        println!("let iteration_trace_last_20: Vec<IterationTraceRow> = vec![");
+        let history_start = normalized_result.history.len().saturating_sub(20);
+        for (position, record) in normalized_result
+            .history
+            .iter()
+            .enumerate()
+            .skip(history_start)
+        {
+            let before = if position > 0 {
+                Some(normalized_result.history[position - 1].residual_norm)
+            } else {
+                None
+            };
+            println!(
+                "    IterationTraceRow {{ iteration: {}, residual_norm_before: {:?}, lambda: None, regularization: None, trial_alpha: None, accepted: {}, residual_norm_after: {:.17e}, step_norm: {:.17e}, termination: None }},",
+                record.iteration, before, record.accepted, record.residual_norm, record.step_norm
+            );
+        }
+        println!("];");
+        println!(
+            "let final_termination: &str = {:?};",
+            format!("{:?}", normalized_result.termination)
+        );
+        println!(
+            "// Aggregate RST calls: residual={} jacobian={} linear_solves={} iterations={} accepted_steps={} rejected_steps={} total_duration_us={}.",
+            normalized_result.statistics.residual_evaluations,
+            normalized_result.statistics.jacobian_evaluations,
+            normalized_result.statistics.linear_solves,
+            normalized_result.statistics.iterations,
+            normalized_result.statistics.accepted_steps,
+            normalized_result.statistics.rejected_steps,
+            normalized_result.statistics.total_duration.as_micros()
+        );
+    }
+
+    /// Proves that the exact equation strings exported from KiThe preserve
+    /// both residual and Jacobian semantics when rebuilt through RST's public
+    /// parser. This catches a lossy `Expr::to_string()` hand-off before an RST
+    /// reproducer is used to diagnose solver behavior.
+    #[test]
+    #[ignore = "currently exposes RST parser incompatibility with Expr::to_string() output"]
+    fn tp1907_upper_inventory_symbolic_string_round_trip_matches_original_graph() {
+        let fixture = fixture();
+        let inventory_scale = 1.0e8;
+        let temperature_k = 700.0;
+        let initial_composition = scaled_initial_composition(&fixture, inventory_scale);
+        let (inventory, _, _) = frozen_element_inventory(&fixture, &initial_composition);
+        let prepared =
+            prepared_fixed_tp1907_problem_at_scale(&fixture, temperature_k, inventory_scale);
+        let rst_problem = prepare_rst_symbolic_problem_from_prepared(&prepared)
+            .expect("TP-1907 round-trip source graph must prepare");
+        let (equations, variables, parameter_values, parameters) =
+            rst_problem.symbolic_payload_for_test();
+        let equation_hash = stable_equation_hash(&equations);
+        println!("TP1907 equation_hash_fnv1a64=0x{equation_hash:016x}");
+
+        for (index, equation) in equations.iter().enumerate() {
+            let parsed = catch_unwind(AssertUnwindSafe(|| Expr::parse_expression(equation)));
+            if parsed.is_err() {
+                panic!("TP-1907 exported equation {index} is rejected by RST parser: {equation:?}");
+            }
+        }
+
+        let options = SymbolicProblemOptions::new()
+            .with_variables(variables.clone())
+            .with_equation_parameters(parameters.clone())
+            .with_equation_parameter_values(DVector::from_vec(parameter_values.clone()))
+            .with_lambdify_execution_policy(LambdifyExecutionPolicy::Parallel { min_work: 1 })
+            .with_lambdify_backend();
+        let reparsed_problem =
+            SymbolicNonlinearProblem::from_strings_with_options(equations.to_vec(), options)
+                .expect("TP-1907 exported equations must parse through public RST string API");
+
+        let solve_options = EquilibriumSolveOptions::default()
+            .with_max_iterations(500)
+            .expect("TP-1907 round-trip iteration budget must validate")
+            .with_tolerance(1.0e-12)
+            .expect("TP-1907 round-trip tolerance must validate");
+        let outcome = calculator_tp1907_builder(&fixture, repository())
+            .solve_options(solve_options)
+            .solver_policy(SolverPolicy::Single(SolverBackend::RustedSciThe(
+                RustedSciTheSolver::TrustRegionLevenbergMarquardt,
+            )))
+            .expect("TP-1907 round-trip solver policy must validate")
+            .at_temperature(temperature_k)
+            .element_inventory(inventory)
+            .element_numerical_seed(initial_composition)
+            .solve()
+            .expect("TP-1907 round-trip facade route must accept the solution");
+        let point = match outcome {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected TP-1907 round-trip point, got {other:?}"),
+        };
+        let y_final = DVector::from_vec(point.solution().accepted_solution().log_moles().to_vec());
+        assert_eq!(y_final.len(), equations.len());
+        assert_eq!(y_final.len(), variables.len());
+
+        let original_residual = rst_problem
+            .residual_for_test(y_final.as_slice())
+            .expect("original TP-1907 graph residual must evaluate");
+        let original_jacobian = rst_problem
+            .jacobian_for_test(y_final.as_slice())
+            .expect("original TP-1907 graph Jacobian must evaluate");
+        let reparsed_residual = reparsed_problem
+            .residual(&y_final)
+            .expect("reparsed TP-1907 graph residual must evaluate");
+        let reparsed_jacobian = reparsed_problem
+            .jacobian(&y_final)
+            .expect("reparsed TP-1907 graph Jacobian must evaluate");
+
+        let residual_differences = original_residual
+            .iter()
+            .zip(reparsed_residual.iter())
+            .map(|(original, reparsed)| (original - reparsed).abs())
+            .collect::<Vec<_>>();
+        let max_abs_residual_difference =
+            residual_differences.iter().copied().fold(0.0_f64, f64::max);
+        let mut max_abs_jacobian_difference = 0.0_f64;
+        let mut first_jacobian_difference = None;
+        for row in 0..original_jacobian.nrows() {
+            for column in 0..original_jacobian.ncols() {
+                let original = original_jacobian[(row, column)];
+                let reparsed = reparsed_jacobian[(row, column)];
+                let difference = (original - reparsed).abs();
+                if difference > max_abs_jacobian_difference {
+                    max_abs_jacobian_difference = difference;
+                }
+                if first_jacobian_difference.is_none() && difference != 0.0 {
+                    first_jacobian_difference = Some((row, column, original, reparsed, difference));
+                }
+            }
+        }
+        let first_residual_difference = residual_differences
+            .iter()
+            .enumerate()
+            .find(|(_, difference)| **difference != 0.0)
+            .map(|(row, difference)| {
+                (
+                    row,
+                    original_residual[row],
+                    reparsed_residual[row],
+                    *difference,
+                )
+            });
+        println!("TP1907 KiThe/RST symbolic string round-trip");
+        println!(
+            "case=upper-inventory scale={inventory_scale:.17e} temperature_k={temperature_k:.17e}"
+        );
+        println!(
+            "equation_count={} variable_count={} parameter_count={}",
+            equations.len(),
+            variables.len(),
+            parameters.len()
+        );
+        println!("equation_hash_fnv1a64=0x{equation_hash:016x}");
+        println!("max_abs_residual_difference={max_abs_residual_difference:.17e}");
+        println!("max_abs_jacobian_difference={max_abs_jacobian_difference:.17e}");
+        println!(
+            "original_residual_l2={:.17e}",
+            l2_norm(original_residual.as_slice())
+        );
+        println!(
+            "reparsed_residual_l2={:.17e}",
+            l2_norm(reparsed_residual.as_slice())
+        );
+        println!("first_residual_difference={first_residual_difference:?}");
+        println!("first_jacobian_difference={first_jacobian_difference:?}");
+        println!("variables={variables:?}");
+        println!("equation_parameters={parameters:?}");
+        println!("equation_parameter_values={parameter_values:?}");
+        println!("canonical_equations:");
+        for (index, equation) in equations.iter().enumerate() {
+            println!("  [{index}] {equation:?}");
+        }
+
+        assert!(
+            max_abs_residual_difference <= 1.0e-12,
+            "TP-1907 Expr::to_string() residual round-trip drift is {max_abs_residual_difference:.17e}; first={first_residual_difference:?}"
+        );
+        assert!(
+            max_abs_jacobian_difference <= 1.0e-12,
+            "TP-1907 Expr::to_string() Jacobian round-trip drift is {max_abs_jacobian_difference:.17e}; first={first_jacobian_difference:?}"
+        );
+    }
+
+    /// Emits a self-contained RST reproducer for the currently fragile upper
+    /// inventory scale. This is intentionally ignored: it is a hand-off
+    /// artifact for RustedSciThe solver development, not a production gate.
+    #[test]
+    #[ignore = "paste the emitted symbolic payload into the RustedSciThe test suite"]
+    fn tp1907_upper_inventory_emits_paste_ready_rst_symbolic_problem() {
+        let fixture = fixture();
+        let inventory_scale = 1.0e8;
+        let initial_composition = scaled_initial_composition(&fixture, inventory_scale);
+        let (inventory, element_labels, element_totals_b) =
+            frozen_element_inventory(&fixture, &initial_composition);
+        let normalization = ExtensiveNormalization::from_element_inventory(&inventory)
+            .expect("TP-1907 elemental inventory must define normalization");
+        let prepared = prepared_fixed_tp1907_problem_at_scale(&fixture, 700.0, inventory_scale);
+        let rst_problem = prepare_rst_symbolic_problem_from_prepared(&prepared)
+            .expect("TP-1907 upper-scale RST problem must prepare");
+        let (equations, variables, parameter_values, parameters) =
+            rst_problem.symbolic_payload_for_test();
+        let initial = prepared.problem().initial_log_moles().as_slice().to_vec();
+        let bounds = rst_problem.log_mole_bounds_for_test();
+        let (element_matrix, _, matrix_element_labels) = element_composition_and_molar_mass(
+            fixture.resolved().phase_data(),
+            fixture.resolved().layout(),
+            None,
+        )
+        .expect("TP-1907 element matrix must remain available");
+        assert_eq!(element_labels, matrix_element_labels);
+
+        let singular_values = rst_problem
+            .jacobian_for_test(&initial)
+            .expect("TP-1907 Jacobian must remain evaluable")
+            .svd(false, false)
+            .singular_values;
+        let largest_singular_value = singular_values.iter().copied().fold(0.0_f64, f64::max);
+        let rank_tolerance = 1.0e-12 * largest_singular_value.max(1.0);
+        let numerical_rank = singular_values
+            .iter()
+            .filter(|&&value| value > rank_tolerance)
+            .count();
+        assert_eq!(equations.len(), 18);
+        assert_eq!(variables.len(), 18);
+        assert_eq!(numerical_rank, 17);
+
+        let oracle_options = EquilibriumSolveOptions::default()
+            .with_max_iterations(500)
+            .expect("TP-1907 oracle iteration budget must validate")
+            .with_tolerance(1.0e-12)
+            .expect("TP-1907 oracle tolerance must validate");
+        let molecular_oracle = calculator_tp1907_builder(&fixture, repository())
+            .solve_options(oracle_options)
+            .solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::TR)))
+            .expect("TP-1907 independent oracle policy must validate")
+            .at_temperature(700.0)
+            .initial_moles(initial_composition.moles().to_vec())
+            .solve()
+            .expect("TP-1907 legacy-TR molecular oracle must solve");
+        let molecular_oracle = match molecular_oracle {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected TP-1907 molecular oracle point, got {other:?}"),
+        };
+        let oracle_solution = molecular_oracle.solution();
+        let oracle_log_moles = oracle_solution
+            .accepted_solution()
+            .log_moles()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let oracle_numerical_moles = oracle_solution
+            .accepted_solution()
+            .moles()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let oracle_published_moles = oracle_solution
+            .component_moles()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let oracle_mole_fractions = oracle_solution
+            .metadata()
+            .components()
+            .iter()
+            .map(|component| {
+                oracle_solution
+                    .mole_fraction_for(component.id())
+                    .expect("TP-1907 oracle mole fraction must exist")
+            })
+            .collect::<Vec<_>>();
+        let oracle_raw_residual = prepared
+            .residual(&oracle_log_moles)
+            .expect("TP-1907 oracle raw residual must remain evaluable");
+        let row_scale = prepared
+            .residual_scale()
+            .expect("TP-1907 row scaling contract must remain available");
+        let oracle_scaled_residual = prepared
+            .scaled_residual(&oracle_log_moles, &row_scale)
+            .expect("TP-1907 oracle scaled residual must remain evaluable");
+        let oracle_element_balance = (0..element_matrix.ncols())
+            .map(|element| {
+                (0..element_matrix.nrows())
+                    .map(|species| {
+                        element_matrix[(species, element)] * oracle_numerical_moles[species]
+                    })
+                    .sum::<f64>()
+                    - element_totals_b[element]
+            })
+            .collect::<Vec<_>>();
+        let phase_manager = PhaseControlPolicy::default().into_phase_manager();
+        let (dg_create, dg_keep) = phase_manager
+            .thresholds_at(700.0)
+            .expect("TP-1907 phase hysteresis thresholds must resolve");
+
+        assert_eq!(equations.len(), variables.len());
+        assert!(!equations.is_empty());
+        assert_eq!(parameters.len(), parameter_values.len());
+
+        println!("TP1907 RST paste-ready reproducer");
+        println!("// source: NASA TP-1907 CHON + graphite, fixed P,T");
+        println!(
+            "// physical inventory multiplier relative to the frozen seed: {inventory_scale:.17e}"
+        );
+        println!("// temperature_k: 700.0; pressure_pa: 101325.0");
+        println!(
+            "// This is the prepared symbolic residual/Jacobian problem in physical coordinates."
+        );
+        println!(
+            "// It intentionally excludes phase control, normalization, and facade cascade code."
+        );
+        println!("// The reduced graph has no missing scalar equality to insert blindly:");
+        println!("// phase control is an outer active-set/complementarity condition.");
+        println!("// Equalities inside this graph are reaction-affinity rows plus A*n-b rows.");
+        println!(
+            "// TPD, active topology, and phase add/remove decisions are external inequalities."
+        );
+        println!(
+            "// At 700 K graphite is active when published graphite total > 0 and final minimum TPD"
+        );
+        println!(
+            "// satisfies the phase-control acceptance tolerance (the oracle reports +1.87993e-9);"
+        );
+        println!(
+            "// an inactive phase must have zero published amount and satisfy its inactive-phase"
+        );
+        println!(
+            "// stability tolerance (usually expressed as a non-negative minimum TPD condition)."
+        );
+        println!("// Production elemental normalization: s = sum(element_totals_b), b_hat = b/s,");
+        println!(
+            "// n_hat = n/s, y_hat = log(n_hat) = log(n) - log(s), and n = s*n_hat on publication."
+        );
+        println!(
+            "// measured production normalization scale s: {:.17e}",
+            normalization.physical_inventory_scale()
+        );
+        println!(
+            "// This witness deliberately keeps raw b and raw y, so RST can inspect conditioning directly."
+        );
+        println!(
+            "// Solver coordinates here are y=log(n), not n; normalized recovery uses y_hat=log(n/s)."
+        );
+        println!(
+            "// Current RST production adapter binds the raw symbolic residual/Jacobian; it does not consume the runner's scaled f/j closures."
+        );
+        println!(
+            "// Legacy backends consume the scaled closures. The common validation gate recomputes both raw and scaled residuals afterward."
+        );
+        println!(
+            "// Ideal TPD(x) = sum_i x_i * (g_reduced[i] + R*T*ln(x_i)); zero-support terms contribute zero."
+        );
+        println!(
+            "// TPD units: J/mol; active accepted iff TPD <= dg_keep; inactive accepted iff TPD >= dg_create."
+        );
+        println!(
+            "// phase_eps = {:.17e} mol; dg_create = {:.17e} J/mol; dg_keep = {:.17e} J/mol",
+            phase_manager.phase_eps, dg_create, dg_keep
+        );
+        println!("// Activate an inactive candidate when minimum TPD < dg_create.");
+        println!(
+            "// Deactivate an active phase only when total < phase_eps and minimum TPD > dg_keep."
+        );
+        println!("// jacobian singular values: {singular_values:?}");
+        println!(
+            "// numerical rank threshold: {rank_tolerance:.17e}; rank: {numerical_rank}/{}",
+            variables.len()
+        );
+        println!(
+            "// Rank 17 is not claimed to be physically expected: this direct reduced graph is intentionally a singular safety regression."
+        );
+        println!(
+            "// Phase control does not add an equality row here; it selects active sets and checks TPD inequalities outside Newton."
+        );
+        println!("// The source facade acceptance contract is NOT solver termination alone:");
+        println!("//   future strict physical gate: raw_residual_l2 < 1e-5");
+        println!("//   max_abs_element_balance_error <= 1e-6");
+        println!("//   all published moles finite and non-negative");
+        println!(
+            "//   elemental b, component/phase ordering, and active topology match the molecular oracle"
+        );
+        println!("//   component relative error <= 1e-5 (or absolute error <= 1e-10)");
+        println!("//   mole-fraction error <= 1e-8 and frozen external regression envelope passes");
+        println!("let equations: Vec<String> = vec![");
+        for equation in &equations {
+            println!("    {equation:?}.to_string(),");
+        }
+        println!("];");
+        println!(
+            "let variables: Vec<String> = vec![{}];",
+            variables
+                .iter()
+                .map(|value| format!("{value:?}.to_string()"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "let equation_parameters: Vec<String> = vec![{}];",
+            parameters
+                .iter()
+                .map(|value| format!("{value:?}.to_string()"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "let equation_parameter_values: Vec<f64> = vec![{}];",
+            parameter_values
+                .iter()
+                .map(|value| format!("{value:.17e}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "let element_labels: Vec<String> = vec![{}];",
+            element_labels
+                .iter()
+                .map(|value| format!("{value:?}.to_string()"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "let species_order: Vec<String> = vec![{}];",
+            prepared
+                .problem()
+                .species()
+                .iter()
+                .map(|value| format!("{value:?}.to_string()"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!("let element_composition_a_element_by_species: Vec<Vec<f64>> = vec![");
+        for element in 0..element_matrix.ncols() {
+            println!(
+                "    vec![{}], // A[{}={}]",
+                (0..element_matrix.nrows())
+                    .map(|species| format!("{:.17e}", element_matrix[(species, element)]))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                element,
+                element_labels[element]
+            );
+        }
+        println!("];");
+        println!("// A is printed as A[element, species]; the library stores species-by-element.");
+        println!("// Exact balance definition: balance[e] = sum_i A[e,i] * n[i] - b[e].");
+        println!(
+            "let element_totals_b: Vec<f64> = vec![{}];",
+            element_totals_b
+                .iter()
+                .map(|value| format!("{value:.17e}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "let species_phase: Vec<usize> = vec![{}];",
+            prepared
+                .species_phase()
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!("// phase order and species membership:");
+        for (index, phase) in prepared.problem().phases().iter().enumerate() {
+            println!(
+                "// phase[{index}] kind={:?} species_indices={:?}",
+                phase.kind, phase.species
+            );
+        }
+        println!("// phase descriptors:");
+        for phase in prepared.problem().phase_descriptors() {
+            println!(
+                "// phase index={} id={:?} component_range={:?}",
+                phase.index().index(),
+                phase.id(),
+                phase.component_range()
+            );
+        }
+        println!(
+            "let residual_row_scale_w: Vec<f64> = vec![{}];",
+            row_scale
+                .iter()
+                .map(|value| format!("{value:.17e}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "// Despite the historical variable name, residual_row_scale_w is the denominator vector D, not diag(W)."
+        );
+        println!(
+            "// W = diag(1 / D); F_raw(y) = [reaction-affinity rows; A*n-b]; F_scaled(y) = W * F_raw(y)."
+        );
+        println!(
+            "// Therefore F_scaled[i] = F_raw[i] / D[i] and J_scaled[i,:] = J_raw[i,:] / D[i]."
+        );
+        println!(
+            "// Reaction D rows are ||nu_k||; elemental D rows are abs(b[e]), or 1 when b[e] == 0."
+        );
+        println!(
+            "// Scaling is numerical conditioning metadata and never replaces the physical A*n-b check."
+        );
+        println!(
+            "let initial_log_moles: Vec<f64> = vec![{}];",
+            initial
+                .iter()
+                .map(|value| format!("{value:.17e}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "let log_mole_bounds: Option<Vec<(f64, f64)>> = {};",
+            bounds.as_ref().map_or_else(
+                || "None".to_string(),
+                |values| {
+                    format!(
+                        "Some(vec![{}])",
+                        values
+                            .iter()
+                            .map(|(lower, upper)| { format!("({lower:.17e}, {upper:.17e})") })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                },
+            )
+        );
+        println!(
+            "let initial_moles: Vec<f64> = vec![{}];",
+            prepared
+                .problem()
+                .initial_moles()
+                .iter()
+                .map(|value| format!("{value:.17e}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!("variables_count = {};", variables.len());
+        println!("equations_count = {};", equations.len());
+        println!(
+            "// Molecular oracle: production molecular-input facade solve at physical scale 1e8."
+        );
+        println!(
+            "// It is independent of the direct standalone RST callback and uses an explicit legacy-TR facade policy."
+        );
+        println!(
+            "// oracle accepted backend: {:?}",
+            oracle_solution.solve_report().accepted_backend
+        );
+        println!(
+            "// oracle component totals / published moles (scale 1e8, exact species order): {oracle_published_moles:?}"
+        );
+        println!(
+            "// oracle numerical moles (positive solver coordinates, scale 1e8): {oracle_numerical_moles:?}"
+        );
+        println!("// oracle mole fractions: {oracle_mole_fractions:?}");
+        println!(
+            "// oracle active topology: {}; phase statuses: {:?}",
+            active_phase_topology(oracle_solution),
+            oracle_solution
+                .phases()
+                .iter()
+                .map(|phase| (phase.id(), oracle_solution.phase_status(phase.id())))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "// oracle phase totals (published, physical scale 1e8): {:?}",
+            oracle_solution
+                .phases()
+                .iter()
+                .map(|phase| (phase.id(), oracle_solution.phase_total(phase.id())))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "// oracle final graphite minimum TPD: {:.17e}",
+            graphite_final_tpd(oracle_solution)
+        );
+        println!(
+            "// oracle raw residual_l2 on this graph: {:.17e}",
+            l2_norm(&oracle_raw_residual)
+        );
+        println!(
+            "// oracle scaled residual_l2 on this graph: {:.17e}",
+            l2_norm(&oracle_scaled_residual)
+        );
+        println!("// oracle raw A*n-b: {oracle_element_balance:?}");
+        println!(
+            "// current common-gate residual metric: scaled_residual_l2 < 1e-5 when scaling is enabled; raw_residual_l2 is diagnostic only."
+        );
+        println!("// future physical acceptance gate: raw_residual_l2 < 1e-5;");
+        println!(
+            "// max_abs(raw A*n-b) <= 1e-6; component relative error <= 1e-5 or abs <= 1e-10;"
+        );
+        println!(
+            "// mole-fraction error <= 1e-8; finite/non-negative published moles; exact ordering/topology."
+        );
+        println!(
+            "// Diagnostic component relative error uses abs(candidate-oracle) / max(abs(candidate), abs(oracle), 1e-30)."
+        );
+        println!(
+            "// Published inactive-phase amounts may be exact zero; internal exp(log-moles) candidates must be finite and strictly positive."
+        );
+        println!("// Required future RST gate methods: Minpack LM, Nielsen LM, Trust-Region LM.");
+        println!("// Advisory characterization methods: plain LM, Damped Newton, Powell Dogleg.");
+        println!(
+            "// On this rank-deficient reduced graph, typed SingularJacobian/StepTooSmall is valid characterization, not physical acceptance."
+        );
+        println!(
+            "// Production pipeline: physical build -> raw RST symbolic or scaled legacy backend -> candidate validation (raw+scaled residual, physical A*n-b) -> TPD/complementarity -> restart/publication; normalized recovery is used only after classified numerical failure."
+        );
+
+        let contract = RustedSciTheSolveContract::new(1.0e-12, 500)
+            .expect("RST diagnostic solve contract must validate");
+        let mut solvers = RustedSciTheSolver::recommended_cascade();
+        solvers.push(RustedSciTheSolver::PowellDogleg);
+
+        println!("RST method matrix:");
+        for solver in solvers {
+            let started = Instant::now();
+            match solver.solve(&rst_problem, &initial, &contract) {
+                Ok(outcome) => {
+                    let residual = rst_problem
+                        .residual_for_test(&outcome.solution)
+                        .expect("RST residual must remain evaluable")
+                        .iter()
+                        .map(|value| value * value)
+                        .sum::<f64>()
+                        .sqrt();
+                    let jacobian = rst_problem
+                        .jacobian_for_test(&outcome.solution)
+                        .expect("RST Jacobian must remain evaluable");
+                    let max_abs_jacobian = jacobian
+                        .iter()
+                        .map(|value| value.abs())
+                        .fold(0.0_f64, f64::max);
+                    let candidate_physical = prepared.reconstruct_moles(&outcome.solution);
+                    let (
+                        finite_non_negative,
+                        max_balance,
+                        max_component_relative,
+                        max_fraction_error,
+                    ) = match candidate_physical {
+                        Ok(candidate_moles) => {
+                            let finite_non_negative = candidate_moles
+                                .iter()
+                                .all(|value| value.is_finite() && *value >= 0.0);
+                            let max_balance = (0..element_matrix.ncols())
+                                .map(|element| {
+                                    (0..element_matrix.nrows())
+                                        .map(|species| {
+                                            element_matrix[(species, element)]
+                                                * candidate_moles[species]
+                                        })
+                                        .sum::<f64>()
+                                        - element_totals_b[element]
+                                })
+                                .map(f64::abs)
+                                .fold(0.0_f64, f64::max);
+                            let max_component_relative = candidate_moles
+                                .iter()
+                                .zip(oracle_numerical_moles.iter())
+                                .map(|(&candidate, &oracle)| {
+                                    (candidate - oracle).abs()
+                                        / candidate.abs().max(oracle.abs()).max(1.0e-30)
+                                })
+                                .fold(0.0_f64, f64::max);
+                            let mut max_fraction_error = 0.0_f64;
+                            for phase in prepared.problem().phases() {
+                                let total = phase
+                                    .species
+                                    .iter()
+                                    .map(|&species| candidate_moles[species])
+                                    .sum::<f64>();
+                                if total.is_finite() && total > 0.0 {
+                                    for &species in &phase.species {
+                                        max_fraction_error = max_fraction_error.max(
+                                            (candidate_moles[species] / total
+                                                - oracle_mole_fractions[species])
+                                                .abs(),
+                                        );
+                                    }
+                                }
+                            }
+                            (
+                                finite_non_negative,
+                                max_balance,
+                                max_component_relative,
+                                max_fraction_error,
+                            )
+                        }
+                        Err(_) => (false, f64::INFINITY, f64::INFINITY, f64::INFINITY),
+                    };
+                    println!(
+                        "  {} status=returned termination={:?} converged={} residual_l2={residual:.17e} max_abs_jacobian={max_abs_jacobian:.17e} finite_non_negative={} max_abs_element_balance={max_balance:.17e} max_component_relative={max_component_relative:.17e} max_mole_fraction_error={max_fraction_error:.17e} iterations={} residual_calls={} jacobian_calls={} linear_solves={} elapsed_ms={} wall_ms={}",
+                        solver.name(),
+                        outcome.metrics.termination,
+                        outcome.metrics.backend_converged,
+                        finite_non_negative,
+                        outcome.metrics.iterations,
+                        outcome.metrics.residual_evaluations,
+                        outcome.metrics.jacobian_evaluations,
+                        outcome.metrics.linear_solves,
+                        outcome.metrics.elapsed_millis,
+                        started.elapsed().as_millis(),
+                    );
+                }
+                Err(error) => {
+                    println!(
+                        "  {} status=error error={error:?} wall_ms={}",
+                        solver.name(),
+                        started.elapsed().as_millis(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tp1907_upper_inventory_analytic_and_lambdified_symbolic_contracts_agree() {
+        let fixture = fixture();
+        let prepared = prepared_fixed_tp1907_problem_at_scale(&fixture, 700.0, 1.0e8);
+        let rst_problem = prepare_rst_symbolic_problem_from_prepared(&prepared)
+            .expect("TP-1907 upper-scale RST problem must prepare");
+        let initial = prepared.problem().initial_log_moles().as_slice().to_vec();
+        let probes = [
+            initial.clone(),
+            initial
+                .iter()
+                .enumerate()
+                .map(|(index, value)| value + if index % 2 == 0 { 1.0e-3 } else { -1.0e-3 })
+                .collect::<Vec<_>>(),
+        ];
+
+        let mut max_residual_abs_error = 0.0_f64;
+        let mut max_jacobian_abs_error = 0.0_f64;
+        let mut max_residual_relative_error = 0.0_f64;
+        let mut max_jacobian_relative_error = 0.0_f64;
+        for probe in probes {
+            let analytic_residual = prepared.residual(&probe).expect("analytic residual");
+            let symbolic_residual = rst_problem
+                .residual_for_test(&probe)
+                .expect("lambdified symbolic residual");
+            assert_eq!(analytic_residual.len(), symbolic_residual.len());
+            for (row, (&analytic, symbolic)) in analytic_residual
+                .iter()
+                .zip(symbolic_residual.iter())
+                .enumerate()
+            {
+                let absolute = (analytic - symbolic).abs();
+                let relative = absolute / analytic.abs().max(symbolic.abs()).max(1.0);
+                max_residual_abs_error = max_residual_abs_error.max(absolute);
+                max_residual_relative_error = max_residual_relative_error.max(relative);
+                assert!(
+                    relative <= 1.0e-11,
+                    "TP-1907 residual row {row} differs: analytic={analytic:e}, symbolic={symbolic:e}, relative={relative:e}"
+                );
+            }
+
+            let analytic_jacobian = prepared.jacobian(&probe).expect("analytic Jacobian");
+            let symbolic_jacobian = rst_problem
+                .jacobian_for_test(&probe)
+                .expect("lambdified symbolic Jacobian");
+            assert_eq!(analytic_jacobian.shape(), symbolic_jacobian.shape());
+            for (index, (&analytic, symbolic)) in analytic_jacobian
+                .iter()
+                .zip(symbolic_jacobian.iter())
+                .enumerate()
+            {
+                let absolute = (analytic - symbolic).abs();
+                let relative = absolute / analytic.abs().max(symbolic.abs()).max(1.0);
+                max_jacobian_abs_error = max_jacobian_abs_error.max(absolute);
+                max_jacobian_relative_error = max_jacobian_relative_error.max(relative);
+                assert!(
+                    relative <= 1.0e-11,
+                    "TP-1907 Jacobian entry {index} differs: analytic={analytic:e}, symbolic={symbolic:e}, relative={relative:e}"
+                );
+            }
+        }
+
+        println!(
+            "TP-1907 analytic-vs-symbolic upper scale max_residual_abs={max_residual_abs_error:e} max_residual_relative={max_residual_relative_error:e} max_jacobian_abs={max_jacobian_abs_error:e} max_jacobian_relative={max_jacobian_relative_error:e}"
+        );
     }
 
     #[test]
@@ -1481,7 +3242,14 @@ mod tests {
             None,
         );
         let backends = [
-            ("rst-lm", SolverBackend::RustedSciThe(RustedSciTheSolver::LevenbergMarquardt)),
+            (
+                "rst-lm",
+                SolverBackend::RustedSciThe(RustedSciTheSolver::LevenbergMarquardt),
+            ),
+            (
+                "rst-backtracking-lm",
+                SolverBackend::RustedSciThe(RustedSciTheSolver::BacktrackingLevenbergMarquardt),
+            ),
             (
                 "rst-minpack-lm",
                 SolverBackend::RustedSciThe(RustedSciTheSolver::MinpackLevenbergMarquardt),
@@ -1494,7 +3262,10 @@ mod tests {
                 "rst-trust-region-lm",
                 SolverBackend::RustedSciThe(RustedSciTheSolver::TrustRegionLevenbergMarquardt),
             ),
-            ("rst-damped-newton", SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton)),
+            (
+                "rst-damped-newton",
+                SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton),
+            ),
             ("legacy-lm", SolverBackend::Legacy(Solvers::LM)),
             ("legacy-nr", SolverBackend::Legacy(Solvers::NR)),
             ("legacy-tr", SolverBackend::Legacy(Solvers::TR)),
@@ -1519,9 +3290,7 @@ mod tests {
             {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    println!(
-                        "TP-1907 backend={name} scale=1e8 FAILED error={error:?}",
-                    );
+                    println!("TP-1907 backend={name} scale=1e8 FAILED error={error:?}",);
                     failures.push(name);
                     continue;
                 }
@@ -1588,25 +3357,24 @@ mod tests {
             }
             println!(
                 "TP-1907 backend={name} scale=1e8 residual={:.3e} balance={:.3e}",
-                validation.residual_l2_norm,
-                validation.max_abs_element_balance_error,
+                validation.residual_l2_norm, validation.max_abs_element_balance_error,
             );
             successes.push(name);
         }
         assert_eq!(
             successes,
-            vec![
-                "rst-minpack-lm",
-                "rst-trust-region-lm",
-                "legacy-lm",
-                "legacy-nr",
-                "legacy-tr",
-            ],
+            vec!["rst-trust-region-lm", "legacy-lm", "legacy-nr", "legacy-tr",],
             "accepted backend matrix changed at inventory scale 1e8"
         );
         assert_eq!(
             failures,
-            vec!["rst-lm", "rst-nielsen-lm", "rst-damped-newton"],
+            vec![
+                "rst-lm",
+                "rst-backtracking-lm",
+                "rst-minpack-lm",
+                "rst-nielsen-lm",
+                "rst-damped-newton",
+            ],
             "isolated backend failure matrix changed at inventory scale 1e8"
         );
     }
@@ -1728,10 +3496,9 @@ mod tests {
                 .collect(),
         )
         .expect("scaled accepted log-mole seed must remain finite");
-        let mut runner = PreparedEquilibriumRunner::new(
-            prepared_fixed_tp1907_problem_at_scale(&fixture, 700.0, factor),
-            Vec::new(),
-        )
+        let mut runner = PreparedEquilibriumRunner::new(prepared_fixed_tp1907_problem_at_scale(
+            &fixture, 700.0, factor,
+        ))
         .expect("scaled fixed-active runner must construct");
         let settings = runner.configure();
         settings.solver = Solvers::LM;

@@ -2,7 +2,10 @@
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
-use RustedSciThe::numerical::BVP_sci::BVP_sci_symb::BVPwrap;
+use RustedSciThe::numerical::BVP_sci::new::{
+    BvpSciAssembly, BvpSciMatrixLayout, BvpSciSolver, BvpSciTelemetryMode,
+};
+use log::warn;
 use std::collections::HashMap;
 
 use nalgebra::{DMatrix, DVector};
@@ -361,56 +364,54 @@ impl Zeldovich {
         let values = vec!["T".to_string(), "qs".to_string()];
         self.vec_of_vars = values.clone();
         let T0s = self.T0s;
-        let arg = "x".to_string();
-
-        let mut BorderConditions = HashMap::new();
-        BorderConditions.insert("T".to_string(), vec![(0, T0s)]);
-        BorderConditions.insert(
-            "qs".to_string(),
-            vec![(1, self.Pe * (self.L / self.dT) * 1e-10)],
-        );
+        let end_qs = self.Pe * (self.L / self.dT) * 1e-10;
         let n = 100;
-        let t0 = 0.0;
-        let t_end = 1.0;
-        let ones = vec![1.0; values.len() * n];
-        let initial_guess: DMatrix<f64> =
-            DMatrix::from_column_slice(values.len(), n, DVector::from_vec(ones).as_slice());
-
-        let mut bvp_solver = BVPwrap::new(
-            None,
-            Some(t0),
-            Some(t_end),
-            Some(n),
-            eq_system,
-            values,
-            vec![],
-            None,
-            BorderConditions,
-            arg,
-            1e-8,
-            100000,
-            initial_guess,
-        );
-        bvp_solver.solve();
-        let sol = bvp_solver.get_result();
-        match sol {
-            Some(y_mesh) => {
+        let initial_state = vec![1.0; values.len() * n];
+        let mut bvp_solver = match BvpSciSolver::builder(eq_system, values)
+            .with_independent_variable("x")
+            .with_frontend(BvpSciAssembly::ExprLegacy)
+            .with_matrix_layout(BvpSciMatrixLayout::Dense)
+            .with_tolerance(1e-8)
+            .with_limits(100_000, 100, 20)
+            .with_telemetry(BvpSciTelemetryMode::Off)
+            .with_mesh_and_initial_state(
+                (0..n).map(|node| node as f64 / (n - 1) as f64).collect(),
+                initial_state,
+            )
+            .with_boundary_callback(move |ya, yb, _parameters, output| {
+                output[0] = ya[0] - T0s;
+                output[1] = yb[1] - end_qs;
+                Ok(())
+            })
+            .build()
+        {
+            Ok(solver) => solver,
+            Err(error) => {
+                warn!("Zeldovich BVP preparation failed: {error}");
+                return;
+            }
+        };
+        match bvp_solver.solve() {
+            Ok(solution) => {
                 let dT = self.dT;
-                let x_mesh = self.L * bvp_solver.mesh();
-                let T_sol: DVector<f64> = dT * y_mesh.column(0).into_owned();
-                let qs_sol: DVector<f64> =
-                    (self.dT / self.L) * y_mesh.column(1).into_owned() / self.Pe;
+                let x_mesh =
+                    DVector::from_iterator(solution.x.len(), solution.x.iter().map(|x| self.L * x));
+                let T_sol = DVector::from_iterator(
+                    solution.x.len(),
+                    solution.y.chunks_exact(2).map(|state| dT * state[0]),
+                );
+                let qs_sol = DVector::from_iterator(
+                    solution.x.len(),
+                    solution
+                        .y
+                        .chunks_exact(2)
+                        .map(|state| (self.dT / self.L) * state[1] / self.Pe),
+                );
                 self.x_mesh = x_mesh;
                 self.T_sol = T_sol;
                 self.qs_sol = qs_sol;
-                println!("BVP solved successfully with Sci method");
-                //println!("x_mesh = {:?}", self.x_mesh);
-                println!("T_sol = {:?}", self.T_sol);
-                println!("qs_sol = {:?}", self.qs_sol);
             }
-            None => {
-                println!("Error during BVP solving with Sci method");
-            }
+            Err(error) => warn!("Zeldovich BVP solve failed: {error}"),
         }
     }
 }

@@ -8,6 +8,8 @@ the solver state.
 ## Contents
 
 - `equilibrium_timing.rs`: opt-in stage timings and immutable timing reports;
+- `equilibrium_instrumentation.rs`: opt-in fine-grained evaluation counters
+  and one reusable capture boundary for characterization/benchmarks;
 - `equilibrium_diagnostics.rs`: bounded typed lifecycle/TPD/backend events and
   optional live sinks;
 - `equilibrium_diagnostics_display.rs`: explicit text and `log` facade output
@@ -24,8 +26,8 @@ the solver state.
 ## Boundary
 
 No module here changes a candidate, cache, phase set, continuation seed, or
-publication decision. Diagnostics are disabled by default; timing avoids clock
-reads unless explicitly enabled. `format_solution_execution_summary()` and
+publication decision. Diagnostics and instrumentation are disabled by default;
+timing avoids clock reads unless explicitly enabled. `format_solution_execution_summary()` and
 `format_ph_solution_execution_summary()` remain useful with verbose diagnostics
 disabled: they read only immutable accepted reports and expose committed
 phase-control history, extensive-normalization recovery, and P,H route choices.
@@ -42,4 +44,5 @@ contracts rather than presentation concerns.
 The parent module uses explicit `#[path]` declarations, so callers continue to
 import `ChemEquilibrium::equilibrium_timing`,
 `ChemEquilibrium::equilibrium_diagnostics`, and
+`ChemEquilibrium::equilibrium_instrumentation`, and
 `ChemEquilibrium::equilibrium_temperature_postprocessing` unchanged.

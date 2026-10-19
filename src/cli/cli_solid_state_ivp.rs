@@ -1,6 +1,6 @@
 use crate::Kinetics::solid_state_kinetics_IVP::{KineticModelIVP, KineticModelNames};
-use RustedSciThe::numerical::ODE_api2::SolverType;
-use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
+use RustedSciThe::numerical::ODE_api2::{NonStiffMethod, SolverType};
+
 use dialoguer::{Input, Select, theme::ColorfulTheme};
 
 pub fn solid_state_ivp_menu() {
@@ -68,9 +68,9 @@ fn choose_solver_type() -> Result<SolverType, String> {
         .unwrap();
 
     match selection {
-        0 => Ok(SolverType::BDF),
-        1 => Ok(SolverType::Radau(RadauOrder::Order3)),
-        2 => Ok(SolverType::NonStiff("RK45".to_owned())),
+        0 => Ok(SolverType::Bdf),
+        1 => Ok(SolverType::Radau),
+        2 => Ok(SolverType::NonStiff(NonStiffMethod::Rk45)),
         3 => Ok(SolverType::BackwardEuler),
         _ => Err("Invalid solver choice".to_string()),
     }

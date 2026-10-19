@@ -111,6 +111,9 @@ limits work. Empty overrides use production policy. `Enable scaling` changes
 solver coordinates, not physical units. `Trace seed policy` sets positive
 log-mole initial values and is not extra inventory. `Cascade total iterations`
 limits total fallback work while retaining attempt evidence.
+`RST symbolic frontend` selects `ExprLegacy` (the default) or `AtomView` for
+symbolic residual/Jacobian preparation. It has no effect when the backend policy
+does not invoke RST.
 
 ### Control contract
 
@@ -118,6 +121,7 @@ limits total fallback work while retaining attempt evidence.
 | --- | --- | --- | --- |
 | Solver policy | Production cascade by default | Always | Request-invalidating |
 | Backend and custom cascade | Supported unique backends | Single backend / custom cascade | Request-invalidating |
+| RST symbolic frontend | `ExprLegacy` by default; `AtomView` is opt-in | Always | Request-invalidating |
 | P,H route | Auto by default | P,H only | Request-invalidating |
 | Tolerance, iteration and scaling overrides | Empty uses production defaults; finite positive overrides | Advanced numerics | Request-invalidating |
 | Trace-seed policy | No physical inventory is added | Advanced numerics | Request-invalidating |

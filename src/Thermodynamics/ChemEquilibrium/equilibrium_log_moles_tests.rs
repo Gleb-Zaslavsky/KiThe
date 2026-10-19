@@ -983,6 +983,8 @@ mod tests {
 
     #[test]
     fn o2_o_equilibrium_uses_rst_symbolic_lm_without_the_legacy_jacobian() {
+        use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::capture;
+
         let mut instance = gas_solver(
             vec!["O2".to_string(), "O".to_string()],
             500.0,
@@ -1003,7 +1005,8 @@ mod tests {
             RustedSciTheSolver::LevenbergMarquardt,
         )));
 
-        instance.solve().unwrap();
+        let (solve_result, _) = capture(|| instance.solve());
+        solve_result.unwrap();
 
         let report = instance.last_solve_report.as_ref().unwrap();
         assert_eq!(

@@ -26,6 +26,7 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::{
     ResolvedPhaseEnthalpyRequest, ResolvedThermochemistry,
     recover_resolved_ph_after_numerical_failure, solve_resolved_ph,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingMode;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
     EquilibriumSolveOptions, PhaseControlPolicy,
 };
@@ -566,7 +567,7 @@ impl<'a> PhRangeRequest<'a> {
         } else {
             None
         };
-        let prepared_nested = if matches!(
+        let mut prepared_nested = if matches!(
             self.prototype.ph_solve_mode(),
             PhSolveMode::NestedTemperature | PhSolveMode::Auto
         ) && uses_prepared_fixed_layout
@@ -618,8 +619,17 @@ impl<'a> PhRangeRequest<'a> {
             // Keep an untouched request for classified recovery. The chosen
             // prepared driver may consume the working request, while the
             // recovery must start from the same physical point transaction.
-            let recovery_request = request.clone();
+            let timing_enabled =
+                request.solve_options().timing_mode() == EquilibriumTimingMode::Enabled;
+            let (recovery_request, recovery_request_clone) = if timing_enabled {
+                let clone_started = Instant::now();
+                let recovery_request = request.clone();
+                (recovery_request, clone_started.elapsed())
+            } else {
+                (request.clone(), Duration::ZERO)
+            };
             let formulation_reused = prepared_monolithic.is_some() && index > 0;
+            let physical_attempt_started = Instant::now();
             let solve_result = if let Some(state) = prepared_monolithic.as_mut() {
                 match state.solve(&request, formulation_reused) {
                     Ok(solution) => Ok(solution),
@@ -631,7 +641,7 @@ impl<'a> PhRangeRequest<'a> {
                         let nested_request =
                             request.cloned_with_ph_solve_mode(PhSolveMode::NestedTemperature);
                         match prepared_nested
-                            .as_ref()
+                            .as_mut()
                             .expect("fixed-layout Auto range must prepare nested recovery state")
                             .solve(nested_request)
                         {
@@ -644,14 +654,19 @@ impl<'a> PhRangeRequest<'a> {
                     }
                     Err(error) => Err(error),
                 }
-            } else if let Some(state) = prepared_nested.as_ref() {
+            } else if let Some(state) = prepared_nested.as_mut() {
                 state.solve(request)
             } else {
                 solve_resolved_ph(request)
             };
+            let physical_failure_duration = physical_attempt_started.elapsed();
             let solve_result = match solve_result {
                 Ok(solution) => Ok(solution),
-                Err(error) => recover_resolved_ph_after_numerical_failure(recovery_request, error),
+                Err(error) => recover_resolved_ph_after_numerical_failure(
+                    recovery_request,
+                    error,
+                    physical_failure_duration,
+                ),
             };
             let mut solution = solve_result.map_err(|source| {
                 PhRangeError::Point(PhRangePointError {
@@ -660,6 +675,7 @@ impl<'a> PhRangeRequest<'a> {
                     source,
                 })
             })?;
+            solution = solution.with_recovery_request_clone_timing(recovery_request_clone);
             let elapsed = point_started.elapsed();
             let point_transitions = solution.report().phase_control_transitions();
             if self

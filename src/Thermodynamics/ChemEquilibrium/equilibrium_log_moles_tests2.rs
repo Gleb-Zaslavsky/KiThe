@@ -8,8 +8,8 @@ mod tests {
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
         ContinuationSeedPolicy, EquilibriumLogMoles, EquilibriumSolveCandidate, GibbsFn, Phase,
         PhaseKind, R, Solvers, TemperatureSolveFailure, TemperatureSolveSnapshot,
-        continuation_seed_for_point, equilibrium_logmole_jacobian2, equilibrium_logmole_residual2,
-        evaluate_equilibrium_logmole_jacobian, evaluate_equilibrium_logmole_residual,
+        continuation_seed_for_point, evaluate_equilibrium_logmole_jacobian,
+        evaluate_equilibrium_logmole_residual,
         evaluate_equilibrium_logmole_residual_with_standard_gibbs,
         recoverable_backend_failure_kind, scale_jacobian_rows, scale_residual_rows,
         scaled_jacobian, scaled_residual, temperature_failure, validate_logmole_system_dimensions,
@@ -622,6 +622,7 @@ mod tests {
                     outcome: SolverAttemptOutcome::Failed {
                         kind: crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptFailureKind::Solver,
                         reason: "max iterations".to_string(),
+                        elapsed_micros: 0,
                     },
                     metrics: None,
                 },
@@ -630,6 +631,7 @@ mod tests {
                     outcome: SolverAttemptOutcome::Failed {
                         kind: crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptFailureKind::Solver,
                         reason: "singular".to_string(),
+                        elapsed_micros: 0,
                     },
                     metrics: None,
                 },
@@ -1210,93 +1212,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // D.57 — equilibrium_logmole_residual2() and equilibrium_logmole_jacobian2()
-    // -----------------------------------------------------------------------
-    #[test]
-    fn equilibrium_logmole_residual2_creates_closure() {
-        let reactions = DMatrix::from_row_slice(2, 1, &[-1.0, 1.0]);
-        let elements = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
-        let element_totals = vec![2.0];
-        let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0)];
-        let phases = vec![Phase {
-            kind: PhaseKind::IdealGas,
-            species: vec![0, 1],
-        }];
-
-        let result = equilibrium_logmole_residual2(
-            reactions,
-            elements,
-            element_totals,
-            gibbs,
-            phases,
-            3000.0,
-            101325.0,
-            101325.0,
-            1e-30,
-            1e-30,
-        );
-        assert!(result.is_ok());
-        let closure = result.unwrap();
-        let residual = closure(&[1.0_f64.ln(), 1.0_f64.ln()]).unwrap();
-        assert_eq!(residual.len(), 2);
-    }
-
-    #[test]
-    fn equilibrium_logmole_residual2_rejects_wrong_log_moles_length() {
-        let reactions = DMatrix::from_row_slice(2, 1, &[-1.0, 1.0]);
-        let elements = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
-        let element_totals = vec![2.0];
-        let gibbs: Vec<GibbsFn> = vec![Rc::new(|_| 0.0), Rc::new(|_| 0.0)];
-        let phases = vec![Phase {
-            kind: PhaseKind::IdealGas,
-            species: vec![0, 1],
-        }];
-
-        let closure = equilibrium_logmole_residual2(
-            reactions,
-            elements,
-            element_totals,
-            gibbs,
-            phases,
-            3000.0,
-            101325.0,
-            101325.0,
-            1e-30,
-            1e-30,
-        )
-        .unwrap();
-        let result = closure(&[1.0_f64.ln()]); // 1 entry, expected 2
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn equilibrium_logmole_jacobian2_returns_correct_shape() {
-        let reactions = DMatrix::from_row_slice(2, 1, &[-1.0, 1.0]);
-        let elements = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
-        let species_phase = vec![0, 0];
-        let phase_stoich = vec![vec![-1.0]];
-
-        let result = equilibrium_logmole_jacobian2(
-            &[1.0_f64.ln(), 1.0_f64.ln()],
-            &reactions,
-            &elements,
-            &species_phase,
-            &phase_stoich,
-            1,
-            1e-30,
-            1e-30,
-        );
-        assert!(result.is_ok());
-        let jacobian = result.unwrap();
-        assert_eq!(jacobian.nrows(), 2);
-        assert_eq!(jacobian.ncols(), 2);
-    }
-
-    // Note: equilibrium_logmole_jacobian2 (deprecated) does not call
-    // validate_logmole_system_dimensions, so dimension mismatches are not
-    // caught as typed errors. This is a known limitation of the deprecated path.
-
-    // -----------------------------------------------------------------------
     // D.32 — validate_temperature_range() — indirect via solve_for_T_range()
     // -----------------------------------------------------------------------
     #[test]
@@ -1593,10 +1508,18 @@ mod tests {
     // D.37 — stage_equilibrium_system()
     // -----------------------------------------------------------------------
     #[test]
-    #[should_panic(expected = "Cannot compute the SVD of an empty matrix")]
-    fn stage_equilibrium_system_panics_on_empty_solver() {
+    fn stage_equilibrium_system_rejects_empty_solver_with_typed_error() {
         let solver = EquilibriumLogMoles::empty();
-        let _ = solver.stage_equilibrium_system(&[]);
+        let error = solver
+            .stage_equilibrium_system(&[])
+            .expect_err("empty staging input must be rejected before SVD");
+        assert!(matches!(
+            error,
+            ReactionExtentError::InvalidProblem {
+                field: "reaction_basis_matrix",
+                ..
+            }
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -1676,7 +1599,7 @@ mod tests {
         };
         let budget = SolverCascadeBudget::new(1, 100, 100);
         let params = SolverParams::default();
-        let result = EquilibriumLogMoles::solve_backend_cascade(
+        let result = crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::solve_backend_cascade_with_control(
             &[],
             vec![0.0],
             &f,
@@ -1686,6 +1609,7 @@ mod tests {
             SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)),
             budget,
             &params,
+            None,
             None,
         );
         assert!(result.is_err());
@@ -1711,7 +1635,7 @@ mod tests {
         };
         let budget = SolverCascadeBudget::new(0, 0, 0);
         let params = SolverParams::default();
-        let result = EquilibriumLogMoles::solve_backend_cascade(
+        let result = crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::solve_backend_cascade_with_control(
             &[],
             vec![0.0],
             &f,
@@ -1721,6 +1645,7 @@ mod tests {
             SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)),
             budget,
             &params,
+            None,
             None,
         );
         assert!(result.is_err());

@@ -826,7 +826,7 @@ impl KineticModelIVP {
 
     /// Convenience constructor for the default LSODE2 workflow.
     pub fn new_lsode2() -> Self {
-        Self::new(SolverType::LSODE2)
+        Self::new(SolverType::Lsode2)
     }
 
     pub fn set_stop_condition(&mut self, condition: Option<HashMap<String, f64>>) {
@@ -1343,12 +1343,12 @@ mod tests {
 #[cfg(test)]
 mod kinetic_model_ivp_tests {
     use super::*;
-    use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
+    use RustedSciThe::numerical::ODE_api2::{NonStiffMethod, SolverType};
     use std::time::Instant;
 
     #[test]
     fn test_new() {
-        let ivp = KineticModelIVP::new(SolverType::BDF);
+        let ivp = KineticModelIVP::new(SolverType::Bdf);
 
         assert!(ivp.solver.is_none());
         assert_eq!(ivp.t_final, 0.0);
@@ -1359,7 +1359,7 @@ mod kinetic_model_ivp_tests {
         assert!(ivp.kinmodel.is_none());
         assert_eq!(ivp.kin_expression, Expr::Const(0.0));
         assert_eq!(ivp.jac, Expr::Const(0.0));
-        assert!(matches!(ivp.solvertype, SolverType::BDF));
+        assert!(matches!(ivp.solvertype, SolverType::Bdf));
 
         // Check default solver parameters
         assert!(ivp.solver_params.contains_key("step_size"));
@@ -1371,7 +1371,7 @@ mod kinetic_model_ivp_tests {
     fn test_new_lsode2_uses_lsode2_solver_type() {
         let ivp = KineticModelIVP::new_lsode2();
 
-        assert!(matches!(ivp.solvertype, SolverType::LSODE2));
+        assert!(matches!(ivp.solvertype, SolverType::Lsode2));
         assert!(ivp.solver.is_none());
     }
 
@@ -1379,13 +1379,13 @@ mod kinetic_model_ivp_tests {
     fn test_default_uses_lsode2_solver_type() {
         let ivp = KineticModelIVP::default();
 
-        assert!(matches!(ivp.solvertype, SolverType::LSODE2));
+        assert!(matches!(ivp.solvertype, SolverType::Lsode2));
         assert!(ivp.solver.is_none());
     }
 
     #[test]
     fn test_set_problem() {
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
 
         let _ = ivp.set_problem(100.0, 10.0, 298.15, 50000.0, 1e6);
 
@@ -1398,7 +1398,7 @@ mod kinetic_model_ivp_tests {
 
     #[test]
     fn test_set_model() {
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
         let _ = ivp.set_problem(100.0, 10.0, 298.15, 50000.0, 1e6);
 
         // Test parameter-free model
@@ -1423,7 +1423,7 @@ mod kinetic_model_ivp_tests {
 
     #[test]
     fn test_get_solution_vectors() {
-        let mut ivp = KineticModelIVP::new(SolverType::NonStiff("RK45".to_owned()));
+        let mut ivp = KineticModelIVP::new(SolverType::NonStiff(NonStiffMethod::Rk45));
         ivp.set_problem(10.0, 5.0, 298.15, 50000.0, 1e6).unwrap();
         ivp.set_model(KineticModelNames::F1, vec![]).unwrap();
         ivp.check_task().unwrap();
@@ -1495,7 +1495,7 @@ mod kinetic_model_ivp_tests {
     #[test]
     fn test_lsode2_matches_bdf_for_f1() {
         let mut lsode2 = KineticModelIVP::new_lsode2();
-        let mut bdf = KineticModelIVP::new(SolverType::BDF);
+        let mut bdf = KineticModelIVP::new(SolverType::Bdf);
 
         for ivp in [&mut lsode2, &mut bdf] {
             ivp.set_problem(10.0, 5.0, 298.15, 50000.0, 1e6).unwrap();
@@ -1602,7 +1602,7 @@ mod kinetic_model_ivp_tests {
 
     #[test]
     fn test_get_solution_conversion_rate_matches_derivative() {
-        let mut ivp = KineticModelIVP::new(SolverType::NonStiff("RK45".to_owned()));
+        let mut ivp = KineticModelIVP::new(SolverType::NonStiff(NonStiffMethod::Rk45));
         ivp.set_problem(20.0, 5.0, 298.15, 40000.0, 5e5).unwrap();
         ivp.set_model(KineticModelNames::F1, vec![]).unwrap();
         ivp.check_task().unwrap();
@@ -1639,7 +1639,7 @@ mod kinetic_model_ivp_tests {
 
     #[test]
     fn test_check_task_success() {
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
 
         // Follow the correct order
         let _ = ivp.set_problem(100.0, 10.0, 298.15, 50000.0, 1e6);
@@ -1652,7 +1652,7 @@ mod kinetic_model_ivp_tests {
     #[test]
 
     fn test_check_task_fail_no_problem() {
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
         let _ = ivp.set_model(KineticModelNames::A2, vec![]);
 
         // Should panic because problem not set
@@ -1668,7 +1668,7 @@ mod kinetic_model_ivp_tests {
     #[test]
 
     fn test_check_task_fail_no_model() {
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
         let _ = ivp.set_problem(100.0, 10.0, 298.15, 50000.0, 1e6);
 
         // Should panic because model not set
@@ -1683,7 +1683,7 @@ mod kinetic_model_ivp_tests {
 
     #[test]
     fn test_complete_workflow() {
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
 
         // Step 1: new() - already done
         assert!(ivp.kinmodel.is_none());
@@ -1702,7 +1702,7 @@ mod kinetic_model_ivp_tests {
 
     #[test]
     fn test_arrhenius_expression() {
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
         let _ = ivp.set_problem(100.0, 10.0, 298.15, 50000.0, 1e6);
 
         let arrhenius = ivp.arrhenius();
@@ -1716,7 +1716,7 @@ mod kinetic_model_ivp_tests {
 
     #[test]
     fn test_different_solver_types() {
-        let solver_types = [SolverType::BDF, SolverType::BackwardEuler, SolverType::BDF];
+        let solver_types = [SolverType::Bdf, SolverType::BackwardEuler, SolverType::Bdf];
 
         for solver_type in solver_types {
             let mut ivp = KineticModelIVP::new(solver_type.clone());
@@ -1739,7 +1739,7 @@ mod kinetic_model_ivp_tests {
         ];
 
         for (model_name, params) in test_cases {
-            let mut ivp = KineticModelIVP::new(SolverType::BDF);
+            let mut ivp = KineticModelIVP::new(SolverType::Bdf);
             let _ = ivp.set_problem(100.0, 10.0, 298.15, 50000.0, 1e6);
             let _ = ivp.set_model(model_name.clone(), params);
 
@@ -1754,7 +1754,7 @@ mod kinetic_model_ivp_tests {
 
     #[test]
     fn test_parameter_validation_in_set_model() {
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
         ivp.set_problem(100.0, 10.0, 298.15, 50000.0, 1e6).unwrap();
 
         // This should return error because wrong number of parameters
@@ -1769,7 +1769,7 @@ mod kinetic_model_ivp_tests {
 
     #[test]
     fn test_kinetic_expression_contains_arrhenius() {
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
         let _ = ivp.set_problem(100.0, 10.0, 298.15, 50000.0, 1e6);
         let _ = ivp.set_model(KineticModelNames::F1, vec![]);
 
@@ -1785,7 +1785,7 @@ mod kinetic_model_ivp_tests {
     }
     #[test]
     fn solve_with_rk45() {
-        let mut ivp = KineticModelIVP::new(SolverType::NonStiff("RK45".to_owned()));
+        let mut ivp = KineticModelIVP::new(SolverType::NonStiff(NonStiffMethod::Rk45));
         let _ = ivp.set_problem(100.0, 10.0, 298.15, 50000.0, 1e6);
 
         // Test parameterized model
@@ -1797,7 +1797,7 @@ mod kinetic_model_ivp_tests {
     #[test]
     fn solve_with_radau() {
         let t = Instant::now();
-        let mut ivp = KineticModelIVP::new(SolverType::Radau(RadauOrder::Order7));
+        let mut ivp = KineticModelIVP::new(SolverType::Radau);
         let _ = ivp.set_problem(10.0, 10.0, 298.15, 50000.0, 1e6);
 
         // Test parameterized model
@@ -1825,10 +1825,10 @@ mod error_handling_tests {
     use std::time::Instant;
 
     use super::*;
-    use RustedSciThe::numerical::Radau::Radau_main::RadauOrder;
+
     #[test]
     fn test_set_problem_validation() {
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
 
         // Test negative t_final
         assert!(ivp.set_problem(-1.0, 10.0, 298.15, 50000.0, 1e6).is_err());
@@ -1851,7 +1851,7 @@ mod error_handling_tests {
 
     #[test]
     fn test_set_model_error_propagation() {
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
         ivp.set_problem(100.0, 10.0, 298.15, 50000.0, 1e6).unwrap();
 
         // Test invalid parameters
@@ -1870,7 +1870,7 @@ mod error_handling_tests {
 
     #[test]
     fn test_check_task_detailed_errors() {
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
 
         // Test uninitialized state
         let result = ivp.check_task();
@@ -1891,7 +1891,7 @@ mod error_handling_tests {
 
     #[test]
     fn test_solve_without_setup() {
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
 
         // Try to solve without setup
         let result = ivp.solve();
@@ -1901,7 +1901,7 @@ mod error_handling_tests {
 
     #[test]
     fn test_gnuplot_without_solve() {
-        let ivp = KineticModelIVP::new(SolverType::BDF);
+        let ivp = KineticModelIVP::new(SolverType::Bdf);
 
         let result = ivp.plot();
         assert!(result.is_err());
@@ -1910,7 +1910,7 @@ mod error_handling_tests {
 
     #[test]
     fn test_save_result_without_solve() {
-        let ivp = KineticModelIVP::new(SolverType::BDF);
+        let ivp = KineticModelIVP::new(SolverType::Bdf);
 
         let result = ivp.save_result();
         assert!(result.is_err());
@@ -1920,7 +1920,7 @@ mod error_handling_tests {
     #[test]
     fn test_complete_error_free_workflow() {
         let t = Instant::now();
-        let mut ivp = KineticModelIVP::new(SolverType::Radau(RadauOrder::Order7));
+        let mut ivp = KineticModelIVP::new(SolverType::Radau);
 
         // All operations should return Ok
         assert!(ivp.set_problem(50.0, 10.0, 298.15, 50000.0, 1e6).is_ok());
@@ -1938,7 +1938,7 @@ mod error_handling_tests {
     #[test]
     fn test_complete_error_free_workflow2() {
         let t = Instant::now();
-        let mut ivp = KineticModelIVP::new(SolverType::BDF);
+        let mut ivp = KineticModelIVP::new(SolverType::Bdf);
 
         // All operations should return Ok
         assert!(ivp.set_problem(50.0, 2.0, 298.15, 50000.0, 1e6).is_ok());

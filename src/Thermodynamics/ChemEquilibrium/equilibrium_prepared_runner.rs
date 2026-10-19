@@ -7,8 +7,12 @@
 //! constructing the historical mutable `EquilibriumLogMoles` orchestration
 //! object merely to solve one already prepared problem.
 
+use std::cell::Cell;
+
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::PhaseActivityModel;
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::EquilibriumNonlinearBackend;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_backend_adapter::{
+    EquilibriumNonlinearBackend, solve_backend_cascade_with_control_and_telemetry,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_cross_validation::{
     EquilibriumConstantCrossValidationStatus, classify_equilibrium_constant_cross_validation,
 };
@@ -19,25 +23,29 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_solver::{
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constant_validation::{
     EquilibriumConstantValidationMode, EquilibriumConstantValidationTolerances,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::rst_solver_telemetry_mode;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
-    EquilibriumLogMoles, EquilibriumSolverSettings, LEGACY_MOLE_FEASIBILITY_TOLERANCE,
-    compute_species_moles,
+    EquilibriumSolverSettings, LEGACY_MOLE_FEASIBILITY_TOLERANCE, compute_species_moles,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
+    MultiStartSeedFailure, ReactionExtentError,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
     EquilibriumSolution, LogMolesInitialGuess, PreparedEquilibriumProblem,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
-    RstPreparedProblem, prepare_rst_symbolic_problem_from_prepared,
+    RstPreparedProblem, prepare_rst_symbolic_problem_from_prepared_with_options,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
     EquilibriumSolveReport, MultiStartAttemptReport, MultiStartSolveReport, SolverBackend,
     SolverCascadeBudget, SolverPolicy,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::{
+    EquilibriumTimingMode, RstPreparationTimingReport,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_validation::{
     EquilibriumAcceptanceCriteria, EquilibriumCandidateResiduals, validate_equilibrium_candidate,
 };
-use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::DMatrix;
 use std::time::{Duration, Instant};
 
@@ -52,6 +60,12 @@ pub(crate) struct PreparedSolveOutcome {
     pub(crate) keq_validation_status: Option<EquilibriumConstantCrossValidationStatus>,
     /// Time spent in the independent validation stage after backend solving.
     pub(crate) validation_duration: Duration,
+    /// Time spent materializing an owned RST problem for this solve. Zero
+    /// means the caller supplied a reusable RST problem or selected legacy
+    /// backends only.
+    pub(crate) rst_preparation_duration: Duration,
+    /// Fine-grained RST symbolic/problem preparation evidence.
+    pub(crate) rst_preparation_timing: RstPreparationTimingReport,
     /// Optional explicit multi-start evidence for this accepted result.
     pub(crate) multi_start_report: Option<MultiStartSolveReport>,
 }
@@ -61,34 +75,60 @@ pub(crate) struct PreparedSolveOutcome {
 /// The runner deliberately has no published mutable solution fields and no
 /// phase-transition state. A failed solve simply returns an error; it cannot
 /// leave a partially updated solver object behind. Active-set orchestration is
-/// a separate concern and remains on its compatibility path until its own
-/// immutable transition state is extracted.
-#[derive(Clone)]
+/// a separate concern owned by `PreparedPhaseControlRunner`, which composes
+/// this runner without constructing the mutable compatibility host.
 pub(crate) struct PreparedEquilibriumRunner {
     prepared: PreparedEquilibriumProblem,
-    symbolic_standard_gibbs: Vec<Expr>,
+    default_route: PreparedEquilibriumDefaultRoute,
     settings: EquilibriumSolverSettings,
+    timing_enabled: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PreparedEquilibriumDefaultRoute {
+    LegacyDefault,
+    ProductionDefault,
 }
 
 impl PreparedEquilibriumRunner {
-    /// Creates a runner from one validated prepared problem and its optional
-    /// symbolic standard-state snapshot.
-    pub(crate) fn new(
+    /// Creates a runner for the historical direct numerical callers.
+    pub(crate) fn new(prepared: PreparedEquilibriumProblem) -> Result<Self, ReactionExtentError> {
+        Self::new_with_default(prepared, PreparedEquilibriumDefaultRoute::LegacyDefault)
+    }
+
+    /// Creates a runner for the canonical facade route.
+    ///
+    /// The route is explicit because the absence of a symbolic source payload
+    /// no longer acts as an accidental legacy-policy selector.
+    pub(crate) fn new_production(
         prepared: PreparedEquilibriumProblem,
-        symbolic_standard_gibbs: Vec<Expr>,
     ) -> Result<Self, ReactionExtentError> {
-        let species_count = prepared.problem().species().len();
-        if !symbolic_standard_gibbs.is_empty() && symbolic_standard_gibbs.len() != species_count {
-            return Err(ReactionExtentError::DimensionMismatch(format!(
-                "symbolic Gibbs snapshot has {} entries for {species_count} species",
-                symbolic_standard_gibbs.len()
-            )));
-        }
+        Self::new_with_default(prepared, PreparedEquilibriumDefaultRoute::ProductionDefault)
+    }
+
+    /// Creates a runner from one validated numerical prepared problem.
+    ///
+    /// The canonical prepared route owns numeric Gibbs closures only. If an
+    /// explicitly selected policy contains an RST backend, the parameterized
+    /// RST graph is built from the prepared problem on demand; a source
+    /// `Expr` snapshot is not part of this numerical runner's contract.
+    fn new_with_default(
+        prepared: PreparedEquilibriumProblem,
+        default_route: PreparedEquilibriumDefaultRoute,
+    ) -> Result<Self, ReactionExtentError> {
         Ok(Self {
             prepared,
-            symbolic_standard_gibbs,
+            default_route,
             settings: EquilibriumSolverSettings::default(),
+            timing_enabled: false,
         })
+    }
+
+    /// Enables the optional clock reads used by the calculator timing report.
+    /// Ordinary library callers keep the zero-overhead default.
+    pub(crate) fn with_timing_enabled(mut self, enabled: bool) -> Self {
+        self.timing_enabled = enabled;
+        self
     }
 
     /// Mutates numerical policy only; prepared chemistry remains immutable.
@@ -158,8 +198,9 @@ impl PreparedEquilibriumRunner {
     /// [`solve_with_initial_guess`], and selects the best candidate using
     /// [`select_preferred_candidate_index`]. The optional external RST problem
     /// is forwarded to every seed attempt so the symbolic problem is reused
-    /// across starts rather than rebuilt for each one. Returns an error when
-    /// all seeds fail, retaining the first error for diagnostics.
+    /// across starts rather than rebuilt for each one. A configured
+    /// [`SolverCascadeBudget`] applies independently to each seed cascade,
+    /// while a complete all-seeds failure retains every typed cause.
     fn solve_from_initial_guesses_with_optional_rst(
         self,
         seeds: Vec<LogMolesInitialGuess>,
@@ -192,39 +233,60 @@ impl PreparedEquilibriumRunner {
         // numerical recovery and defeat prepared-problem reuse.
         self.settings.validate()?;
         let policy = self.settings.solver_policy.clone().unwrap_or_else(|| {
-            if self.symbolic_standard_gibbs.is_empty() {
-                SolverPolicy::legacy_default(self.settings.solver)
-            } else {
+            if matches!(
+                self.default_route,
+                PreparedEquilibriumDefaultRoute::ProductionDefault
+            ) {
                 SolverPolicy::production_default(self.settings.solver)
+            } else {
+                SolverPolicy::legacy_default(self.settings.solver)
             }
         });
-        let rst_problem = if external_rst_problem.is_none()
+        let should_prepare_rst = external_rst_problem.is_none()
             && policy
                 .ordered_backends()
                 .iter()
-                .any(|backend| matches!(backend, SolverBackend::RustedSciThe(_)))
+                .any(|backend| matches!(backend, SolverBackend::RustedSciThe(_)));
+        let rst_preparation_started = should_prepare_rst
+            .then(|| self.timing_enabled.then(Instant::now))
+            .flatten();
+        let (rst_problem, rst_preparation_duration, rst_preparation_timing) = if should_prepare_rst
         {
-            Some(prepare_rst_symbolic_problem_from_prepared(
-                &self.prepared,
-                &self.symbolic_standard_gibbs,
-            )?)
+            let timing_mode = if self.timing_enabled {
+                EquilibriumTimingMode::Enabled
+            } else {
+                EquilibriumTimingMode::Disabled
+            };
+            let (problem, preparation_timing) =
+                prepare_rst_symbolic_problem_from_prepared_with_options(
+                    &self.prepared,
+                    timing_mode,
+                    self.settings.rst_symbolic_frontend,
+                )?;
+            let duration =
+                rst_preparation_started.map_or(Duration::ZERO, |started| started.elapsed());
+            (Some(problem), duration, preparation_timing)
         } else {
-            None
+            (None, Duration::ZERO, RstPreparationTimingReport::default())
         };
 
         let mut attempts = Vec::with_capacity(seeds.len());
+        let mut backend_attempts = Vec::with_capacity(seeds.len());
+        let mut failures = Vec::with_capacity(seeds.len());
+        let mut validation_duration = Duration::ZERO;
         let mut best: Option<(usize, PreparedSolveOutcome)> = None;
-        let mut first_error = None;
 
         for (start_index, seed) in seeds.into_iter().enumerate() {
             if let Some(control) = &self.settings.execution_control {
                 control.check_cancelled()?;
             }
-            match self.clone().solve_with_initial_guess(
+            match self.solve_with_initial_guess(
                 seed.as_slice().to_vec(),
                 external_rst_problem.or(rst_problem.as_ref()),
             ) {
                 Ok(outcome) => {
+                    backend_attempts.push(outcome.solve_report.attempts.clone());
+                    validation_duration += outcome.validation_duration;
                     let residual = outcome.solution.validation().residual_l2_norm;
                     attempts.push(MultiStartAttemptReport {
                         start_index,
@@ -247,33 +309,31 @@ impl PreparedEquilibriumRunner {
                     }
                 }
                 Err(error) => {
-                    if first_error.is_none() {
-                        first_error = Some(error.to_string());
-                    }
+                    backend_attempts.push(error.backend_attempt_reports());
                     attempts.push(MultiStartAttemptReport {
                         start_index,
                         accepted: false,
                         residual_l2_norm: None,
                         error: Some(error.to_string()),
-                        started_backend_attempts: started_backend_attempts_from_error(&error),
-                        nonlinear_iterations: nonlinear_iterations_from_error(&error),
+                        started_backend_attempts: error.started_backend_attempts(),
+                        nonlinear_iterations: error.nonlinear_iterations(),
                     });
+                    failures.push(MultiStartSeedFailure::new(start_index, error));
                 }
             }
         }
 
         let Some((selected_start, mut outcome)) = best else {
-            return Err(ReactionExtentError::InvalidProblem {
-                field: "multi_start_solve",
-                message: format!(
-                    "all {} initial seeds failed; first error: {}",
-                    attempts.len(),
-                    first_error.unwrap_or_else(|| "unknown multi-start failure".to_string())
-                ),
-            });
+            return Err(ReactionExtentError::MultiStartSeedRecoveryFailed { attempts: failures });
         };
+        outcome.rst_preparation_duration += rst_preparation_duration;
+        outcome
+            .rst_preparation_timing
+            .accumulate(rst_preparation_timing);
+        outcome.validation_duration = validation_duration;
         outcome.multi_start_report = Some(MultiStartSolveReport {
             attempts,
+            backend_attempts,
             selected_start,
         });
         Ok(outcome)
@@ -288,7 +348,7 @@ impl PreparedEquilibriumRunner {
     /// solution, validation report, backend cascade evidence, and optional
     /// equilibrium-constant cross-validation.
     fn solve_with_initial_guess(
-        self,
+        &self,
         initial_guess: Vec<f64>,
         external_rst_problem: Option<&RstPreparedProblem>,
     ) -> Result<PreparedSolveOutcome, ReactionExtentError> {
@@ -297,10 +357,13 @@ impl PreparedEquilibriumRunner {
             control.check_cancelled()?;
         }
         let policy = self.settings.solver_policy.clone().unwrap_or_else(|| {
-            if self.symbolic_standard_gibbs.is_empty() {
-                SolverPolicy::legacy_default(self.settings.solver)
-            } else {
+            if matches!(
+                self.default_route,
+                PreparedEquilibriumDefaultRoute::ProductionDefault
+            ) {
                 SolverPolicy::production_default(self.settings.solver)
+            } else {
+                SolverPolicy::legacy_default(self.settings.solver)
             }
         });
         let backends = policy.ordered_backends();
@@ -341,15 +404,32 @@ impl PreparedEquilibriumRunner {
         } else {
             None
         };
-        let owned_rst_problem = if external_rst_problem.is_none()
+        let should_prepare_rst = external_rst_problem.is_none()
             && backends
                 .iter()
-                .any(|backend| matches!(backend, SolverBackend::RustedSciThe(_)))
-        {
-            Some(prepare_rst_symbolic_problem_from_prepared(
-                &self.prepared,
-                &self.symbolic_standard_gibbs,
-            )?)
+                .any(|backend| matches!(backend, SolverBackend::RustedSciThe(_)));
+        let rst_preparation_started = should_prepare_rst
+            .then(|| self.timing_enabled.then(Instant::now))
+            .flatten();
+        let mut rst_preparation_duration = Duration::ZERO;
+        let mut rst_preparation_timing = RstPreparationTimingReport::default();
+        let owned_rst_problem = if should_prepare_rst {
+            let timing_mode = if self.timing_enabled {
+                EquilibriumTimingMode::Enabled
+            } else {
+                EquilibriumTimingMode::Disabled
+            };
+            let (problem, preparation_timing) =
+                prepare_rst_symbolic_problem_from_prepared_with_options(
+                    &self.prepared,
+                    timing_mode,
+                    self.settings.rst_symbolic_frontend,
+                )?;
+            rst_preparation_timing = preparation_timing;
+            if let Some(started) = rst_preparation_started {
+                rst_preparation_duration = started.elapsed();
+            }
+            Some(problem)
         } else {
             None
         };
@@ -365,24 +445,33 @@ impl PreparedEquilibriumRunner {
         };
         let solver_tolerance = self.settings.solver_params.tol;
         let element_tolerance = 10.0 * solver_tolerance.max(1e-8);
+        let candidate_validation_duration = Cell::new(Duration::ZERO);
         let validate_candidate = |candidate: &[f64]| {
-            let raw_residual = residual(candidate)?;
-            let acceptance_residual = scaled_residual(candidate)?;
-            validate_equilibrium_candidate(
-                EquilibriumCandidateResiduals {
-                    log_moles: candidate,
-                    raw_residual: &raw_residual,
-                    acceptance_residual: &acceptance_residual,
-                },
-                EquilibriumAcceptanceCriteria::new(
-                    solver_tolerance,
-                    element_tolerance,
-                    solver_tolerance,
-                )?
-                .with_element_balance_relative_tolerance(element_tolerance)?,
-                self.prepared.problem().element_composition(),
-                self.prepared.element_totals(),
-            )
+            let started = self.timing_enabled.then(Instant::now);
+            let result = (|| {
+                let raw_residual = residual(candidate)?;
+                let acceptance_residual = scaled_residual(candidate)?;
+                validate_equilibrium_candidate(
+                    EquilibriumCandidateResiduals {
+                        log_moles: candidate,
+                        raw_residual: &raw_residual,
+                        acceptance_residual: &acceptance_residual,
+                    },
+                    EquilibriumAcceptanceCriteria::new(
+                        solver_tolerance,
+                        element_tolerance,
+                        solver_tolerance,
+                    )?
+                    .with_element_balance_relative_tolerance(element_tolerance)?,
+                    self.prepared.problem().element_composition(),
+                    self.prepared.element_totals(),
+                )
+            })();
+            if let Some(started) = started {
+                candidate_validation_duration
+                    .set(candidate_validation_duration.get() + started.elapsed());
+            }
+            result
         };
         let budget = self.settings.solver_budget.unwrap_or_else(|| {
             SolverCascadeBudget::new(
@@ -399,7 +488,7 @@ impl PreparedEquilibriumRunner {
             .map(|backend| backend as &dyn EquilibriumNonlinearBackend)
             .collect();
         let (log_moles, validation, solve_report) =
-            EquilibriumLogMoles::solve_backend_cascade_with_control(
+            solve_backend_cascade_with_control_and_telemetry(
                 &backend_refs,
                 initial_guess,
                 &scaled_residual,
@@ -413,45 +502,29 @@ impl PreparedEquilibriumRunner {
                 &self.settings.solver_params,
                 rst_problem,
                 execution_control.as_ref(),
+                rst_solver_telemetry_mode(self.timing_enabled),
             )?;
         if let Some(control) = &execution_control {
             control.check_cancelled()?;
         }
         let solution = self.prepared.accepted_solution(log_moles, validation)?;
-        let validation_started = Instant::now();
+        let validation_started = self.timing_enabled.then(Instant::now);
         let keq_validation_status =
             run_keq_cross_validation(&self.prepared, &solution, &self.settings)?;
+        let validation_duration = validation_started.map_or(Duration::ZERO, |started| {
+            candidate_validation_duration
+                .get()
+                .saturating_add(started.elapsed())
+        });
         Ok(PreparedSolveOutcome {
             solution,
             solve_report,
             keq_validation_status,
-            validation_duration: validation_started.elapsed(),
+            validation_duration,
+            rst_preparation_duration,
+            rst_preparation_timing,
             multi_start_report: None,
         })
-    }
-}
-
-fn started_backend_attempts_from_error(error: &ReactionExtentError) -> usize {
-    match error {
-        ReactionExtentError::AllBackendsFailed { attempts }
-        | ReactionExtentError::CascadeAborted { attempts, .. } => attempts
-            .iter()
-            .filter(|attempt| attempt.is_started())
-            .count(),
-        _ => 0,
-    }
-}
-
-fn nonlinear_iterations_from_error(error: &ReactionExtentError) -> usize {
-    match error {
-        ReactionExtentError::AllBackendsFailed { attempts }
-        | ReactionExtentError::CascadeAborted { attempts, .. } => attempts
-            .iter()
-            .filter(|attempt| attempt.is_started())
-            .filter_map(|attempt| attempt.metrics.as_ref())
-            .map(|metrics| metrics.iterations)
-            .sum(),
-        _ => 0,
     }
 }
 
@@ -518,4 +591,59 @@ fn run_keq_cross_validation(
         });
     }
     Ok(Some(status))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
+        GibbsFn, Phase, PhaseKind, Solvers,
+    };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::{
+        EquilibriumConditions, EquilibriumProblem, LogMolesInitialGuess,
+    };
+    use nalgebra::DMatrix;
+    use std::rc::Rc;
+
+    #[test]
+    fn prepared_runner_all_seed_failure_preserves_each_original_cause() {
+        let initial_moles = vec![1.0, 0.0];
+        let problem = EquilibriumProblem::new(
+            vec!["A".to_string(), "B".to_string()],
+            initial_moles.clone(),
+            LogMolesInitialGuess::from_moles(&initial_moles, 1e-20).unwrap(),
+            DMatrix::from_row_slice(2, 1, &[1.0, 1.0]),
+            vec![
+                Rc::new(|_| f64::NAN) as GibbsFn,
+                Rc::new(|_| 0.0) as GibbsFn,
+            ],
+            vec![Phase {
+                kind: PhaseKind::IdealGas,
+                species: vec![0, 1],
+            }],
+            EquilibriumConditions::new(1_000.0, 101_325.0, 101_325.0).unwrap(),
+        )
+        .unwrap();
+        let prepared = PreparedEquilibriumProblem::new(problem).unwrap();
+        let seed = prepared.problem().initial_log_moles().clone();
+        let mut runner = PreparedEquilibriumRunner::new(prepared).unwrap();
+        runner.configure().solver_policy =
+            Some(SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)));
+
+        let error = runner
+            .solve_from_initial_guesses(vec![seed.clone(), seed])
+            .expect_err("both seeds must fail on the non-finite Gibbs callback");
+        assert_eq!(error.started_backend_attempts(), 2);
+        let ReactionExtentError::MultiStartSeedRecoveryFailed { attempts } = error else {
+            panic!("expected typed all-seeds failure");
+        };
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].start_index(), 0);
+        assert_eq!(attempts[1].start_index(), 1);
+        assert!(attempts.iter().all(|attempt| matches!(
+            attempt.cause(),
+            ReactionExtentError::AllBackendsFailed { attempts } if attempts.len() == 1
+        )));
+    }
 }

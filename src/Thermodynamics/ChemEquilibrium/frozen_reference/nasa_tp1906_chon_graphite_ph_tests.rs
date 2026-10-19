@@ -17,16 +17,19 @@ mod tests {
         ElementInventory, FormalElementCarrier,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_extensive_normalization::ExtensiveNormalization;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::capture;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_multiphase_domain::{
         MultiphaseEquilibriumLayout, MultiphaseInitialComposition,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_range::{
         PhEnthalpyGrid, PhRangePointPreparation, PhRangeRequest,
     };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_thermochemistry::ResolvedThermochemistry;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::{
         PhSolveMode, PhTemperatureSolveOptions, solve_resolved_ph,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::TraceSpeciesSeedPolicy;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_timing::EquilibriumTimingMode;
     use crate::Thermodynamics::ChemEquilibrium::frozen_reference::assertions::{
         AcceptedSolutionContract, assert_bounded_solution_accepted, assert_byte_snapshots_unchanged,
     };
@@ -402,6 +405,41 @@ mod tests {
     }
 
     #[test]
+    fn tp1907_gibbs_reuses_native_intervals_between_temperature_points() {
+        let fixture = fixture();
+        let thermochemistry =
+            ResolvedThermochemistry::from_resolved_system(fixture.tp1907().resolved())
+                .expect("TP-1907 resolved thermochemistry must build");
+
+        let (values, instrumentation) = capture(|| {
+            let first = thermochemistry
+                .evaluate_gibbs(700.0)
+                .expect("first in-range Gibbs point must evaluate");
+            let second = thermochemistry
+                .evaluate_gibbs(700.5)
+                .expect("second in-range Gibbs point must evaluate");
+            let third = thermochemistry
+                .evaluate_gibbs(699.5)
+                .expect("reverse in-range Gibbs point must evaluate");
+            (first, second, third)
+        });
+
+        assert!(values.0.iter().all(|value| value.is_finite()));
+        assert!(values.1.iter().all(|value| value.is_finite()));
+        assert!(values.2.iter().all(|value| value.is_finite()));
+        assert_eq!(
+            instrumentation.counters().gibbs_coefficient_refreshes(),
+            2,
+            "the first Gibbs vector refreshes gas and graphite independently"
+        );
+        assert_eq!(
+            instrumentation.counters().gibbs_interval_reuses(),
+            4,
+            "two later temperatures reuse the native interval in both phases"
+        );
+    }
+
+    #[test]
     fn monolithic_h700_lands_on_the_canonical_pt_graphite_branch() {
         let fixture = fixture();
         let case = fixture
@@ -432,6 +470,87 @@ mod tests {
                 .max_abs_reaction_affinity
                 <= 1.0e-6,
             "accepted monolithic state must satisfy the dimensionless affinity contract"
+        );
+    }
+
+    #[test]
+    #[ignore = "release characterization of source-backed monolithic P,H property evaluation"]
+    fn i5_tp1906_monolithic_ph_property_evaluation_characterization() {
+        let fixture = fixture();
+        let case = fixture
+            .cases()
+            .unwrap()
+            .into_iter()
+            .find(|case| (case.enthalpy.temperature_k - 700.0).abs() <= f64::EPSILON)
+            .expect("the frozen TP-1906 dataset must contain the 700 K row");
+        let request = fixture
+            .ph_request(&case, 900.0)
+            .expect("TP-1906 characterization request must validate")
+            .with_ph_solve_mode(PhSolveMode::Monolithic)
+            .with_solve_options(
+                EquilibriumSolveOptions::new().with_timing_mode(EquilibriumTimingMode::Enabled),
+            );
+
+        let (solution, instrumentation) = capture(|| {
+            solve_resolved_ph(request)
+                .expect("monolithic TP-1906 characterization solve must accept")
+        });
+        assert!(instrumentation.enabled());
+        assert!(solution.report().inner_timing().enabled());
+        let counters = instrumentation.counters();
+        let species = solution.equilibrium().component_moles().len();
+
+        assert_eq!(
+            solution.report().solve_path(),
+            crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::PhSolvePath::MonolithicPhaseControl,
+        );
+        assert!(counters.context_evaluations() > 0);
+        assert_eq!(
+            counters.residual_context_evaluations(),
+            counters.candidate_snapshot_evaluations(),
+            "residual-side contexts must be owned by candidate snapshots"
+        );
+        assert!(counters.residual_evaluations() > 0);
+        assert!(counters.jacobian_evaluations() > 0);
+        assert_eq!(
+            counters.jacobian_context_evaluations(),
+            counters.jacobian_evaluations(),
+            "every analytic Jacobian evaluation must use its dedicated context"
+        );
+        assert!(
+            counters.enthalpy_component_calls() <= counters.enthalpy_vector_evaluations() * species,
+            "source-backed enthalpy calls cannot exceed vector attempts"
+        );
+        assert!(
+            counters.heat_capacity_component_calls()
+                <= counters.heat_capacity_vector_evaluations() * species,
+            "source-backed Cp calls cannot exceed vector attempts"
+        );
+        assert!(
+            counters.gibbs_component_calls() <= counters.gibbs_vector_evaluations() * species,
+            "source-backed Gibbs calls cannot exceed vector attempts"
+        );
+
+        println!(
+            "TP-1906 monolithic P,H property evaluation: elapsed={:?} species={} context={} residual_context={} jacobian_context={} residual={} jacobian={} snapshots={} G_vectors={} H_vectors={} Cp_vectors={} G_component_calls={} H_component_calls={} Cp_component_calls={} G_coefficient_refreshes={} G_interval_reuses={} property_coefficient_selections={} property_calculations={}",
+            instrumentation.elapsed(),
+            species,
+            counters.context_evaluations(),
+            counters.residual_context_evaluations(),
+            counters.jacobian_context_evaluations(),
+            counters.residual_evaluations(),
+            counters.jacobian_evaluations(),
+            counters.candidate_snapshot_evaluations(),
+            counters.gibbs_vector_evaluations(),
+            counters.enthalpy_vector_evaluations(),
+            counters.heat_capacity_vector_evaluations(),
+            counters.gibbs_component_calls(),
+            counters.enthalpy_component_calls(),
+            counters.heat_capacity_component_calls(),
+            counters.gibbs_coefficient_refreshes(),
+            counters.gibbs_interval_reuses(),
+            counters.property_coefficient_selections(),
+            counters.property_calculations(),
         );
     }
 
@@ -609,7 +728,10 @@ mod tests {
         let contract = AcceptedSolutionContract::new(1.0e-6, 1.0e-6);
         assert_bounded_solution_accepted(baseline.equilibrium(), contract);
 
-        for factor in [1.0e-1, 1.0e1] {
+        // This is the same extensive transformation used by the P,T scale
+        // stories. Include both small and large inventories so normalization
+        // boundaries cannot hide a physical-scale dependency.
+        for factor in [1.0e-3, 1.0e-1, 1.0e1, 1.0e3, 1.0e4, 1.0e6, 1.0e8] {
             let request = fixture
                 .ph_request(&case, 900.0)
                 .unwrap()

@@ -140,7 +140,7 @@ fn test_kas_activation_energy() {
         0.0,
         &[2.0, 5.0, 10.0, 20.0],
         50.0,
-        SolverType::BDF,
+        SolverType::Bdf,
         vec![],
         "",
     )

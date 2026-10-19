@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use nalgebra::DMatrix;
 
@@ -19,6 +20,11 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_activity::phase_activity
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::TemperatureBounds;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
     EnthalpyScale, additive_total_enthalpy,
+};
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::{
+    record_candidate_snapshot_evaluation, record_context_evaluation,
+    record_jacobian_context_evaluation, record_jacobian_evaluation,
+    record_residual_context_evaluation, record_residual_evaluation,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     R, compute_species_moles, evaluate_equilibrium_logmole_residual_with_standard_gibbs,
@@ -267,20 +273,27 @@ impl BoundedTemperatureTransform {
 #[derive(Clone)]
 pub(crate) struct PreparedPhFormulation {
     prepared_pt: PreparedEquilibriumProblem,
-    thermochemistry: ResolvedThermochemistry,
+    thermochemistry: Arc<ResolvedThermochemistry>,
     temperature_transform: BoundedTemperatureTransform,
     unknown_layout: PhUnknownLayout,
     residual_layout: PhResidualLayout,
-    pt_row_scale: Vec<f64>,
+    pt_row_scale: Arc<Vec<f64>>,
     target_enthalpy: f64,
     enthalpy_scale: EnthalpyScale,
 }
 
-struct PhEvaluationContext {
+struct PhResidualEvaluationContext {
     log_moles: Vec<f64>,
     moles: Vec<f64>,
     temperature: TransformedTemperature,
     standard_gibbs: Vec<f64>,
+    molar_enthalpies: Vec<f64>,
+}
+
+struct PhJacobianEvaluationContext {
+    log_moles: Vec<f64>,
+    moles: Vec<f64>,
+    temperature: TransformedTemperature,
     molar_enthalpies: Vec<f64>,
     heat_capacities: Vec<f64>,
 }
@@ -364,11 +377,11 @@ impl PreparedPhFormulation {
 
         Ok(Self {
             prepared_pt,
-            thermochemistry,
+            thermochemistry: Arc::new(thermochemistry),
             temperature_transform: BoundedTemperatureTransform::new(temperature_bounds)?,
             unknown_layout,
             residual_layout,
-            pt_row_scale,
+            pt_row_scale: Arc::new(pt_row_scale),
             target_enthalpy,
             enthalpy_scale,
         })
@@ -461,11 +474,14 @@ impl PreparedPhFormulation {
         }
         Ok(Self {
             prepared_pt,
-            thermochemistry: self.thermochemistry.clone(),
+            // Thermochemistry is immutable across prepared P,H targets and
+            // may retain large private symbolic sources. Share it instead of
+            // cloning the complete capability bundle for every hot point.
+            thermochemistry: Arc::clone(&self.thermochemistry),
             temperature_transform: self.temperature_transform,
             unknown_layout: self.unknown_layout,
             residual_layout: self.residual_layout,
-            pt_row_scale: self.pt_row_scale.clone(),
+            pt_row_scale: Arc::clone(&self.pt_row_scale),
             target_enthalpy,
             enthalpy_scale,
         })
@@ -473,6 +489,7 @@ impl PreparedPhFormulation {
 
     /// Evaluates the scaled monolithic P,H residual.
     pub(crate) fn residual(&self, unknowns: &[f64]) -> Result<Vec<f64>, ReactionExtentError> {
+        record_residual_evaluation();
         let snapshot = self.candidate_snapshot(unknowns)?;
         let mut residual = snapshot.scaled_pt_residual;
         residual.push(snapshot.scaled_enthalpy_error);
@@ -485,6 +502,7 @@ impl PreparedPhFormulation {
         &self,
         unknowns: &[f64],
     ) -> Result<PhCandidateSnapshot, ReactionExtentError> {
+        record_candidate_snapshot_evaluation();
         let context = self.evaluate_context(unknowns)?;
         let problem = self.prepared_pt.problem();
         let conditions = problem.conditions();
@@ -517,17 +535,29 @@ impl PreparedPhFormulation {
         })
     }
 
+    /// Evaluates a candidate for the feasibility callback and retains the
+    /// complete snapshot when the fixed-active-set checks pass.
+    ///
+    /// The monolithic runner may consume this exact snapshot for the residual
+    /// callback immediately afterward. Returning `None` intentionally keeps
+    /// the historical boolean behavior for evaluation failures and invalid
+    /// reconstructed mole amounts.
+    pub(crate) fn feasible_candidate_snapshot(
+        &self,
+        unknowns: &[f64],
+    ) -> Option<PhCandidateSnapshot> {
+        self.candidate_snapshot(unknowns).ok().filter(|snapshot| {
+            snapshot
+                .moles
+                .iter()
+                .all(|moles| moles.is_finite() && *moles >= 0.0)
+        })
+    }
+
     /// Tests whether an iterate can safely be evaluated by the fixed-active
     /// P,H equations. Detailed diagnostics remain in `candidate_snapshot`.
     pub(crate) fn is_feasible(&self, unknowns: &[f64]) -> bool {
-        self.candidate_snapshot(unknowns)
-            .map(|snapshot| {
-                snapshot
-                    .moles
-                    .iter()
-                    .all(|moles| moles.is_finite() && *moles >= 0.0)
-            })
-            .unwrap_or(false)
+        self.feasible_candidate_snapshot(unknowns).is_some()
     }
 
     /// Underlying fixed-P,T problem used by the shared acceptance gate.
@@ -542,7 +572,7 @@ impl PreparedPhFormulation {
 
     /// Row scales shared by the analytic and RST-symbolic P,H residuals.
     pub(crate) fn pt_row_scale(&self) -> &[f64] {
-        &self.pt_row_scale
+        self.pt_row_scale.as_slice()
     }
 
     /// Prescribed total enthalpy in joules.
@@ -552,7 +582,7 @@ impl PreparedPhFormulation {
 
     /// Resolved thermochemistry aligned with the prepared active system.
     pub(crate) fn thermochemistry(&self) -> &ResolvedThermochemistry {
-        &self.thermochemistry
+        self.thermochemistry.as_ref()
     }
 
     /// Common thermochemistry interval enforced by the bounded temperature
@@ -563,7 +593,8 @@ impl PreparedPhFormulation {
 
     /// Evaluates the full analytical Jacobian with respect to `[ln(n), theta_T]`.
     pub(crate) fn jacobian(&self, unknowns: &[f64]) -> Result<DMatrix<f64>, ReactionExtentError> {
-        let context = self.evaluate_context(unknowns)?;
+        record_jacobian_evaluation();
+        let context = self.evaluate_jacobian_context(unknowns)?;
         let problem = self.prepared_pt.problem();
         let conditions = problem.conditions();
         let pt_jacobian = scale_jacobian_rows(
@@ -625,18 +656,17 @@ impl PreparedPhFormulation {
         Ok(jacobian)
     }
 
-    /// Decomposes the monolithic `[log-moles, theta_T]` unknown vector into a
-    /// structured [`PhEvaluationContext`] containing physical moles, the solved
-    /// temperature, and the enthalpy-scale-normalized energy residual.
+    /// Decomposes the monolithic `[log-moles, theta_T]` unknown vector into the
+    /// thermochemistry needed by the residual and candidate snapshot.
     ///
-    /// The context is consumed by both the analytical residual/Jacobian
-    /// formulation and the candidate-snapshot builder. A dimension mismatch
-    /// between `unknowns` and the declared layout is caught here rather than
-    /// propagating an index-out-of-bounds panic.
+    /// A dimension mismatch between `unknowns` and the declared layout is
+    /// caught here rather than propagating an index-out-of-bounds panic.
     fn evaluate_context(
         &self,
         unknowns: &[f64],
-    ) -> Result<PhEvaluationContext, ReactionExtentError> {
+    ) -> Result<PhResidualEvaluationContext, ReactionExtentError> {
+        record_context_evaluation();
+        record_residual_context_evaluation();
         if unknowns.len() != self.unknown_layout.dimension() {
             return Err(ReactionExtentError::DimensionMismatch(format!(
                 "P,H iterate has {} entries, expected {}",
@@ -655,6 +685,39 @@ impl PreparedPhFormulation {
         let molar_enthalpies = self
             .thermochemistry
             .evaluate_enthalpy(temperature.temperature())?;
+        Ok(PhResidualEvaluationContext {
+            log_moles,
+            moles,
+            temperature,
+            standard_gibbs,
+            molar_enthalpies,
+        })
+    }
+
+    /// Evaluates only the thermochemistry consumed by the analytic Jacobian.
+    /// Gibbs values belong to the residual-side context and are deliberately
+    /// not requested here.
+    fn evaluate_jacobian_context(
+        &self,
+        unknowns: &[f64],
+    ) -> Result<PhJacobianEvaluationContext, ReactionExtentError> {
+        record_context_evaluation();
+        record_jacobian_context_evaluation();
+        if unknowns.len() != self.unknown_layout.dimension() {
+            return Err(ReactionExtentError::DimensionMismatch(format!(
+                "P,H iterate has {} entries, expected {}",
+                unknowns.len(),
+                self.unknown_layout.dimension()
+            )));
+        }
+        let log_moles = unknowns[self.unknown_layout.log_moles()].to_vec();
+        let moles = compute_species_moles(&log_moles)?;
+        let temperature = self
+            .temperature_transform
+            .evaluate(unknowns[self.unknown_layout.temperature()])?;
+        let molar_enthalpies = self
+            .thermochemistry
+            .evaluate_enthalpy(temperature.temperature())?;
         let heat_capacities = self
             .thermochemistry
             .evaluate_heat_capacity(temperature.temperature())?
@@ -667,11 +730,10 @@ impl PreparedPhFormulation {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(PhEvaluationContext {
+        Ok(PhJacobianEvaluationContext {
             log_moles,
             moles,
             temperature,
-            standard_gibbs,
             molar_enthalpies,
             heat_capacities,
         })
@@ -876,6 +938,27 @@ mod tests {
 
     fn prepared_two_species_ph() -> PreparedPhFormulation {
         prepared_two_species_ph_with_cp(true)
+    }
+
+    #[test]
+    fn retarget_shares_immutable_thermochemistry_and_row_scale() {
+        let formulation = prepared_two_species_ph();
+        let retargeted = formulation
+            .retarget(
+                formulation.prepared_pt().clone(),
+                6_000.0,
+                EnthalpyScale::new(12_000.0).unwrap(),
+            )
+            .unwrap();
+
+        assert!(Arc::ptr_eq(
+            &formulation.thermochemistry,
+            &retargeted.thermochemistry
+        ));
+        assert!(Arc::ptr_eq(
+            &formulation.pt_row_scale,
+            &retargeted.pt_row_scale
+        ));
     }
 
     #[test]

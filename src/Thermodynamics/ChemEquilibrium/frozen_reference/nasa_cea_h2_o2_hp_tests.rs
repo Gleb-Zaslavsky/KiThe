@@ -22,6 +22,10 @@ mod tests {
         preflight_nasa_cea_h2_o2_hp, reconstruct_nasa_cea_h2_o2_reactants,
     };
     use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::EquilibriumSolveOptions;
+    use crate::Thermodynamics::ChemEquilibrium::prelude::{
+        ElementInventory, EquilibriumCalculator, EquilibriumCalculatorOutcome,
+        PhaseEquilibriumInputKind, TotalEnthalpyJoules,
+    };
     use crate::Thermodynamics::thermo_lib_api::{ThermoData, ThermoRepository};
     use crate::library_manager::with_library_manager;
 
@@ -599,6 +603,76 @@ mod tests {
         );
         assert_eq!(before_library, local_library_snapshot());
         assert_eq!(before_frozen, frozen_dataset_snapshot());
+    }
+
+    #[test]
+    #[ignore = "release I5 NASA CEA ElementInventory facade characterization"]
+    fn i5_nasa_cea_hp_element_inventory_facade_matches_frozen_reference()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let before_library = local_library_snapshot();
+        let before_frozen = frozen_dataset_snapshot();
+        let dataset = load_nasa_cea_h2_o2_hp_dataset().expect("CEA dataset must load");
+        let reference = dataset
+            .rows()
+            .first()
+            .expect("CEA dataset must contain one case");
+        let repository = local_repository();
+        let fixture = ResolvedNasaCeaH2O2HpGasFixture::resolve_offline(repository, reference)
+            .expect("CEA gas universe must resolve offline");
+        let reactants = reconstruct_nasa_cea_h2_o2_reactants(local_repository(), reference)
+            .expect("CEA reactants must be reconstructible");
+        let bounds = fixture.thermochemistry().temperature_bounds();
+        let inventory = ElementInventory::from_amounts([
+            ("H", reactants.hydrogen_atom_moles),
+            ("O", reactants.oxygen_atom_moles),
+        ])
+        .expect("CEA reactants must produce a valid elemental inventory");
+
+        let outcome = EquilibriumCalculator::builder()
+            .ideal_gas_phase(
+                "gas",
+                ["H", "H2", "H2O", "H2O2", "HO2", "O", "O2", "O3", "OH"],
+            )?
+            .element_inventory(inventory)
+            .prefer_libraries(["NASA_gas"])
+            .offline_only()
+            .pressure_pa(reference.pressure_pa)
+            .reference_pressure_pa(reference.pressure_pa)
+            .at_total_enthalpy(
+                TotalEnthalpyJoules::new(reactants.target_enthalpy_j)?,
+                reference.reactant_temperature_k,
+                TemperatureBounds::new(bounds.lower(), bounds.upper())?,
+            )
+            .ph_solve_mode(PhSolveMode::NestedTemperature)
+            .production_cascade()
+            .solve()?;
+        let EquilibriumCalculatorOutcome::PhPoint(point) = outcome else {
+            unreachable!("at_total_enthalpy selects the typed P,H outcome");
+        };
+        assert_eq!(
+            point.solution().equilibrium().build_report().input_kind(),
+            PhaseEquilibriumInputKind::ElementInventory
+        );
+        let report = NasaCeaEquilibriumComparisonReport::from_solution(
+            &dataset,
+            &reactants,
+            reference.pressure_pa,
+            point.solution(),
+        )?;
+        render_comparison(&report);
+        assert_eq!(report.excluded_condensed_count(), 2);
+        assert_eq!(
+            report
+                .species
+                .iter()
+                .filter(|row| row.local_component.is_some())
+                .count(),
+            9
+        );
+        assert_cea_external_regression_envelope(&report);
+        assert_eq!(before_library, local_library_snapshot());
+        assert_eq!(before_frozen, frozen_dataset_snapshot());
+        Ok(())
     }
 
     #[test]

@@ -140,8 +140,12 @@ impl ActiveSetProjection {
                 ),
             });
         }
-        let independent_element_columns =
-            independent_column_basis(&full_local_elements, element_rank, rank_tolerance)?;
+        let independent_element_columns = independent_column_basis(
+            &full_local_elements,
+            element_rank,
+            rank_tolerance,
+            "phase_active_set.element_basis",
+        )?;
         let local_elements = DMatrix::from_fn(
             active_species.len(),
             independent_element_columns.len(),
@@ -293,10 +297,11 @@ impl ActiveSetProjection {
 /// increase the SVD rank are retained. This makes reduced active problems
 /// reproducible while preserving every elemental constraint represented by
 /// the active species.
-fn independent_column_basis(
+pub(crate) fn independent_column_basis(
     matrix: &DMatrix<f64>,
     expected_rank: usize,
     tolerance: f64,
+    error_field: &'static str,
 ) -> Result<Vec<usize>, ReactionExtentError> {
     let mut selected = Vec::with_capacity(expected_rank);
     let mut current_rank = 0;
@@ -321,7 +326,7 @@ fn independent_column_basis(
     }
     if current_rank != expected_rank {
         return Err(ReactionExtentError::InvalidProblem {
-            field: "phase_active_set.element_basis",
+            field: error_field,
             message: format!(
                 "could not select {expected_rank} independent element columns; found {current_rank}"
             ),

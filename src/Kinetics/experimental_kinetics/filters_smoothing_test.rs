@@ -77,9 +77,8 @@ mod tests {
         let mut raw = Vec::new();
         let mut filtered = Vec::new();
 
-        for (reference_value, candidate_value) in reference_values
-            .iter()
-            .zip(candidate_values.iter())
+        for (reference_value, candidate_value) in
+            reference_values.iter().zip(candidate_values.iter())
         {
             if let (Some(raw_value), Some(filtered_value)) = (reference_value, candidate_value) {
                 raw.push(raw_value);

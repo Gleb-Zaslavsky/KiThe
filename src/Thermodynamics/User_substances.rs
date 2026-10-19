@@ -2096,6 +2096,18 @@ impl SubsData {
         });
         self.log_and_propagate(result, substance, "is_coeffs_valid_for_T")
     }
+
+    /// Returns the native coefficient interval currently selected for a substance.
+    pub fn current_coeffs_temperature_interval(
+        &mut self,
+        substance: &str,
+    ) -> SubsDataResult<Option<(f64, f64)>> {
+        let result = self.with_thermo_calculator(substance, |thermo| {
+            thermo.current_coeffs_temperature_interval()
+        });
+        self.log_and_propagate(result, substance, "current_coeffs_temperature_interval")
+    }
+
     /// we have right to calculate thermal properties, construct functions and symbolc expressions
     /// only if the thermal polynomial coefficients corresponds to the given temperature
     /// so this method checks if the current coefficients for this substance are suitable for the given temperature

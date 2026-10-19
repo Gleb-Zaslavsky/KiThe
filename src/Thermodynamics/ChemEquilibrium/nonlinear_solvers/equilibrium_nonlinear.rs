@@ -23,8 +23,8 @@
 //! - If the step reduces the residual, `λ` is decreased (closer to Gauss-Newton).
 //! - If the step increases the residual, `λ` is increased (closer to gradient descent).
 //!
-//! The solver includes a **feasibility constraint** via `max_step_moles_nonnegative`
-//! that limits the step to prevent log-mole values from producing negative physical moles.
+//! The solvers enforce feasibility through their trial-state predicates and
+//! the canonical positive log-mole representation.
 //!
 //! ## Newton-Raphson (NRSolver)
 //!
@@ -41,7 +41,7 @@
 //! ||F(x_k + α·s)||² ≤ (1 - 2·α·c) · ||F(x_k)||²
 //! ```
 //!
-//! The step is also limited by `max_step_moles_nonnegative` to maintain feasibility.
+//! Trial states are checked by the solver's feasibility predicate.
 //!
 //! ## Trust Region (TrustRegionSolver)
 //!
@@ -107,7 +107,7 @@
 //!     v
 //!   LMSolver / NRSolver / TrustRegionSolver
 //!     ├── Iterate until ||F(x)|| < tol or max_iter
-//!     ├── Apply max_step_moles_nonnegative for feasibility
+//!     ├── Check trial-state feasibility
 //!     └── Return solution or SolveError
 //! ```
 //!
@@ -146,8 +146,6 @@
 //!   a reduction factor of 0.5, ensuring sufficient decrease.
 //! - The Trust Region solver solves the subproblem via the **dogleg method** when the
 //!   Gauss-Newton step lies outside the trust region.
-//! - `max_step_moles_nonnegative` computes the maximum step that keeps all mole numbers
-//!   non-negative: `α_max = min_i (-x_i / s_i)` for `s_i < 0`.
 //! - Gram-Schmidt completion in `compute_reaction_basis` handles the case where SVD
 //!   returns fewer nullspace vectors than the dimension of the nullspace.
 //!
@@ -158,6 +156,13 @@
 //! - [`equilibrium_reaction_basis`](super::equilibrium_reaction_basis) — typed reaction basis wrapper
 //!
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventoryError;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::LegacySolverStage;
+#[cfg(any(test, feature = "equilibrium-instrumentation"))]
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::{
+    LegacyCallbackKind, legacy_solver_timing_enabled, record_legacy_callback,
+    record_legacy_jacobian, record_legacy_linear_system, record_legacy_residual,
+    record_legacy_stage,
+};
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptOutcome;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptReport;
 use crate::Thermodynamics::User_substances_error::SubsDataError;
@@ -231,6 +236,33 @@ impl PhMonolithicSeedFailure {
 
     pub(crate) fn into_cause(self) -> ReactionExtentError {
         *self.cause
+    }
+}
+
+/// One rejected initial log-mole seed in explicit multi-start recovery.
+/// The original typed cause remains available for backend-level diagnostics.
+#[derive(Debug)]
+pub struct MultiStartSeedFailure {
+    start_index: usize,
+    cause: Box<ReactionExtentError>,
+}
+
+impl MultiStartSeedFailure {
+    pub(crate) fn new(start_index: usize, cause: ReactionExtentError) -> Self {
+        Self {
+            start_index,
+            cause: Box::new(cause),
+        }
+    }
+
+    /// Position of the seed in the caller-provided ordered seed list.
+    pub fn start_index(&self) -> usize {
+        self.start_index
+    }
+
+    /// Typed backend or formulation cause for this rejected seed.
+    pub fn cause(&self) -> &ReactionExtentError {
+        &self.cause
     }
 }
 
@@ -371,6 +403,13 @@ pub enum ReactionExtentError {
     PhMonolithicSeedRecoveryFailed {
         /// Ordered fresh temperature starts and their typed causes.
         attempts: Vec<PhMonolithicSeedFailure>,
+    },
+    /// Every explicit multi-start log-mole seed was rejected. Each seed owns
+    /// its original typed cascade error instead of reducing the batch to one
+    /// summary string.
+    MultiStartSeedRecoveryFailed {
+        /// Ordered seed failures and their complete typed causes.
+        attempts: Vec<MultiStartSeedFailure>,
     },
     /// A bounded monolithic P,H all-active probe solved numerically, but its
     /// TPD evidence did not authorize publishing the probed phase set.
@@ -586,6 +625,11 @@ impl fmt::Display for ReactionExtentError {
                 "monolithic P,H temperature-seed recovery failed after {} attempt(s)",
                 attempts.len()
             ),
+            Self::MultiStartSeedRecoveryFailed { attempts } => write!(
+                f,
+                "explicit multi-start recovery failed after {} seed attempt(s)",
+                attempts.len()
+            ),
             Self::PhMonolithicPhaseProbeRejected { message } => {
                 write!(f, "monolithic P,H phase probe was rejected: {message}")
             }
@@ -648,6 +692,9 @@ impl Error for ReactionExtentError {
             Self::PhMonolithicSeedRecoveryFailed { attempts } => {
                 attempts.last().map(|attempt| attempt.cause() as _)
             }
+            Self::MultiStartSeedRecoveryFailed { attempts } => {
+                attempts.last().map(|attempt| attempt.cause() as _)
+            }
             _ => None,
         }
     }
@@ -691,6 +738,7 @@ impl ReactionExtentError {
             Self::PhMonolithicSeedRecoveryFailed { .. } => {
                 ReactionExtentErrorKind::AllBackendsFailed
             }
+            Self::MultiStartSeedRecoveryFailed { .. } => ReactionExtentErrorKind::AllBackendsFailed,
             Self::PhMonolithicPhaseProbeRejected { .. } => {
                 ReactionExtentErrorKind::InvalidCandidate
             }
@@ -725,7 +773,55 @@ impl ReactionExtentError {
                 .iter()
                 .map(|attempt| attempt.cause().started_backend_attempts())
                 .sum(),
+            Self::MultiStartSeedRecoveryFailed { attempts } => attempts
+                .iter()
+                .map(|attempt| attempt.cause().started_backend_attempts())
+                .sum(),
             _ => 0,
+        }
+    }
+
+    /// Returns every retained concrete backend attempt in execution order.
+    ///
+    /// Wrapper failures are flattened so diagnostics can account for the
+    /// original physical solve, normalization discovery, seed recovery, and
+    /// nested P,H fallback without reconstructing the error tree themselves.
+    pub fn backend_attempt_reports(&self) -> Vec<SolverAttemptReport> {
+        let mut reports = Vec::new();
+        self.collect_backend_attempt_reports(&mut reports);
+        reports
+    }
+
+    fn collect_backend_attempt_reports(&self, output: &mut Vec<SolverAttemptReport>) {
+        match self {
+            Self::AllBackendsFailed { attempts } | Self::CascadeAborted { attempts, .. } => {
+                output.extend(attempts.iter().cloned());
+            }
+            Self::TemperatureTrialFailed { cause, .. }
+            | Self::TemperatureRangePointFailed { cause, .. } => {
+                cause.collect_backend_attempt_reports(output);
+            }
+            Self::ExtensiveNormalizationRecoveryFailed {
+                physical, recovery, ..
+            } => {
+                physical.collect_backend_attempt_reports(output);
+                recovery.collect_backend_attempt_reports(output);
+            }
+            Self::PhAutoFallbackFailed { monolithic, nested } => {
+                monolithic.collect_backend_attempt_reports(output);
+                nested.collect_backend_attempt_reports(output);
+            }
+            Self::PhMonolithicSeedRecoveryFailed { attempts } => {
+                for attempt in attempts {
+                    attempt.cause().collect_backend_attempt_reports(output);
+                }
+            }
+            Self::MultiStartSeedRecoveryFailed { attempts } => {
+                for attempt in attempts {
+                    attempt.cause().collect_backend_attempt_reports(output);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -750,6 +846,10 @@ impl ReactionExtentError {
                 .nonlinear_iterations()
                 .saturating_add(nested.nonlinear_iterations()),
             Self::PhMonolithicSeedRecoveryFailed { attempts } => attempts
+                .iter()
+                .map(|attempt| attempt.cause().nonlinear_iterations())
+                .sum(),
+            Self::MultiStartSeedRecoveryFailed { attempts } => attempts
                 .iter()
                 .map(|attempt| attempt.cause().nonlinear_iterations())
                 .sum(),
@@ -794,6 +894,12 @@ impl ReactionExtentError {
                         .iter()
                         .all(|attempt| attempt.cause().is_retryable_formulation_failure())
             }
+            Self::MultiStartSeedRecoveryFailed { attempts } => {
+                !attempts.is_empty()
+                    && attempts
+                        .iter()
+                        .all(|attempt| attempt.cause().is_retryable_formulation_failure())
+            }
             Self::PhMonolithicPhaseProbeRejected { .. } => true,
             _ => self.is_retryable_backend_failure(),
         }
@@ -819,13 +925,14 @@ impl ReactionExtentError {
 #[cfg(test)]
 mod error_contract_tests {
     use super::{
-        EquilibriumPreparationError, PhMonolithicSeedFailure, ReactionExtentError,
-        ReactionExtentErrorKind, SolveError,
+        EquilibriumPreparationError, MultiStartSeedFailure, PhMonolithicSeedFailure,
+        ReactionExtentError, ReactionExtentErrorKind, SolveError,
     };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventoryError;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
-        SolverAttemptFailureKind, SolverAttemptOutcome, SolverAttemptReport, SolverBackend,
+        SolverAttemptFailureKind, SolverAttemptMetrics, SolverAttemptOutcome, SolverAttemptReport,
+        SolverBackend, SolverTermination,
     };
     use crate::Thermodynamics::User_substances_error::SubsDataError;
     use std::error::Error;
@@ -861,6 +968,54 @@ mod error_contract_tests {
     }
 
     #[test]
+    fn multi_start_failure_preserves_each_typed_cascade_and_aggregates_work() {
+        let cascade_failure = |solver| ReactionExtentError::AllBackendsFailed {
+            attempts: vec![SolverAttemptReport {
+                backend: SolverBackend::Legacy(solver),
+                outcome: SolverAttemptOutcome::Failed {
+                    kind: SolverAttemptFailureKind::Solver,
+                    reason: "iteration limit".to_string(),
+                    elapsed_micros: 0,
+                },
+                metrics: Some(SolverAttemptMetrics {
+                    termination: SolverTermination::MaxIterations,
+                    backend_converged: false,
+                    iterations: 3,
+                    residual_evaluations: 4,
+                    jacobian_evaluations: 3,
+                    linear_solves: 3,
+                    counters_collected: true,
+                    timings_collected: false,
+                    elapsed_millis: 1,
+                    elapsed_micros: 1_000,
+                    evaluation_timing: None,
+                }),
+            }],
+        };
+        let error = ReactionExtentError::MultiStartSeedRecoveryFailed {
+            attempts: vec![
+                MultiStartSeedFailure::new(0, cascade_failure(Solvers::LM)),
+                MultiStartSeedFailure::new(1, cascade_failure(Solvers::NR)),
+            ],
+        };
+
+        assert_eq!(error.kind(), ReactionExtentErrorKind::AllBackendsFailed);
+        assert_eq!(error.started_backend_attempts(), 2);
+        assert_eq!(error.nonlinear_iterations(), 6);
+        assert!(error.is_retryable_formulation_failure());
+        assert!(error.source().is_some());
+        assert!(error.to_string().contains("2 seed attempt(s)"));
+        let ReactionExtentError::MultiStartSeedRecoveryFailed { attempts } = error else {
+            panic!("expected typed multi-start recovery failure");
+        };
+        assert_eq!(attempts[0].start_index(), 0);
+        assert!(matches!(
+            attempts[0].cause(),
+            ReactionExtentError::AllBackendsFailed { attempts } if attempts.len() == 1
+        ));
+    }
+
+    #[test]
     fn all_backend_failure_display_reports_the_attempt_count() {
         let error = ReactionExtentError::AllBackendsFailed {
             attempts: Vec::new(),
@@ -883,6 +1038,7 @@ mod error_contract_tests {
             outcome: SolverAttemptOutcome::Failed {
                 kind: SolverAttemptFailureKind::Solver,
                 reason: "iteration limit".to_string(),
+                elapsed_micros: 0,
             },
             metrics: None,
         };
@@ -942,6 +1098,7 @@ mod error_contract_tests {
                         outcome: SolverAttemptOutcome::Failed {
                             kind: SolverAttemptFailureKind::Solver,
                             reason: "iteration limit".to_string(),
+                            elapsed_micros: 0,
                         },
                         metrics: None,
                     }],
@@ -962,6 +1119,7 @@ mod error_contract_tests {
                     outcome: SolverAttemptOutcome::Failed {
                         kind: SolverAttemptFailureKind::Solver,
                         reason: "nested iteration limit".to_string(),
+                        elapsed_micros: 0,
                     },
                     metrics: None,
                 }],
@@ -1136,7 +1294,7 @@ where
         let mut lambda = self.lambda;
 
         for _iter in 0..self.max_iter {
-            let f_val = (self.f)(&x).map_err(|error| {
+            let f_val = timed_legacy_residual(&self.f, &x).map_err(|error| {
                 SolveError::EvalError(format!("residual evaluation failed: {error}"))
             })?;
             info!("Iteration {}, x = {:?}, f = {:?}", _iter, x, f_val);
@@ -1149,7 +1307,7 @@ where
                 return Err(SolveError::SingularMatrix);
             }
 
-            let j = (self.jacobian)(&x).map_err(|error| {
+            let j = timed_legacy_jacobian(&self.jacobian, &x).map_err(|error| {
                 SolveError::EvalError(format!("Jacobian evaluation failed: {error}"))
             })?;
             info!("  Jacobian:\n{}", j);
@@ -1167,38 +1325,45 @@ where
             if j.iter().any(|value| !value.is_finite()) {
                 return Err(SolveError::SingularMatrix);
             }
-            let jt = j.transpose();
+            let jt = timed_legacy_stage(LegacySolverStage::MatrixOperations, || j.transpose());
 
-            let jtj = &jt * &j;
-            let mut lhs = jtj.clone();
+            let mut lhs = timed_legacy_stage(LegacySolverStage::MatrixOperations, || &jt * &j);
+            let jtj = &lhs;
             info!("  Jᵀ·J:\n{}", jtj);
-            for i in 0..n {
-                lhs[(i, i)] += lambda;
-            }
+            timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+                for i in 0..n {
+                    lhs[(i, i)] += lambda;
+                }
+            });
 
-            let rhs = -(&jt * DVector::from_vec(f_val.clone()));
+            let rhs = timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+                -(&jt * DVector::from_vec(f_val))
+            });
 
-            let delta = lhs.lu().solve(&rhs).ok_or(SolveError::SingularMatrix)?;
+            let delta_result = timed_legacy_linear_system(|| lhs.lu().solve(&rhs));
+            let delta = delta_result.ok_or(SolveError::SingularMatrix)?;
             info!("  Step delta: {:?}", delta);
-
-            let delta = delta.data.as_vec().clone();
 
             let mut alpha = 1.0;
             let mut accepted = false;
 
             while alpha >= self.alpha_min {
-                let x_trial: Vec<f64> = x
-                    .iter()
-                    .zip(delta.iter())
-                    .map(|(xi, dxi)| xi + alpha * dxi)
-                    .collect();
+                let x_trial: Vec<f64> = timed_legacy_stage(LegacySolverStage::TrialVector, || {
+                    x.iter()
+                        .zip(delta.iter())
+                        .map(|(xi, dxi)| xi + alpha * dxi)
+                        .collect()
+                });
                 info!("    Trial x (alpha={}): {:?}", alpha, x_trial);
-                if !(self.feasible)(&x_trial) {
-                    alpha *= 0.5;
+                let feasible = timed_legacy_stage(LegacySolverStage::Feasibility, || {
+                    (self.feasible)(&x_trial)
+                });
+                if !feasible {
+                    alpha = timed_legacy_stage(LegacySolverStage::Globalization, || alpha * 0.5);
                     continue;
                 }
 
-                let f_trial = (self.f)(&x_trial).map_err(|error| {
+                let f_trial = timed_legacy_residual(&self.f, &x_trial).map_err(|error| {
                     SolveError::EvalError(format!("residual evaluation failed: {error}"))
                 })?;
                 info!("    Trial f: {:?}", f_trial);
@@ -1206,16 +1371,16 @@ where
                 info!("    ||f_trial|| = {}", f_trial_norm);
                 if f_trial_norm < f_norm {
                     x = x_trial;
-                    lambda *= 0.3;
+                    lambda = timed_legacy_stage(LegacySolverStage::Globalization, || lambda * 0.3);
                     accepted = true;
                     break;
                 } else {
-                    alpha *= 0.5;
+                    alpha = timed_legacy_stage(LegacySolverStage::Globalization, || alpha * 0.5);
                 }
             }
 
             if !accepted {
-                lambda *= 10.0;
+                lambda = timed_legacy_stage(LegacySolverStage::Globalization, || lambda * 10.0);
                 info!(
                     "  No acceptable step found; increasing lambda to {}",
                     lambda
@@ -1227,63 +1392,6 @@ where
     }
 }
 //////////////////////////////////////NR SOLVER//////////////////////////////////////////////////////////////
-/// Computes maximum step size to keep mole numbers non-negative
-///
-/// For Newton steps that would drive species moles negative, this function
-/// computes the largest α such that n_i + α*Δn_i ≥ 0 for all species.
-pub fn max_step_moles_nonnegative(
-    n: &[f64],       // current moles
-    delta_n: &[f64], // Newton step
-    safety: f64,     // e.g. 0.95
-) -> Result<f64, SolveError> {
-    if n.len() != delta_n.len() {
-        return Err(SolveError::EvalError(format!(
-            "mole vector has {} entries but Newton step has {} entries",
-            n.len(),
-            delta_n.len(),
-        )));
-    }
-    if !safety.is_finite() || safety <= 0.0 || safety > 1.0 {
-        return Err(SolveError::EvalError(
-            "step safety factor must be finite and lie in (0, 1]".to_string(),
-        ));
-    }
-    if n.iter().chain(delta_n).any(|value| !value.is_finite()) {
-        return Err(SolveError::EvalError(
-            "moles and Newton step must be finite".to_string(),
-        ));
-    }
-
-    let mut alpha_max: f64 = 1.0;
-
-    for i in 0..n.len() {
-        let ni = n[i];
-        let dni = delta_n[i];
-
-        // Only decreasing species can violate positivity
-        if dni < 0.0 {
-            if ni <= 0.0 {
-                return Ok(0.0); // already infeasible
-            }
-
-            let alpha_i = safety * ni / (-dni);
-            alpha_max = alpha_max.min(alpha_i);
-        }
-    }
-
-    Ok(alpha_max.clamp(0.0, 1.0))
-}
-
-/*
-pub fn tolerance_calc(f_val: &Vec<f64>, x: &Vec<f64>){
-    let mut complex = 0.0;
-    let x_sum: f64 = x.iter().sum();
-    for (i, f_val_i) in f_val.iter().enumerate(){
-        let rel
-       let s =  f_val_i/x[i].abs()
-    }
-}
-*/
 
 /// Newton-Raphson solver with line search and feasibility constraints
 ///
@@ -1318,12 +1426,13 @@ where
     /// Solves nonlinear system using Newton-Raphson with line search
     ///
     /// Performs backtracking line search with feasibility checking.
-    /// Uses bound-aware step limiting to prevent negative mole numbers.
+    /// Checks trial-state feasibility before accepting a step.
     pub fn solve(&mut self, mut x: Vec<f64>) -> Result<Vec<f64>, SolveError> {
         let n = x.len();
 
         for iter in 0..self.max_iter {
-            let f_val = (self.f)(&x).map_err(|error| SolveError::EvalError(error.to_string()))?;
+            let f_val = timed_legacy_residual(&self.f, &x)
+                .map_err(|error| SolveError::EvalError(error.to_string()))?;
             info!("NR Iteration {}, x = {:?}, f = {:?}", iter, x, f_val);
             let f_norm = l2_norm(&f_val);
             info!(" ||f|| = {}", f_norm);
@@ -1333,8 +1442,8 @@ where
             if f_norm.is_nan() || f_norm.is_infinite() {
                 return Err(SolveError::SingularMatrix);
             }
-            let j =
-                (self.jacobian)(&x).map_err(|error| SolveError::EvalError(error.to_string()))?;
+            let j = timed_legacy_jacobian(&self.jacobian, &x)
+                .map_err(|error| SolveError::EvalError(error.to_string()))?;
 
             info!(" Jacobian:\n{}", j);
             if j.nrows() != n || j.ncols() != n {
@@ -1349,32 +1458,35 @@ where
                 ));
             }
             // Solve J * delta = -f
-            let rhs = -DVector::from_vec(f_val);
-            let delta_vec = j.lu().solve(&rhs).ok_or(SolveError::SingularMatrix)?;
+            let rhs = timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+                -DVector::from_vec(f_val)
+            });
+            let delta_result = timed_legacy_linear_system(|| j.lu().solve(&rhs));
+            let delta_vec = delta_result.ok_or(SolveError::SingularMatrix)?;
             let delta = delta_vec.data.as_vec();
             info!(" Step delta: {:?}", delta_vec);
-            // --- NEW: bound-aware step size ---
-            // let alpha_species =  max_step_moles_nonnegative(&x, &delta, 0.95);
-
-            // let mut alpha = alpha_species;
             let mut alpha = 1.0;
             info!("bounded step {}", alpha);
 
             let mut accepted = false;
             while alpha >= self.alpha_min {
-                let x_trial: Vec<f64> = x
-                    .iter()
-                    .zip(delta.iter())
-                    .map(|(xi, dxi)| xi + alpha * dxi)
-                    .collect();
+                let x_trial: Vec<f64> = timed_legacy_stage(LegacySolverStage::TrialVector, || {
+                    x.iter()
+                        .zip(delta.iter())
+                        .map(|(xi, dxi)| xi + alpha * dxi)
+                        .collect()
+                });
                 info!(" Trial x (alpha={}): {:?}", alpha, x_trial);
-                if !(self.feasible)(&x_trial) {
-                    alpha *= 0.5;
+                let feasible = timed_legacy_stage(LegacySolverStage::Feasibility, || {
+                    (self.feasible)(&x_trial)
+                });
+                if !feasible {
+                    alpha = timed_legacy_stage(LegacySolverStage::Globalization, || alpha * 0.5);
                     continue;
                 }
 
-                let f_trial =
-                    (self.f)(&x_trial).map_err(|error| SolveError::EvalError(error.to_string()))?;
+                let f_trial = timed_legacy_residual(&self.f, &x_trial)
+                    .map_err(|error| SolveError::EvalError(error.to_string()))?;
 
                 info!(" Trial f: {:?}", f_trial);
 
@@ -1386,7 +1498,7 @@ where
                     break;
                 }
 
-                alpha *= 0.5;
+                alpha = timed_legacy_stage(LegacySolverStage::Globalization, || alpha * 0.5);
                 if !accepted {
                     info!(" No acceptable step found; continuing to next iteration");
                 }
@@ -1406,11 +1518,107 @@ where
     }
 }
 
+#[inline]
+fn timed_legacy_residual<F>(f: &F, values: &[f64]) -> Result<Vec<f64>, ReactionExtentError>
+where
+    F: Fn(&[f64]) -> Result<Vec<f64>, ReactionExtentError>,
+{
+    #[cfg(not(any(test, feature = "equilibrium-instrumentation")))]
+    {
+        return f(values);
+    }
+
+    #[cfg(any(test, feature = "equilibrium-instrumentation"))]
+    {
+        if legacy_solver_timing_enabled() {
+            record_legacy_callback(LegacyCallbackKind::Residual, values);
+        }
+        let started = legacy_solver_timing_enabled().then(std::time::Instant::now);
+        let result = f(values);
+        if let Some(started) = started {
+            record_legacy_residual(started.elapsed());
+        }
+        result
+    }
+}
+
+#[inline]
+fn timed_legacy_jacobian<F>(
+    jacobian: &F,
+    values: &[f64],
+) -> Result<DMatrix<f64>, ReactionExtentError>
+where
+    F: Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError>,
+{
+    #[cfg(not(any(test, feature = "equilibrium-instrumentation")))]
+    {
+        return jacobian(values);
+    }
+
+    #[cfg(any(test, feature = "equilibrium-instrumentation"))]
+    {
+        if legacy_solver_timing_enabled() {
+            record_legacy_callback(LegacyCallbackKind::Jacobian, values);
+        }
+        let started = legacy_solver_timing_enabled().then(std::time::Instant::now);
+        let result = jacobian(values);
+        if let Some(started) = started {
+            record_legacy_jacobian(started.elapsed());
+        }
+        result
+    }
+}
+
+#[cfg(not(any(test, feature = "equilibrium-instrumentation")))]
+#[inline]
+fn timed_legacy_linear_system<F, T>(solve: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    solve()
+}
+
+#[cfg(any(test, feature = "equilibrium-instrumentation"))]
+fn timed_legacy_linear_system<F, T>(solve: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    let started = std::time::Instant::now();
+    let result = solve();
+    record_legacy_linear_system(started.elapsed());
+    result
+}
+
+#[cfg(not(any(test, feature = "equilibrium-instrumentation")))]
+#[inline]
+fn timed_legacy_stage<T, F>(_: LegacySolverStage, operation: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    operation()
+}
+
+#[cfg(any(test, feature = "equilibrium-instrumentation"))]
+#[inline]
+fn timed_legacy_stage<T, F>(stage: LegacySolverStage, operation: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    let started = legacy_solver_timing_enabled().then(std::time::Instant::now);
+    let result = operation();
+    if let Some(started) = started {
+        record_legacy_stage(stage, started.elapsed());
+    }
+    result
+}
+
 /// Computes L2 norm of a vector
 ///
 /// Helper function for convergence checking in solvers.
 fn l2_norm(v: &[f64]) -> f64 {
-    v.iter().map(|x| x * x).sum::<f64>().sqrt()
+    timed_legacy_stage(LegacySolverStage::Norm, || {
+        v.iter().map(|x| x * x).sum::<f64>().sqrt()
+    })
 }
 ///////////////////////TRUST REGION///////////////////////////////////////////////////
 
@@ -1444,7 +1652,8 @@ where
         let mut delta = self.delta_init;
 
         for _iter in 0..self.max_iter {
-            let f_val = (self.f)(&x).map_err(|error| SolveError::EvalError(error.to_string()))?;
+            let f_val = timed_legacy_residual(&self.f, &x)
+                .map_err(|error| SolveError::EvalError(error.to_string()))?;
             if f_val.len() != n {
                 return Err(SolveError::EvalError("residual dimension mismatch".into()));
             }
@@ -1457,8 +1666,8 @@ where
                 return Ok(x);
             }
 
-            let J =
-                (self.jacobian)(&x).map_err(|error| SolveError::EvalError(error.to_string()))?;
+            let J = timed_legacy_jacobian(&self.jacobian, &x)
+                .map_err(|error| SolveError::EvalError(error.to_string()))?;
 
             if J.nrows() != n || J.ncols() != n {
                 error!(
@@ -1473,50 +1682,67 @@ where
                 return Err(SolveError::SingularMatrix);
             }
 
-            let fvec = DVector::from_vec(f_val.clone());
-
-            // --- Newton step ---
-            let newton_step = J
-                .clone()
-                .lu()
-                .solve(&(-&fvec))
-                .ok_or(SolveError::SingularMatrix)?;
+            let fvec = timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+                DVector::from_vec(f_val)
+            });
 
             // --- Cauchy step ---
-            let g = &J.transpose() * &fvec;
-            let g_norm_sq = g.dot(&g);
-            let jg = &J * &g;
-            let alpha = g_norm_sq / jg.dot(&jg).max(1e-16);
-            let cauchy_step = -alpha * g.clone();
+            let g = timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+                &J.transpose() * &fvec
+            });
+            let g_norm_sq = timed_legacy_stage(LegacySolverStage::Norm, || g.dot(&g));
+            let jg = timed_legacy_stage(LegacySolverStage::MatrixOperations, || &J * &g);
+            let jg_norm_sq = timed_legacy_stage(LegacySolverStage::Norm, || jg.dot(&jg));
+            let alpha = g_norm_sq / jg_norm_sq.max(1e-16);
+            let cauchy_step =
+                timed_legacy_stage(LegacySolverStage::MatrixOperations, || -alpha * g.clone());
 
             // --- Dogleg step ---
-            let p = if newton_step.norm() <= delta {
-                newton_step
-            } else if cauchy_step.norm() >= delta {
-                delta / cauchy_step.norm() * cauchy_step
+            let cauchy_norm = timed_legacy_stage(LegacySolverStage::Norm, || cauchy_step.norm());
+            // A boundary Cauchy step does not use the Newton step. Delay the
+            // LU solve until the dogleg path actually needs Newton data.
+            let p = if cauchy_norm >= delta {
+                timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+                    delta / cauchy_norm * cauchy_step
+                })
             } else {
-                let p_u = cauchy_step;
-                let p_b = newton_step;
-                let d = &p_b - &p_u;
+                let newton_step_result =
+                    timed_legacy_linear_system(|| J.clone().lu().solve(&(-&fvec)));
+                let newton_step = newton_step_result.ok_or(SolveError::SingularMatrix)?;
+                let newton_norm =
+                    timed_legacy_stage(LegacySolverStage::Norm, || newton_step.norm());
+                timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+                    if newton_norm <= delta {
+                        newton_step
+                    } else {
+                        let p_u = cauchy_step;
+                        let p_b = newton_step;
+                        let d = &p_b - &p_u;
 
-                let a = d.dot(&d);
-                let b = 2.0 * p_u.dot(&d);
-                let c = p_u.dot(&p_u) - delta * delta;
+                        let a = d.dot(&d);
+                        let b = 2.0 * p_u.dot(&d);
+                        let c = p_u.dot(&p_u) - delta * delta;
 
-                let tau = (-b + (b * b - 4.0 * a * c).sqrt()) / (2.0 * a);
-                p_u + tau * d
+                        let tau = (-b + (b * b - 4.0 * a * c).sqrt()) / (2.0 * a);
+                        p_u + tau * d
+                    }
+                })
             };
+            let p_norm = timed_legacy_stage(LegacySolverStage::Norm, || p.norm());
 
-            let p_vec = p.data.as_vec().clone();
-            let x_trial: Vec<f64> = x.iter().zip(p_vec.iter()).map(|(xi, pi)| xi + pi).collect();
+            let x_trial: Vec<f64> = timed_legacy_stage(LegacySolverStage::TrialVector, || {
+                x.iter().zip(p.iter()).map(|(xi, pi)| xi + pi).collect()
+            });
 
-            if !(self.feasible)(&x_trial) {
-                delta *= 0.25;
+            let feasible =
+                timed_legacy_stage(LegacySolverStage::Feasibility, || (self.feasible)(&x_trial));
+            if !feasible {
+                timed_legacy_stage(LegacySolverStage::Globalization, || delta *= 0.25);
                 continue;
             }
 
-            let f_trial =
-                (self.f)(&x_trial).map_err(|error| SolveError::EvalError(error.to_string()))?;
+            let f_trial = timed_legacy_residual(&self.f, &x_trial)
+                .map_err(|error| SolveError::EvalError(error.to_string()))?;
 
             // A numerically exact trial root must be accepted directly.  At
             // that point the quadratic-model reduction can be zero or lose
@@ -1535,21 +1761,32 @@ where
             // g^T p where g = J^T f. Using f^T p here is dimensionally wrong
             // and can make a well-improving step look harmful when J is
             // ill-conditioned, collapsing the trust region to machine noise.
-            let model_reduction = -2.0 * g.dot(&p) - p.dot(&(J.transpose() * &J * &p));
+            // The quadratic model only needs p^T J^T J p = ||Jp||^2.
+            // Forming the dense J^T J matrix here repeats expensive work and
+            // allocates a matrix that is immediately reduced to one scalar.
+            let jacobian_trial =
+                timed_legacy_stage(LegacySolverStage::MatrixOperations, || &J * &p);
+            let linear_model_term = timed_legacy_stage(LegacySolverStage::Norm, || g.dot(&p));
+            let quadratic_model_term = timed_legacy_stage(LegacySolverStage::Norm, || {
+                jacobian_trial.dot(&jacobian_trial)
+            });
+            let model_reduction = -2.0 * linear_model_term - quadratic_model_term;
 
             if !model_reduction.is_finite() || model_reduction <= 0.0 {
-                delta *= 0.25;
+                timed_legacy_stage(LegacySolverStage::Globalization, || delta *= 0.25);
                 continue;
             }
 
             let rho = actual_reduction / model_reduction;
 
             // --- Trust region update ---
-            if rho < 0.25 {
-                delta *= 0.25;
-            } else if rho > 0.75 && (p.norm() - delta).abs() < 1e-12 {
-                delta = (2.0 * delta).min(self.delta_max);
-            }
+            timed_legacy_stage(LegacySolverStage::Globalization, || {
+                if rho < 0.25 {
+                    delta *= 0.25;
+                } else if rho > 0.75 && (p_norm - delta).abs() < 1e-12 {
+                    delta = (2.0 * delta).min(self.delta_max);
+                }
+            });
 
             // --- Accept / reject ---
             if rho > self.eta {
@@ -1652,6 +1889,25 @@ pub fn compute_reaction_basis(
 ) -> Result<ReactionBasis, ReactionExtentError> {
     use nalgebra::linalg::SVD;
 
+    if !tol.is_finite() || tol <= 0.0 {
+        return Err(ReactionExtentError::InvalidProblem {
+            field: "reaction_basis_tolerance",
+            message: "reaction-basis tolerance must be finite and strictly positive".to_string(),
+        });
+    }
+    if a.nrows() == 0 || a.ncols() == 0 {
+        return Err(ReactionExtentError::InvalidProblem {
+            field: "reaction_basis_matrix",
+            message: "element composition matrix must have positive dimensions".to_string(),
+        });
+    }
+    if a.iter().any(|value| !value.is_finite()) {
+        return Err(ReactionExtentError::InvalidProblem {
+            field: "reaction_basis_matrix",
+            message: "element composition matrix must contain only finite values".to_string(),
+        });
+    }
+
     let m = a.nrows(); // species
 
     // SVD of Aᵀ (elements × species)
@@ -1703,7 +1959,10 @@ pub fn compute_reaction_basis(
         // The span we must be orthogonal to is the space spanned by the first `rank` rows (if rank>0)
         let orth_span: Vec<&DVector<f64>> = v_rows.iter().take(rank).collect();
 
-        let mut null_basis: Vec<DVector<f64>> = Vec::new();
+        // The thin SVD may already have supplied part of the nullspace.
+        // Seed Gram-Schmidt with those vectors so completion cannot duplicate
+        // or linearly combine an already selected reaction direction.
+        let mut null_basis: Vec<DVector<f64>> = v_rows[rank..p].to_vec();
 
         for j in 0..m {
             if col >= num_reactions {
@@ -1735,17 +1994,16 @@ pub fn compute_reaction_basis(
             }
         }
     }
-    let mut reactions = -1.0 * reactions; // flip sign convention
-
-    // Zero out small elements (numerical noise) for stability
-    let eps = 1e-3;
-    for i in 0..m {
-        for j in 0..num_reactions {
-            if reactions[(i, j)].abs() < eps {
-                reactions[(i, j)] = 0.0;
-            }
-        }
+    if col != num_reactions {
+        return Err(ReactionExtentError::InvalidProblem {
+            field: "reaction_basis_nullspace",
+            message: format!(
+                "constructed {col} independent nullspace vectors, expected {num_reactions}"
+            ),
+        });
     }
+
+    let reactions = -1.0 * reactions; // flip sign convention
 
     Ok(ReactionBasis {
         rank,
@@ -1900,7 +2158,9 @@ mod tests {
 
 #[cfg(test)]
 mod tests_reaction_basis {
-    use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::compute_reaction_basis;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::{
+        ReactionExtentError, compute_reaction_basis,
+    };
     use log::info;
     use nalgebra::DMatrix;
 
@@ -2002,40 +2262,66 @@ mod tests_reaction_basis {
         // Element conservation check
         assert!((2.0 * nu[0] + 1.0 * nu[1]).abs() < 1e-10);
     }
+
+    #[test]
+    fn rectangular_rank_deficient_basis_has_complete_independent_nullspace() {
+        // Four species and two declared element columns, with the second
+        // element column dependent on the first by being identically zero.
+        let a = DMatrix::from_row_slice(4, 2, &[1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0]);
+
+        let basis = compute_reaction_basis(&a, 1e-12).unwrap();
+        assert_eq!(basis.rank, 1);
+        assert_eq!(basis.num_reactions, 3);
+        assert!(
+            (basis.reactions.transpose() * &basis.reactions)
+                .svd(false, false)
+                .singular_values
+                .iter()
+                .all(|value| *value > 1e-8),
+            "reaction columns must be independent: {:?}",
+            basis.reactions
+        );
+        assert!((a.transpose() * &basis.reactions).norm() < 1e-10);
+    }
+
+    #[test]
+    fn reaction_basis_rejects_invalid_matrix_and_rank_tolerances() {
+        let a = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
+        assert!(matches!(
+            compute_reaction_basis(&a, 0.0),
+            Err(ReactionExtentError::InvalidProblem {
+                field: "reaction_basis_tolerance",
+                ..
+            })
+        ));
+        assert!(matches!(
+            compute_reaction_basis(&DMatrix::from_row_slice(1, 1, &[f64::NAN]), 1e-12),
+            Err(ReactionExtentError::InvalidProblem {
+                field: "reaction_basis_matrix",
+                ..
+            })
+        ));
+
+        let nearly_dependent = DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1e-14]);
+        assert_eq!(
+            compute_reaction_basis(&nearly_dependent, 1e-12)
+                .unwrap()
+                .rank,
+            1
+        );
+        assert_eq!(
+            compute_reaction_basis(&nearly_dependent, 1e-16)
+                .unwrap()
+                .rank,
+            2
+        );
+    }
 }
 
 #[cfg(test)]
 mod nr_tests {
     use super::*;
     use nalgebra::DMatrix;
-
-    #[test]
-    fn max_step_limits_alpha() {
-        // species 0 has a large negative step, species 1 increases
-        let n = vec![0.01, 0.5];
-        let delta = vec![-1.0, 0.1];
-        let alpha = max_step_moles_nonnegative(&n, &delta, 0.95).unwrap();
-
-        // For species 0: alpha0 = 0.95 * 0.01 / 1.0 = 0.0095
-        let expected = 0.95 * 0.01 / 1.0;
-        assert!((alpha - expected).abs() < 1e-12);
-    }
-
-    #[test]
-    fn max_step_rejects_malformed_public_inputs_without_panicking() {
-        assert!(matches!(
-            max_step_moles_nonnegative(&[1.0], &[1.0, 2.0], 0.95),
-            Err(SolveError::EvalError(_))
-        ));
-        assert!(matches!(
-            max_step_moles_nonnegative(&[f64::NAN], &[1.0], 0.95),
-            Err(SolveError::EvalError(_))
-        ));
-        assert!(matches!(
-            max_step_moles_nonnegative(&[1.0], &[-1.0], 1.5),
-            Err(SolveError::EvalError(_))
-        ));
-    }
 
     #[test]
     fn nr_solver_respects_bounds_and_converges() {

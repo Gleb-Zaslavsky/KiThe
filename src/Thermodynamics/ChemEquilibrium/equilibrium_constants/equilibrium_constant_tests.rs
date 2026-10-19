@@ -99,6 +99,20 @@ mod tests {
     }
 
     #[test]
+    fn reaction_basis_rejects_dependent_reaction_columns() {
+        let error = ValidatedReactionBasis::new(
+            vec!["A2".to_string(), "A".to_string(), "B".to_string()],
+            &DMatrix::from_row_slice(3, 2, &[2.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
+            DMatrix::from_column_slice(3, 2, &[-1.0, 2.0, 0.0, -2.0, 4.0, 0.0]),
+            1,
+            ReactionBasisTolerances::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not independent"));
+    }
+
+    #[test]
     fn reaction_basis_is_stable_under_species_permutation_up_to_reordering() {
         let original = ValidatedReactionBasis::new(
             vec!["A2".to_string(), "B2".to_string(), "AB".to_string()],

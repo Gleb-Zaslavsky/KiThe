@@ -16,8 +16,10 @@
 //!
 //! The acceptance gate checks three conditions:
 //!
-//! 1. **Residual norm**: `||F(y)||₂ < residual_tolerance` — the nonlinear residual
-//!    (element conservation + reaction affinities) must be sufficiently small.
+//! 1. **Acceptance residual norm**: `||F_acceptance(y)||₂ < residual_tolerance` —
+//!    the residual supplied to the common gate must be sufficiently small. With
+//!    row scaling enabled this is the scaled residual; the raw physical
+//!    residual is recorded separately and is not currently a rejection gate.
 //!
 //! 2. **Element balance**: `||A^T·n(y) - b_0||₂ < element_balance_tolerance` —
 //!    the solution must conserve elements to within the specified tolerance.
@@ -66,7 +68,7 @@
 //!     └── Return EquilibriumCandidateReport or error
 //!     │
 //!     v
-//!   EquilibriumLogMoles::solve_backend_cascade()
+//!   equilibrium_backend_adapter::solve_backend_cascade_with_control()
 //!     ├── If accepted: publish candidate
 //!     └── If rejected: try next backend or fail
 //! ```
@@ -90,9 +92,11 @@
 //! # Non-obvious Details
 //!
 //! - The **raw residual** and **acceptance residual** may differ when row scaling
-//!   is applied. The acceptance gate checks both: the raw residual ensures the
-//!   unscaled problem is solved, while the acceptance residual ensures the scaled
-//!   problem (seen by the backend) is solved.
+//!   is applied. The report records both. The common gate currently enforces the
+//!   acceptance residual, while physical element balances are recomputed from
+//!   `n = exp(y)` independently. A stricter raw-residual requirement belongs to
+//!   an explicit physical acceptance profile, not an implicit interpretation of
+//!   this report field.
 //! - `compare_candidate_reports` uses a lexicographic ordering: lower residual norm
 //!   is preferred, then lower element balance error, then lower reaction affinity.
 //! - The `EquilibriumCandidateReport` contains both `L2` and `RMS` norms, plus
@@ -273,9 +277,11 @@ pub fn select_preferred_candidate_index(
 
 /// Checks a log-mole candidate against numerical and conservation invariants.
 ///
-/// `residual` must use the same scaling and tolerance convention as the
-/// selected nonlinear backend. Element balances are always recomputed from
-/// physical moles, independently of that residual scaling.
+/// `acceptance_residual` must use the same scaling and tolerance convention as
+/// the selected nonlinear backend. Element balances are always recomputed from
+/// physical moles, independently of that residual scaling. The raw residual is
+/// retained for diagnostics and comparison, but is not separately rejected by
+/// this common gate.
 pub fn validate_equilibrium_candidate(
     residuals: EquilibriumCandidateResiduals<'_>,
     criteria: EquilibriumAcceptanceCriteria,
