@@ -282,7 +282,7 @@ impl PreparedPhaseControlRunner {
         });
         if should_trip {
             let backend = crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::
-                SolverBackend::Legacy(
+                SolverBackend::Native(
                     crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers::NR,
                 );
             return Err(ReactionExtentError::AllBackendsFailed {
@@ -447,7 +447,7 @@ impl PreparedPhaseControlRunner {
                 ) {
                     SolverPolicy::production_default(self.solver_settings.solver)
                 } else {
-                    SolverPolicy::legacy_default(self.solver_settings.solver)
+                    SolverPolicy::native_default(self.solver_settings.solver)
                 };
                 policy
                     .ordered_backends()
@@ -1473,7 +1473,7 @@ impl PreparedPhaseControlRunner {
                     ) {
                         SolverPolicy::production_default(runner.configure().solver)
                     } else {
-                        SolverPolicy::legacy_default(runner.configure().solver)
+                        SolverPolicy::native_default(runner.configure().solver)
                     },
                 );
             }
@@ -1841,7 +1841,7 @@ mod tests {
     }
 
     fn accepted_report() -> EquilibriumSolveReport {
-        let backend = SolverBackend::Legacy(Solvers::NR);
+        let backend = SolverBackend::Native(Solvers::NR);
         EquilibriumSolveReport {
             policy: SolverPolicy::Single(backend),
             attempts: vec![SolverAttemptReport {

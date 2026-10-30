@@ -52,7 +52,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_gas_solver_pins_the_requested_legacy_backend_family() {
+    fn compatibility_gas_solver_pins_the_requested_native_backend_family() {
         // The historical constructor accepts `Solvers` rather than a typed
         // policy. It must translate that selector immediately; otherwise a
         // later symbolic-context check can silently promote the solve to RST.
@@ -68,7 +68,7 @@ mod tests {
 
         assert_eq!(
             solver.solver_settings.solver_policy,
-            Some(SolverPolicy::legacy_default(Solvers::LM))
+            Some(SolverPolicy::native_default(Solvers::LM))
         );
     }
 

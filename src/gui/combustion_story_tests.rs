@@ -87,10 +87,11 @@ mod tests {
 
     /// Load the known BVP story document used by the GUI regression suite.
     fn load_problem_test_document(app: &mut CombustionApp) {
-        let result = app.load_document_from_path(PathBuf::from("problem_test.txt"));
+        let result =
+            app.load_document_from_path(PathBuf::from("src/gui/fixtures/bvp_problem.fixture"));
         assert!(
             matches!(result, GuiFileOperationResult::Loaded { .. }),
-            "problem_test.txt should load as a valid BVP document"
+            "tracked BVP GUI fixture should load as a valid document"
         );
     }
 
@@ -664,9 +665,9 @@ mod tests {
         )));
         let mut open = true;
         let app_for_ui = Rc::clone(&app);
-        let mut harness = Harness::new_ui(move |ui| {
-            app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
-        });
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(820.0, 620.0))
+            .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
         harness.run();
 
         harness
@@ -687,6 +688,10 @@ mod tests {
             );
         }
 
+        harness
+            .get_by_role_and_label(Role::ComboBox, "C compiler")
+            .scroll_to_me();
+        harness.run();
         harness
             .get_by_role_and_label(Role::ComboBox, "C compiler")
             .click();
@@ -778,6 +783,102 @@ mod tests {
     }
 
     #[test]
+    fn bvp_family_switch_exposes_capability_specific_controls_in_compact_window() {
+        let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
+            ProblemsEnum::BVPSimple,
+        )));
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(820.0, 620.0))
+            .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
+
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "sci")
+            .click_accesskit();
+        harness.run();
+
+        assert_eq!(
+            as_string(first_value(
+                &app.borrow().document,
+                "solver_settings",
+                "solver_family"
+            )),
+            "sci"
+        );
+        for label in ["Execution", "Symbolic assembly", "Matrix layout"] {
+            harness.get_by_label(label);
+        }
+
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Execution")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Execution")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "aot")
+            .click_accesskit();
+        harness.run();
+        harness.get_by_label("AOT codegen backend");
+        harness.get_by_label("C compiler");
+
+        harness
+            .get_by_role_and_label(Role::ComboBox, "AOT codegen backend")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "AOT codegen backend")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Zig")
+            .click_accesskit();
+        harness.run();
+        assert!(
+            !app.borrow()
+                .document
+                .get("solver_settings")
+                .is_some_and(|section| section.contains_key("aot_c_compiler")),
+            "non-C AOT codegen must remove the irrelevant C compiler setting"
+        );
+
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "frozen")
+            .click_accesskit();
+        harness.run();
+        assert_eq!(
+            as_string(first_value(
+                &app.borrow().document,
+                "solver_settings",
+                "solver_family"
+            )),
+            "frozen"
+        );
+        harness.get_by_label("Core solve");
+        harness.get_by_label("Linear algebra backend");
+    }
+
+    #[test]
     fn worker_lifecycle_blocks_duplicate_runs_and_completes() {
         let mut app = CombustionApp::new_with_problem(ProblemsEnum::BVPSimple);
         app.start_test_calculation_worker(Duration::from_millis(20), Ok(()));
@@ -799,7 +900,12 @@ mod tests {
         );
 
         wait_for_calculation(&mut app);
-        assert_eq!(app.calculation_state, CalculationState::Completed);
+        assert_eq!(
+            app.calculation_state,
+            CalculationState::Completed,
+            "test worker did not complete: {:?}",
+            app.last_run_message
+        );
         assert_eq!(
             app.last_run_message.as_deref(),
             Some("Calculation completed successfully.")
@@ -879,7 +985,12 @@ mod tests {
         app.request_calculation();
         wait_for_calculation_with_limit(&mut app, 2000, Duration::from_millis(5));
 
-        assert_eq!(app.calculation_state, CalculationState::Completed);
+        assert_eq!(
+            app.calculation_state,
+            CalculationState::Completed,
+            "BVP run did not complete: {:?}",
+            app.last_run_message
+        );
         assert_eq!(
             app.last_run_message.as_deref(),
             Some("Calculation completed successfully.")
@@ -902,7 +1013,12 @@ mod tests {
         app.request_calculation();
         wait_for_calculation_with_limit(&mut app, 2000, Duration::from_millis(5));
 
-        assert_eq!(app.calculation_state, CalculationState::Completed);
+        assert_eq!(
+            app.calculation_state,
+            CalculationState::Completed,
+            "BVP run did not complete: {:?}",
+            app.last_run_message
+        );
         assert_eq!(
             app.last_run_message.as_deref(),
             Some("Calculation completed successfully.")

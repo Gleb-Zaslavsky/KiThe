@@ -50,15 +50,15 @@ mod tests {
         task.kindata
             .set_reaction_data_directly(
                 vec![ReactionData::new_elementary(
-                    "A=>B".to_string(),
+                    "H2=>2H".to_string(),
                     vec![1.0e3, 0.0, 1.0e4],
                     None,
                 )],
                 None,
             )
             .expect("reaction setup should succeed");
-        task.kindata.stecheodata.vec_of_molmasses = Some(vec![10.0, 20.0]);
-        task.kindata.substances = vec!["A".to_string(), "B".to_string()];
+        task.kindata.stecheodata.vec_of_molmasses = Some(vec![2.016, 1.008]);
+        task.kindata.substances = vec!["H2".to_string(), "H".to_string()];
         task.thermal_effects = vec![-2.0e5];
         task.ro = 1200.0;
         task.Cp = 1000.0;
@@ -69,12 +69,12 @@ mod tests {
         task.initial_conditions = HashMap::from([
             ("T".to_string(), 450.0),
             ("q".to_string(), 0.15),
-            ("A".to_string(), 0.7),
-            ("B".to_string(), 0.3),
+            ("H2".to_string(), 0.7),
+            ("H".to_string(), 0.3),
         ]);
         task.set_solver_backend_config(
             ReactorIvpSolverConfig::default()
-                .with_method(ReactorIvpMethod::Auto)
+                .with_lsode2_controller(ReactorIvpMethod::Auto)
                 .with_symbolic_backend(ReactorIvpSymbolicBackend::AtomView)
                 .with_execution_backend(ReactorIvpExecutionBackend::Lambdify)
                 .with_matrix_backend(matrix_backend)

@@ -29,7 +29,7 @@
 //! - `fitting_adjacent()`: Sequential fitting of Cp, dH, dS for adjacent temperature intervals
 //! - `fitting_adjacent2()`: Improved fitting starting with entropy, includes quality reports
 //! - `fitting_adjacent3()`: Weighted sum fitting (Y = Cp + a*dH + b*dS) for simultaneous optimization
-//! - `fitting_coeffs_for_T_interval()`: Main interface for temperature interval fitting with fallback
+//! - `fitting_coeffs_for_T_interval_with_report()`: Fit an interval and expose the selected route
 //!
 //! ## Usage
 //! ```rust, ignore
@@ -52,10 +52,11 @@
 //! - Uses custom deserialization for composition data parsing
 //! - Implements comprehensive error handling for temperature range validation
 //! - Creates both numerical functions and symbolic expressions for flexible usage
-//! - Panic-safe fitting with automatic fallback mechanisms
+//! - Sequential fitting with an inspectable linear-SVD fallback route
 //! - Quality assessment with L1, L2, and max norms for fitting validation
 //! - Pretty table reporting for fitting quality metrics
 
+use RustedSciThe::numerical::optimization::sym_fitting::FittingError as RstFittingError;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 use prettytable::{Cell, Row, Table};
@@ -75,12 +76,40 @@ const Rsym: Expr = Expr::Const(1.987);
 use crate::Thermodynamics::DBhandlers::NIST_parser::{Phase, SearchType};
 #[derive(Debug)]
 pub enum NASAError {
-    NoCoefficientsFound { temperature: f64, range: String },
+    NoCoefficientsFound {
+        temperature: f64,
+        range: String,
+    },
     InvalidTemperatureRange,
     SerdeError(serde_json::Error),
     UnsupportedUnit(String),
     SymbolicError(String),
     FittingError(String),
+    FittingAttemptsFailed {
+        primary: Box<NASAError>,
+        fallback: Box<NASAError>,
+    },
+    FittingBackend {
+        stage: &'static str,
+        source: RstFittingError,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NASAIntervalFitStrategy {
+    ExistingInterval,
+    AdjacentSequential,
+    AdjacentLinearSvd,
+    NonAdjacentSymbolic,
+    NonAdjacentLinearSvd,
+}
+
+#[derive(Debug, Clone)]
+pub struct NASAIntervalFitReport {
+    pub strategy: NASAIntervalFitStrategy,
+    pub primary_failure: Option<String>,
+    pub property_reports:
+        HashMap<String, crate::Thermodynamics::DBhandlers::NASAdata_fitting::FittingReport>,
 }
 
 impl fmt::Display for NASAError {
@@ -112,6 +141,13 @@ impl fmt::Display for NASAError {
             NASAError::FittingError(msg) => {
                 write!(f, "Fitting error: {}", msg)
             }
+            NASAError::FittingAttemptsFailed { primary, fallback } => write!(
+                f,
+                "NASA fitting routes failed; primary: {primary}; fallback: {fallback}"
+            ),
+            NASAError::FittingBackend { stage, source } => {
+                write!(f, "NASA {stage} fitting backend failed: {source}")
+            }
         }
     }
 }
@@ -120,6 +156,8 @@ impl Error for NASAError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             NASAError::SerdeError(err) => Some(err),
+            NASAError::FittingBackend { source, .. } => Some(source),
+            NASAError::FittingAttemptsFailed { fallback, .. } => Some(fallback.as_ref()),
             _ => None,
         }
     }
@@ -689,82 +727,126 @@ impl NASAdata {
     /// * `Ok((interval_index, coeffs))` - Index and coefficients for the temperature range
     /// * `Err(NASAError::InvalidTemperatureRange)` - If temperature is outside all ranges
     pub fn interval_for_this_T(&mut self, t: f64) -> Result<(usize, Coeffs), NASAError> {
-        let intervals = self.coeffs_map.clone();
-
-        for (interval_idx, coeffs) in intervals {
-            if coeffs.T.0 <= t && t <= coeffs.T.1 {
-                self.current_T_range = Some(coeffs.T);
-                return Ok((interval_idx, coeffs.clone()));
-            }
-        }
-
-        Err(NASAError::InvalidTemperatureRange)
+        let (interval_idx, coeffs) = self.find_interval_for_T(t)?;
+        self.current_T_range = Some(coeffs.T);
+        Ok((interval_idx, coeffs))
     }
 
-    /// Main interface for temperature interval coefficient fitting with fallback
-    ///
-    /// Determines the appropriate fitting strategy based on temperature interval:
-    /// - Same interval: Uses existing coefficients
-    /// - Adjacent intervals: Attempts fitting_adjacent2, falls back to fitting_adjacent on panic
-    /// - Non-adjacent intervals: Returns error
-    ///
-    /// The fallback mechanism catches panics from assertion failures in fitting_adjacent2
-    /// and automatically retries with the more robust fitting_adjacent method.
-    ///
-    /// # Returns
-    /// * `Ok(())` - Coefficients successfully fitted or selected
-    /// * `Err(NASAError::InvalidTemperatureRange)` - If no T_interval set or intervals invalid
-    ///
-    /// # Requires
-    /// * `T_interval` must be set via `set_T_interval()` before calling
-    /// * Coefficient map must be populated via `parse_coefficients()`
+    fn find_interval_for_T(&self, temperature: f64) -> Result<(usize, Coeffs), NASAError> {
+        self.coeffs_map
+            .iter()
+            .filter(|(_, coeffs)| coeffs.T.0 <= temperature && temperature <= coeffs.T.1)
+            .min_by(|(left_idx, left), (right_idx, right)| {
+                left.T
+                    .0
+                    .total_cmp(&right.T.0)
+                    .then_with(|| left_idx.cmp(right_idx))
+            })
+            .map(|(&index, coeffs)| (index, coeffs.clone()))
+            .ok_or(NASAError::InvalidTemperatureRange)
+    }
+
+    /// Compatibility entry point. Use the report variant to inspect route and fallback evidence.
     pub fn fitting_coeffs_for_T_interval(&mut self) -> Result<(), NASAError> {
+        self.fitting_coeffs_for_T_interval_with_report().map(|_| ())
+    }
+
+    pub fn fitting_coeffs_for_T_interval_with_report(
+        &mut self,
+    ) -> Result<NASAIntervalFitReport, NASAError> {
         if let Some((T_min, T_max)) = self.T_interval {
-            let (i_t_min, coeffs_min) = self.interval_for_this_T(T_min)?;
-            let (i_t_max, coeffs_max) = self.interval_for_this_T(T_max)?;
-            if i_t_min == i_t_max {
-                // Both boundaries are in the same interval, no fitting needed
-                self.coeffs = coeffs_min.coeff.clone();
+            if !T_min.is_finite() || !T_max.is_finite() || T_min <= 0.0 || T_min >= T_max {
+                return Err(NASAError::InvalidTemperatureRange);
+            }
+            let (i_t_min, coeffs_min) = self.find_interval_for_T(T_min)?;
+            let (i_t_max, coeffs_max) = self.find_interval_for_T(T_max)?;
+            let selected_range = coeffs_max.T;
+            let previous_coeffs = self.coeffs;
+            let report = if i_t_min == i_t_max {
+                self.coeffs = coeffs_min.coeff;
+                NASAIntervalFitReport {
+                    strategy: NASAIntervalFitStrategy::ExistingInterval,
+                    primary_failure: None,
+                    property_reports: HashMap::new(),
+                }
             } else if (i_t_max as isize - i_t_min as isize).abs() == 1 {
-                // Boundaries are in adjacent intervals, perform fitting
-
-                let result =
-                    self.fitting_adjacent2(coeffs_min.clone(), coeffs_max.clone(), T_min, T_max);
-
-                match result {
-                    Ok(_) => {
-                        self.current_T_range = self.T_interval;
-                    } // fitting_adjacent2 succeeded
-                    _ => {
-                        // fitting_adjacent2 panicked or failed, use fitting_adjacent as fallback
-                        println!("fitting_adjacent2 failed, falling back to fitting_adjacent");
-                        self.fit_cp_dh_ds(coeffs_min.clone(), coeffs_max.clone(), T_min, T_max)?;
-                        self.current_T_range = self.T_interval;
+                match self.fitting_adjacent2(coeffs_min.clone(), coeffs_max.clone(), T_min, T_max) {
+                    Ok(property_reports) => NASAIntervalFitReport {
+                        strategy: NASAIntervalFitStrategy::AdjacentSequential,
+                        primary_failure: None,
+                        property_reports,
+                    },
+                    Err(primary_error) => {
+                        self.coeffs = previous_coeffs;
+                        let fallback = (|| {
+                            self.fit_cp_dh_ds(
+                                coeffs_min.clone(),
+                                coeffs_max.clone(),
+                                T_min,
+                                T_max,
+                            )?;
+                            let (temps, cp, h, s) = Self::prepare_fit_data_for_2_range_fitting(
+                                coeffs_min, coeffs_max, T_min, T_max,
+                            )?;
+                            self.reports_for_coefficients(&temps, &cp, &h, &s, self.coeffs)
+                        })();
+                        match fallback {
+                            Ok(property_reports) => NASAIntervalFitReport {
+                                strategy: NASAIntervalFitStrategy::AdjacentLinearSvd,
+                                primary_failure: Some(primary_error.to_string()),
+                                property_reports,
+                            },
+                            Err(fallback_error) => {
+                                self.coeffs = previous_coeffs;
+                                return Err(NASAError::FittingAttemptsFailed {
+                                    primary: Box::new(primary_error),
+                                    fallback: Box::new(fallback_error),
+                                });
+                            }
+                        }
                     }
                 }
             } else if (i_t_max as isize - i_t_min as isize).abs() > 1 {
-                // Non-adjacent intervals, collect all coefficients in range
-                let mut coeffs_in_range = Vec::new();
-                for (_, coeffs) in &self.coeffs_map {
-                    if coeffs.T.1 > T_min && coeffs.T.0 < T_max {
-                        coeffs_in_range.push(coeffs.clone());
-                    }
-                }
-                let result = self.fitting_non_adjacent(coeffs_in_range.clone(), T_min, T_max);
-                match result {
-                    Ok(_) => {
-                        self.current_T_range = self.T_interval;
-                    } // fitting_non_adjacent succeeded
-                    _ => {
-                        self.fitting_cp_dh_ds_non_adjacent(coeffs_in_range, T_min, T_max)?;
-                        self.current_T_range = self.T_interval;
+                let mut coeffs_in_range = self
+                    .coeffs_map
+                    .values()
+                    .filter(|coeffs| coeffs.T.1 > T_min && coeffs.T.0 < T_max)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                coeffs_in_range.sort_by(|left, right| left.T.0.total_cmp(&right.T.0));
+
+                match self.fitting_non_adjacent(coeffs_in_range.clone(), T_min, T_max) {
+                    Ok(property_reports) => NASAIntervalFitReport {
+                        strategy: NASAIntervalFitStrategy::NonAdjacentSymbolic,
+                        primary_failure: None,
+                        property_reports,
+                    },
+                    Err(primary_error) => {
+                        self.coeffs = previous_coeffs;
+                        let fallback =
+                            self.fitting_cp_dh_ds_non_adjacent(coeffs_in_range, T_min, T_max);
+                        match fallback {
+                            Ok(property_reports) => NASAIntervalFitReport {
+                                strategy: NASAIntervalFitStrategy::NonAdjacentLinearSvd,
+                                primary_failure: Some(primary_error.to_string()),
+                                property_reports,
+                            },
+                            Err(fallback_error) => {
+                                self.coeffs = previous_coeffs;
+                                return Err(NASAError::FittingAttemptsFailed {
+                                    primary: Box::new(primary_error),
+                                    fallback: Box::new(fallback_error),
+                                });
+                            }
+                        }
                     }
                 }
             } else {
-                // this is unreachable
                 return Err(NASAError::InvalidTemperatureRange);
-            }
-            Ok(())
+            };
+
+            self.current_T_range = Some(selected_range);
+            Ok(report)
         } else {
             Err(NASAError::InvalidTemperatureRange)
         }

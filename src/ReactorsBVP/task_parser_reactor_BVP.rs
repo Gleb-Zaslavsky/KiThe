@@ -82,7 +82,9 @@ use crate::ReactorsBVP::task_value_conversion::try_value_as_usize;
 use crate::Utils::show_this_pic::show_image;
 use crate::gui::bvp_gui_config::normalize_bvp_solver_backend_section;
 use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
+use RustedSciThe::command_interpreter::task_parser_bvp_hybrid::parse_hybrid_bvp_solver_settings_from_document;
 use RustedSciThe::numerical::BVP_Damp::task_parser_damped;
+use RustedSciThe::numerical::BVP_api::BvpSolverSettings;
 use log::info;
 use nalgebra::DMatrix;
 use std::collections::HashMap;
@@ -386,6 +388,120 @@ fn normalize_solver_counter_field(
     }
 }
 
+/// Extract only solver-owned sections and let RST parse the family contract.
+/// The legacy `strategy`-only form is translated once at this boundary.
+fn hybrid_bvp_settings_from_map(
+    task_map: &DocumentMap,
+    substances: &[String],
+) -> Result<(BvpSolverSettings, bool), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let mut normalized = normalize_reactor_physics_task_map(task_map);
+    let mut dont_save_log = false;
+    if let Some(settings) = normalized.get_mut("solver_settings") {
+        if let Some(values) = settings.remove("dont_save_log") {
+            match values.as_deref() {
+                Some([Value::Boolean(value)]) => dont_save_log = *value,
+                _ => {
+                    return Err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::BvpSettings(
+                        RustedSciThe::command_interpreter::task_parser_bvp_hybrid::
+                            HybridBvpSettingsError::InvalidField {
+                                path: "solver_settings.dont_save_log".into(),
+                                message: "expected one boolean value".into(),
+                            },
+                    ));
+                }
+            }
+        }
+
+        if !settings.contains_key("solver_family") {
+            let legacy_strategy = settings
+                .get("strategy")
+                .and_then(Option::as_ref)
+                .and_then(|values| values.first())
+                .and_then(Value::as_string)
+                .map(|value| value.trim().to_ascii_lowercase());
+            let family = match legacy_strategy.as_deref() {
+                Some("frozen" | "naive") => "frozen",
+                _ => "damped",
+            };
+            settings.insert(
+                "solver_family".into(),
+                Some(vec![Value::String(family.into())]),
+            );
+        }
+    }
+
+    const SOLVER_SECTIONS: &[&str] = &[
+        "solver_settings",
+        "strategy_params",
+        "adaptive_strategy",
+        "grid_refinement",
+        "bounds",
+        "rel_tolerance",
+    ];
+    normalized.retain(|section, _| SOLVER_SECTIONS.contains(&section.as_str()));
+    let parsed = parse_hybrid_bvp_solver_settings_from_document(&normalized)
+        .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::BvpSettings)?;
+    let parsed = expand_damped_settings_for_reactor(parsed, substances)?;
+    Ok((parsed, dont_save_log))
+}
+
+fn expand_damped_settings_for_reactor(
+    settings: BvpSolverSettings,
+    substances: &[String],
+) -> Result<BvpSolverSettings, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let BvpSolverSettings::Damped(mut options) = settings else {
+        return Ok(settings);
+    };
+    let rel_tolerance = options.rel_tolerance.as_ref().ok_or_else(|| {
+        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::MissingData(
+            "Missing `rel_tolerance` in `solver_settings` section".into(),
+        )
+    })?;
+    let bounds = options.bounds.as_ref().ok_or_else(|| {
+        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::MissingData(
+            "Missing `bounds` in `solver_settings` section".into(),
+        )
+    })?;
+    let tolerances = ToleranceConfig::new(
+        *rel_tolerance
+            .get("C")
+            .ok_or_else(|| missing_field("rel_tolerance", "C"))?,
+        *rel_tolerance
+            .get("J")
+            .ok_or_else(|| missing_field("rel_tolerance", "J"))?,
+        *rel_tolerance
+            .get("Teta")
+            .ok_or_else(|| missing_field("rel_tolerance", "Teta"))?,
+        *rel_tolerance
+            .get("q")
+            .ok_or_else(|| missing_field("rel_tolerance", "q"))?,
+    );
+    let bounds = BoundsConfig::new(
+        *bounds
+            .get("C")
+            .ok_or_else(|| missing_field("bounds", "C"))?,
+        *bounds
+            .get("J")
+            .ok_or_else(|| missing_field("bounds", "J"))?,
+        *bounds
+            .get("Teta")
+            .ok_or_else(|| missing_field("bounds", "Teta"))?,
+        *bounds
+            .get("q")
+            .ok_or_else(|| missing_field("bounds", "q"))?,
+    );
+    options.rel_tolerance = Some(tolerances.to_full_tolerance_map(substances));
+    options.bounds = Some(bounds.to_full_bounds_map(substances));
+    Ok(BvpSolverSettings::Damped(options))
+}
+
+fn hybrid_initial_guess_columns(settings: &BvpSolverSettings, intervals: usize) -> Option<usize> {
+    match settings {
+        BvpSolverSettings::Damped(_) => Some(intervals),
+        BvpSolverSettings::Frozen(_) | BvpSolverSettings::Sci { .. } => intervals.checked_add(1),
+    }
+}
+
 /// Convert the typed damped solver-family settings into the canonical tolerance map.
 ///
 /// The native RustedSciThe parser owns the typed solver contract. KiThe still needs
@@ -448,6 +564,7 @@ fn bounds_config_from_damped_spec(
 /// Solver backends may report a result without surfacing a structured failure.
 /// This helper keeps the public contract strict by rejecting empty or non-finite
 /// matrices before they are stored in reactor state.
+#[cfg(test)]
 fn validate_solver_output_matrix(
     solution: &DMatrix<f64>,
 ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
@@ -485,78 +602,24 @@ fn solve_and_store_nrbvp(
     t_end: f64,
     n_steps: usize,
     arg: String,
-    initial_guess: DMatrix<f64>,
 ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
-    let solver_task_map = normalize_reactor_physics_task_map(task_map);
-    let damped_spec =
-        task_parser_damped::parse_bvp_damped_solver_settings_from_document(&solver_task_map)
-            .map_err(|err| {
-                crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(format!(
-                    "RustedSciThe rejected solver settings: {err}"
-                ))
-            })?;
-    // The typed RST options already contain tolerances, bounds, and backend
-    // execution details, so the KiThe handoff only needs to pass them through.
-    let solver_options = damped_spec.build_solver_options().map_err(|err| {
-        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(format!(
-            "RustedSciThe rejected solver settings: {err}"
-        ))
-    })?;
-    // The backend still expects the reactor-specific expanded maps, so we keep
-    // this small compatibility bridge until RustedSciThe accepts them directly.
-    let tolerance_config = tolerance_config_from_damped_spec(&damped_spec)?;
-    let bounds_config = bounds_config_from_damped_spec(&damped_spec)?;
-    let full_bounds = Some(bounds_config.to_full_bounds_map(&reactor.kindata.substances));
-    let full_rel_tolerance =
-        Some(tolerance_config.to_full_tolerance_map(&reactor.kindata.substances));
-
-    let solver = &reactor.solver;
-    let mut nr = solver.build_nrbvp_backend(
-        crate::ReactorsBVP::SimpleReactorBVP::NrbvpHandoffConfig::new(
-            initial_guess,
-            t0,
-            t_end,
-            n_steps,
-            damped_spec.scheme.clone(),
-            damped_spec.strategy.clone(),
-            damped_spec.strategy_params.clone(),
-            damped_spec.linear_sys_method.clone(),
-            damped_spec.method.clone(),
-            damped_spec.abs_tolerance,
-            full_rel_tolerance,
-            damped_spec.max_iterations,
-            full_bounds,
-            damped_spec.loglevel.clone(),
-            damped_spec.dont_save_log,
+    let (settings, dont_save_log) =
+        hybrid_bvp_settings_from_map(task_map, &reactor.kindata.substances)?;
+    let columns = hybrid_initial_guess_columns(&settings, n_steps).ok_or_else(|| {
+        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
+            "BVP initial-guess column count overflows usize".into(),
         )
-        .with_solver_options(solver_options),
+    })?;
+    let initial_guess =
+        set_initial_guess_from_map_data(task_map, columns, reactor.solver.unknowns.len())?;
+    reactor.solver.solve_with_hybrid_settings(
+        settings,
+        initial_guess,
+        t0,
+        t_end,
+        n_steps,
+        dont_save_log,
     )?;
-    nr.before_solve_preprocessing();
-    nr.solve();
-
-    let solution = nr.get_result().ok_or_else(|| {
-        crate::ReactorsBVP::SimpleReactorBVP::ReactorError::CalculationError(
-            "Solver finished without producing a solution matrix".to_string(),
-        )
-    })?;
-    validate_solver_output_matrix(&solution)?;
-    if nr.x_mesh.is_empty() {
-        return Err(
-            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::CalculationError(
-                "Solver finished without producing an x mesh".to_string(),
-            ),
-        );
-    }
-    if nr.x_mesh.iter().any(|value| !value.is_finite()) {
-        return Err(
-            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidNumericValue(
-                "Solver x mesh contains non-finite values".to_string(),
-            ),
-        );
-    }
-
-    reactor.solver.x_mesh = Some(nr.x_mesh);
-    reactor.solver.solution = Some(solution);
     reactor.solver.arg_name = arg;
     set_postprocessing_from_map(reactor, task_map)?;
     Ok(())
@@ -624,44 +687,46 @@ pub(crate) fn validate_reactor_bvp_task_map(task_map: &DocumentMap) -> BvpTaskVa
         report.push_error("postprocessing", error);
     }
 
+    let solver_settings = match hybrid_bvp_settings_from_map(task_map, &reactor.kindata.substances)
+    {
+        Ok((settings, _)) => Some(settings),
+        Err(error) => {
+            report.push_error("solver settings", error);
+            None
+        }
+    };
+
     if physics_valid {
-        if let Some((_, _, n_steps, _)) = run_settings.as_ref() {
+        if let (Some((_, _, n_steps, _)), Some(settings)) =
+            (run_settings.as_ref(), solver_settings.as_ref())
+        {
             let unknown_count = reactor
                 .kindata
                 .substances
                 .len()
                 .checked_mul(2)
                 .and_then(|count| count.checked_add(2));
-            match unknown_count {
-                Some(unknown_count) => {
+            match (
+                hybrid_initial_guess_columns(settings, *n_steps),
+                unknown_count,
+            ) {
+                (Some(columns), Some(unknown_count)) => {
                     if let Err(error) =
-                        set_initial_guess_from_map_data(task_map, *n_steps, unknown_count)
+                        set_initial_guess_from_map_data(task_map, columns, unknown_count)
                     {
                         report.push_error("initial guess", error);
                     }
                 }
-                None => report.push_error(
+                (None, _) => report.push_error(
+                    "initial guess",
+                    "initial-guess column count overflowed usize",
+                ),
+                (_, None) => report.push_error(
                     "initial guess",
                     "unknown count overflowed while validating the initial guess",
                 ),
             }
         }
-    }
-
-    let normalized = normalize_reactor_physics_task_map(task_map);
-    match task_parser_damped::parse_bvp_damped_solver_settings_from_document(&normalized) {
-        Ok(spec) => {
-            if let Err(error) = spec.build_solver_options() {
-                report.push_error("solver settings", error);
-            }
-            if let Err(error) = tolerance_config_from_damped_spec(&spec) {
-                report.push_error("solver tolerances", error);
-            }
-            if let Err(error) = bounds_config_from_damped_spec(&spec) {
-                report.push_error("solver bounds", error);
-            }
-        }
-        Err(error) => report.push_error("solver settings", error),
     }
 
     report
@@ -1061,9 +1126,7 @@ impl SimpleReactorTask {
                 ),
             );
         }
-        let initial_guess =
-            set_initial_guess_from_map_data(task_map, n_steps, self.solver.unknowns.len())?;
-        solve_and_store_nrbvp(self, task_map, t0, t_end, n_steps, arg, initial_guess)
+        solve_and_store_nrbvp(self, task_map, t0, t_end, n_steps, arg)
     }
 
     /// One-shot method: reads configuration file, parses it, and solves the BVP problem.
@@ -1159,9 +1222,7 @@ impl SimpleReactorTask {
                 ),
             );
         }
-        let initial_guess =
-            set_initial_guess_from_map_data(&task_map, n_steps, self.solver.unknowns.len())?;
-        solve_and_store_nrbvp(self, &task_map, t0, t_end, n_steps, arg, initial_guess)
+        solve_and_store_nrbvp(self, &task_map, t0, t_end, n_steps, arg)
     }
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1211,6 +1272,7 @@ pub const SIMPLE_BVP_TEMPLATE: &'static str = r#"
         reactions
         A=>10B: [130000.0, 0.0, 20920.0, 102000.0]
         solver_settings
+        solver_family: damped
         scheme: forward
         method: Banded
         strategy: Damped
@@ -1476,6 +1538,85 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use tempfile::tempdir;
+
+    #[test]
+    fn hybrid_bvp_parser_routes_damped_frozen_and_sci_settings() {
+        let mut parser = DocumentParser::new(task_content.to_string());
+        let mut damped_document = parser.parse_document().unwrap().clone();
+        let solver_settings = damped_document
+            .get_mut("solver_settings")
+            .expect("task fixture includes solver settings");
+        solver_settings.insert(
+            "solver_family".into(),
+            Some(vec![Value::String("damped".into())]),
+        );
+        let substances = vec!["HMX".into(), "DecompositionProduct".into()];
+        let (damped, dont_save_log) = hybrid_bvp_settings_from_map(&damped_document, &substances)
+            .expect("Damped family should be parsed by RST hybrid parser");
+        assert!(matches!(damped, BvpSolverSettings::Damped(_)));
+        assert!(dont_save_log);
+        assert_eq!(hybrid_initial_guess_columns(&damped, 25), Some(25));
+
+        let frozen_document = DocumentMap::from([(
+            "solver_settings".into(),
+            HashMap::from([
+                (
+                    "solver_family".into(),
+                    Some(vec![Value::String("frozen".into())]),
+                ),
+                (
+                    "strategy".into(),
+                    Some(vec![Value::String("Frozen".into())]),
+                ),
+            ]),
+        )]);
+        let (frozen, _) = hybrid_bvp_settings_from_map(&frozen_document, &substances)
+            .expect("Frozen family should be parsed by RST hybrid parser");
+        assert!(matches!(frozen, BvpSolverSettings::Frozen(_)));
+        assert_eq!(hybrid_initial_guess_columns(&frozen, 25), Some(26));
+
+        let sci_document = DocumentMap::from([(
+            "solver_settings".into(),
+            HashMap::from([
+                (
+                    "solver_family".into(),
+                    Some(vec![Value::String("sci".into())]),
+                ),
+                (
+                    "execution".into(),
+                    Some(vec![Value::String("lambdify".into())]),
+                ),
+                (
+                    "assembly".into(),
+                    Some(vec![Value::String("atom_view_native".into())]),
+                ),
+                (
+                    "matrix_layout".into(),
+                    Some(vec![Value::String("banded_auto".into())]),
+                ),
+                ("tolerance".into(), Some(vec![Value::Float(1e-4)])),
+                ("max_nodes".into(), Some(vec![Value::Integer(256)])),
+                (
+                    "telemetry".into(),
+                    Some(vec![Value::String("counters".into())]),
+                ),
+            ]),
+        )]);
+        let (sci, _) = hybrid_bvp_settings_from_map(&sci_document, &substances)
+            .expect("Sci family should be parsed without reactor-owned task sections");
+        assert!(matches!(sci, BvpSolverSettings::Sci { .. }));
+        assert_eq!(hybrid_initial_guess_columns(&sci, 25), Some(26));
+
+        let mut legacy_document = parser.parse_document().unwrap().clone();
+        legacy_document
+            .get_mut("solver_settings")
+            .expect("task fixture includes solver settings")
+            .remove("solver_family");
+        let (legacy_damped, _) = hybrid_bvp_settings_from_map(&legacy_document, &substances)
+            .expect("legacy strategy-only task should infer Damped family");
+        assert!(matches!(legacy_damped, BvpSolverSettings::Damped(_)));
+    }
+
     #[allow(non_upper_case_globals)]
     const task_content: &str = r#"
         initial_guess
@@ -1483,7 +1624,7 @@ mod tests {
         process_conditions
         problem_name: Some(HMXTest)
         problem_description: Some(HMXdecompositiontest)
-        substances: HMX, HMXprod
+        substances: HMX, DecompositionProduct
         t0: 0.0
         t_end: 1.0
         n_steps: 25
@@ -1501,22 +1642,22 @@ mod tests {
         groups:true
         boundary_condition
         HMX: 0.999
-        HMXprod: 0.001
+        DecompositionProduct: 0.001
         T: 800.0
         diffusion_coefficients
         HMX: 0.000009296
-        HMXprod: 0.000009296
+        DecompositionProduct: 0.000009296
         HMX
         H: 4
         N: 8
         C: 8
         O: 8
-        HMXprod
+        DecompositionProduct
         H: 6
         C: 1
         O: 1
         reactions
-        HMX=>10HMXprod: [130000.0, 0.0, 20920.0, 102000.0]
+        HMX=>10DecompositionProduct: [130000.0, 0.0, 20920.0, 102000.0]
         solver_settings
         scheme: forward
         method: Banded
@@ -1663,7 +1804,7 @@ mod tests {
         assert_eq!(reactor.problem_name, Some("HMXTest".to_string()));
         assert_eq!(
             reactor.kindata.substances,
-            vec!["HMX".to_string(), "HMXprod".to_string()]
+            vec!["HMX".to_string(), "DecompositionProduct".to_string()]
         );
 
         assert_eq!(reactor.Tm, 1500.0);
@@ -1676,24 +1817,39 @@ mod tests {
 
         // Verify boundary conditions
         assert_eq!(reactor.boundary_condition.get("HMX"), Some(&0.999));
-        assert_eq!(reactor.boundary_condition.get("HMXprod"), Some(&0.001));
+        assert_eq!(
+            reactor.boundary_condition.get("DecompositionProduct"),
+            Some(&0.001)
+        );
         assert_eq!(reactor.boundary_condition.get("T"), Some(&800.0));
 
         // Verify diffusion coefficients
         assert_eq!(reactor.Diffusion.get("HMX"), Some(&0.000009296));
-        assert_eq!(reactor.Diffusion.get("HMXprod"), Some(&0.000009296));
+        assert_eq!(
+            reactor.Diffusion.get("DecompositionProduct"),
+            Some(&0.000009296)
+        );
 
         // Verify groups
         assert!(reactor.kindata.groups.is_some());
         let groups = reactor.kindata.groups.as_ref().unwrap();
         assert_eq!(groups.get("HMX").unwrap().get("H"), Some(&4));
         assert_eq!(groups.get("HMX").unwrap().get("N"), Some(&8));
-        assert_eq!(groups.get("HMXprod").unwrap().get("H"), Some(&6));
-        assert_eq!(groups.get("HMXprod").unwrap().get("C"), Some(&1));
+        assert_eq!(
+            groups.get("DecompositionProduct").unwrap().get("H"),
+            Some(&6)
+        );
+        assert_eq!(
+            groups.get("DecompositionProduct").unwrap().get("C"),
+            Some(&1)
+        );
 
         // Verify reactions were parsed
         assert_eq!(reactor.kindata.vec_of_equations.len(), 1);
-        assert_eq!(reactor.kindata.vec_of_equations[0], "HMX=>10HMXprod");
+        assert_eq!(
+            reactor.kindata.vec_of_equations[0],
+            "HMX=>10DecompositionProduct"
+        );
     }
 
     #[test]
@@ -2404,10 +2560,19 @@ mod tests {
             .parse_parameters_with_exact_names(&mut parser)
             .expect("Second parse should also succeed");
 
-        assert_eq!(reactor.kindata.substances, vec!["HMX", "HMXprod"]);
-        assert_eq!(reactor.kindata.vec_of_equations, vec!["HMX=>10HMXprod"]);
+        assert_eq!(
+            reactor.kindata.substances,
+            vec!["HMX", "DecompositionProduct"]
+        );
+        assert_eq!(
+            reactor.kindata.vec_of_equations,
+            vec!["HMX=>10DecompositionProduct"]
+        );
         assert_eq!(reactor.boundary_condition.get("HMX"), Some(&0.999));
-        assert_eq!(reactor.boundary_condition.get("HMXprod"), Some(&0.001));
+        assert_eq!(
+            reactor.boundary_condition.get("DecompositionProduct"),
+            Some(&0.001)
+        );
     }
 
     #[test]

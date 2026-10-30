@@ -576,13 +576,13 @@ mod tests {
             min_moles: 1e-3,
         };
         let solve_report = EquilibriumSolveReport {
-            policy: SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)),
+            policy: SolverPolicy::Single(SolverBackend::Native(Solvers::LM)),
             attempts: vec![SolverAttemptReport {
-                backend: SolverBackend::Legacy(Solvers::LM),
+                backend: SolverBackend::Native(Solvers::LM),
                 outcome: SolverAttemptOutcome::Accepted,
                 metrics: None,
             }],
-            accepted_backend: SolverBackend::Legacy(Solvers::LM),
+            accepted_backend: SolverBackend::Native(Solvers::LM),
         };
         let snapshot = TemperatureSolveSnapshot {
             temperature: 3000.0,
@@ -618,7 +618,7 @@ mod tests {
             message: "all backends failed".to_string(),
             attempts: vec![
                 SolverAttemptReport {
-                    backend: SolverBackend::Legacy(Solvers::LM),
+                    backend: SolverBackend::Native(Solvers::LM),
                     outcome: SolverAttemptOutcome::Failed {
                         kind: crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptFailureKind::Solver,
                         reason: "max iterations".to_string(),
@@ -627,7 +627,7 @@ mod tests {
                     metrics: None,
                 },
                 SolverAttemptReport {
-                    backend: SolverBackend::Legacy(Solvers::NR),
+                    backend: SolverBackend::Native(Solvers::NR),
                     outcome: SolverAttemptOutcome::Failed {
                         kind: crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptFailureKind::Solver,
                         reason: "singular".to_string(),
@@ -828,13 +828,13 @@ mod tests {
                 min_moles: 0.3,
             },
             solve_report: EquilibriumSolveReport {
-                policy: SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)),
+                policy: SolverPolicy::Single(SolverBackend::Native(Solvers::LM)),
                 attempts: vec![SolverAttemptReport {
-                    backend: SolverBackend::Legacy(Solvers::LM),
+                    backend: SolverBackend::Native(Solvers::LM),
                     outcome: SolverAttemptOutcome::Accepted,
                     metrics: None,
                 }],
-                accepted_backend: SolverBackend::Legacy(Solvers::LM),
+                accepted_backend: SolverBackend::Native(Solvers::LM),
             },
             keq_validation_status: Some(
                 EquilibriumConstantCrossValidationStatus::ValidatorNotApplicable {
@@ -875,13 +875,13 @@ mod tests {
                 min_moles: 0.3,
             },
             solve_report: EquilibriumSolveReport {
-                policy: SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)),
+                policy: SolverPolicy::Single(SolverBackend::Native(Solvers::LM)),
                 attempts: vec![SolverAttemptReport {
-                    backend: SolverBackend::Legacy(Solvers::LM),
+                    backend: SolverBackend::Native(Solvers::LM),
                     outcome: SolverAttemptOutcome::Accepted,
                     metrics: None,
                 }],
-                accepted_backend: SolverBackend::Legacy(Solvers::LM),
+                accepted_backend: SolverBackend::Native(Solvers::LM),
             },
             keq_validation_status: None,
         };
@@ -1570,7 +1570,7 @@ mod tests {
             })
         };
         // Empty policy with no backends
-        let policy = SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM));
+        let policy = SolverPolicy::Single(SolverBackend::Native(Solvers::LM));
         let result = solver.solver_impl(vec![0.0], &f, None, &feasible, &validate, policy, None);
         // Should fail because solver has no stoich matrix etc.
         assert!(result.is_err());
@@ -1606,7 +1606,7 @@ mod tests {
             None,
             &feasible,
             &validate,
-            SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)),
+            SolverPolicy::Single(SolverBackend::Native(Solvers::LM)),
             budget,
             &params,
             None,
@@ -1642,7 +1642,7 @@ mod tests {
             None,
             &feasible,
             &validate,
-            SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)),
+            SolverPolicy::Single(SolverBackend::Native(Solvers::LM)),
             budget,
             &params,
             None,
@@ -1811,7 +1811,7 @@ mod tests {
             species: vec![0, 1],
         }];
         solver.create_stoich_matrix().unwrap();
-        solver.solver_settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
+        solver.solver_settings.solver_policy = Some(SolverPolicy::native_default(Solvers::LM));
 
         let rows = solver
             .solve_for_T_range_with_phase_control(500.0, 600.0, 50.0)

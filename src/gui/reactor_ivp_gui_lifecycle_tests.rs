@@ -132,8 +132,8 @@ mod tests {
         config.scaling.L = 0.027;
         config.initial_state.temperature = 612.0;
         config.initial_state.heat_flux = 0.09;
-        config.initial_state.species.insert("A".to_string(), 0.78);
-        config.initial_state.species.insert("B".to_string(), 0.22);
+        config.initial_state.species.insert("H2".to_string(), 0.78);
+        config.initial_state.species.insert("H".to_string(), 0.22);
         config.thermal_effects = vec![-1.45e5];
         config.stop_condition_enabled = true;
         config.stop_condition_species_index = 0;
@@ -169,8 +169,8 @@ mod tests {
         assert_eq!(rebuilt.scaling.L, 0.027);
         assert_eq!(rebuilt.initial_state.temperature, 612.0);
         assert_eq!(rebuilt.initial_state.heat_flux, 0.09);
-        assert_eq!(rebuilt.initial_state.species["A"], 0.78);
-        assert_eq!(rebuilt.initial_state.species["B"], 0.22);
+        assert_eq!(rebuilt.initial_state.species["H2"], 0.78);
+        assert_eq!(rebuilt.initial_state.species["H"], 0.22);
         assert_eq!(rebuilt.thermal_effects, vec![-1.45e5]);
         assert_eq!(rebuilt.method, ReactorIvpMethod::Bdf);
         assert_eq!(
@@ -221,11 +221,11 @@ mod tests {
         app.config
             .initial_state
             .species
-            .insert("A".to_string(), 0.74);
+            .insert("H2".to_string(), 0.74);
         app.config
             .initial_state
             .species
-            .insert("B".to_string(), 0.26);
+            .insert("H".to_string(), 0.26);
         app.config.thermal_effects = vec![-1.65e5];
         app.config.stop_condition_enabled = true;
         app.config.stop_condition_species_index = 0;
@@ -286,8 +286,8 @@ mod tests {
         assert_eq!(loaded.config.scaling.L, 0.031);
         assert_eq!(loaded.config.initial_state.temperature, 640.0);
         assert_eq!(loaded.config.initial_state.heat_flux, 0.11);
-        assert_eq!(loaded.config.initial_state.species["A"], 0.74);
-        assert_eq!(loaded.config.initial_state.species["B"], 0.26);
+        assert_eq!(loaded.config.initial_state.species["H2"], 0.74);
+        assert_eq!(loaded.config.initial_state.species["H"], 0.26);
         assert_eq!(loaded.config.thermal_effects, vec![-1.65e5]);
         assert!(loaded.config.stop_condition_enabled);
         assert_eq!(loaded.config.stop_condition_species_index, 0);

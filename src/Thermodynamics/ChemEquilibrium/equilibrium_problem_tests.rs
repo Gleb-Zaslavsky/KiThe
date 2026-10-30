@@ -425,7 +425,7 @@ fn formulation_blocks_remain_aligned_and_dimension_safe_for_the_canonical_two_sp
 }
 
 #[test]
-fn typed_problem_builds_a_legacy_solver_without_reinterpreting_moles_as_logs() {
+fn typed_problem_builds_a_native_solver_without_reinterpreting_moles_as_logs() {
     let solver = EquilibriumLogMoles::from_problem(two_species_problem()).unwrap();
 
     assert_eq!(solver.n0, vec![1.0, 0.0]);
@@ -438,8 +438,8 @@ fn typed_problem_builds_a_legacy_solver_without_reinterpreting_moles_as_logs() {
 fn invalid_explicit_cascade_budget_stops_before_any_backend_or_publication() {
     let mut solver = EquilibriumLogMoles::from_problem(two_species_problem()).unwrap();
     solver.set_solver_policy(SolverPolicy::Cascade(vec![
-        SolverBackend::Legacy(Solvers::LM),
-        SolverBackend::Legacy(Solvers::NR),
+        SolverBackend::Native(Solvers::LM),
+        SolverBackend::Native(Solvers::NR),
     ]));
     solver.set_solver_budget(SolverCascadeBudget::new(0, 1, 1));
 
@@ -462,8 +462,8 @@ fn invalid_mutated_input_stops_before_any_backend_attempt_or_state_publication()
     solver.initial_guess = None;
     solver.n0.pop();
     solver.set_solver_policy(SolverPolicy::Cascade(vec![
-        SolverBackend::Legacy(Solvers::LM),
-        SolverBackend::Legacy(Solvers::NR),
+        SolverBackend::Native(Solvers::LM),
+        SolverBackend::Native(Solvers::NR),
     ]));
 
     let error = solver.solve().unwrap_err();
@@ -479,8 +479,8 @@ fn invalid_mutated_input_stops_before_any_backend_attempt_or_state_publication()
 fn failed_solve_after_a_successful_publication_keeps_the_last_accepted_state_intact() {
     let mut solver = EquilibriumLogMoles::from_problem(two_species_problem()).unwrap();
     solver.set_solver_policy(SolverPolicy::Cascade(vec![
-        SolverBackend::Legacy(Solvers::LM),
-        SolverBackend::Legacy(Solvers::NR),
+        SolverBackend::Native(Solvers::LM),
+        SolverBackend::Native(Solvers::NR),
     ]));
 
     solver.solve().unwrap();
@@ -613,7 +613,7 @@ fn analytic_jacobian_matches_finite_differences_for_normal_and_trace_species() {
 }
 
 #[test]
-fn legacy_residual_closure_delegates_to_the_pure_prepared_formulation() {
+fn native_residual_closure_delegates_to_the_pure_prepared_formulation() {
     let prepared = PreparedEquilibriumProblem::new(two_species_problem()).unwrap();
     let problem = prepared.problem();
     let conditions = problem.conditions();
@@ -640,7 +640,7 @@ fn legacy_residual_closure_delegates_to_the_pure_prepared_formulation() {
 }
 
 #[test]
-fn numeric_legacy_closure_and_symbolic_residuals_share_one_formulation_contract() {
+fn numeric_native_closure_and_symbolic_residuals_share_one_formulation_contract() {
     // Constant standard Gibbs energies keep this fixture offline and isolate
     // formulation equivalence from database lookup or thermochemical fitting.
     let prepared = PreparedEquilibriumProblem::new(two_species_problem()).unwrap();
@@ -784,7 +784,7 @@ fn gas_and_pure_condensed_numeric_symbolic_and_jacobian_contracts_agree() {
 }
 
 #[test]
-fn legacy_jacobian_wrapper_delegates_to_the_pure_prepared_formulation() {
+fn native_jacobian_wrapper_delegates_to_the_pure_prepared_formulation() {
     let prepared = PreparedEquilibriumProblem::new(two_species_problem()).unwrap();
     let problem = prepared.problem();
     let log_moles = [0.0, -4.0];
@@ -805,7 +805,7 @@ fn legacy_jacobian_wrapper_delegates_to_the_pure_prepared_formulation() {
 }
 
 #[test]
-fn legacy_solver_default_seed_uses_log_moles_when_the_typed_seed_is_not_set() {
+fn native_solver_default_seed_uses_log_moles_when_the_typed_seed_is_not_set() {
     let mut solver = EquilibriumLogMoles::empty();
     solver.subs_data.substances = vec!["O2".to_string(), "O".to_string()];
     solver.n0 = vec![1.0, 0.0];
@@ -1002,7 +1002,7 @@ fn phase_qualified_components_allow_same_substance_in_distinct_phases() {
 }
 
 #[test]
-fn legacy_indexed_ideal_solution_is_not_mislabeled_as_pure_condensed() {
+fn native_indexed_ideal_solution_is_not_mislabeled_as_pure_condensed() {
     // The legacy `Phase` type carries only an activity law. It cannot prove a
     // one-component pure-phase semantic, so its synthetic descriptor must
     // retain the broader ideal-solution label until a typed PhaseSpec bridge

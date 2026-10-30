@@ -239,7 +239,7 @@ impl PreparedEquilibriumRunner {
             ) {
                 SolverPolicy::production_default(self.settings.solver)
             } else {
-                SolverPolicy::legacy_default(self.settings.solver)
+                SolverPolicy::native_default(self.settings.solver)
             }
         });
         let should_prepare_rst = external_rst_problem.is_none()
@@ -363,7 +363,7 @@ impl PreparedEquilibriumRunner {
             ) {
                 SolverPolicy::production_default(self.settings.solver)
             } else {
-                SolverPolicy::legacy_default(self.settings.solver)
+                SolverPolicy::native_default(self.settings.solver)
             }
         });
         let backends = policy.ordered_backends();
@@ -392,7 +392,7 @@ impl PreparedEquilibriumRunner {
         };
         let uses_legacy = backends
             .iter()
-            .any(|backend| matches!(backend, SolverBackend::Legacy(_)));
+            .any(|backend| matches!(backend, SolverBackend::Native(_)));
         let jacobian = if uses_legacy {
             Some(|values: &[f64]| {
                 if let Some(scale) = &scale {
@@ -629,7 +629,7 @@ mod tests {
         let seed = prepared.problem().initial_log_moles().clone();
         let mut runner = PreparedEquilibriumRunner::new(prepared).unwrap();
         runner.configure().solver_policy =
-            Some(SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)));
+            Some(SolverPolicy::Single(SolverBackend::Native(Solvers::LM)));
 
         let error = runner
             .solve_from_initial_guesses(vec![seed.clone(), seed])

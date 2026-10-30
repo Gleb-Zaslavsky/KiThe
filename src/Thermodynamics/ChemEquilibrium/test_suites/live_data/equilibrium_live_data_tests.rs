@@ -390,7 +390,7 @@ fn live_reactive_pt_to_h_to_ph_recovers_temperature_and_composition() {
         ResolvedPhaseEquilibriumRequest::new(&resolved, known_conditions, initial.clone())
             .with_solve_options(
                 EquilibriumSolveOptions::new()
-                    .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+                    .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
                     .expect("legacy NR reference policy must validate"),
             ),
     )
@@ -1989,6 +1989,7 @@ fn live_temperature_range_failure_diagnostics_preserve_backend_metrics() {
                     termination: SolverTermination::Stagnation,
                     backend_converged: false,
                     iterations: 3,
+                    backend_progress_available: true,
                     residual_evaluations: 4,
                     jacobian_evaluations: 3,
                     linear_solves: 3,
@@ -2180,7 +2181,7 @@ fn live_reactive_gas_ph_backend_matrix() {
     let pressure = 101_325.0;
     let known_temperature = 2_500.0;
     let reference_options = EquilibriumSolveOptions::new()
-        .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+        .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
         .expect("reference single backend policy must validate");
     let reference = solve_resolved_pt(
         ResolvedPhaseEquilibriumRequest::new(
@@ -2225,9 +2226,9 @@ fn live_reactive_gas_ph_backend_matrix() {
             "rst_damped_newton",
             SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton),
         ),
-        ("legacy_lm", SolverBackend::Legacy(Solvers::LM)),
-        ("legacy_nr", SolverBackend::Legacy(Solvers::NR)),
-        ("legacy_tr", SolverBackend::Legacy(Solvers::TR)),
+        ("native_lm", SolverBackend::Native(Solvers::LM)),
+        ("native_nr", SolverBackend::Native(Solvers::NR)),
+        ("native_tr", SolverBackend::Native(Solvers::TR)),
     ];
 
     let mut successful_backends = 0usize;
@@ -2407,7 +2408,7 @@ fn live_large_element_limited_gas_timing_report() {
 
 #[test]
 #[ignore = "explicit release solver characterization run"]
-fn live_large_element_limited_solver_matrix_compares_rst_and_legacy_backends() {
+fn live_large_element_limited_solver_matrix_compares_rst_and_native_backends() {
     // Every backend receives the same real resolved problem and the same
     // initial composition. This is a characterization matrix, not a fallback
     // cascade: failures are reported per backend instead of being hidden by a
@@ -2438,9 +2439,9 @@ fn live_large_element_limited_solver_matrix_compares_rst_and_legacy_backends() {
             "rst_damped_newton",
             SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton),
         ),
-        ("legacy_lm", SolverBackend::Legacy(Solvers::LM)),
-        ("legacy_nr", SolverBackend::Legacy(Solvers::NR)),
-        ("legacy_tr", SolverBackend::Legacy(Solvers::TR)),
+        ("native_lm", SolverBackend::Native(Solvers::LM)),
+        ("native_nr", SolverBackend::Native(Solvers::NR)),
+        ("native_tr", SolverBackend::Native(Solvers::TR)),
     ];
 
     println!(
@@ -2513,7 +2514,7 @@ fn live_bounded_backend_regression_avoids_nonfinite_and_iteration_failures() {
             "rst_powell_dogleg",
             SolverBackend::RustedSciThe(RustedSciTheSolver::PowellDogleg),
         ),
-        ("legacy_tr", SolverBackend::Legacy(Solvers::TR)),
+        ("native_tr", SolverBackend::Native(Solvers::TR)),
     ];
 
     for (name, backend) in backends {
@@ -2566,7 +2567,7 @@ fn live_element_limited_release_scaling_matrix() {
                 .build()
                 .expect("real exact-element scaling spec must remain valid");
         let options = EquilibriumSolveOptions::new()
-            .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+            .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
             .expect("single legacy NR policy must validate")
             .with_timing_mode(EquilibriumTimingMode::Enabled);
         let started = std::time::Instant::now();
@@ -2605,7 +2606,7 @@ fn live_element_limited_release_scaling_matrix() {
         );
 
         println!(
-            "live C/H/O-limited scaling: backend=legacy-nr species={} total={:?} nonlinear={:?} residual={:e} balance={:e}",
+            "live C/H/O-limited scaling: backend=native-nr species={} total={:?} nonlinear={:?} residual={:e} balance={:e}",
             count,
             started.elapsed(),
             outcome.timing_report().nonlinear_solve(),
@@ -2654,9 +2655,9 @@ fn live_exact_element_typed_temperature_range_backend_matrix() {
             "rst_damped_newton",
             SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton),
         ),
-        ("legacy_lm", SolverBackend::Legacy(Solvers::LM)),
-        ("legacy_nr", SolverBackend::Legacy(Solvers::NR)),
-        ("legacy_tr", SolverBackend::Legacy(Solvers::TR)),
+        ("native_lm", SolverBackend::Native(Solvers::LM)),
+        ("native_nr", SolverBackend::Native(Solvers::NR)),
+        ("native_tr", SolverBackend::Native(Solvers::TR)),
     ];
 
     let mut successful_backends = 0usize;
@@ -2899,9 +2900,9 @@ fn live_100_species_50_point_temperature_range_backend_matrix() {
             "rst_damped_newton",
             SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton),
         ),
-        ("legacy_lm", SolverBackend::Legacy(Solvers::LM)),
-        ("legacy_nr", SolverBackend::Legacy(Solvers::NR)),
-        ("legacy_tr", SolverBackend::Legacy(Solvers::TR)),
+        ("native_lm", SolverBackend::Native(Solvers::LM)),
+        ("native_nr", SolverBackend::Native(Solvers::NR)),
+        ("native_tr", SolverBackend::Native(Solvers::TR)),
     ];
 
     let mut successful_backends = 0usize;
@@ -3456,7 +3457,7 @@ fn live_fixed_point_matches_one_point_typed_temperature_range() {
     let conditions = EquilibriumConditions::new(1_000.0, 101_325.0, 101_325.0)
         .expect("real fixed/range comparison conditions must validate");
     let options = EquilibriumSolveOptions::new()
-        .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+        .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
         .expect("single legacy NR policy must validate");
 
     let fixed = solve_resolved_pt(
@@ -3491,7 +3492,7 @@ fn live_fixed_point_matches_one_point_typed_temperature_range() {
 
 #[test]
 #[ignore = "explicit release temperature-range characterization run"]
-fn live_large_element_limited_legacy_temperature_range_story() {
+fn live_large_element_limited_native_temperature_range_story() {
     // Keep the compatibility baseline while the typed facade is characterized
     // by the release-oriented story below.
     let (selected, _) = live_large_element_limited_gas_request();
@@ -3537,7 +3538,7 @@ fn live_large_element_limited_legacy_temperature_range_story() {
         assert!(
             result.temperature_solutions.iter().all(|snapshot| matches!(
                 snapshot.solve_report.accepted_backend,
-                SolverBackend::Legacy(_)
+                SolverBackend::Native(_)
             )),
             "legacy temperature-range compatibility must not silently promote to an RST backend"
         );
@@ -3559,7 +3560,7 @@ fn live_large_element_limited_typed_temperature_range_story() {
     let composition = MultiphaseInitialComposition::from_dense(&layout, vec![1e-3; selected.len()])
         .expect("live initial composition must match the resolved layout");
     let options = EquilibriumSolveOptions::new()
-        .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+        .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
         .expect("legacy characterization policy must validate")
         .with_timing_mode(EquilibriumTimingMode::Enabled);
 
@@ -3622,7 +3623,7 @@ fn live_large_element_limited_typed_temperature_range_story() {
         );
         let timing = result.report().point_timing();
         println!(
-            "live typed T-range: backend=legacy-nr direction={expected_direction:?} \
+            "live typed T-range: backend=native-nr direction={expected_direction:?} \
              species={} points={} setup_builds={} reuses={} \
              point_total={:?} point_mean={:?} point_median={:?} point_worst={:?}",
             selected.len(),
@@ -4305,7 +4306,7 @@ fn live_reactive_gas_ph_target_range_continues_from_previous_accepted_state() {
     // phase control, where an active-set lifecycle cannot be shared blindly.
     let nested_options = options
         .clone()
-        .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+        .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
         .expect("nested reference backend policy must validate");
     let nested = PhRangeRequest::from_resolved_thermochemistry(
         &resolved,
@@ -4414,7 +4415,7 @@ fn live_reactive_gas_ph_target_range_backend_matrix() {
         .expect("reactive gas initial composition must validate");
     let pressure = 101_325.0;
     let reference_options = EquilibriumSolveOptions::new()
-        .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+        .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
         .expect("reference backend policy must validate");
     let thermochemistry = ResolvedThermochemistry::from_resolved_system(&resolved)
         .expect("live NASA records must provide a thermochemistry bundle");
@@ -4451,9 +4452,9 @@ fn live_reactive_gas_ph_target_range_backend_matrix() {
             "rst_trust_region_lm",
             SolverBackend::RustedSciThe(RustedSciTheSolver::TrustRegionLevenbergMarquardt),
         ),
-        ("legacy_lm", SolverBackend::Legacy(Solvers::LM)),
-        ("legacy_nr", SolverBackend::Legacy(Solvers::NR)),
-        ("legacy_tr", SolverBackend::Legacy(Solvers::TR)),
+        ("native_lm", SolverBackend::Native(Solvers::LM)),
+        ("native_nr", SolverBackend::Native(Solvers::NR)),
+        ("native_tr", SolverBackend::Native(Solvers::TR)),
     ];
     let mut successful = 0usize;
     let mut rows = Vec::with_capacity(backends.len());
@@ -4784,9 +4785,9 @@ fn live_reactive_and_water_ph_target_range_route_matrix() {
     let before = live_library_file_snapshot();
     let timing_options =
         || EquilibriumSolveOptions::new().with_timing_mode(EquilibriumTimingMode::Enabled);
-    let legacy_nr_options = || {
+    let native_nr_options = || {
         timing_options()
-            .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+            .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
             .expect("legacy-NR matrix policy must validate")
     };
     let pressure = 101_325.0;
@@ -4820,7 +4821,7 @@ fn live_reactive_and_water_ph_target_range_route_matrix() {
                     conditions,
                     reactive_initial.clone(),
                 )
-                .with_solve_options(legacy_nr_options()),
+                .with_solve_options(native_nr_options()),
             )
             .expect("reactive reference P,T state must solve");
             let target = reactive_thermochemistry
@@ -4844,7 +4845,7 @@ fn live_reactive_and_water_ph_target_range_route_matrix() {
     )
     .expect("nested reactive range must validate")
     .with_ph_solve_mode(PhSolveMode::NestedTemperature)
-    .with_solve_options(legacy_nr_options())
+    .with_solve_options(native_nr_options())
     .solve()
     .expect("nested reactive range must solve");
     assert_eq!(reactive_range.report().formulation_builds(), 1);
@@ -4993,7 +4994,7 @@ fn live_reactive_and_water_ph_target_range_route_matrix() {
     )
     .expect("rollback range must validate")
     .with_ph_solve_mode(PhSolveMode::NestedTemperature)
-    .with_solve_options(legacy_nr_options());
+    .with_solve_options(native_nr_options());
     let rollback_started = std::time::Instant::now();
     match rollback_request.solve() {
         Err(PhRangeError::Point(error)) => {
@@ -5041,7 +5042,7 @@ fn live_large_element_limited_nested_ph_target_range_story() {
         .expect("large real gas composition must validate");
     let pressure = 101_325.0;
     let options = EquilibriumSolveOptions::new()
-        .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+        .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
         .expect("large nested P,H policy must validate")
         .with_timing_mode(EquilibriumTimingMode::Enabled);
     let thermochemistry = ResolvedThermochemistry::from_resolved_system(&resolved)
@@ -5157,7 +5158,7 @@ fn live_nested_ph_inner_pt_cascade_release_matrix() {
     let pressure = 101_325.0;
     let temperatures = [1_005.0, 1_050.0, 1_095.0];
     let options = EquilibriumSolveOptions::new()
-        .with_solver_policy(SolverPolicy::legacy_default(Solvers::NR))
+        .with_solver_policy(SolverPolicy::native_default(Solvers::NR))
         .expect("nested inner P,T cascade policy must validate")
         .with_timing_mode(EquilibriumTimingMode::Enabled);
     let mut rows = Vec::new();
@@ -5500,8 +5501,8 @@ fn live_real_ph_invalid_input_and_rollback_matrix() {
     .with_ph_solve_mode(PhSolveMode::NestedTemperature)
     .with_solve_options(
         EquilibriumSolveOptions::new()
-            .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
-            .expect("single legacy backend policy must validate"),
+            .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
+            .expect("single native backend policy must validate"),
     )
     .solve();
 

@@ -165,7 +165,7 @@ fn local_n2_fallback_app() -> EquilibriumApp {
         },
     };
     app.document.config.solver.selection = EquilibriumSolverDraft::CustomCascade {
-        backends: vec![GuiSolverBackend::RstNielsenLm, GuiSolverBackend::LegacyNr],
+        backends: vec![GuiSolverBackend::RstNielsenLm, GuiSolverBackend::NativeNr],
     };
     // Keep the first attempt deliberately short while leaving the legacy
     // fallback enough room to demonstrate its own step-control path.
@@ -380,7 +380,7 @@ fn local_gas_continuation_app() -> EquilibriumApp {
         },
     };
     app.document.config.solver.selection = EquilibriumSolverDraft::SingleBackend {
-        backend: GuiSolverBackend::LegacyNr,
+        backend: GuiSolverBackend::NativeNr,
     };
     app.document.config.diagnostics.collect_timing = true;
     app.document.config.postprocessing.plot_target =
@@ -878,7 +878,7 @@ fn solver_editor_exposes_optional_cascade_budget_without_changing_defaults() {
 fn custom_solver_cascade_is_ordered_and_rejects_duplicates() {
     let mut document = EquilibriumGuiDocument::new();
     document.config.solver.selection = EquilibriumSolverDraft::CustomCascade {
-        backends: vec![GuiSolverBackend::LegacyNr, GuiSolverBackend::RstLm],
+        backends: vec![GuiSolverBackend::NativeNr, GuiSolverBackend::RstLm],
     };
     let validated = document
         .validate_for_run()
@@ -888,7 +888,7 @@ fn custom_solver_cascade_is_ordered_and_rejects_duplicates() {
     assert!(matches!(request, EquilibriumGuiSolveRequest::Facade(_)));
 
     document.config.solver.selection = EquilibriumSolverDraft::CustomCascade {
-        backends: vec![GuiSolverBackend::LegacyNr, GuiSolverBackend::LegacyNr],
+        backends: vec![GuiSolverBackend::NativeNr, GuiSolverBackend::NativeNr],
     };
     let report = document
         .validate()
@@ -1154,6 +1154,29 @@ fn range_editor_exposes_grid_controls_and_accepts_descending_input() {
 }
 
 #[test]
+fn ph_range_editor_exposes_enthalpy_grid_controls() {
+    let app = Rc::new(RefCell::new(EquilibriumApp::new()));
+    let app_for_ui = Rc::clone(&app);
+    let mut open = true;
+    let mut harness = Harness::new_ui(move |ui| {
+        app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+    });
+
+    harness.run();
+    harness.get_by_label("P,H = const").click_accesskit();
+    harness.run();
+    harness.get_by_label("Target range").click_accesskit();
+    harness.run();
+    harness.get_by_label("Start total enthalpy [J]");
+    harness.get_by_label("End total enthalpy [J]");
+    harness.get_by_label("Solved points");
+    assert!(matches!(
+        app.borrow().document.config.problem,
+        super::equilibrium_gui_model::EquilibriumProblemDraft::FixedPhRange { .. }
+    ));
+}
+
+#[test]
 fn output_shows_resampling_only_for_a_pt_temperature_range() {
     let app = Rc::new(RefCell::new(EquilibriumApp::new()));
     let app_for_ui = Rc::clone(&app);
@@ -1313,7 +1336,7 @@ fn offline_local_h2o_ph_story_publishes_energy_contract() {
         .with_solve_options(
             crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::EquilibriumSolveOptions::new()
                 .with_solver_policy(
-                    SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)),
+                    SolverPolicy::Single(SolverBackend::Native(Solvers::NR)),
                 )
                 .expect("single legacy reference policy is valid"),
         ),
@@ -1325,11 +1348,11 @@ fn offline_local_h2o_ph_story_publishes_energy_contract() {
         .expect("live H2O enthalpy evaluates");
 
     let mut app = EquilibriumApp::new();
-    // Use one deterministic legacy backend here so this ignored GUI story
+    // Use one deterministic native backend here so this ignored GUI story
     // validates the route-dependent monolithic snapshot itself rather than
     // conflating it with the broader RST backend cascade characterization.
     app.document.config.solver.selection = EquilibriumSolverDraft::SingleBackend {
-        backend: GuiSolverBackend::LegacyNr,
+        backend: GuiSolverBackend::NativeNr,
     };
     app.document.config.lookup = EquilibriumLookupDraft::Explicit {
         priority_libraries: vec!["NASA_gas".into()],
@@ -1449,7 +1472,7 @@ fn offline_local_h2o_ph_inner_fallback_story_renders_backend_attempts() {
             // This narrow bracket forces the symbolic route to fall back to
             // the safeguarded numeric route; Nielsen is retained as the first
             // inner candidate and Legacy NR receives the recovery budget.
-            backends: vec![GuiSolverBackend::RstNielsenLm, GuiSolverBackend::LegacyNr],
+            backends: vec![GuiSolverBackend::RstNielsenLm, GuiSolverBackend::NativeNr],
         },
     );
     app.document.config.solver.ph_solve_mode = GuiPhSolveMode::NestedTemperature;
@@ -1546,6 +1569,35 @@ fn fixed_ph_cancellation_discards_late_worker_completion() {
         app.publish_failure(ticket, "late P,H worker failure"),
         super::equilibrium_gui_execution::EquilibriumGuiPublication::Stale
     );
+}
+
+#[test]
+fn fixed_ph_range_cancellation_discards_late_worker_completion() {
+    let mut app = EquilibriumApp::new();
+    app.document.config.problem = EquilibriumProblemDraft::FixedPhRange {
+        pressure_pa: "101325".into(),
+        reference_pressure_pa: "101325".into(),
+        start_enthalpy_j: "-4.2e5".into(),
+        end_enthalpy_j: "-4.1e5".into(),
+        point_count: "3".into(),
+        temperature_bounds: super::equilibrium_gui_model::PhTemperatureBoundsDraft::default(),
+    };
+    app.prepare_request()
+        .expect("P,H range document must prepare before cancellation");
+    let ticket = app
+        .begin_prepared_run()
+        .expect("P,H range run ticket must be created");
+    assert!(app.cancel_run());
+    assert!(matches!(
+        app.run_state(),
+        super::equilibrium_gui_execution::EquilibriumGuiRunState::Cancelling { .. }
+    ));
+    assert!(app.result_snapshot().is_none());
+    assert_eq!(
+        app.publish_failure(ticket, "late P,H range worker failure"),
+        super::equilibrium_gui_execution::EquilibriumGuiPublication::Stale
+    );
+    assert!(app.result_snapshot().is_none());
 }
 
 #[test]
@@ -1886,13 +1938,15 @@ fn closing_and_reopening_the_window_preserves_only_the_editable_document() {
     // Closing only hides the egui window. The app object remains the owner of
     // the document, while no accepted result or worker is manufactured by a
     // reopen operation.
-    let _ = context.run_ui(Default::default(), |ctx| app.show(ctx, &mut open));
+    let mut output = context.run_ui(Default::default(), |ctx| app.show(ctx, &mut open));
+    output.textures_delta.clear();
     assert!(!open);
     assert_eq!(app.document, expected_document);
     assert!(app.result_snapshot().is_none());
 
     open = true;
-    let _ = context.run_ui(Default::default(), |ctx| app.show(ctx, &mut open));
+    let mut output = context.run_ui(Default::default(), |ctx| app.show(ctx, &mut open));
+    output.textures_delta.clear();
     assert_eq!(app.document, expected_document);
     assert!(app.result_snapshot().is_none());
 }

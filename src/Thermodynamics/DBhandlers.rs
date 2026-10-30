@@ -274,6 +274,8 @@ pub mod TRANSPORTdata;
 /// ```
 pub mod thermo_api;
 
+/// Non-transactional diagnostics for stored thermodynamic and transport records.
+pub mod library_audit;
 pub mod transport_api;
 //pub use transport_api::{TransportCalculator, TransportError, LambdaUnit, ViscosityUnit};
 pub mod Diffusion;

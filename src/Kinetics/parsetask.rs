@@ -9,73 +9,80 @@
 /// of "short name of the reaction library" + "reaction number in the library"
 /// for example C_10 means reaction '10' in the CANTERA library.
 /// The same means C10 and Сantera_10
-use regex::Regex;
 use std::collections::HashMap;
 
-pub fn decipher_shortcut_name(short: &str) -> (String, String) {
-    let re = Regex::new(r"(\d+(\.\d*)?)\*?").unwrap();
-    let captures = re.captures(short);
-    println!("captures {:?}", captures);
-    let shortcut = short.to_string().to_owned();
+use crate::Kinetics::error::{KineticsError, KineticsResult};
 
-    let (library_encrypted_name, reaction_number) = {
-        match captures {
-            Some(cap) => {
-                let reaction_number = cap.get(0).unwrap().as_str().to_string();
-                let library_encrypted_name = shortcut
-                    .trim()
-                    .to_owned()
-                    .replace(&reaction_number, "")
-                    .replace("_", "")
-                    .to_lowercase();
-                (library_encrypted_name, reaction_number)
-            }
-            None => ("Unknown".to_string(), "Unknown".to_string()),
-        }
-    };
-    println!("library_encrypted_name {:?}", &library_encrypted_name);
-    let library_name = match library_encrypted_name.as_str() {
-        "c" | "cantera" | "ca" => "Cantera".to_string(),
+/// Parse `<library alias><optional underscore><integer reaction id>`.
+pub fn decipher_shortcut_name(short: &str) -> KineticsResult<(String, String)> {
+    let input = short.trim();
+    let digit_start = input
+        .find(|character: char| character.is_ascii_digit())
+        .ok_or_else(|| invalid_shortcut(short, "expected a reaction number"))?;
+    let (mut prefix, reaction_id) = input.split_at(digit_start);
+    if prefix.ends_with('_') {
+        prefix = &prefix[..prefix.len() - 1];
+    }
+    if prefix.is_empty()
+        || !prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        || reaction_id.is_empty()
+        || !reaction_id.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(invalid_shortcut(
+            short,
+            "expected an ASCII library alias followed by an integer reaction id",
+        ));
+    }
+
+    let normalized = prefix.to_ascii_lowercase().replace('_', "");
+    let library = match normalized.as_str() {
+        "c" | "ca" | "cantera" => "Cantera".to_string(),
         "n" | "nuig" => "NUIG".to_string(),
-        "unknown" => "Unknown".to_string(),
-        "a" | "aramco" => "ARAMCO".to_string(),
-        "B" | "beckstead" => "Beckstead".to_string(),
-        "B_c" | "beckstead_c" => "Beckstead_c".to_string(),
-        _ => library_encrypted_name.clone(),
+        "a" | "aramco" => "Aramco".to_string(),
+        "b" | "beckstead" => "Beckstead".to_string(),
+        "bc" | "becksteadc" => "Beckstead_c".to_string(),
+        _ => prefix.to_string(),
     };
-    println!("library_name {:?}", &library_name);
-    println!("reaction_number {:?}", &reaction_number);
-
-    (library_name.to_owned(), reaction_number)
+    Ok((library, reaction_id.to_string()))
 }
-pub fn decipher_vector_of_shortcuts(vec_of_shortcuts: Vec<&str>) -> HashMap<String, Vec<String>> {
+
+fn invalid_shortcut(input: &str, reason: &str) -> KineticsError {
+    KineticsError::InvalidReactionShortcut {
+        input: input.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+pub fn decipher_vector_of_shortcuts(
+    vec_of_shortcuts: Vec<&str>,
+) -> KineticsResult<HashMap<String, Vec<String>>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for shortcut in vec_of_shortcuts {
-        let (library_name, reaction_number) = decipher_shortcut_name(shortcut);
-        if map.contains_key(&library_name) {
-            map.get_mut(&library_name)
-                .unwrap()
-                .push(reaction_number.to_string());
-        } else {
-            map.insert(library_name.to_string(), vec![reaction_number.to_string()]);
-        }
+        let (library_name, reaction_number) = decipher_shortcut_name(shortcut)?;
+        map.entry(library_name).or_default().push(reaction_number);
     }
-    map
+    Ok(map)
 }
-pub fn decipher_vector_of_shortcuts_to_pairs(vec_of_shortcuts: Vec<&str>) -> Vec<(String, String)> {
+
+pub fn decipher_vector_of_shortcuts_to_pairs(
+    vec_of_shortcuts: Vec<&str>,
+) -> KineticsResult<Vec<(String, String)>> {
     let mut vec_of_pairs = Vec::new();
     for shortcut in vec_of_shortcuts {
-        let (library_name, reaction_number) = decipher_shortcut_name(shortcut);
+        let (library_name, reaction_number) = decipher_shortcut_name(shortcut)?;
         vec_of_pairs.push((library_name, reaction_number));
     }
-    vec_of_pairs
+    Ok(vec_of_pairs)
 }
 pub fn cipher_vector_of_shortcuts(map: HashMap<String, String>) -> Vec<String> {
-    let mut vec = Vec::new();
-    for (library_name, reaction_number) in map {
-        vec.push(format!("{}_{}", library_name, reaction_number));
-    }
-    vec
+    let mut shortcuts: Vec<_> = map
+        .into_iter()
+        .map(|(library, reaction)| format!("{library}_{reaction}"))
+        .collect();
+    shortcuts.sort();
+    shortcuts
 }
 #[cfg(test)]
 mod tests {
@@ -84,32 +91,52 @@ mod tests {
     #[test]
     fn test_decipher_shortcut_name() {
         assert_eq!(
-            decipher_shortcut_name("C_10"),
+            decipher_shortcut_name("C_10").unwrap(),
             ("Cantera".to_string(), "10".to_string())
         );
         assert_eq!(
-            decipher_shortcut_name("C10"),
+            decipher_shortcut_name("C10").unwrap(),
             ("Cantera".to_string(), "10".to_string())
         );
         assert_eq!(
-            decipher_shortcut_name("Cantera_10"),
+            decipher_shortcut_name("Cantera_10").unwrap(),
             ("Cantera".to_string(), "10".to_string())
         );
 
         assert_eq!(
-            decipher_shortcut_name("A10"),
-            ("ARAMCO".to_string(), "10".to_string())
+            decipher_shortcut_name("A10").unwrap(),
+            ("Aramco".to_string(), "10".to_string())
         );
 
         assert_eq!(
-            decipher_shortcut_name("N_10"),
+            decipher_shortcut_name("N_10").unwrap(),
             ("NUIG".to_string(), "10".to_string())
         );
 
         assert_eq!(
-            decipher_shortcut_name("invalid"),
-            ("Unknown".to_string(), "Unknown".to_string())
+            decipher_shortcut_name("Bc_10").unwrap(),
+            ("Beckstead_c".to_string(), "10".to_string())
         );
+        assert_eq!(
+            decipher_shortcut_name("B10").unwrap(),
+            ("Beckstead".to_string(), "10".to_string())
+        );
+        assert_eq!(
+            decipher_shortcut_name("NoSuchLib_10").unwrap(),
+            ("NoSuchLib".to_string(), "10".to_string())
+        );
+        assert!(matches!(
+            decipher_shortcut_name("junk-C10"),
+            Err(KineticsError::InvalidReactionShortcut { .. })
+        ));
+        assert!(matches!(
+            decipher_shortcut_name("C_10tail"),
+            Err(KineticsError::InvalidReactionShortcut { .. })
+        ));
+        assert!(matches!(
+            decipher_shortcut_name("invalid"),
+            Err(KineticsError::InvalidReactionShortcut { .. })
+        ));
     }
 
     #[test]
@@ -117,11 +144,14 @@ mod tests {
         let vec_of_shortcuts = vec!["C_10", "A10", "n_10"];
         let expected_map = HashMap::from([
             ("Cantera".to_string(), vec!["10".to_string()]),
-            ("ARAMCO".to_string(), vec!["10".to_string()]),
+            ("Aramco".to_string(), vec!["10".to_string()]),
             ("NUIG".to_string(), vec!["10".to_string()]),
         ]);
 
-        assert_eq!(decipher_vector_of_shortcuts(vec_of_shortcuts), expected_map);
+        assert_eq!(
+            decipher_vector_of_shortcuts(vec_of_shortcuts).unwrap(),
+            expected_map
+        );
     }
     #[test]
     fn test_cipher_vector_of_shortcuts() {

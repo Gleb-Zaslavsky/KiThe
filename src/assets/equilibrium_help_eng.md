@@ -7,19 +7,25 @@ contain a separate GUI solver. Results are immutable accepted snapshots.
 
 `P,T = const` solves composition at fixed pressure and temperature. `P,H =
 const` solves composition and temperature at fixed pressure and total
-enthalpy. `Point` solves one state. `Range` is available for P,T and keeps the
-entered direction, reusing formulation data and the last accepted state.
+enthalpy. `Point` solves one state. `Range` is available for P,T and P,H and
+keeps the entered direction, reusing formulation data and the last accepted
+state.
 
 `Pressure [Pa]` is the system pressure and must be finite and positive.
 `Reference pressure [Pa]` is the gas standard-state pressure in the ideal-gas
 activity law; it is not automatically the system pressure and must match the
 library convention. `Temperature [K]` is the P,T temperature.
 
-For a P,T range, `Start`, `End`, and `Points` define the grid; at least two
-points are required. For P,H, `Target total enthalpy [J]` is extensive enthalpy
-of the complete inventory, not J/mol. `Lower bound`, `Upper bound`, and
-`Initial seed [K]` define and seed the scalar temperature search. The seed must
-be inside the bracket, and the bracket must stay inside available data.
+For a P,T range, `Start`, `End`, and `Points` define the temperature grid. For
+a P,H range, `Start total enthalpy [J]`, `End total enthalpy [J]`, and
+`Solved points` define a uniformly spaced target grid, including both
+endpoints. At least two points are required; ascending and descending targets
+are both supported. Each accepted point seeds continuation to the next target,
+and the range is published transactionally only if every target succeeds.
+P,H enthalpy is extensive for the complete inventory, not J/mol. `Lower
+bound`, `Upper bound`, and `Initial seed [K]` define and seed the scalar
+temperature search. The seed must be inside the bracket, and the bracket must
+stay inside available data.
 
 `Explicit species` accepts exact records. `Search by elements` discovers
 candidates, but candidates must still be assigned to a phase. `Elements` is the
@@ -48,8 +54,8 @@ replacing accepted state.
 
 | Control | Domain / effective default | Visible when | Change class |
 | --- | --- | --- | --- |
-| Problem, point/range, pressure and temperature | Positive Pa and K; `Point` is the default | Always; range is P,T only | Request-invalidating |
-| P,H target and temperature bracket | Extensive J; finite K bracket and seed inside it | P,H only | Request-invalidating |
+| Problem, point/range, pressure and temperature | Positive Pa and K; `Point` is the default | Always | Request-invalidating |
+| P,H target or target grid and temperature bracket | Extensive J; range has at least two points; finite K bracket and seed inside it | P,H only | Request-invalidating |
 | Species, elements, phases and initial moles | Exact identifiers; finite non-negative mol | According to inventory mode | Request-invalidating |
 | Validate / Prepare / Run / Cancel | Validate first; preparation creates an immutable request | Action availability follows document and worker state | Preparation-only / runtime |
 

@@ -2581,7 +2581,7 @@ pub fn gas_solver(
     // This compatibility helper accepts a legacy `Solvers` selector. Make
     // that contract explicit instead of letting symbolic context silently
     // promote the call into the RST production cascade.
-    instance.solver_settings.solver_policy = Some(SolverPolicy::legacy_default(solver));
+    instance.solver_settings.solver_policy = Some(SolverPolicy::native_default(solver));
     instance.solver_settings.scaling_flag = scaling;
     instance.gibbs = g_vec;
 
@@ -2620,7 +2620,7 @@ pub fn gas_solver_from_elements(
     let n0 = instance.n0.clone();
 
     instance.solver_settings.solver = solver;
-    instance.solver_settings.solver_policy = Some(SolverPolicy::legacy_default(solver));
+    instance.solver_settings.solver_policy = Some(SolverPolicy::native_default(solver));
     instance.solver_settings.scaling_flag = scaling;
     instance.gibbs = g_vec;
     let species: Vec<usize> = (0..subs.len()).map(|x| x as usize).collect();
@@ -2699,7 +2699,7 @@ pub fn gas_solver_for_T_range(
     instance.solver_settings.solver = solver;
     // Preserve the historical meaning of this compatibility selector: the
     // requested legacy method runs first, followed only by legacy fallbacks.
-    instance.solver_settings.solver_policy = Some(SolverPolicy::legacy_default(solver));
+    instance.solver_settings.solver_policy = Some(SolverPolicy::native_default(solver));
     if parallel {
         instance.solve_for_T_range_par2(T_start, T_end, T_step)?
     } else {
@@ -2765,7 +2765,7 @@ pub fn gas_solver_for_T_range_for_elements(
     instance.solver_settings.scaling_flag = false;
     instance.with_loglevel(loglevel);
     instance.solver_settings.solver = solver;
-    instance.solver_settings.solver_policy = Some(SolverPolicy::legacy_default(solver));
+    instance.solver_settings.solver_policy = Some(SolverPolicy::native_default(solver));
     instance.solve_for_T_range(T_start, T_end, T_step)?;
     Ok(instance)
 }

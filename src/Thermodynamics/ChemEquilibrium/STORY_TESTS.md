@@ -7,6 +7,10 @@ this document prevents release evidence from being lost in terminal history.
 
 All commands below assume the repository root is the current directory.
 
+Historical captures created before the backend rename may show `Legacy(LM/NR/TR)`
+or `legacy-*`. These labels refer to the same KiThe-native implementations now
+reported as `Native(LM/NR/TR)` and `native-*`; the recorded measurements are unchanged.
+
 Common command shape:
 
 ```powershell
@@ -507,7 +511,7 @@ is a separate integration task, not something this witness silently assumes.
 
 The molecular oracle is solved at the actual `1e8` physical scale through the
 production `EquilibriumCalculator` molecular-input facade with an explicit
-`SolverPolicy::Single(SolverBackend::Legacy(Solvers::TR))` policy. It is
+`SolverPolicy::Single(SolverBackend::Native(Solvers::TR))` policy. It is
 independent of the direct standalone RST callback invocation and independent
 of the RST algorithms under test, while still exercising the real facade,
 phase-control, validation, and publication boundaries.
@@ -1546,7 +1550,7 @@ live phase-control timing report
 test Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_phase_control_timing_report_prints_stage_breakdown ... ok
 
 
-cargo test --release --lib Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_solver_matrix_compares_rst_and_legacy_backends --no-default-features -- --ignored --nocapture
+cargo test --release --lib Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_solver_matrix_compares_rst_and_native_backends --no-default-features -- --ignored --nocapture
 
 live large C/H/O-limited solver matrix: species=20
   rst_lm                   ok total=94.0388ms nonlinear=89.7731ms residual=2.3428860389495855e-7 balance=1.266742673117216e-7
@@ -1566,7 +1570,7 @@ gauss newton step norm <= delta: return gauss newton step
   legacy_lm                ok total=4.1019ms nonlinear=105.2µs residual=3.6781743366064495e-14 balance=1.3877787807814457e-17
   legacy_nr                ok total=3.6206ms nonlinear=64µs residual=2.049728905790898e-7 balance=1.8438182231017564e-8
   legacy_tr                ok total=3.4807ms nonlinear=221.4µs residual=2.2203496345604435e-10 balance=1.1150885770305763e-11
-test Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_solver_matrix_compares_rst_and_legacy_backends ... ok
+test Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_solver_matrix_compares_rst_and_native_backends ... ok
 
 
 
@@ -1613,13 +1617,13 @@ live typed T-range backend: backend=legacy_tr species=20 points=3 total=587µs m
 test Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_exact_element_typed_temperature_range_backend_matrix ... ok
 
 
-cargo test --release --lib Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_legacy_temperature_range_story --no-default-features -- --ignored --nocapture
+cargo test --release --lib Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_native_temperature_range_story --no-default-features -- --ignored --nocapture
 
 running 1 test
 live real T-range: backend=LM, species=20, points=5, elapsed=942.2µs
 live real T-range: backend=NR, species=20, points=5, elapsed=1.0818ms
 live real T-range: backend=TR, species=20, points=5, elapsed=812.9µs
-test Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_legacy_temperature_range_story ... ok
+test Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_native_temperature_range_story ... ok
 
 cargo test --release --lib Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_typed_temperature_range_story --no-default-features -- --ignored --nocapture
 live typed T-range: backend=legacy-nr direction=Ascending species=20 points=3 setup_builds=1 reuses=2 point_total=408µs point_mean=136µs point_median=108.1µs point_worst=193.8µs
@@ -1808,7 +1812,7 @@ The test passed.
 
 ### Test
 
-`Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_solver_matrix_compares_rst_and_legacy_backends`
+`Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_solver_matrix_compares_rst_and_native_backends`
 
 ### What it checks
 
@@ -1818,7 +1822,7 @@ The test passed.
 
 ### Release command
 
-    cargo test --release --lib Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_solver_matrix_compares_rst_and_legacy_backends --no-default-features -- --ignored --nocapture
+    cargo test --release --lib Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_solver_matrix_compares_rst_and_native_backends --no-default-features -- --ignored --nocapture
 
 ### Release characterization
 
@@ -1902,7 +1906,7 @@ a failure of the typed range workflow.
 
 ### Test
 
-`Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_legacy_temperature_range_story`
+`Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_native_temperature_range_story`
 
 ### What it checks
 
@@ -1911,7 +1915,7 @@ a failure of the typed range workflow.
 
 ### Release command
 
-    cargo test --release --lib Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_legacy_temperature_range_story --no-default-features -- --ignored --nocapture
+    cargo test --release --lib Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_native_temperature_range_story --no-default-features -- --ignored --nocapture
 
 ### Release characterization
 
@@ -6165,7 +6169,7 @@ the next optimization targets measured work rather than an opaque facade
 ### Command
 
 ```powershell
-cargo bench --bench equilibrium_legacy_callbacks `
+cargo bench --bench equilibrium_native_callbacks `
   --no-default-features `
   --features equilibrium-instrumentation `
   -- --noplot
@@ -6230,7 +6234,7 @@ policy is not changed by this benchmark.
 cargo test --lib --no-default-features equilibrium_nonlinear -- --quiet
 cargo test --lib --no-default-features equilibrium_rst_backend_tests -- --quiet
 cargo test --lib --no-default-features equilibrium_backend_adapter -- --quiet
-cargo check --bench equilibrium_legacy_callbacks --no-default-features `
+cargo check --bench equilibrium_native_callbacks --no-default-features `
   --features equilibrium-instrumentation --quiet
 ```
 
@@ -6243,7 +6247,7 @@ equilibrium_backend_adapter: 7 passed
 tp1907_upper_inventory_is_backend_invariant: 1 passed
 production_default_retains_a_scale_robust_backend_on_real_tp1907_story: 1 passed
 failed_legacy_attempt_preserves_callback_metrics: 1 passed
-cargo check equilibrium_legacy_callbacks: passed
+cargo check equilibrium_native_callbacks: passed
 full Criterion matrix (36 case/backend functions): passed
 ```
 
@@ -6275,8 +6279,8 @@ overhead.
 
 ```powershell
 cargo check --lib --no-default-features --quiet
-cargo check --bench equilibrium_legacy_callbacks --no-default-features --quiet
-cargo check --bench equilibrium_legacy_callbacks --no-default-features `
+cargo check --bench equilibrium_native_callbacks --no-default-features --quiet
+cargo check --bench equilibrium_native_callbacks --no-default-features `
   --features equilibrium-instrumentation --quiet
 cargo test --lib --no-default-features equilibrium_nonlinear -- --quiet
 cargo test --lib --no-default-features equilibrium_backend_adapter -- --quiet
@@ -6313,8 +6317,8 @@ than a new performance baseline.
 equilibrium_nonlinear: 36 passed
 equilibrium_backend_adapter: 7 passed
 cargo check --lib --no-default-features: passed
-cargo check equilibrium_legacy_callbacks without instrumentation: passed
-cargo check equilibrium_legacy_callbacks with instrumentation: passed
+cargo check equilibrium_native_callbacks without instrumentation: passed
+cargo check equilibrium_native_callbacks with instrumentation: passed
 ```
 
 The instrumented release callback benchmark still publishes the same accepted
@@ -6555,7 +6559,7 @@ single accepted row cannot explain retry cost.
 ### Command
 
 ```powershell
-cargo bench --bench equilibrium_legacy_overhead `
+cargo bench --bench equilibrium_native_overhead `
   --no-default-features `
   --features equilibrium-instrumentation `
   -- --noplot
@@ -6639,7 +6643,7 @@ the diagnostic capture opt-in.
 ### Correctness and coverage gate
 
 ```powershell
-cargo check --bench equilibrium_legacy_overhead `
+cargo check --bench equilibrium_native_overhead `
   --no-default-features `
   --features equilibrium-instrumentation --quiet
 cargo test --lib --no-default-features equilibrium_nonlinear -- --quiet
@@ -6665,7 +6669,7 @@ backend order, and recovery behavior.
 ### Command
 
 ```powershell
-cargo rustc --release --bench equilibrium_legacy_overhead `
+cargo rustc --release --bench equilibrium_native_overhead `
   --no-default-features `
   --features equilibrium-instrumentation `
   --config 'profile.release.lto="off"' `
@@ -6721,7 +6725,7 @@ full dense transformation remains rejected and is not part of this result.
 cargo test --lib --no-default-features equilibrium_nonlinear -- --quiet
 cargo test --lib --no-default-features nasa_tp1907_chon_graphite_tests -- --quiet
 cargo test --lib --no-default-features nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_real_ph_solution_is_extensive_when_inventory_and_target_scale_together -- --quiet
-cargo check --bench equilibrium_legacy_overhead `
+cargo check --bench equilibrium_native_overhead `
   --no-default-features `
   --features equilibrium-instrumentation --quiet
 ```
@@ -6762,7 +6766,7 @@ The zero-Jacobian case still reaches LU and remains a singular-Jacobian error.
 ### Command
 
 ```powershell
-cargo rustc --release --bench equilibrium_legacy_overhead `
+cargo rustc --release --bench equilibrium_native_overhead `
   --no-default-features `
   --features equilibrium-instrumentation `
   --config "profile.release.lto='off'" `
@@ -6796,7 +6800,7 @@ Criterion before/after series; no exact facade speedup is claimed.
 cargo test --lib --no-default-features equilibrium_nonlinear -- --quiet
 cargo test --lib --no-default-features nasa_tp1907_chon_graphite_tests -- --quiet
 cargo test --lib --no-default-features nasa_tp1906_chon_graphite_ph_tests::tests::tp1906_real_ph_solution_is_extensive_when_inventory_and_target_scale_together -- --quiet
-cargo check --bench equilibrium_legacy_overhead `
+cargo check --bench equilibrium_native_overhead `
   --no-default-features `
   --features equilibrium-instrumentation --quiet
 ```
@@ -6944,7 +6948,7 @@ target\release\deps\equilibrium_baseline-<fresh-hash>.exe --noplot
 The Legacy detail harness was also used for the trial-buffer decision:
 
 ```powershell
-cargo bench --bench equilibrium_legacy_overhead `
+cargo bench --bench equilibrium_native_overhead `
   --no-default-features `
   --features equilibrium-instrumentation -- --noplot
 ```
@@ -7291,7 +7295,7 @@ in both matched builds.
 **Command:**
 
 ```text
-cargo bench --bench equilibrium_legacy_callbacks --no-default-features --features "equilibrium-instrumentation" -- --noplot
+cargo bench --bench equilibrium_native_callbacks --no-default-features --features "equilibrium-instrumentation" -- --noplot
 ```
 
 The dashboard was executed from the optimized benchmark binary after Cargo
@@ -9023,3 +9027,389 @@ differentiation; the largest end-to-end gains are STANJAN-15 P,H and
 RP-1311/40 P,T. This run does not establish a universal AtomView default:
 Minpack's unpaired TP-1907/18 ExprLegacy failure needs a separate correctness
 investigation, and the native LM figures use a different nonlinear method.
+
+### Story 121: Current RST 0.4.27 equilibrium correctness baseline
+
+**Name:** `RST 0.4.27 preserves the tested frontend, backend, and bounded-scale contracts`
+
+**Question / hypothesis:** After the RST upgrade, do the current high-scale
+TP-1907 backend/frontend gates and the STANJAN small-constant P,H regression
+still pass? What does the existing elemental P,H scale characterization
+actually accept on this version?
+
+**Commands:**
+
+```powershell
+cargo test --lib --no-default-features tp1907_upper_inventory_is_backend_invariant -- --nocapture
+cargo test --lib --no-default-features tp1907_upper_inventory_facade_atom_view_and_expr_legacy_match_published_equilibrium -- --nocapture
+cargo test --lib --no-default-features stanjan15_tiny_constant_and_public_ph_facade_are_frontend_equivalent -- --nocapture
+cargo test --lib --no-default-features elemental_calculator_ph_scale_envelope_characterization -- --include-ignored --nocapture
+```
+
+These are debug correctness runs against the lockfile's RustedSciThe `0.4.27`.
+They do not refresh release performance estimates.
+
+**Release correctness matrix (RST 0.4.27):**
+
+| Formulation / fixture | Backend and frontend | Tested scale | Production cascade | Isolated solver result | Limit of guarantee |
+| --- | --- | ---: | --- | --- | --- |
+| TP-1907 CHON + graphite, fixed P,T | RST LM, ExprLegacy vs AtomView | `1e8` | Both frontend routes publish the oracle solution | Not a solver comparison; same LM method on both frontends | One frozen topology and one large scale |
+| TP-1907 CHON + graphite, fixed P,T | Configured production cascade | `1e8` | Publishes an accepted oracle solution | RST Trust-Region LM and Native LM/TR pass; several other isolated methods reject the strict gate | Does not promise every individual method succeeds |
+| STANJAN-15, fixed P,H small-constant regression | RST LM, ExprLegacy vs AtomView | Fixture scale | Public facade accepts equivalent outputs | Frontend parity, not a solver-family matrix | One real-system small-constant regression |
+| H2/O2/H2O elemental P,H scale sweep | Production cascade; frontend fixed by current options | `1e-6..1e8` | Passes after proactive low-scale normalization or existing high-scale recovery | No isolated-backend sweep was run | One ideal-gas fixture; not a universal solver/phase guarantee |
+| TP-1906 CHON + graphite, nested P,H | Production cascade | `1e-4`, `1e-2` relative to unit inventory | Reconstructs accepted physical result and preserves topology | No isolated-backend sweep was run | Two source temperatures, two low factors |
+| GUI H2O P,H range | GUI facade and production configuration | `0.1 mol`, three targets | Ascending/descending range publishes every accepted point with continuation and normalization evidence | No isolated-backend sweep was run | Small deterministic GUI request fixture |
+
+This table is the current bounded correctness contract. It deliberately does
+not turn cascade success into a guarantee for every backend. The older Story
+120 timings and frontend measurements are retained as historical RST 0.4.26
+performance evidence, not as current 0.4.27 release numbers.
+
+**Detailed current observations:**
+
+| Case | Result on RST 0.4.27 | Scope |
+| --- | --- | --- |
+| TP-1907 CHON + graphite, fixed P,T, inventory `1e8` | Frontend facade parity passes: both RST LM routes publish at `700 K`; max fraction delta `8.33e-16`, max component relative delta `5.23e-13`, identical topology | ExprLegacy vs AtomView with the same RST LM policy |
+| TP-1907 CHON + graphite, fixed P,T backend matrix, inventory `1e8` | Story passes; RST Trust-Region LM and native LM/TR meet the strict oracle gate; several other individual methods are rejected | Production robustness is a cascade property, not a guarantee that every isolated method passes |
+| STANJAN-15 small coefficient, public P,H | Tiny-constant probe and public facade frontend-equivalence test pass | Regression for the AtomView small-nonzero-constant defect |
+| Elemental H2/O2/H2O P,H lower-scale characterization | See exact table below | One ideal-gas fixture; characterization only, not a universal scale guarantee |
+
+The TP-1907 frontend test reports physical absolute balance near `4.83e-5`
+at inventory `1e8`; the acceptance contract is scale-aware and the independent
+published-output parity metrics are shown separately. The backend matrix runs
+with RST telemetry off, so its zero callback counters are unavailable data,
+not evidence of zero solver work.
+
+**Observed P,H scale characterization:**
+
+| Inventory factor | Outcome | `|delta T|` vs unit scale | Maximum relative mole error | Relative balance |
+| ---: | --- | ---: | ---: | ---: |
+| `1e-6..1e-1` | accepted through proactive normalized solve and physical reconstruction | `4.0468e-5 K` | `5.3017e-6` | `8.2365e-8` |
+| `1` | accepted reference | `0 K` | `0` | `2.6497e-14` |
+| `1e1` | accepted | `3.5517e-8 K` | `1.4236e-10` | `1.5782e-11` |
+| `1e2` | accepted | `1.8583e-6 K` | `5.3649e-8` | `2.1874e-12` |
+| `1e3..1e8` | accepted via normalized recovery | `4.0468e-5 K` | `5.3017e-6` | `8.2365e-8` |
+
+The default P,H policy now preconditions physical inventory scales below
+`1 mol` before the first nonlinear/scalar solve. At `1e-2`, the prior physical
+route had residual `7.45e-7` and relative balance `1.10e-5`; the published
+normalized-first result has residual `9.26e-8`, relative balance `8.24e-8`, and
+temperature drift `4.05e-5 K`. The former `1e-6` `enthalpy_non_monotone`
+failure now also solves and is published after the audited physical
+reconstruction. No acceptance tolerance was relaxed.
+
+An active frozen TP-1906/1907 CHON + graphite P,H scale matrix adds
+multiphase evidence at source temperatures 700 K and 720 K. Factors `1e-4`
+and `1e-2` reconstruct physical results, preserve graphite topology, and
+match the unit-factor temperature; maximum component relative error is
+`4.33e-7` at 700 K and `2.18e-11` at 720 K.
+
+**Decision:** Keep the measured upper TP-1907 envelope and RST 0.4.26 release
+timings as separate historical evidence. The simple elemental and frozen
+multiphase small-scale gates pass with typed proactive-normalization evidence
+and physical reconstruction, without changing tolerances. Broader P,H model
+coverage and per-backend low-scale comparison remain follow-ups; GUI range
+behavior is recorded in Story 122.
+
+### Story 123: P,H low-inventory normalized preconditioning
+
+**Name:** `Small-scale P,H normalization preserves physical publication and frozen topology`
+
+**Question / hypothesis:** Does a proactive normalized P,H solve recover the
+previous `1e-6` monotonicity failure and the inaccurate `1e-2` accepted point,
+while preserving physical balance, enthalpy, component amounts, and topology?
+
+**Commands:**
+
+```powershell
+cargo test --lib --no-default-features elemental_calculator_ph_scale_envelope_characterization -- --nocapture --test-threads=1
+cargo test --lib --no-default-features i5_tp1906_extensive_ph_scale_matrix_characterization -- --nocapture --test-threads=1
+cargo test --lib --no-default-features extensive_normalization_policy_is_explicit_and_reproducible -- --nocapture
+```
+
+**Observed contract:** The elemental H2/O2/H2O sweep now actively checks
+`1e-6..1e-1`, unit scale, and upper controls. For low scales it requires
+`SmallScalePreconditioning` evidence, successful physical-boundary
+reconstruction, no physical retry, residual below `1e-6`, relative elemental
+balance below `1e-6`, temperature drift below `1e-4 K`, and component relative
+error below `1e-5`. The frozen CHON + graphite matrix checks factors `1e-4` and
+`1e-2` at 700 K and 720 K against the unit-scale solution and phase topology.
+The policy snapshot test verifies that the new default is explicit while the
+older `OnNumericalFailure` option remains available.
+
+**Conclusion:** The sampled lower-scale P,H envelope is closed for these two
+fixtures without relaxing acceptance. This is evidence for the measured
+elemental gas and frozen CHON + graphite systems, not a universal guarantee
+for every phase model or inventory.
+
+### Story 122: GUI fixed-P,H target ranges
+
+**Name:** `GUI P,H target range preserves direction and continuation through the facade`
+
+**Question / hypothesis:** Does the GUI expose a uniform total-enthalpy grid
+and pass it through the public calculator facade without changing target
+ordering? Does each accepted point continue from the preceding point, and do
+the rendered help and hover descriptions explain the range controls?
+
+**Commands:**
+
+```powershell
+cargo test --lib --no-default-features equilibrium_gui -- --nocapture --test-threads=1
+cargo test --lib --no-default-features ph_range -- --nocapture --test-threads=1
+cargo test --lib --no-default-features ph_range_editor_exposes_enthalpy_grid_controls -- --nocapture
+cargo test --lib --no-default-features ascending_and_descending_ph_ranges_cross_the_facade_boundary -- --nocapture
+cargo test --lib --no-default-features ph_range_solves_through_the_gui_request_facade_in_requested_order -- --nocapture
+cargo test --lib --no-default-features failing_intermediate_ph_range_point_returns_typed_index_without_partial_outcome -- --nocapture
+cargo test --lib --no-default-features fixed_ph_range_cancellation_discards_late_worker_completion -- --nocapture
+cargo test --lib --no-default-features structured_tooltip_resources_have_matching_keys_and_override_fallbacks -- --nocapture
+cargo test --lib --no-default-features elemental_ph_range_preserves_transactional_rollback_after_continuation_failure -- --nocapture
+```
+
+**Observed contract:** The GUI editor switches between one P,H target and a
+range, exposes start/end total enthalpy and point count, and retains the
+temperature bounds. The request-level test solves three H2O targets in both
+ascending and descending order through the GUI facade boundary, using a
+`0.1 mol` physical inventory and proportionally scaled enthalpy targets. It asserts
+the requested target direction, accepted temperatures within `1 K` of
+350/400/450 K (the facade's default P,H tolerance), continuation after the
+first point, non-empty per-point timing and formulation evidence, small-scale
+preconditioning evidence, physical-boundary reconstruction, and the published
+`0.1 mol` inventory. Structured resource tests require unique matching
+English/Russian keys and content-bearing range/help descriptions. The existing
+calculator rollback test remains the atomic-publication gate if any target
+fails. A GUI-facade range with an unreachable intermediate target returns its
+typed point index and no partial range outcome; cancellation invalidates a
+P,H-range worker ticket so a late completion cannot publish.
+
+**Conclusion:** The GUI P,H range workflow is wired through the same public
+facade and preserves order/continuation. Each point uses a physical inventory
+of `0.1 mol` with enthalpy targets scaled to that amount. The test requires
+typed `SmallScalePreconditioning` evidence, successful physical-boundary
+reconstruction, and a published H2O amount of `0.1 mol` at every target.
+Normalization is therefore covered end-to-end through the GUI range request,
+not only at the calculator layer. The latest focused debug runs passed the GUI
+suite (`143 passed, 14 ignored`) and all P,H-range matches (`12 passed`); the
+ignored GUI tests require the local gas/condensed catalogs or real worker runs.
+
+### Story 124: Isolated-backend small-inventory P,H matrix
+
+**Name:** `Each isolated backend is measured against its own unit-scale P,H reference`
+
+**Question / hypothesis:** Does the proactive small-inventory normalization
+preserve the accepted H2/O2/H2O nested P,H state for each individual RST and
+KiThe-native backend, rather than only for the production cascade? Which
+isolated methods fail independently of the small inventory scale?
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features elemental_ph_small_scale_backend_matrix -- --nocapture --test-threads=1
+```
+
+**Setup and acceptance:** The test uses one NASA-gas H2/O2/H2O ideal-gas
+universe, `P=101325 Pa`, a 2500 K reference composition, nested P,H mode, and
+inventory/target pairs scaled together. Each backend is run separately through
+`SolverPolicy::Single`; each passing backend is compared with its own accepted
+unit-scale solution. At factors `1e-2` and `1e-6`, acceptance requires
+temperature drift `<1e-4 K`, unscaled component relative error `<1e-5`, raw
+residual `<1e-6`, relative physical elemental balance `<1e-6`, and typed
+`SmallScalePreconditioning` evidence with physical-boundary reconstruction.
+The test uses the existing facade tolerances; it does not weaken the gate.
+
+**Observed results (debug, RST 0.4.27):**
+
+| Isolated method | `1e-2` | `1e-6` | Observed scope |
+| --- | --- | --- | --- |
+| RST LM | PASS; `dT=3.703e-5 K`, max relative moles `1.320e-6`, residual `9.265e-8`, relative balance `8.236e-8` | Same measured values | Both scales match this method's unit-scale reference |
+| RST Minpack LM | PASS; `dT=6.593e-6 K`, max relative moles `2.284e-8`, residual `3.341e-9`, relative balance `2.512e-9` | Same measured values | Both scales match this method's unit-scale reference |
+| RST Nielsen LM | FAIL | FAIL | Both normalized runs reject candidates at residuals `1.338e-6` and `1.183e-6`, just above the `1e-6` candidate gate |
+| RST Trust-Region LM | Not comparable | Not comparable | The isolated unit-scale reference fails at a P,H temperature trial (`1.254e-6` candidate residual); small-scale covariance is not inferred |
+| RST Damped Newton | Not comparable | Not comparable | The isolated unit-scale reference fails; no scale comparison is claimed |
+| RST Backtracking LM | Not comparable | Not comparable | The isolated unit-scale reference fails; no scale comparison is claimed |
+| Native LM | PASS; `dT=3.183e-12 K`, max relative moles `1.451e-12`, residual `2.587e-14`, relative balance `2.326e-14` | PASS; `dT=3.638e-12 K`, max relative moles `1.453e-12`, residual `2.597e-14`, relative balance `2.337e-14` | Both scales match this method's unit-scale reference |
+| Native NR | PASS; `dT=6.575e-6 K`, max relative moles `2.278e-8`, residual `3.341e-9`, relative balance `2.512e-9` | Same measured values | Both scales match this method's unit-scale reference |
+| Native TR | PASS; `dT=5.962e-6 K`, max relative moles `2.582e-8`, residual `3.341e-9`, relative balance `2.512e-9` | Same measured values | Both scales match this method's unit-scale reference |
+
+**Conclusion:** The low-scale physical reconstruction itself is not limited to
+the production cascade: five isolated methods pass at both tested scales. This
+does not establish universal backend equivalence. Nielsen's failure is an
+acceptance shortfall on this nested P,H trial path; the three other RST methods
+cannot be judged for scale covariance here because their isolated unit-scale
+reference did not pass. Broader condensed/mixed-phase coverage and monolithic
+P,H remain separate gates.
+
+### Story 125: Small-scale synthetic gas plus condensed P,H cross-validation
+
+**Name:** `The independent pure-phase P,H validator preserves the gas-condensed state down to 1e-6 inventory`
+
+**Question / hypothesis:** Does the synthetic ideal-gas plus pure-condensed
+I1/I2 P,H cross-validation retain the same intensive state and normalized
+phase amounts when inventory and target enthalpy are scaled to `1e-6`?
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features p10_1_ph_inventory_target_enthalpy_scaling_preserves_intensive_state -- --nocapture --test-threads=1
+```
+
+**Scope and result:** This is a mathematical synthetic cross-validation
+fixture, not a thermochemical database record or a public-facade guarantee. It
+compares the independent pure-phase P,H validator against its unit-scale
+reference at inventory factors `1e-6`, `1e-4`, `0.25`, `1`, and `8`, scaling
+the target enthalpy with the inventory. All points pass: temperature delta is
+zero at printed precision, normalized condensed amount remains `0.25`, maximum
+chemical-log residual is `9.379e-13`, and maximum normalized enthalpy residual
+is `4.000e-9`.
+
+**Conclusion:** This adds small-scale evidence for a distinct pure-condensed
+phase formulation. It does not replace the production-facade frozen
+CHON+graphite evidence and does not cover a real local condensed-data record.
+
+### Story 126: Wide GUI P,H range acceptance and temperature characterization
+
+**Name:** `The GUI facade accepts a nine-point 300-500 K H2O range in either direction`
+
+**Question / hypothesis:** Does a wider nine-point GUI P,H range at `0.1 mol`
+complete transactionally in ascending and descending order, preserve
+continuation and physical reconstruction, and how closely do the recovered
+temperatures match the source states?
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features i5_wide_ph_range_temperature_accuracy_characterization -- --ignored --nocapture --test-threads=1
+```
+
+**Observed results:** All 18 points (nine in each direction) pass the existing
+facade enthalpy acceptance limit, finite/non-negative mole checks, physical
+balance check, continuation contract, and low-scale physical reconstruction.
+Expected temperatures are computed by independently inverting the same
+resolved local thermochemistry model at each uniformly spaced enthalpy target,
+rather than assuming that a uniform enthalpy grid is also uniform in
+temperature. This is a route-level numerical cross-check, not an independent
+thermochemical data oracle.
+
+| Direction | Maximum `|delta T|` | Largest absolute enthalpy error | Largest enthalpy limit |
+| --- | ---: | ---: | ---: |
+| Ascending | `1.48e-4 K` | `2.230e-4 J` | `2.417e-4 J` |
+| Descending | `1.36e-4 K` | `1.865e-4 J` | `2.417e-4 J` |
+
+The returned temperatures differ by about `1.2 K` from the temperatures one
+would get by placing the same nine points uniformly in temperature. That is
+the expected nonlinear mapping between uniform enthalpy and temperature, not
+a solver error. The independent H-to-T inversion shows the P,H results track
+the requested enthalpy states closely.
+
+**Conclusion:** GUI range order, continuation, enthalpy acceptance, and
+physical reconstruction are demonstrated over a broader interval with
+sub-millikelvin agreement against the thermochemistry-based inverse reference.
+The existing three-point low-scale story remains intact; this adds a separate
+nine-point, 300..500 K range contract.
+
+### Story 127: Frozen real gas-plus-graphite P,H phase lifecycle
+
+**Name:** `NASA TP-1906 P,H facade follows the frozen TP-1907 gas/graphite manifold`
+
+**Question / hypothesis:** Does the real frozen CHON + graphite P,H facade
+solve every source enthalpy point and preserve the independently checked P,T
+manifold, including graphite appearance/disappearance, in both continuation
+directions?
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features tp1906_four_point_ph_lifecycle_preserves_pt_manifold_and_graphite_topology -- --nocapture
+```
+
+**Observed result:** Passed on 2026-10-26. The test validates all four frozen
+TP-1906 enthalpy points against same-temperature P,T witnesses, requires the
+expected graphite topology at each point, and replays the full target range in
+forward and reverse order with continuation checks. This is actual bundled
+NASA frozen data through the equilibrium facade; it is one condensed-phase
+family (pure graphite), not broad liquid/solution-phase coverage.
+
+**Conclusion:** Real mixed gas/condensed P,H facade lifecycle is established
+for CHON + graphite. Additional independent condensed-phase families and
+isolated-backend low-scale matrices remain open.
+
+### Story 128: Offline NIST/Shomate source fixture
+
+**Name:** `Frozen NIST WebBook water Shomate coefficients reproduce the 500 K anchor offline`
+
+**Question / hypothesis:** Can the native KiThe NIST handler consume a frozen,
+reviewable NIST Shomate payload without any network access and reproduce a
+published thermochemistry anchor with explicit units and provenance?
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features local_nist_water_shomate_fixture_matches_the_published_500k_anchor_offline -- --nocapture
+```
+
+**Fixture:** NIST Chemistry WebBook SRD 69, water gas-phase Shomate data,
+CAS `7732-18-5`, Chase 1998, ranges `500..1700 K` and `1700..6000 K`.
+Payload and source metadata live under
+`frozen_reference/data/nist_webbook/`; coefficients are in SI convention for
+Cp/S and kJ/mol for Shomate enthalpy coefficients, with `t=T/1000`.
+
+**Observed result:** Passed offline. At 500 K, KiThe NIST handler matches the
+published rounded anchors Cp `35.22 J/mol/K`, enthalpy increment
+`6.92 kJ/mol`, and S `206.5 J/mol/K` within source-rounding tolerances.
+
+**Conclusion:** The frozen Shomate payload and handler-level anchor are ready.
+This does not yet prove NIST-backed P,T/P,H equilibrium facade resolution;
+that integration remains a separate gate rather than being implied by a
+thermochemistry-handler test.
+
+### Story 129: Bundled thermochemistry content-hash manifest
+
+**Name:** `Bundled thermo inputs and frozen NIST data match the versioned SHA-256 manifest`
+
+**Question / hypothesis:** Does a content-level manifest detect modifications
+to the bundled thermo library inputs and the pinned local NIST fixture, rather
+than merely identifying the same record names and catalog structure?
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features bundled_thermochemistry_content_manifest_matches_checked_in_data -- --nocapture
+```
+
+**Observed result:** Passed on 2026-10-26. The versioned manifest verifies
+SHA-256 for `library_config.json`, `substance_base_v2.json`,
+`all_keys_substance.json`, `elements.json`, and both water Shomate fixture
+files. Hash mismatch, missing files, and unsupported manifest schema are
+reported as typed errors.
+
+**Conclusion:** The initial bundled-data release is now content-addressed.
+The existing capsule's structural fingerprint remains a distinct field; a
+future capsule can reference the validated manifest release id without
+pretending its structural fingerprint hashes coefficients.
+
+### Story 130: Partial RST telemetry on failed callbacks
+
+**Name:** `Enabled calculator telemetry preserves RST callback evidence when a solve errors`
+
+**Question / hypothesis:** When an RST callback fails before producing a
+`SolveResult`, can the facade retain callback counts and durations that were
+already observed, without manufacturing iteration or linear-solve statistics?
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features failed_rst_callback_keeps_partial_callback_telemetry -- --nocapture
+```
+
+**Observed result:** Passed on 2026-10-26 with `Detailed` telemetry. The
+deliberately invalid `ln(x)` callback returns a typed backend error while the
+attempt report retains residual callback count and timing. The iteration and
+linear-solve integer fields are marked unavailable by
+`backend_progress_available=false`; the iteration trace and linear-system
+timing remain `None`, and the table presentation leaves their cells blank
+instead of printing misleading zeroes. Telemetry-off solves still use the
+direct unwrapped RST path.
+
+**Conclusion:** KiThe now preserves useful partial callback attribution on
+failure. Full failed-iteration, factorization, and linear-system telemetry
+still requires an upstream RST result/error API that carries partial
+`SolveStatistics`.

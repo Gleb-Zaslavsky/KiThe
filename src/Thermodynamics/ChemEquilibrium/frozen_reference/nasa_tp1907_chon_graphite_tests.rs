@@ -783,7 +783,7 @@ mod tests {
             .expect("strict extensivity tolerance must validate")
     }
 
-    fn solve_prepared_with_legacy_lm(
+    fn solve_prepared_with_native_lm(
         prepared: PreparedEquilibriumProblem,
     ) -> crate::Thermodynamics::ChemEquilibrium::equilibrium_problem::EquilibriumSolution {
         let mut runner = PreparedEquilibriumRunner::new(prepared)
@@ -1501,12 +1501,12 @@ mod tests {
             .expect("TP-1907 backend matrix oracle tolerance must validate");
         let molecular = calculator_tp1907_builder(&fixture, repository())
             .solve_options(oracle_options)
-            .solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::TR)))
+            .solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::TR)))
             .expect("TP-1907 backend matrix oracle policy must validate")
             .at_temperature(reference.temperature_k)
             .initial_moles(initial.moles().to_vec())
             .solve()
-            .expect("TP-1907 Legacy(TR) molecular oracle must solve");
+            .expect("TP-1907 Native(TR) molecular oracle must solve");
         let molecular = match molecular {
             EquilibriumCalculatorOutcome::PtPoint(point) => point,
             other => panic!("expected TP-1907 molecular oracle point, got {other:?}"),
@@ -1555,9 +1555,9 @@ mod tests {
                 "RST",
                 SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton),
             ),
-            ("legacy-lm", "Legacy", SolverBackend::Legacy(Solvers::LM)),
-            ("legacy-nr", "Legacy", SolverBackend::Legacy(Solvers::NR)),
-            ("legacy-tr", "Legacy", SolverBackend::Legacy(Solvers::TR)),
+            ("native-lm", "Legacy", SolverBackend::Native(Solvers::LM)),
+            ("native-nr", "Legacy", SolverBackend::Native(Solvers::NR)),
+            ("native-tr", "Legacy", SolverBackend::Native(Solvers::TR)),
         ];
 
         println!("TP-1907 upper inventory facade backend acceptance matrix");
@@ -1574,7 +1574,7 @@ mod tests {
         };
 
         let mut rst_passes = 0;
-        let mut legacy_passes = 0;
+        let mut native_passes = 0;
         let options = EquilibriumSolveOptions::default()
             .with_max_iterations(500)
             .expect("TP-1907 backend matrix iteration budget must validate")
@@ -1655,7 +1655,7 @@ mod tests {
                         if family == "RST" {
                             rst_passes += 1;
                         } else {
-                            legacy_passes += 1;
+                            native_passes += 1;
                         }
                         "PASS"
                     } else {
@@ -1732,10 +1732,10 @@ mod tests {
         }
 
         assert!(
-            legacy_passes > 0,
-            "TP-1907 upper inventory failed: no Legacy backend passed the physical acceptance matrix"
+            native_passes > 0,
+            "TP-1907 upper inventory failed: no Native backend passed the physical acceptance matrix"
         );
-        (rst_passes, legacy_passes)
+        (rst_passes, native_passes)
     }
 
     #[test]
@@ -2673,7 +2673,7 @@ mod tests {
             .expect("TP-1907 oracle tolerance must validate");
         let molecular_oracle = calculator_tp1907_builder(&fixture, repository())
             .solve_options(oracle_options)
-            .solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::TR)))
+            .solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::TR)))
             .expect("TP-1907 independent oracle policy must validate")
             .at_temperature(700.0)
             .initial_moles(initial_composition.moles().to_vec())
@@ -2787,7 +2787,7 @@ mod tests {
             "// Current RST production adapter binds the raw symbolic residual/Jacobian; it does not consume the runner's scaled f/j closures."
         );
         println!(
-            "// Legacy backends consume the scaled closures. The common validation gate recomputes both raw and scaled residuals afterward."
+            "// Native backends consume the scaled closures. The common validation gate recomputes both raw and scaled residuals afterward."
         );
         println!(
             "// Ideal TPD(x) = sum_i x_i * (g_reduced[i] + R*T*ln(x_i)); zero-support terms contribute zero."
@@ -3046,7 +3046,7 @@ mod tests {
             "// On this rank-deficient reduced graph, typed SingularJacobian/StepTooSmall is valid characterization, not physical acceptance."
         );
         println!(
-            "// Production pipeline: physical build -> raw RST symbolic or scaled legacy backend -> candidate validation (raw+scaled residual, physical A*n-b) -> TPD/complementarity -> restart/publication; normalized recovery is used only after classified numerical failure."
+            "// Production pipeline: physical build -> raw RST symbolic or scaled native backend -> candidate validation (raw+scaled residual, physical A*n-b) -> TPD/complementarity -> restart/publication; normalized recovery is used only after classified numerical failure."
         );
 
         let contract = RustedSciTheSolveContract::new(1.0e-12, 500)
@@ -3266,9 +3266,9 @@ mod tests {
                 "rst-damped-newton",
                 SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton),
             ),
-            ("legacy-lm", SolverBackend::Legacy(Solvers::LM)),
-            ("legacy-nr", SolverBackend::Legacy(Solvers::NR)),
-            ("legacy-tr", SolverBackend::Legacy(Solvers::TR)),
+            ("native-lm", SolverBackend::Native(Solvers::LM)),
+            ("native-nr", SolverBackend::Native(Solvers::NR)),
+            ("native-tr", SolverBackend::Native(Solvers::TR)),
         ];
         let mut failures = Vec::new();
         let mut successes = Vec::new();
@@ -3363,7 +3363,7 @@ mod tests {
         }
         assert_eq!(
             successes,
-            vec!["rst-trust-region-lm", "legacy-lm", "legacy-nr", "legacy-tr",],
+            vec!["rst-trust-region-lm", "native-lm", "native-nr", "native-tr",],
             "accepted backend matrix changed at inventory scale 1e8"
         );
         assert_eq!(
@@ -3383,7 +3383,7 @@ mod tests {
     fn tp1907_real_reaction_basis_permutation_and_scaling_preserve_fixed_active_solution() {
         let fixture = fixture();
         let prepared = prepared_fixed_tp1907_problem(&fixture, 700.0);
-        let baseline = solve_prepared_with_legacy_lm(prepared.clone());
+        let baseline = solve_prepared_with_native_lm(prepared.clone());
 
         let source = prepared.reaction_basis().reactions.clone();
         let mut transformed = nalgebra::DMatrix::zeros(source.nrows(), source.ncols());
@@ -3398,7 +3398,7 @@ mod tests {
         let transformed = prepared
             .with_reaction_matrix_for_test(transformed)
             .expect("permuted and rescaled real reaction basis must remain valid");
-        let candidate = solve_prepared_with_legacy_lm(transformed);
+        let candidate = solve_prepared_with_native_lm(transformed);
 
         for (index, (&expected, &actual)) in
             baseline.moles().iter().zip(candidate.moles()).enumerate()
@@ -3425,7 +3425,7 @@ mod tests {
         let fixture = fixture();
         let prepared = prepared_fixed_tp1907_problem(&fixture, 700.0);
         let source = prepared.reaction_basis().reactions.clone();
-        let mut probe = solve_prepared_with_legacy_lm(prepared.clone())
+        let mut probe = solve_prepared_with_native_lm(prepared.clone())
             .log_moles()
             .to_vec();
         for (index, value) in probe.iter_mut().enumerate() {
@@ -3486,7 +3486,7 @@ mod tests {
     fn tp1907_fixed_active_large_inventory_accepts_scaled_accepted_seed() {
         let fixture = fixture();
         let baseline_problem = prepared_fixed_tp1907_problem(&fixture, 700.0);
-        let baseline = solve_prepared_with_legacy_lm(baseline_problem);
+        let baseline = solve_prepared_with_native_lm(baseline_problem);
         let factor = 1.0e4_f64;
         let scaled_seed = LogMolesInitialGuess::new(
             baseline
@@ -3803,7 +3803,7 @@ mod tests {
                 continue;
             }
             let baseline_problem = prepared_fixed_tp1907_problem(&fixture, temperature_k);
-            let baseline = solve_prepared_with_legacy_lm(baseline_problem);
+            let baseline = solve_prepared_with_native_lm(baseline_problem);
             let scaled_problem =
                 prepared_fixed_tp1907_problem_at_scale(&fixture, temperature_k, factor);
             let fresh_seed = scaled_problem.problem().initial_log_moles().clone();
@@ -4001,7 +4001,7 @@ mod tests {
         );
 
         for temperature_k in [680.0, 700.0] {
-            let unit = solve_prepared_with_legacy_lm(prepared_fixed_tp1907_problem(
+            let unit = solve_prepared_with_native_lm(prepared_fixed_tp1907_problem(
                 &fixture,
                 temperature_k,
             ));
@@ -4239,7 +4239,7 @@ mod tests {
         );
 
         for temperature_k in [680.0, 700.0] {
-            let unit = solve_prepared_with_legacy_lm(prepared_fixed_tp1907_problem(
+            let unit = solve_prepared_with_native_lm(prepared_fixed_tp1907_problem(
                 &fixture,
                 temperature_k,
             ));
@@ -4921,7 +4921,7 @@ mod tests {
     }
 
     #[test]
-    fn tp1907_default_and_legacy_nr_keep_the_same_bounded_pt_state() {
+    fn tp1907_default_and_native_nr_keep_the_same_bounded_pt_state() {
         let fixture = fixture();
         let solve = |options| {
             solve_resolved_pt(
@@ -4940,30 +4940,30 @@ mod tests {
             .expect("TP-1907 bounded backend-matrix solve must accept")
         };
         let default = solve(EquilibriumSolveOptions::default());
-        let legacy_nr = solve(EquilibriumSolveOptions::default().with_solver_backend(Solvers::NR));
+        let native_nr = solve(EquilibriumSolveOptions::default().with_solver_backend(Solvers::NR));
         let contract = AcceptedSolutionContract::new(1.0e-6, 1.0e-6);
         assert_bounded_solution_accepted(&default, contract);
-        assert_bounded_solution_accepted(&legacy_nr, contract);
+        assert_bounded_solution_accepted(&native_nr, contract);
 
         for phase in default.phases() {
             assert_eq!(
                 default.phase_status(phase.id()),
-                legacy_nr.phase_status(phase.id()),
+                native_nr.phase_status(phase.id()),
                 "backend selection must not change phase {:?} topology",
                 phase.id(),
             );
         }
-        for (index, (&default_moles, &legacy_moles)) in default
+        for (index, (&default_moles, &native_moles)) in default
             .component_moles()
             .iter()
-            .zip(legacy_nr.component_moles())
+            .zip(native_nr.component_moles())
             .enumerate()
         {
-            let relative = (default_moles - legacy_moles).abs()
-                / default_moles.abs().max(legacy_moles.abs()).max(1.0e-12);
+            let relative = (default_moles - native_moles).abs()
+                / default_moles.abs().max(native_moles.abs()).max(1.0e-12);
             assert!(
                 relative <= 1.0e-5,
-                "P,T backend matrix differs at component {index}: default={default_moles:e}, legacy_nr={legacy_moles:e}, relative={relative:e}"
+                "P,T backend matrix differs at component {index}: default={default_moles:e}, native_nr={native_moles:e}, relative={relative:e}"
             );
         }
     }

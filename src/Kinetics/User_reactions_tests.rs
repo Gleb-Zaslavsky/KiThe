@@ -24,6 +24,17 @@ mod tests {
         serde_json::from_str(&content[json_start..]).expect("expected valid kinetics JSON")
     }
 
+    fn root_kinetics_error(
+        error: &crate::Kinetics::error::KineticsError,
+    ) -> &crate::Kinetics::error::KineticsError {
+        match error {
+            crate::Kinetics::error::KineticsError::Context { source, .. } => {
+                root_kinetics_error(source)
+            }
+            cause => cause,
+        }
+    }
+
     fn make_every_reaction(
         library: &str,
         reaction_name: &str,
@@ -2045,8 +2056,10 @@ mod tests {
         let analyze_err = kd.analyze_reactions().unwrap_err();
         assert!(matches!(
             analyze_err,
-            crate::Kinetics::error::KineticsError::InvalidState(message)
-            if message.contains("reaction analysis")
+            crate::Kinetics::error::KineticsError::OperationNotAllowedInState {
+                operation: "reaction analysis",
+                state: "Empty"
+            }
         ));
 
         let shortcut_err = kd.get_reactions_from_shortcuts().unwrap_err();
@@ -2254,6 +2267,123 @@ mod tests {
     }
 
     #[test]
+    fn kinetics_facade_direct_payload_symbolic_and_stoichiometry_story() {
+        let mut kinetics = KinData::new();
+        kinetics
+            .append_reaction(vec![
+                json!({
+                    "type": "elem",
+                    "eq": "2H2 + O2 -> 2H2O",
+                    "Arrenius": [2.0e6, 0.5, 1200.0]
+                }),
+                json!({
+                    "type": "elem",
+                    "eq": "H2O -> H2 + 0.5O2",
+                    "Arrenius": [7.0e5, 0.0, 800.0]
+                }),
+            ])
+            .unwrap();
+
+        kinetics.kinetic_main().unwrap();
+        assert_eq!(kinetics.equations().len(), 2);
+        assert_eq!(kinetics.substances().len(), 3);
+        assert_eq!(
+            kinetics.stoichiometric_analyzer().stecheo_matrx,
+            vec![vec![-2.0, -1.0, 2.0], vec![1.0, 0.5, -1.0]]
+        );
+
+        let temperature_k = 900.0_f64;
+        let expected_first_rate =
+            2.0e6 * temperature_k.powf(0.5) * (-1200.0 / (R * temperature_k)).exp();
+        let first_rate = kinetics
+            .calc_K_const_for_1_react(0, temperature_k, None, None)
+            .unwrap();
+        assert_relative_eq!(first_rate, expected_first_rate, max_relative = 1e-12);
+
+        kinetics
+            .calc_sym_constants(None, None, Some(Expr::Var("T_scaled".to_string())))
+            .unwrap();
+        let symbolic = kinetics.symbolic_constants().unwrap();
+        assert_eq!(symbolic.len(), 2);
+        assert!(
+            kinetics
+                .normalized_reactions()
+                .unwrap()
+                .iter()
+                .all(|reaction| reaction.K_sym.is_some())
+        );
+    }
+
+    #[test]
+    fn kinetics_batch_parse_failures_are_located_and_do_not_publish_partial_results_story() {
+        let mut malformed_payload_batch = KinData::new();
+        malformed_payload_batch
+            .append_reaction_with_shortcut(
+                vec![
+                    json!({"type": "elem", "eq": "H2 -> 2H", "Arrenius": [1.0, 0.0, 0.0]}),
+                    json!({"type": "elem", "eq": "O2 -> 2O", "Arrenius": [1.0, 0.0]}),
+                    json!({"type": "elem", "eq": "H2O -> H2 + 0.5O2", "Arrenius": [1.0, 0.0, 0.0]}),
+                ],
+                vec!["C_10".into(), "C_11".into(), "C_12".into()],
+            )
+            .unwrap();
+
+        let payload_error = malformed_payload_batch.kinetic_main().unwrap_err();
+        assert!(payload_error.to_string().contains("index 1"));
+        assert!(payload_error.to_string().contains("shortcut `C_11`"));
+        assert!(matches!(
+            root_kinetics_error(&payload_error),
+            crate::Kinetics::error::KineticsError::InvalidReactionPayload { .. }
+        ));
+        assert_eq!(
+            malformed_payload_batch.workflow_state(),
+            crate::Kinetics::User_reactions::KinDataState::ShortcutsSelected
+        );
+        assert!(malformed_payload_batch.reaction_data().is_none());
+        assert!(malformed_payload_batch.equations().is_empty());
+        assert!(
+            malformed_payload_batch
+                .stoichiometric_analyzer()
+                .stecheo_matrx
+                .is_empty()
+        );
+
+        let mut malformed_equation_batch = KinData::new();
+        malformed_equation_batch
+            .append_reaction_with_shortcut(
+                vec![
+                    json!({"type": "elem", "eq": "H2 -> 2H", "Arrenius": [1.0, 0.0, 0.0]}),
+                    json!({"type": "elem", "eq": "O2 + H2", "Arrenius": [1.0, 0.0, 0.0]}),
+                    json!({"type": "elem", "eq": "H2O -> H2 + 0.5O2", "Arrenius": [1.0, 0.0, 0.0]}),
+                ],
+                vec!["C_10".into(), "C_11".into(), "C_12".into()],
+            )
+            .unwrap();
+
+        let equation_error = malformed_equation_batch.kinetic_main().unwrap_err();
+        let rendered_error = equation_error.to_string();
+        assert!(rendered_error.contains("reaction row 1"));
+        assert!(rendered_error.contains("shortcut `C_11`"));
+        assert!(rendered_error.contains("O2 + H2"));
+        assert!(matches!(
+            root_kinetics_error(&equation_error),
+            crate::Kinetics::error::KineticsError::ReactionSyntax { .. }
+        ));
+        assert_eq!(
+            malformed_equation_batch.workflow_state(),
+            crate::Kinetics::User_reactions::KinDataState::ReactionDataParsed
+        );
+        assert_eq!(malformed_equation_batch.reaction_data().unwrap().len(), 3);
+        assert_eq!(malformed_equation_batch.equations().len(), 3);
+        assert!(
+            malformed_equation_batch
+                .stoichiometric_analyzer()
+                .stecheo_matrx
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn test_set_reactions_directly_preserves_groups() {
         let mut kd = KinData::new();
         let groups = HashMap::from([(
@@ -2388,10 +2518,14 @@ mod tests {
             .validate_state_contract(crate::Kinetics::User_reactions::KinDataState::Sorted)
             .unwrap_err();
 
-        assert!(
-            err.to_string()
-                .contains("coherent normalized reaction view")
-        );
+        assert!(matches!(
+            err,
+            crate::Kinetics::error::KineticsError::StateContractMismatch {
+                state: "Sorted",
+                requirement:
+                    crate::Kinetics::error::KinDataStateRequirement::NormalizedReactionView
+            }
+        ));
     }
 
     #[test]
@@ -2403,10 +2537,14 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(
-            err.to_string()
-                .contains("raw reaction values or document ids")
-        );
+        assert!(matches!(
+            err,
+            crate::Kinetics::error::KineticsError::StateContractMismatch {
+                state: "DirectReactionsLoaded",
+                requirement:
+                    crate::Kinetics::error::KinDataStateRequirement::RawValuesOrDocumentIds
+            }
+        ));
     }
 
     #[test]
@@ -2418,8 +2556,14 @@ mod tests {
             .validate_state_contract(crate::Kinetics::User_reactions::KinDataState::Analyzed)
             .unwrap_err();
 
-        assert!(err.to_string().contains("Analyzed requires"));
-        assert!(err.to_string().contains("analyzed artifacts"));
+        assert!(matches!(
+            err,
+            crate::Kinetics::error::KineticsError::StateContractMismatch {
+                state: "Analyzed",
+                requirement:
+                    crate::Kinetics::error::KinDataStateRequirement::AnalyzedDataOrArtifacts
+            }
+        ));
     }
 
     #[test]
@@ -2556,7 +2700,7 @@ mod tests {
 
     #[test]
     fn test_kindata_workflow_state_moves_with_the_data_branch() {
-        let mut kd = KinData::from_direct_reactions(vec!["A -> B".to_string()]).unwrap();
+        let mut kd = KinData::from_direct_reactions(vec!["H2 -> H".to_string()]).unwrap();
 
         // The facade should expose the branch that is currently loaded, not a manually set state.
         assert_eq!(
@@ -2584,7 +2728,7 @@ mod tests {
 
     #[test]
     fn test_kindata_mutation_paths_keep_state_invariants() {
-        let mut kd = KinData::from_direct_reactions(vec!["A -> B".to_string()]).unwrap();
+        let mut kd = KinData::from_direct_reactions(vec!["H2 -> H".to_string()]).unwrap();
         assert_raw_lengths_match(&kd);
 
         kd.append_reaction(vec![json!({"eq": "C -> D"})]).unwrap();
@@ -2715,7 +2859,7 @@ mod tests {
             format!("{}", normalized.normalized_reaction_data_table().unwrap());
         assert!(normalized_table_text.contains("Canonical ID"));
 
-        let mut kd = KinData::from_direct_reactions(vec!["A -> B".to_string()]).unwrap();
+        let mut kd = KinData::from_direct_reactions(vec!["H2 -> H".to_string()]).unwrap();
         kd.kinetic_main().unwrap();
         let (substances_table, elements_table) = kd.substances_verbose_tables().unwrap();
         let substances_table_text = format!("{}", substances_table);
@@ -2726,7 +2870,7 @@ mod tests {
 
     #[test]
     fn test_kindata_normalized_print_helpers_do_not_mutate_state() {
-        let mut normalized = KinData::from_direct_reactions(vec!["A -> B".to_string()]).unwrap();
+        let mut normalized = KinData::from_direct_reactions(vec!["H2 -> H".to_string()]).unwrap();
         normalized.kinetic_main().unwrap();
 
         // Materialize the normalized export view first; the pure print helpers
@@ -2871,7 +3015,7 @@ mod tests {
         assert!(matches!(
             err,
             crate::Kinetics::error::KineticsError::MissingLibrary(library)
-                if library == "nosuchlib"
+                if library == "NoSuchLib"
         ));
         assert_eq!(kd.canonical_reaction_ids().unwrap(), before_ids.as_slice());
         assert_eq!(
@@ -2888,10 +3032,13 @@ mod tests {
 
         let err = kd.kinetic_main().unwrap_err();
 
-        assert!(matches!(
-            err,
-            crate::Kinetics::error::KineticsError::InvalidReactionData(_)
-        ));
+        assert!(
+            matches!(
+                &err,
+                crate::Kinetics::error::KineticsError::FormulaSyntax { .. }
+            ),
+            "unexpected failure: {err:?}"
+        );
         assert_eq!(
             kd.workflow_state(),
             crate::Kinetics::User_reactions::KinDataState::DirectReactionsLoaded
@@ -3349,8 +3496,12 @@ mod tests {
         let result = kd.analyze_reactions();
         assert!(matches!(
             result,
-            Err(crate::Kinetics::error::KineticsError::InvalidState(message))
-            if message.contains("reaction analysis")
+            Err(
+                crate::Kinetics::error::KineticsError::OperationNotAllowedInState {
+                    operation: "reaction analysis",
+                    state: "Empty"
+                }
+            )
         ));
     }
 
@@ -3370,8 +3521,12 @@ mod tests {
         let result = kd.calc_sym_constants(None, None, None);
         assert!(matches!(
             result,
-            Err(crate::Kinetics::error::KineticsError::InvalidState(message))
-            if message.contains("symbolic constant calculation")
+            Err(
+                crate::Kinetics::error::KineticsError::OperationNotAllowedInState {
+                    operation: "symbolic constant calculation",
+                    state: "DirectReactionsLoaded"
+                }
+            )
         ));
     }
 
@@ -3445,8 +3600,8 @@ mod tests {
         let err = kd.get_reactions_from_shortcuts().unwrap_err();
         assert!(matches!(
             err,
-            crate::Kinetics::error::KineticsError::MissingLibrary(library)
-                if library == "Unknown"
+            crate::Kinetics::error::KineticsError::InvalidReactionShortcut { input, .. }
+                if input == "invalid"
         ));
     }
 

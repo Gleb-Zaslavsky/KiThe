@@ -223,6 +223,16 @@ pub enum EquilibriumProblemDraft {
         #[serde(default)]
         temperature_bounds: PhTemperatureBoundsDraft,
     },
+    /// Fixed-pressure continuation over a monotone total-enthalpy grid.
+    FixedPhRange {
+        pressure_pa: String,
+        reference_pressure_pa: String,
+        start_enthalpy_j: String,
+        end_enthalpy_j: String,
+        point_count: String,
+        #[serde(default)]
+        temperature_bounds: PhTemperatureBoundsDraft,
+    },
 }
 
 impl Default for EquilibriumProblemDraft {
@@ -457,9 +467,12 @@ pub enum GuiSolverBackend {
     RstTrustRegionLm,
     RstPowellDogleg,
     RstDampedNewton,
-    LegacyLm,
-    LegacyNr,
-    LegacyTr,
+    #[serde(alias = "LegacyLm")]
+    NativeLm,
+    #[serde(alias = "LegacyNr")]
+    NativeNr,
+    #[serde(alias = "LegacyTr")]
+    NativeTr,
 }
 
 impl GuiSolverBackend {
@@ -473,9 +486,9 @@ impl GuiSolverBackend {
         Self::RstTrustRegionLm,
         Self::RstPowellDogleg,
         Self::RstDampedNewton,
-        Self::LegacyLm,
-        Self::LegacyNr,
-        Self::LegacyTr,
+        Self::NativeLm,
+        Self::NativeNr,
+        Self::NativeTr,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -486,9 +499,9 @@ impl GuiSolverBackend {
             Self::RstTrustRegionLm => "RST Trust-region LM",
             Self::RstPowellDogleg => "RST Powell dogleg",
             Self::RstDampedNewton => "RST damped Newton",
-            Self::LegacyLm => "Legacy LM fallback",
-            Self::LegacyNr => "Legacy Newton-Raphson fallback",
-            Self::LegacyTr => "Legacy trust-region fallback",
+            Self::NativeLm => "KiThe-native LM",
+            Self::NativeNr => "KiThe-native Newton-Raphson",
+            Self::NativeTr => "KiThe-native trust-region",
         }
     }
 }
@@ -861,6 +874,14 @@ pub enum ValidatedProblem {
         target_enthalpy_j: f64,
         temperature_bounds: ValidatedPhTemperatureBounds,
     },
+    FixedPhRange {
+        pressure_pa: f64,
+        reference_pressure_pa: f64,
+        start_enthalpy_j: f64,
+        end_enthalpy_j: f64,
+        point_count: usize,
+        temperature_bounds: ValidatedPhTemperatureBounds,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1151,6 +1172,92 @@ impl EquilibriumProblemDraft {
                             seed_k,
                         },
                     }),
+                    _ => None,
+                }
+            }
+            Self::FixedPhRange {
+                pressure_pa,
+                reference_pressure_pa,
+                start_enthalpy_j,
+                end_enthalpy_j,
+                point_count,
+                temperature_bounds,
+            } => {
+                let pressure = parse_positive(pressure_pa, "problem.pressure_pa", report);
+                let reference = parse_positive(
+                    reference_pressure_pa,
+                    "problem.reference_pressure_pa",
+                    report,
+                );
+                let start = parse_finite(start_enthalpy_j, "problem.start_enthalpy_j", report);
+                let end = parse_finite(end_enthalpy_j, "problem.end_enthalpy_j", report);
+                let count = parse_usize_at_least(point_count, "problem.point_count", 2, report);
+                let lower = parse_positive(
+                    &temperature_bounds.lower_k,
+                    "problem.temperature_bounds.lower_k",
+                    report,
+                );
+                let upper = parse_positive(
+                    &temperature_bounds.upper_k,
+                    "problem.temperature_bounds.upper_k",
+                    report,
+                );
+                let seed = parse_positive(
+                    &temperature_bounds.seed_k,
+                    "problem.temperature_bounds.seed_k",
+                    report,
+                );
+                if matches!((start, end), (Some(start), Some(end)) if start == end) {
+                    report.push(
+                        "problem.enthalpy_range",
+                        ValidationIssueKind::InvalidValue,
+                        "P,H target range endpoints must differ",
+                    );
+                }
+                let ordered = matches!((lower, upper), (Some(lower), Some(upper)) if lower < upper);
+                if matches!((lower, upper), (Some(lower), Some(upper)) if lower >= upper) {
+                    report.push(
+                        "problem.temperature_bounds",
+                        ValidationIssueKind::InvalidValue,
+                        "P,H lower temperature bound must be strictly below upper bound",
+                    );
+                }
+                if let (Some(lower), Some(upper), Some(seed)) = (lower, upper, seed) {
+                    if !(lower..=upper).contains(&seed) {
+                        report.push(
+                            "problem.temperature_bounds.seed_k",
+                            ValidationIssueKind::InvalidValue,
+                            "P,H seed temperature must lie inside the temperature bounds",
+                        );
+                    }
+                }
+                match (
+                    pressure, reference, start, end, count, lower, upper, seed, ordered,
+                ) {
+                    (
+                        Some(pressure_pa),
+                        Some(reference_pressure_pa),
+                        Some(start_enthalpy_j),
+                        Some(end_enthalpy_j),
+                        Some(point_count),
+                        Some(lower_k),
+                        Some(upper_k),
+                        Some(seed_k),
+                        true,
+                    ) if start_enthalpy_j != end_enthalpy_j => {
+                        Some(ValidatedProblem::FixedPhRange {
+                            pressure_pa,
+                            reference_pressure_pa,
+                            start_enthalpy_j,
+                            end_enthalpy_j,
+                            point_count,
+                            temperature_bounds: ValidatedPhTemperatureBounds {
+                                lower_k,
+                                upper_k,
+                                seed_k,
+                            },
+                        })
+                    }
                     _ => None,
                 }
             }
@@ -2221,7 +2328,7 @@ mod tests {
         assert_eq!(labels.len(), 9);
         let unique = labels.iter().collect::<HashSet<_>>();
         assert_eq!(unique.len(), labels.len());
-        assert!(labels.iter().any(|label| label.contains("Legacy")));
+        assert!(labels.iter().any(|label| label.contains("KiThe-native")));
         assert!(labels.iter().any(|label| label.contains("RST")));
     }
 

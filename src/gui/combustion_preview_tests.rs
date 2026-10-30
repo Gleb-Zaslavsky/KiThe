@@ -24,16 +24,15 @@ mod tests {
     use std::rc::Rc;
 
     fn load_problem_test_document() -> DocumentMap {
-        let content = std::fs::read_to_string("problem_test.txt")
-            .expect("problem_test.txt must be readable from the crate root");
+        let content = include_str!("fixtures/bvp_problem.fixture").to_string();
         let mut parser = DocumentParser::new(content);
         parser
             .parse_document()
-            .expect("problem_test.txt must parse as a valid BVP document");
+            .expect("tracked BVP GUI fixture must parse as a valid document");
         parser
             .get_result()
             .cloned()
-            .expect("parsed problem_test.txt must yield a document map")
+            .expect("parsed BVP GUI fixture must yield a document map")
     }
 
     #[test]
@@ -44,7 +43,11 @@ mod tests {
         let snapshot = build_bvp_task_preview_snapshot(&document, &ProblemsEnum::BVPSimple);
 
         assert_eq!(before, document);
-        assert!(snapshot.validation_report.is_valid());
+        assert!(
+            snapshot.validation_report.is_valid(),
+            "preview validation issues: {:?}",
+            snapshot.validation_report.issues
+        );
         assert!(!snapshot.parameter_rows.is_empty());
         assert!(
             snapshot

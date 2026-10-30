@@ -32,6 +32,7 @@
 //! - Comprehensive error handling and validation
 
 use RustedSciThe::numerical::optimization::fitting_features::SewTwoFunctions;
+use RustedSciThe::numerical::optimization::sym_fitting::FittingError as RstFittingError;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -75,6 +76,10 @@ pub enum CEAError {
     MissingData(String),
     ///
     SymbolicError(String),
+    FittingBackend {
+        stage: &'static str,
+        source: RstFittingError,
+    },
 }
 
 /// Structure holding coefficients and temperature range for a single interval
@@ -100,11 +105,22 @@ impl fmt::Display for CEAError {
             CEAError::MissingData(field) => write!(f, "Missing required data: {}", field),
             CEAError::InvalidTemperatureRange => write!(f, "Invalid temperature range specified"),
             CEAError::SymbolicError(msg) => write!(f, "Symbolic error: {}", msg),
+            CEAError::FittingBackend { stage, source } => {
+                write!(f, "CEA {stage} fitting backend failed: {source}")
+            }
         }
     }
 }
 
-impl Error for CEAError {}
+impl Error for CEAError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            CEAError::SerdeError(err) => Some(err),
+            CEAError::FittingBackend { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 impl From<serde_json::Error> for CEAError {
     fn from(err: serde_json::Error) -> Self {
@@ -322,8 +338,11 @@ impl CEAdata {
     /// * `Ok(())` - Data parsed successfully
     /// * `Err(CEAError::SerdeError)` - JSON parsing failed
     pub fn from_serde(&mut self, serde: Value) -> Result<(), CEAError> {
-        self.input = serde_json::from_value(serde).map_err(|e| CEAError::SerdeError(e))?;
-        let _ = self.parse_coefficients();
+        let input = serde_json::from_value(serde).map_err(CEAError::SerdeError)?;
+        let mut staged = self.clone();
+        staged.input = input;
+        staged.parse_coefficients()?;
+        *self = staged;
         Ok(())
     }
     ////////////////////////COEFFICIENTS PARSING AND EXTRACTION////////////////////////
@@ -737,7 +756,11 @@ impl CEAdata {
             None,
             None,
             None,
-        );
+        )
+        .map_err(|source| CEAError::FittingBackend {
+            stage: "adjacent interval",
+            source,
+        })?;
         let map_of_solutions = sew.get_map_of_solutions().ok_or_else(|| {
             CEAError::MissingCoefficients("LM fitting did not publish coefficients".to_string())
         })?;
@@ -753,14 +776,6 @@ impl CEAdata {
         let g = map_of_solutions.get("g").cloned().ok_or_else(|| {
             CEAError::MissingCoefficients("Missing fitted coefficient 'g'".to_string())
         })?;
-        match lv_type {
-            LV::Viscosity => {
-                self.coeff_Visc = vec![e, f, k, g];
-            }
-            LV::Lambda => {
-                self.coeff_Lambda = vec![e, f, k, g];
-            }
-        }
         let r_ssquared = sew.get_r_ssquared().ok_or_else(|| {
             CEAError::MissingCoefficients("LM fitting did not publish R²".to_string())
         })?;
@@ -775,7 +790,10 @@ impl CEAdata {
                 r_ssquared
             )));
         }
-        // Only publish the fitted coefficients after every validation gate has passed.
+        match lv_type {
+            LV::Viscosity => self.coeff_Visc = vec![e, f, k, g],
+            LV::Lambda => self.coeff_Lambda = vec![e, f, k, g],
+        }
         Ok(sew)
     }
     /// Determine and execute appropriate strategy for user temperature interval
@@ -797,28 +815,30 @@ impl CEAdata {
     /// - Sets fitting_needed flag
     /// - Updates appropriate coefficient array
     pub fn fitting_coeffs_for_T_interval(&mut self, lv_type: LV) -> Result<(), CEAError> {
+        let mut staged = self.clone();
         if let Some((T_min, T_max)) = self.T_interval {
-            let (i_t_min, coeffs_min) = self.interval_for_this_T(T_min, lv_type)?;
-            let (i_t_max, coeffs_max) = self.interval_for_this_T(T_max, lv_type)?;
+            let (i_t_min, coeffs_min) = staged.interval_for_this_T(T_min, lv_type)?;
+            let (i_t_max, coeffs_max) = staged.interval_for_this_T(T_max, lv_type)?;
             if i_t_min == i_t_max {
                 // Both boundaries are in the same interval, no fitting needed
-                self.fitting_needed = false;
+                staged.fitting_needed = false;
                 match lv_type {
                     LV::Viscosity => {
-                        self.coeff_Visc = coeffs_min.coeff.clone();
+                        staged.coeff_Visc = coeffs_min.coeff.clone();
                     }
                     LV::Lambda => {
-                        self.coeff_Lambda = coeffs_min.coeff.clone();
+                        staged.coeff_Lambda = coeffs_min.coeff.clone();
                     }
                 }
             } else if (i_t_max as isize - i_t_min as isize).abs() == 1 {
                 // Boundaries are in adjacent intervals, perform fitting
-                self.fitting_needed = true;
-                self.fitting_adjacent(coeffs_min, coeffs_max, T_min, T_max, lv_type)?;
+                staged.fitting_needed = true;
+                staged.fitting_adjacent(coeffs_min, coeffs_max, T_min, T_max, lv_type)?;
             } else {
                 return Err(CEAError::InvalidTemperature(T_min));
             }
 
+            *self = staged;
             Ok(())
         } else {
             Err(CEAError::MissingData("T_interval not set".to_string()))
@@ -1155,6 +1175,23 @@ mod tests {
     }
 
     #[test]
+    fn from_serde_rejects_invalid_coefficients_without_replacing_state() {
+        let mut cea = setup_cea_data();
+        cea.parse_coefficients().unwrap();
+        cea.coeff_Visc = vec![9.0, 8.0, 7.0, 6.0];
+        let original_input = cea.input.clone();
+        let original_map = cea.coeffs.clone();
+        let original_viscosity = cea.coeff_Visc.clone();
+
+        let result = cea.from_serde(serde_json::json!({ "LC": [], "model": [] }));
+        assert!(matches!(result, Err(CEAError::MissingData(_))));
+        assert_eq!(cea.input.LC, original_input.LC);
+        assert_eq!(cea.input.model, original_input.model);
+        assert_eq!(cea.coeffs.len(), original_map.len());
+        assert_eq!(cea.coeff_Visc, original_viscosity);
+    }
+
+    #[test]
     fn test_extract_coefficients() {
         let mut CEA = setup_cea_data();
 
@@ -1467,5 +1504,24 @@ mod tests {
         assert!(CEA.fitting_coeffs_for_T_interval(LV::Viscosity).is_ok());
         assert!(CEA.fitting_needed);
         assert_eq!(CEA.coeff_Visc.len(), 4); // Should have fitted coefficients
+    }
+
+    #[test]
+    fn failed_interval_fit_preserves_all_published_state() {
+        let mut cea = setup_cea_data();
+        cea.set_T_interval(800.0, 1200.0);
+        cea.coeff_Visc = vec![9.0, 8.0, 7.0, 6.0];
+        cea.fitting_needed = false;
+        cea.fit_point_number = 1;
+        let before_coeffs = cea.coeff_Visc.clone();
+        let before_lambda = cea.coeff_Lambda.clone();
+        let before_range = cea.T_interval;
+
+        let result = cea.fitting_coeffs_for_T_interval(LV::Viscosity);
+        assert!(result.is_err());
+        assert_eq!(cea.coeff_Visc, before_coeffs);
+        assert_eq!(cea.coeff_Lambda, before_lambda);
+        assert_eq!(cea.T_interval, before_range);
+        assert!(!cea.fitting_needed);
     }
 }

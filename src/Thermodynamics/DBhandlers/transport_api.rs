@@ -41,6 +41,7 @@
 //! - Factory methods supporting both enum-based and string-based calculator creation
 //! - Symbolic computation support for analytical derivatives and integration
 
+use RustedSciThe::numerical::optimization::sym_fitting::FittingError as RstFittingError;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 use enum_dispatch::enum_dispatch;
@@ -65,6 +66,10 @@ pub enum TransportError {
     ParseError(String),
     SymbolicError(String),
     FittingError(String),
+    FittingBackend {
+        stage: &'static str,
+        source: RstFittingError,
+    },
 }
 
 impl fmt::Display for TransportError {
@@ -90,6 +95,9 @@ impl fmt::Display for TransportError {
             TransportError::ParseError(field) => write!(f, "Missing required data: {}", field),
             TransportError::SymbolicError(msg) => write!(f, "Symbolic error: {}", msg),
             TransportError::FittingError(msg) => write!(f, "Fitting error: {}", msg),
+            TransportError::FittingBackend { stage, source } => {
+                write!(f, "Transport {stage} fitting backend failed: {source}")
+            }
         }
     }
 }
@@ -98,6 +106,7 @@ impl Error for TransportError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             TransportError::SerdeError(err) => Some(err),
+            TransportError::FittingBackend { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -161,6 +170,9 @@ impl From<super::CEAdata::CEAError> for TransportError {
                 TransportError::InvalidTemperatureRange
             }
             super::CEAdata::CEAError::SymbolicError(msg) => TransportError::SymbolicError(msg),
+            super::CEAdata::CEAError::FittingBackend { stage, source } => {
+                TransportError::FittingBackend { stage, source }
+            }
         }
     }
 }

@@ -302,7 +302,7 @@ fn solve_phase_controlled_ph(
     let mut runner = PreparedPhaseControlRunner::new(fixture.problem, false).unwrap();
     let settings: &mut EquilibriumSolverSettings = runner.configure_solver();
     settings.solver = Solvers::LM;
-    settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
+    settings.solver_policy = Some(SolverPolicy::native_default(Solvers::LM));
     settings.solver_params.tol = 1.0e-10;
     settings.solver_params.max_iter = 300;
     runner
@@ -337,7 +337,7 @@ fn configure_lifecycle_runner(problem: EquilibriumProblem) -> PreparedPhaseContr
     let mut runner = PreparedPhaseControlRunner::new(problem, false).unwrap();
     let settings: &mut EquilibriumSolverSettings = runner.configure_solver();
     settings.solver = Solvers::LM;
-    settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
+    settings.solver_policy = Some(SolverPolicy::native_default(Solvers::LM));
     settings.solver_params.tol = 1.0e-10;
     settings.solver_params.max_iter = 300;
     runner

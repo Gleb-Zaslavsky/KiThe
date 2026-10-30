@@ -43,7 +43,9 @@ use crate::Thermodynamics::DBhandlers::transport_api::{
     TransportCalculator, TransportEnum, create_transport_calculator_by_name,
 };
 use crate::Thermodynamics::User_substances_error::SimpleExceptionLogger;
-use crate::Thermodynamics::User_substances_error::{SubsDataError, SubsDataResult};
+use crate::Thermodynamics::User_substances_error::{
+    DatabaseRecordLoadStage, SubsDataError, SubsDataResult,
+};
 pub use crate::Thermodynamics::physical_state::PhysicalState as Phases;
 use crate::Thermodynamics::thermo_lib_api::{
     ElementSearchMode, LibraryCapability, LibraryId, ResolvedThermoRecord, ThermoData,
@@ -1452,7 +1454,14 @@ impl SubsData {
                                 if found_thermo {
                                     continue;
                                 }
-                                thermo.from_serde(substance_data.clone())?;
+                                thermo.from_serde(substance_data.clone()).map_err(|error| {
+                                    SubsDataError::database_record_load_failed(
+                                        lib,
+                                        &resolved_record.record_key,
+                                        DatabaseRecordLoadStage::ThermochemistryPayloadParse,
+                                        error,
+                                    )
+                                })?;
                                 self.store_resolved_search_result(
                                     &substance,
                                     WhatIsFound::Thermo,
@@ -1469,7 +1478,16 @@ impl SubsData {
                                 if found_transport {
                                     continue;
                                 }
-                                transport.from_serde(substance_data.clone())?;
+                                transport
+                                    .from_serde(substance_data.clone())
+                                    .map_err(|error| {
+                                        SubsDataError::database_record_load_failed(
+                                            lib,
+                                            &resolved_record.record_key,
+                                            DatabaseRecordLoadStage::TransportPayloadParse,
+                                            error,
+                                        )
+                                    })?;
                                 self.store_resolved_search_result(
                                     &substance,
                                     WhatIsFound::Transport,
@@ -1500,7 +1518,14 @@ impl SubsData {
                                         continue;
                                     }
                                     thermo.newinstance()?;
-                                    thermo.from_serde(substance_data.clone())?;
+                                    thermo.from_serde(substance_data.clone()).map_err(|error| {
+                                        SubsDataError::database_record_load_failed(
+                                            lib,
+                                            &resolved_record.record_key,
+                                            DatabaseRecordLoadStage::ThermochemistryPayloadParse,
+                                            error,
+                                        )
+                                    })?;
                                     self.store_resolved_search_result(
                                         &substance,
                                         WhatIsFound::Thermo,
@@ -1518,7 +1543,16 @@ impl SubsData {
                                         continue;
                                     }
                                     //   let _ = transport.newinstance();
-                                    transport.from_serde(substance_data.clone())?;
+                                    transport.from_serde(substance_data.clone()).map_err(
+                                        |error| {
+                                            SubsDataError::database_record_load_failed(
+                                                lib,
+                                                &resolved_record.record_key,
+                                                DatabaseRecordLoadStage::TransportPayloadParse,
+                                                error,
+                                            )
+                                        },
+                                    )?;
                                     self.store_resolved_search_result(
                                         &substance,
                                         WhatIsFound::Transport,
@@ -1561,7 +1595,14 @@ impl SubsData {
                     let mut calculator = self.create_calculator(&library)?;
                     match &mut calculator {
                         CalculatorType::Thermo(thermo) => {
-                            thermo.from_serde(substance_data.clone())?;
+                            thermo.from_serde(substance_data.clone()).map_err(|error| {
+                                SubsDataError::database_record_load_failed(
+                                    &library,
+                                    &resolved_record.record_key,
+                                    DatabaseRecordLoadStage::ThermochemistryPayloadParse,
+                                    error,
+                                )
+                            })?;
                             self.store_resolved_search_result(
                                 &substance,
                                 WhatIsFound::Thermo,
@@ -1575,7 +1616,16 @@ impl SubsData {
                             found_thermo = true;
                         }
                         CalculatorType::Transport(transport) => {
-                            transport.from_serde(substance_data.clone())?;
+                            transport
+                                .from_serde(substance_data.clone())
+                                .map_err(|error| {
+                                    SubsDataError::database_record_load_failed(
+                                        &library,
+                                        &resolved_record.record_key,
+                                        DatabaseRecordLoadStage::TransportPayloadParse,
+                                        error,
+                                    )
+                                })?;
                             self.store_resolved_search_result(
                                 &substance,
                                 WhatIsFound::Transport,

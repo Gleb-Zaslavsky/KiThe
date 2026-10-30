@@ -6,11 +6,11 @@ their attempts.
 
 ## Contents
 
-- `equilibrium_nonlinear.rs`: retained hand-written LM, NR, and trust-region
+- `equilibrium_nonlinear.rs`: KiThe-native LM, NR, and trust-region
   implementations plus shared solver errors;
 - `NR_Legacy.rs`: deprecated standalone compatibility solver, not selected by
-  `equilibrium_legacy_backend`;
-- `equilibrium_legacy_backend.rs`: adapter for the retained legacy backends;
+  `equilibrium_native_backend`;
+- `equilibrium_native_backend.rs`: adapter for the KiThe-native backends;
 - `equilibrium_rst_backend.rs`: RustedSciThe wrapper and symbolic prepared
   problems;
 - `equilibrium_backend_adapter.rs`: backend-neutral request/result contract;

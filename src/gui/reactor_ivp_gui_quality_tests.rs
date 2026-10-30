@@ -35,12 +35,12 @@ mod tests {
                 .config
                 .initial_state
                 .species
-                .insert("A".to_string(), 0.1);
+                .insert("H2".to_string(), 0.1);
             app_ref
                 .config
                 .initial_state
                 .species
-                .insert("B".to_string(), 0.9);
+                .insert("H".to_string(), 0.9);
         }
 
         let mut open = true;

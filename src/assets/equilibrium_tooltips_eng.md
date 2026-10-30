@@ -21,6 +21,9 @@ highlighted and determines which canonical facade request is prepared.
 Solve equilibrium at fixed pressure and total enthalpy. The selected mode is
 highlighted and determines which canonical facade request is prepared.
 
+## problem.ph_range
+Solve a uniform total-enthalpy grid in the entered order, continuing from each accepted point.
+
 ## temperature.point
 Solve one fixed temperature in kelvin.
 
@@ -47,6 +50,15 @@ Open the KiThePlot view from the accepted snapshot.
 
 ## field.target_enthalpy
 Target total enthalpy in joules for the P,H constraint.
+
+## field.start_enthalpy
+First total-enthalpy target in joules.
+
+## field.end_enthalpy
+Last total-enthalpy target in joules.
+
+## field.point_count
+Number of uniformly spaced enthalpy targets, including both endpoints.
 
 ## field.moles
 Initial amount in moles; it must be finite and non-negative.

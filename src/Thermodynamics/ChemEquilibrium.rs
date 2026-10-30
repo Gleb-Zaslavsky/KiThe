@@ -95,6 +95,9 @@ mod frozen_reference_nasa_tp1907_chon_graphite;
 #[path = "ChemEquilibrium/frozen_reference/nasa_tp1907_chon_graphite_tests.rs"]
 mod frozen_reference_nasa_tp1907_chon_graphite_tests;
 #[cfg(test)]
+#[path = "ChemEquilibrium/frozen_reference/nist_shomate_fixture_tests.rs"]
+mod frozen_reference_nist_shomate_fixture_tests;
+#[cfg(test)]
 #[path = "ChemEquilibrium/frozen_reference/nist_tashkun_harvey_co2_tests.rs"]
 mod frozen_reference_nist_tashkun_harvey_co2_tests;
 
@@ -261,9 +264,6 @@ pub mod equilibrium_ids;
 /// Opt-in fine-grained evaluation counters for characterization and benchmarks.
 #[path = "ChemEquilibrium/postprocessing_and_logging/equilibrium_instrumentation.rs"]
 pub mod equilibrium_instrumentation;
-/// Temporary adapter around the historical hand-written nonlinear methods.
-#[path = "ChemEquilibrium/nonlinear_solvers/equilibrium_legacy_backend.rs"]
-pub(crate) mod equilibrium_legacy_backend;
 #[cfg(test)]
 #[path = "ChemEquilibrium/test_suites/live_data/equilibrium_live_data_tests.rs"]
 mod equilibrium_live_data_tests;
@@ -284,7 +284,10 @@ mod equilibrium_multiphase_domain_tests;
 #[cfg(test)]
 #[path = "ChemEquilibrium/phase_bridge/equilibrium_multiphase_story_tests.rs"]
 mod equilibrium_multiphase_story_tests;
-/// Reaction-basis construction, equilibrium errors, and temporary legacy backends.
+/// Temporary adapter around the historical hand-written nonlinear methods.
+#[path = "ChemEquilibrium/nonlinear_solvers/equilibrium_native_backend.rs"]
+pub(crate) mod equilibrium_native_backend;
+/// Reaction-basis construction, equilibrium errors, and temporary native backends.
 #[path = "ChemEquilibrium/nonlinear_solvers/equilibrium_nonlinear.rs"]
 pub mod equilibrium_nonlinear;
 #[cfg(test)]
@@ -565,7 +568,7 @@ pub mod prelude {
         PhaseTransitionRecord, TpdMinimizerReport,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::legacy::{
-        InitialPhaseSet, Solvers as LegacyEquilibriumSolver,
+        InitialPhaseSet, Solvers as NativeEquilibriumSolver,
     };
     pub use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
         PhaseEquilibriumBuildReport, PhaseEquilibriumBuildRequest, PhaseEquilibriumInputKind,

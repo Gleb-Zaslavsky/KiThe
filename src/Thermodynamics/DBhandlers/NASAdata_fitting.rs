@@ -929,10 +929,9 @@ impl NASAdata {
         // Identical source polynomials are already the exact global solution. Preserve
         // their coefficients bit-for-bit instead of sending them through an SVD solve.
         if let Some(coeffs) = preserved_coeffs {
-            self.coeffs = coeffs;
-            let report_map =
+            let _report_map =
                 self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
-            Self::print_quality_table(&report_map);
+            self.coeffs = coeffs;
             return Ok(());
         }
 
@@ -952,10 +951,9 @@ impl NASAdata {
         let g = coeffs[6];
 
         let coeffs = (a, b, c, d, e, f, g);
-        self.coeffs = coeffs;
-        let report_map =
+        let _report_map =
             self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
-        Self::print_quality_table(&report_map);
+        self.coeffs = coeffs;
         Ok(())
     }
 
@@ -1049,10 +1047,8 @@ impl NASAdata {
         let g = coeffs[6];
 
         let coeffs = (a, b, c, d, e, f, g);
-        self.coeffs = coeffs;
         let report_map = self.reports_for_coefficients(&Tvec, &cp_vec, &h_vec, &s_vec, coeffs)?;
-        Self::print_quality_table(&report_map);
-
+        self.coeffs = coeffs;
         Ok(report_map)
     }
 
@@ -1098,10 +1094,9 @@ impl NASAdata {
             T_max,
         )?;
         if let Some(coeffs) = preserved_coeffs {
-            self.coeffs = coeffs;
             let report_map =
                 self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
-            Self::print_quality_table(&report_map);
+            self.coeffs = coeffs;
             return Ok(report_map);
         }
         // Scale the three residual families without collapsing them into one value.
@@ -1154,12 +1149,11 @@ impl NASAdata {
             .with_g_tolerance(1e-12)
             .with_max_iterations(1000)
             .build();
-        let (map_of_solutions, r_squared) = lm_solution(
+        let (map_of_solutions, _r_squared) = lm_solution(
             &fitting,
             "NASA adjacent simultaneous",
             &["a", "b", "c", "d", "e", "f", "g"],
         )?;
-        println!("r_squared for stacked fitting: {r_squared}");
         let a = map_of_solutions["a"];
         let b = map_of_solutions["b"];
         let c = map_of_solutions["c"];
@@ -1169,11 +1163,9 @@ impl NASAdata {
         let g = map_of_solutions["g"];
 
         let coeffs = (a, b, c, d, e, f, g);
-        self.coeffs = coeffs;
         let report_map =
             self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
-        Self::print_quality_table(&report_map);
-
+        self.coeffs = coeffs;
         Ok(report_map)
     }
 
@@ -1246,14 +1238,17 @@ impl NASAdata {
             None,
             None,
             None,
-        );
+        )
+        .map_err(|source| NASAError::FittingBackend {
+            stage: "adjacent entropy",
+            source,
+        })?;
 
         let (map_of_solutions_6_coeffs, r_squared) = lm_solution(
             &sew.fitting,
             "NASA non-adjacent entropy",
             &["a", "b", "c", "d", "e", "g"],
         )?;
-        println!("r_squared for s: {r_squared}");
         if 1.0 - r_squared >= 5.0e-2 {
             return Err(NASAError::FittingError(format!(
                 "Poor entropy fitting quality: R² = {:.6}",
@@ -1301,9 +1296,12 @@ impl NASAdata {
             None,
             None,
             None,
-        );
+        )
+        .map_err(|source| NASAError::FittingBackend {
+            stage: "adjacent enthalpy",
+            source,
+        })?;
         let (f_map, r_squared) = lm_solution(&sew2.fitting, "NASA non-adjacent enthalpy", &["f"])?;
-        println!("r_squared for h: {r_squared}");
         if 1.0 - r_squared >= 5.0e-2 {
             return Err(NASAError::FittingError(format!(
                 "Poor enthalpy fitting quality: R² = {:.6}",
@@ -1312,12 +1310,10 @@ impl NASAdata {
         }
         let f = f_map["f"];
         let coeffs = (a, b, c, d, e, f, g);
-        self.coeffs = coeffs;
         // Validate the published coefficients against every raw property family.
         let report_map =
             self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
-        Self::print_quality_table(&report_map);
-
+        self.coeffs = coeffs;
         Ok(report_map.clone())
     }
 
@@ -1356,10 +1352,9 @@ impl NASAdata {
             T_max,
         )?;
         if let Some(coeffs) = preserved_coeffs {
-            self.coeffs = coeffs;
             let report_map =
                 self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
-            Self::print_quality_table(&report_map);
+            self.coeffs = coeffs;
             return Ok(report_map);
         }
         /////////////////////////////fitting ds//////////////////////////////////
@@ -1404,14 +1399,17 @@ impl NASAdata {
             None,
             None,
             None,
-        );
+        )
+        .map_err(|source| NASAError::FittingBackend {
+            stage: "non-adjacent entropy",
+            source,
+        })?;
 
         let (map_of_solutions_6_coeffs, r_squared) = lm_solution(
             &sew.fitting,
             "NASA adjacent sequential entropy",
             &["a", "b", "c", "d", "e", "g"],
         )?;
-        println!("r_squared for s: {r_squared}");
         if 1.0 - r_squared >= 5.0e-2 {
             return Err(NASAError::FittingError(format!(
                 "Poor entropy fitting quality: R² = {:.6}",
@@ -1451,10 +1449,13 @@ impl NASAdata {
             None,
             None,
             None,
-        );
+        )
+        .map_err(|source| NASAError::FittingBackend {
+            stage: "non-adjacent enthalpy",
+            source,
+        })?;
         let (f_map, r_squared) =
             lm_solution(&sew2.fitting, "NASA adjacent sequential enthalpy", &["f"])?;
-        println!("r_squared for h: {r_squared}");
         if 1.0 - r_squared >= 5.0e-2 {
             return Err(NASAError::FittingError(format!(
                 "Poor enthalpy fitting quality: R² = {:.6}",
@@ -1463,13 +1464,10 @@ impl NASAdata {
         }
         let f = f_map["f"];
         let coeffs = (a, b, c, d, e, f, g);
-        self.coeffs = coeffs;
         // Validate the published coefficients against every raw property family.
         let report_map =
             self.reports_for_coefficients(&temps, &cp_vals, &h_vals, &s_vals, coeffs)?;
-
-        // Print fitting quality report table
-        Self::print_quality_table(&report_map);
+        self.coeffs = coeffs;
 
         Ok(report_map)
     }

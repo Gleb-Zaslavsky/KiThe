@@ -58,7 +58,7 @@ mod tests {
         ]);
         task.set_solver_backend_config(
             ReactorIvpSolverConfig::default()
-                .with_method(ReactorIvpMethod::Auto)
+                .with_lsode2_controller(ReactorIvpMethod::Auto)
                 .with_native_execution(Lsode2NativeExecutionConfig::faithful_bdf_solve(
                     200_000, 200_000,
                 ))
@@ -78,7 +78,7 @@ mod tests {
         let mut task = build_balanced_reaction_task(0.1, 0.9, 0.0);
         task.set_solver_backend_config(
             ReactorIvpSolverConfig::default()
-                .with_method(ReactorIvpMethod::Auto)
+                .with_lsode2_controller(ReactorIvpMethod::Auto)
                 .with_native_execution(Lsode2NativeExecutionConfig::faithful_bdf_solve(
                     200_000, 200_000,
                 ))
@@ -101,13 +101,17 @@ mod tests {
         assert!(
             snapshot
                 .summary
-                .native_termination_kind
+                .as_ref()
+                .and_then(|summary| summary.native_termination_kind.as_deref())
                 .as_deref()
                 .is_some_and(|kind| kind == "reached_stop_condition")
                 || snapshot.status().contains("stopped_by_condition"),
             "unexpected stop status: {}, native termination: {:?}",
             snapshot.status(),
-            snapshot.summary.native_termination_kind
+            snapshot
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.native_termination_kind.as_deref())
         );
 
         let values = task

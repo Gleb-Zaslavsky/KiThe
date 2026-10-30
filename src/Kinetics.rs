@@ -85,6 +85,8 @@ pub mod stoichiometry_analyzer;
 ///  kin_instance.search_reactdata_for_vector_of_IDs(vec!["1".to_string(), "2".to_string()]);
 /// ```
 pub mod kinetics_lib_api;
+/// Non-transactional reports for auditing reaction-library payloads and equations.
+pub mod library_audit;
 /// eng
 /// The project uses shortcuts for reaction names in the style
 /// of "short name of the reaction library" + "reaction number in the library"

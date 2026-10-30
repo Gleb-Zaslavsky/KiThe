@@ -54,6 +54,123 @@ mod tests {
 
         harness.get_by_role_and_label(Role::Button, "Preview Task");
         harness.get_by_role_and_label(Role::Button, "Run Calculation");
+        for label in [
+            "Solver family",
+            "Symbolic frontend",
+            "LSODE2 controller",
+            "Matrix backend",
+            "Execution backend",
+            "Telemetry",
+            "Solver logging",
+        ] {
+            harness.get_by_role_and_label(Role::ComboBox, label);
+        }
+    }
+
+    #[test]
+    fn solver_family_controls_are_capability_specific_and_reachable_in_compact_window() {
+        for (choice, expected_family) in [
+            (
+                "BDF (standalone)",
+                crate::ReactorsIVP::solver_backend::ReactorIvpSolverFamily::Bdf,
+            ),
+            (
+                "Radau",
+                crate::ReactorsIVP::solver_backend::ReactorIvpSolverFamily::Radau,
+            ),
+        ] {
+            let app = Rc::new(RefCell::new(ReactorIvpApp::new()));
+            let mut open = true;
+            let app_for_ui = Rc::clone(&app);
+            let mut harness = Harness::builder()
+                .with_size(egui::Vec2::new(820.0, 620.0))
+                .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
+
+            harness.run();
+            harness
+                .get_by_role_and_label(Role::ComboBox, "Solver family")
+                .scroll_to_me();
+            harness.run();
+            harness
+                .get_by_role_and_label(Role::ComboBox, "Solver family")
+                .click();
+            harness.run();
+            harness
+                .get_by_role_and_label(Role::Button, choice)
+                .click_accesskit();
+            harness.run();
+
+            let app_ref = app.borrow();
+            assert_eq!(app_ref.config.solver_family, expected_family);
+            assert_eq!(
+                app_ref.config.matrix_backend,
+                crate::ReactorsIVP::solver_backend::ReactorIvpMatrixBackend::Dense
+            );
+            assert_eq!(
+                app_ref.config.execution_mode,
+                ReactorIvpGuiExecutionMode::Lambdify
+            );
+            assert!(!app_ref.config.stop_condition_enabled);
+            drop(app_ref);
+            harness.get_by_label("Dense (required by selected family)");
+        }
+    }
+
+    #[test]
+    fn ivp_solver_settings_are_accessible_and_update_the_typed_configuration() {
+        let app = Rc::new(RefCell::new(ReactorIvpApp::new()));
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(820.0, 620.0))
+            .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
+
+        harness.run();
+
+        macro_rules! choose {
+            ($label:literal, $choice:literal) => {{
+                harness
+                    .get_by_role_and_label(Role::ComboBox, $label)
+                    .scroll_to_me();
+                harness.run();
+                harness
+                    .get_by_role_and_label(Role::ComboBox, $label)
+                    .click();
+                harness.run();
+                harness
+                    .get_by_role_and_label(Role::Button, $choice)
+                    .click_accesskit();
+                harness.run();
+            }};
+        }
+
+        choose!("Symbolic frontend", "ExprLegacy");
+        choose!("LSODE2 controller", "Adams only");
+        choose!("Matrix backend", "Banded");
+        choose!("Telemetry", "Detailed");
+        choose!("Solver logging", "Debug");
+        choose!("Execution backend", "AOT");
+        choose!("AOT toolchain", "Zig");
+        choose!("AOT profile", "Debug");
+
+        let config = app.borrow().config.clone();
+        assert_eq!(
+            config.symbolic_backend,
+            crate::ReactorsIVP::solver_backend::ReactorIvpSymbolicBackend::ExprLegacy
+        );
+        assert_eq!(
+            config.method,
+            crate::ReactorsIVP::solver_backend::ReactorIvpMethod::Adams
+        );
+        assert_eq!(
+            config.matrix_backend,
+            crate::ReactorsIVP::solver_backend::ReactorIvpMatrixBackend::Banded
+        );
+        assert_eq!(format!("{:?}", config.telemetry), "Detailed");
+        assert_eq!(format!("{:?}", config.logging), "Debug");
+        assert_eq!(format!("{:?}", config.aot_toolchain), "Zig");
+        assert_eq!(format!("{:?}", config.aot_profile), "Debug");
+        assert_eq!(config.execution_mode, ReactorIvpGuiExecutionMode::Aot);
     }
 
     #[test]
@@ -264,10 +381,41 @@ mod tests {
         });
 
         harness.run();
-        harness.get_by_label("AOT settings");
-        harness.get_by_label("toolchain");
-        harness.get_by_label("profile");
+        harness.get_by_label("AOT build");
+        harness.get_by_role_and_label(Role::ComboBox, "AOT toolchain");
+        harness.get_by_role_and_label(Role::ComboBox, "AOT profile");
         harness.get_by_label("AOT confirmation");
+    }
+
+    #[test]
+    fn aot_confirmation_can_be_cancelled_from_keyboard_input() {
+        let app = Rc::new(RefCell::new(ReactorIvpApp::new()));
+        app.borrow_mut().config.execution_mode = ReactorIvpGuiExecutionMode::Aot;
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(820.0, 620.0))
+            .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
+
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Run AOT calculation")
+            .focus();
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        harness.get_by_role_and_label(Role::Button, "Cancel AOT run");
+        harness
+            .get_by_role_and_label(Role::Button, "Cancel AOT run")
+            .focus();
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+
+        assert_eq!(
+            app.borrow().last_status(),
+            Some("AOT calculation cancelled before execution.")
+        );
     }
 
     #[test]

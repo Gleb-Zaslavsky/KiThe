@@ -1,6 +1,6 @@
 [package]
 name = "KiThe"
-version = "0.3.13"
+version = "0.3.14"
 edition = "2024"
 author = "Gleb Zaslavsky"
 license = "MIT"
@@ -55,8 +55,9 @@ tabled = "0.22.0"
 strum = "0.28.0"
 strum_macros = "0.28.0"
 serde_json = "1.0.151"
+sha2 = "0.10.8"
 loc = "0.5.0"
-RustedSciThe = "0.4.26"
+RustedSciThe = "0.4.29"
 rayon = "1.11.0"
 nalgebra = { version = "0.35.0", features = ["serde"] }
 prettytable-rs = "0.10.0"
@@ -120,11 +121,11 @@ name = "equilibrium_gibbs_interval"
 harness = false
 
 [[bench]]
-name = "equilibrium_legacy_callbacks"
+name = "equilibrium_native_callbacks"
 harness = false
 
 [[bench]]
-name = "equilibrium_legacy_overhead"
+name = "equilibrium_native_overhead"
 harness = false
 
 [[bench]]
@@ -133,6 +134,14 @@ harness = false
 
 [[bench]]
 name = "equilibrium_rst_policy_crossover"
+harness = false
+
+[[bench]]
+name = "reactor_ivp_baseline"
+harness = false
+
+[[bench]]
+name = "reactor_bvp_baseline"
 harness = false
 
 

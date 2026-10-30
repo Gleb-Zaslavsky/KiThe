@@ -363,7 +363,12 @@ fn backend_attempt_row(
         SolverAttemptOutcome::Skipped { reason } => ("skipped".to_string(), Some(reason.clone())),
     };
     let metrics = attempt.metrics.as_ref();
-    let timing = metrics.and_then(|metrics| metrics.evaluation_timing.as_ref());
+    let counters = metrics.filter(|metrics| metrics.counters_collected);
+    let progress = metrics.filter(|metrics| metrics.backend_progress_available);
+    let timing = metrics
+        .filter(|metrics| metrics.timings_collected)
+        .and_then(|metrics| metrics.evaluation_timing.as_ref());
+    let wall_time = metrics.filter(|metrics| metrics.timings_collected);
     EquilibriumBackendAttemptPresentationRow {
         attempt_index,
         backend: format!("{:?}", attempt.backend),
@@ -371,11 +376,11 @@ fn backend_attempt_row(
         failure_kind: attempt.failure_kind().map(|kind| format!("{kind:?}")),
         termination: metrics.map(|metrics| format!("{:?}", metrics.termination)),
         backend_converged: metrics.map(|metrics| metrics.backend_converged),
-        iterations: metrics.map(|metrics| metrics.iterations),
-        residual_evaluations: metrics.map(|metrics| metrics.residual_evaluations),
-        jacobian_evaluations: metrics.map(|metrics| metrics.jacobian_evaluations),
-        linear_solves: metrics.map(|metrics| metrics.linear_solves),
-        elapsed_millis: metrics.map(|metrics| metrics.elapsed_millis),
+        iterations: progress.map(|metrics| metrics.iterations),
+        residual_evaluations: counters.map(|metrics| metrics.residual_evaluations),
+        jacobian_evaluations: counters.map(|metrics| metrics.jacobian_evaluations),
+        linear_solves: progress.map(|metrics| metrics.linear_solves),
+        elapsed_millis: wall_time.map(|metrics| metrics.elapsed_millis),
         residual_evaluation_micros: timing.map(|timing| timing.residual_evaluation_micros),
         jacobian_evaluation_micros: timing.map(|timing| timing.jacobian_evaluation_micros),
         solver_overhead_micros: timing.map(|timing| timing.solver_overhead_micros),
@@ -463,20 +468,20 @@ mod tests {
         SolverPolicy, SolverTermination,
     };
     use crate::Thermodynamics::ChemEquilibrium::prelude::{
-        EquilibriumConditions, EquilibriumSolveOptions, LegacyEquilibriumSolver,
+        EquilibriumConditions, EquilibriumSolveOptions, NativeEquilibriumSolver,
         PhaseEquilibriumPipelineRequest, SubstanceSystemSpecBuilder, SubstancesContainer,
     };
 
     #[test]
     fn backend_rows_preserve_outcomes_metrics_and_diagnostics() {
-        let legacy_lm = SolverBackend::Legacy(Solvers::LM);
-        let legacy_nr = SolverBackend::Legacy(Solvers::NR);
-        let legacy_tr = SolverBackend::Legacy(Solvers::TR);
+        let native_lm = SolverBackend::Native(Solvers::LM);
+        let native_nr = SolverBackend::Native(Solvers::NR);
+        let native_tr = SolverBackend::Native(Solvers::TR);
         let report = EquilibriumSolveReport {
-            policy: SolverPolicy::Cascade(vec![legacy_lm, legacy_nr, legacy_tr]),
+            policy: SolverPolicy::Cascade(vec![native_lm, native_nr, native_tr]),
             attempts: vec![
                 SolverAttemptReport {
-                    backend: legacy_lm,
+                    backend: native_lm,
                     outcome: SolverAttemptOutcome::Failed {
                         kind: SolverAttemptFailureKind::Backend,
                         reason: "step rejected".to_string(),
@@ -486,6 +491,7 @@ mod tests {
                         termination: SolverTermination::Stagnation,
                         backend_converged: false,
                         iterations: 7,
+                        backend_progress_available: true,
                         residual_evaluations: 8,
                         jacobian_evaluations: 7,
                         linear_solves: 7,
@@ -496,7 +502,7 @@ mod tests {
                         evaluation_timing: Some(SolverEvaluationTiming {
                             residual_evaluation_micros: 20,
                             jacobian_evaluation_micros: 30,
-                            legacy_same_iterate_callback_pairs: None,
+                            native_same_iterate_callback_pairs: None,
                             linear_system_micros: None,
                             solver_overhead_micros: 40,
                             matrix_operations_micros: 0,
@@ -519,19 +525,19 @@ mod tests {
                     }),
                 },
                 SolverAttemptReport {
-                    backend: legacy_nr,
+                    backend: native_nr,
                     outcome: SolverAttemptOutcome::Accepted,
                     metrics: None,
                 },
                 SolverAttemptReport {
-                    backend: legacy_tr,
+                    backend: native_tr,
                     outcome: SolverAttemptOutcome::Skipped {
                         reason: "cascade budget exhausted".to_string(),
                     },
                     metrics: None,
                 },
             ],
-            accepted_backend: legacy_nr,
+            accepted_backend: native_nr,
         };
 
         let rows = backend_attempt_rows(&report);
@@ -544,13 +550,23 @@ mod tests {
         assert_eq!(rows[1].detail, None);
         assert_eq!(rows[2].outcome, "skipped");
         assert_eq!(rows[2].detail.as_deref(), Some("cascade budget exhausted"));
+
+        let mut partial_report = report.clone();
+        let partial_metrics = partial_report.attempts[0].metrics.as_mut().unwrap();
+        partial_metrics.backend_progress_available = false;
+        let partial_rows = backend_attempt_rows(&partial_report);
+        let partial_row = &partial_rows[0];
+        assert_eq!(partial_row.iterations, None);
+        assert_eq!(partial_row.linear_solves, None);
+        assert_eq!(partial_row.residual_evaluations, Some(8));
+        assert_eq!(partial_row.elapsed_millis, Some(12));
     }
 
     #[test]
     fn failed_cascade_projects_the_same_attempt_trace_without_a_solution() {
         let error = ReactionExtentError::AllBackendsFailed {
             attempts: vec![SolverAttemptReport {
-                backend: SolverBackend::Legacy(Solvers::TR),
+                backend: SolverBackend::Native(Solvers::TR),
                 outcome: SolverAttemptOutcome::RejectedCandidate {
                     reason: "physical balances did not pass acceptance".to_string(),
                 },
@@ -573,7 +589,7 @@ mod tests {
     fn monolithic_seed_failure_flattens_every_preserved_backend_trace() {
         let failure = |solver| ReactionExtentError::AllBackendsFailed {
             attempts: vec![SolverAttemptReport {
-                backend: SolverBackend::Legacy(solver),
+                backend: SolverBackend::Native(solver),
                 outcome: SolverAttemptOutcome::Failed {
                     kind: SolverAttemptFailureKind::Solver,
                     reason: "iteration limit".to_string(),
@@ -593,16 +609,16 @@ mod tests {
             .expect("seed recovery must expose its preserved backend traces");
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].attempt_index, 0);
-        assert_eq!(rows[0].backend, "Legacy(LM)");
+        assert_eq!(rows[0].backend, "Native(LM)");
         assert_eq!(rows[1].attempt_index, 1);
-        assert_eq!(rows[1].backend, "Legacy(NR)");
+        assert_eq!(rows[1].backend, "Native(NR)");
     }
 
     #[test]
     fn multi_start_seed_failure_flattens_every_preserved_backend_trace() {
         let failure = |solver| ReactionExtentError::AllBackendsFailed {
             attempts: vec![SolverAttemptReport {
-                backend: SolverBackend::Legacy(solver),
+                backend: SolverBackend::Native(solver),
                 outcome: SolverAttemptOutcome::Failed {
                     kind: SolverAttemptFailureKind::Solver,
                     reason: "iteration limit".to_string(),
@@ -621,8 +637,8 @@ mod tests {
         let rows = backend_attempt_rows_from_error(&error)
             .expect("multi-start recovery must expose its preserved backend traces");
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].backend, "Legacy(LM)");
-        assert_eq!(rows[1].backend, "Legacy(NR)");
+        assert_eq!(rows[0].backend, "Native(LM)");
+        assert_eq!(rows[1].backend, "Native(NR)");
     }
 
     #[test]
@@ -632,7 +648,7 @@ mod tests {
                 temperature_kelvin: 900.0,
                 pressure_pa: 101_325.0,
                 layout_fingerprint: 7,
-                accepted_backend: "Legacy(NR)".to_string(),
+                accepted_backend: "Native(NR)".to_string(),
                 started_backend_attempts: 1,
                 nonlinear_iterations: 4,
                 phase_transitions: 0,
@@ -643,7 +659,7 @@ mod tests {
             components: Vec::new(),
             backend_attempts: vec![EquilibriumBackendAttemptPresentationRow {
                 attempt_index: 0,
-                backend: "Legacy(NR)".to_string(),
+                backend: "Native(NR)".to_string(),
                 outcome: "accepted".to_string(),
                 failure_kind: None,
                 termination: None,
@@ -674,7 +690,7 @@ mod tests {
 
         let rendered = report.render_compact();
         assert!(rendered.contains("equilibrium: T=900.000000 K"));
-        assert!(rendered.contains("0 | Legacy(NR) | accepted | - | -"));
+        assert!(rendered.contains("0 | Native(NR) | accepted | - | -"));
     }
 
     #[test]
@@ -688,8 +704,8 @@ mod tests {
         .build()
         .expect("offline local-NASA specification must validate");
         let options = EquilibriumSolveOptions::new()
-            .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(
-                LegacyEquilibriumSolver::NR,
+            .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(
+                NativeEquilibriumSolver::NR,
             )))
             .expect("single legacy-NR policy must validate");
         let outcome = PhaseEquilibriumPipelineRequest::new(

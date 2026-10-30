@@ -72,6 +72,63 @@ impl BvpStrategy {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum BvpSolverFamily {
+    #[default]
+    Damped,
+    Frozen,
+    Sci,
+}
+
+impl BvpSolverFamily {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        match normalize_key(raw).as_str() {
+            "damped" | "bvp_damp" => Some(Self::Damped),
+            "frozen" => Some(Self::Frozen),
+            "sci" | "bvp_sci" => Some(Self::Sci),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_document_value(self) -> &'static str {
+        match self {
+            Self::Damped => "damped",
+            Self::Frozen => "frozen",
+            Self::Sci => "sci",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum BvpTelemetryMode {
+    #[default]
+    Off,
+    Counters,
+    Timings,
+    Detailed,
+}
+
+impl BvpTelemetryMode {
+    fn parse(raw: &str) -> Option<Self> {
+        match normalize_key(raw).as_str() {
+            "off" => Some(Self::Off),
+            "counters" => Some(Self::Counters),
+            "timings" => Some(Self::Timings),
+            "detailed" => Some(Self::Detailed),
+            _ => None,
+        }
+    }
+
+    fn as_document_value(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Counters => "counters",
+            Self::Timings => "timings",
+            Self::Detailed => "detailed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum BvpBandedLinearSolver {
     #[default]
     Auto,
@@ -268,8 +325,10 @@ impl Default for BvpAdvancedSolverConfig {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BvpCoreSolverConfig {
+    pub family: BvpSolverFamily,
     pub scheme: BvpScheme,
     pub strategy: BvpStrategy,
+    pub telemetry: BvpTelemetryMode,
     pub linear_sys_method: Option<String>,
     pub abs_tolerance: f64,
     pub max_iterations: usize,
@@ -282,8 +341,10 @@ pub(crate) struct BvpCoreSolverConfig {
 impl Default for BvpCoreSolverConfig {
     fn default() -> Self {
         Self {
+            family: BvpSolverFamily::Damped,
             scheme: BvpScheme::Forward,
             strategy: BvpStrategy::Damped,
+            telemetry: BvpTelemetryMode::Off,
             linear_sys_method: None,
             abs_tolerance: 1e-7,
             max_iterations: 100,
@@ -380,18 +441,201 @@ impl BvpGuiConfig {
         {
             let solver_section = ensure_section_mut(document, "solver_settings");
             self.core.apply_to_section(solver_section);
-            self.backend.apply_to_section(solver_section);
+            if self.core.family != BvpSolverFamily::Sci {
+                self.backend.apply_to_section(solver_section);
+            }
             for field_name in BVP_POSTPROCESSING_FIELD_NAMES {
                 solver_section.remove(*field_name);
             }
         }
 
-        self.advanced_solver.apply_to_document(document);
+        match self.core.family {
+            BvpSolverFamily::Damped => self.advanced_solver.apply_to_document(document),
+            BvpSolverFamily::Frozen => {
+                document.remove("bounds");
+                document.remove("rel_tolerance");
+                document.remove("adaptive_strategy");
+                document.remove("grid_refinement");
+            }
+            BvpSolverFamily::Sci => {
+                document.remove("bounds");
+                document.remove("rel_tolerance");
+                document.remove("strategy_params");
+                document.remove("adaptive_strategy");
+                document.remove("grid_refinement");
+            }
+        }
         self.initial_guess.apply_to_document(document);
 
         let postprocessing_section = ensure_section_mut(document, "postprocessing");
         self.postprocessing.apply_to_section(postprocessing_section);
         self.adaptive_grid.apply_to_document(document);
+        normalize_bvp_solver_family_document(document, self.core.family, false);
+    }
+}
+
+pub(crate) fn set_bvp_solver_family(document: &mut DocumentMap, family: BvpSolverFamily) {
+    normalize_bvp_solver_family_document(document, family, true);
+}
+
+fn normalize_bvp_solver_family_document(
+    document: &mut DocumentMap,
+    family: BvpSolverFamily,
+    reset_family_defaults: bool,
+) {
+    set_string_field(
+        ensure_section_mut(document, "solver_settings"),
+        "solver_family",
+        family.as_document_value(),
+    );
+
+    let damped_only = [
+        "abs_tolerance",
+        "banded_linear_solver",
+        "refinement_steps",
+        "aot_compile_preset",
+        "aot_execution_policy",
+        "aot_residual_target_chunks",
+        "aot_jacobian_target_chunks",
+        "lambdify_execution_policy",
+        "lambdify_min_work",
+        "expr_indexed_lambdify",
+        "expr_dependency_columns",
+    ];
+    let sci_only = [
+        "execution",
+        "assembly",
+        "matrix_layout",
+        "banded_lower",
+        "banded_upper",
+        "boundary_tolerance",
+        "max_nodes",
+        "max_newton_iterations",
+        "max_jacobian_refreshes",
+        "max_mesh_refinements",
+        "max_backtracking_steps",
+        "execution_policy",
+        "execution_min_work",
+        "output_policy",
+        "sparse_factorization",
+        "aot_output_dir",
+        "aot_handoff_path",
+        "aot_crate_name",
+        "aot_module_name",
+        "aot_residual_chunking",
+        "aot_residual_chunk_size",
+        "aot_sparse_jacobian_chunking",
+        "aot_sparse_jacobian_chunk_size",
+        "aot_banded_jacobian_chunking",
+        "aot_banded_jacobian_chunk_size",
+    ];
+    let damped_backend = [
+        "generated_backend",
+        "backend_policy",
+        "matrix_backend",
+        "method",
+        "symbolic_backend",
+        "banded_linear_solver",
+        "refinement_steps",
+        "aot_compile_preset",
+        "aot_execution_policy",
+        "aot_residual_target_chunks",
+        "aot_jacobian_target_chunks",
+    ];
+
+    match family {
+        BvpSolverFamily::Damped => {
+            {
+                let section = ensure_section_mut(document, "solver_settings");
+                for field in sci_only {
+                    section.remove(field);
+                }
+                section.remove("tolerance");
+            }
+            if reset_family_defaults {
+                document.remove("adaptive_strategy");
+                document.remove("grid_refinement");
+                let section = ensure_section_mut(document, "solver_settings");
+                set_string_field(section, "strategy", "Damped");
+                set_float_field(section, "abs_tolerance", 1e-7);
+                set_usize_field(section, "max_iterations", 100);
+                set_bool_field(section, "dont_save_log", true);
+                set_string_field(section, "banded_linear_solver", "auto");
+                set_usize_field(section, "refinement_steps", 5);
+                set_bounds_and_relative_tolerances(document);
+                BvpAdvancedSolverConfig::default().apply_to_document(document);
+                BvpAdaptiveGridConfig::default().apply_to_document(document);
+            }
+        }
+        BvpSolverFamily::Frozen => {
+            document.remove("bounds");
+            document.remove("rel_tolerance");
+            document.remove("adaptive_strategy");
+            document.remove("grid_refinement");
+            {
+                let section = ensure_section_mut(document, "solver_settings");
+                for field in sci_only {
+                    section.remove(field);
+                }
+                for field in ["abs_tolerance", "banded_linear_solver", "refinement_steps"] {
+                    section.remove(field);
+                }
+                if reset_family_defaults {
+                    set_string_field(section, "strategy", "Frozen");
+                    set_float_field(section, "tolerance", 1e-6);
+                    set_usize_field(section, "max_iterations", 50);
+                    set_bool_field(section, "dont_save_log", true);
+                } else if !section.contains_key("tolerance") {
+                    set_float_field(section, "tolerance", 1e-6);
+                }
+            }
+        }
+        BvpSolverFamily::Sci => {
+            document.remove("bounds");
+            document.remove("rel_tolerance");
+            document.remove("strategy_params");
+            document.remove("adaptive_strategy");
+            document.remove("grid_refinement");
+            {
+                let section = ensure_section_mut(document, "solver_settings");
+                for field in damped_only {
+                    section.remove(field);
+                }
+                for field in damped_backend {
+                    section.remove(field);
+                }
+                for field in ["scheme", "strategy", "linear_sys_method", "max_iterations"] {
+                    section.remove(field);
+                }
+                section.remove("dont_save_log");
+                if reset_family_defaults {
+                    set_string_field(section, "execution", "lambdify");
+                    set_string_field(section, "assembly", "atom_view_native");
+                    set_string_field(section, "matrix_layout", "banded_auto");
+                    set_float_field(section, "tolerance", 1e-4);
+                    set_usize_field(section, "max_nodes", 256);
+                }
+            }
+        }
+    }
+}
+
+fn set_bounds_and_relative_tolerances(document: &mut DocumentMap) {
+    let bounds = ensure_section_mut(document, "bounds");
+    for (name, lower, upper) in [
+        ("C", -10.0, 10.0),
+        ("J", -1e20, 1e20),
+        ("Teta", -100.0, 100.0),
+        ("q", -1e20, 1e20),
+    ] {
+        bounds.insert(
+            name.into(),
+            Some(vec![Value::Float(lower), Value::Float(upper)]),
+        );
+    }
+    let relative = ensure_section_mut(document, "rel_tolerance");
+    for name in ["C", "J", "Teta", "q"] {
+        set_float_field(relative, name, 1e-7);
     }
 }
 
@@ -512,23 +756,55 @@ impl ReactorBvpSolverConfig {
 
 impl BvpCoreSolverConfig {
     fn apply_to_section(&self, section: &mut HashMap<String, Option<Vec<Value>>>) {
-        set_string_field(section, "scheme", self.scheme.as_document_value());
-        set_string_field(section, "strategy", self.strategy.as_document_value());
-        set_optional_string_field(
-            section,
-            "linear_sys_method",
-            self.linear_sys_method.as_deref(),
-        );
-        set_float_field(section, "abs_tolerance", self.abs_tolerance);
-        set_usize_field(section, "max_iterations", self.max_iterations);
+        set_string_field(section, "solver_family", self.family.as_document_value());
+        set_string_field(section, "telemetry", self.telemetry.as_document_value());
         set_optional_string_field(section, "loglevel", self.loglevel.as_deref());
-        set_bool_field(section, "dont_save_log", self.dont_save_log);
-        set_string_field(
-            section,
-            "banded_linear_solver",
-            self.banded_linear_solver.as_document_value(),
-        );
-        set_usize_field(section, "refinement_steps", self.refinement_steps);
+        match self.family {
+            BvpSolverFamily::Damped => {
+                set_string_field(section, "scheme", self.scheme.as_document_value());
+                set_string_field(section, "strategy", "Damped");
+                set_optional_string_field(
+                    section,
+                    "linear_sys_method",
+                    self.linear_sys_method.as_deref(),
+                );
+                set_float_field(section, "abs_tolerance", self.abs_tolerance);
+                set_usize_field(section, "max_iterations", self.max_iterations);
+                set_bool_field(section, "dont_save_log", self.dont_save_log);
+                set_string_field(
+                    section,
+                    "banded_linear_solver",
+                    self.banded_linear_solver.as_document_value(),
+                );
+                set_usize_field(section, "refinement_steps", self.refinement_steps);
+                section.remove("tolerance");
+            }
+            BvpSolverFamily::Frozen => {
+                set_string_field(section, "scheme", self.scheme.as_document_value());
+                set_string_field(section, "strategy", self.strategy.as_document_value());
+                set_optional_string_field(
+                    section,
+                    "linear_sys_method",
+                    self.linear_sys_method.as_deref(),
+                );
+                set_float_field(section, "tolerance", self.abs_tolerance);
+                set_usize_field(section, "max_iterations", self.max_iterations);
+                set_bool_field(section, "dont_save_log", self.dont_save_log);
+                section.remove("abs_tolerance");
+                section.remove("banded_linear_solver");
+                section.remove("refinement_steps");
+            }
+            BvpSolverFamily::Sci => {
+                section.remove("scheme");
+                section.remove("strategy");
+                section.remove("linear_sys_method");
+                section.remove("abs_tolerance");
+                section.remove("max_iterations");
+                section.remove("dont_save_log");
+                section.remove("banded_linear_solver");
+                section.remove("refinement_steps");
+            }
+        }
     }
 }
 
@@ -627,6 +903,24 @@ fn parse_core_solver_config(
     report: &mut BvpGuiMigrationReport,
 ) -> BvpCoreSolverConfig {
     let mut core = BvpCoreSolverConfig::default();
+    let legacy_strategy = string_field(section, "strategy");
+    if let Some(raw_family) = string_field(section, "solver_family") {
+        if let Some(family) = BvpSolverFamily::parse(&raw_family) {
+            core.family = family;
+        } else {
+            report.push_warning(format!(
+                "Unknown solver family `{raw_family}`. Falling back to `damped`."
+            ));
+        }
+    } else if legacy_strategy
+        .as_deref()
+        .is_some_and(|strategy| matches!(normalize_key(strategy).as_str(), "frozen" | "naive"))
+    {
+        core.family = BvpSolverFamily::Frozen;
+    }
+    if core.family == BvpSolverFamily::Frozen && legacy_strategy.is_none() {
+        core.strategy = BvpStrategy::Frozen;
+    }
     if let Some(scheme) = string_field(section, "scheme") {
         if let Some(parsed) = BvpScheme::parse(&scheme) {
             core.scheme = parsed;
@@ -636,12 +930,21 @@ fn parse_core_solver_config(
             ));
         }
     }
-    if let Some(strategy) = string_field(section, "strategy") {
+    if let Some(strategy) = legacy_strategy {
         if let Some(parsed) = BvpStrategy::parse(&strategy) {
             core.strategy = parsed;
         } else {
             report.push_warning(format!(
                 "Unknown solver strategy `{strategy}`. Falling back to `Damped`."
+            ));
+        }
+    }
+    if let Some(telemetry) = string_field(section, "telemetry") {
+        if let Some(parsed) = BvpTelemetryMode::parse(&telemetry) {
+            core.telemetry = parsed;
+        } else {
+            report.push_warning(format!(
+                "Unknown solver telemetry mode `{telemetry}`. Falling back to `off`."
             ));
         }
     }
@@ -651,6 +954,13 @@ fn parse_core_solver_config(
             core.abs_tolerance = value;
         } else {
             report.push_warning("Non-finite abs_tolerance encountered. Falling back to 1e-7.");
+        }
+    }
+    if let Some(value) = float_field(section, "tolerance") {
+        if value.is_finite() {
+            core.abs_tolerance = value;
+        } else {
+            report.push_warning("Non-finite tolerance encountered. Falling back to 1e-6.");
         }
     }
     if let Some(value) = usize_field(section, "max_iterations") {

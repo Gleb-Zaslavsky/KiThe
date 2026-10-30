@@ -47,6 +47,40 @@ pub struct MultiphaseEquilibriumSummaryRow {
     pub value: String,
 }
 
+/// Why an extensive-normalized solve was selected.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExtensiveNormalizationTrigger {
+    /// A physical-coordinate attempt failed a classified numerical gate.
+    NumericalFailure {
+        error_kind: ReactionExtentErrorKind,
+        message: String,
+    },
+    /// A low-inventory P,H request was normalized before its first solve.
+    SmallScalePreconditioning { physical_inventory_scale: f64 },
+}
+
+impl ExtensiveNormalizationTrigger {
+    /// Numerical failure kind, when normalization followed a failed attempt.
+    pub fn error_kind(&self) -> Option<ReactionExtentErrorKind> {
+        match self {
+            Self::NumericalFailure { error_kind, .. } => Some(*error_kind),
+            Self::SmallScalePreconditioning { .. } => None,
+        }
+    }
+
+    /// Human-readable trigger explanation retained with accepted results.
+    pub fn description(&self) -> String {
+        match self {
+            Self::NumericalFailure { message, .. } => message.clone(),
+            Self::SmallScalePreconditioning {
+                physical_inventory_scale,
+            } => format!(
+                "P,H preconditioned before solving because physical inventory scale {physical_inventory_scale:.6e} is below 1 mol"
+            ),
+        }
+    }
+}
+
 /// Evidence that an extensive-conditioning recovery was used successfully.
 ///
 /// Every amount published by [`MultiphaseEquilibriumSolution`] is in physical
@@ -57,10 +91,8 @@ pub struct MultiphaseEquilibriumSummaryRow {
 pub struct ExtensiveNormalizationRecoveryEvidence {
     /// Sum of positive physical input component moles used as the exact scale.
     pub physical_inventory_scale: f64,
-    /// Failure family that authorized normalization recovery.
-    pub trigger_kind: ReactionExtentErrorKind,
-    /// Human-readable original physical failure retained for diagnosis.
-    pub trigger_message: String,
+    /// Numerical failure or proactive scale condition that selected the route.
+    pub trigger: ExtensiveNormalizationTrigger,
     /// Backend that accepted the normalized basin-discovery state.
     pub discovery_backend: SolverBackend,
     /// Backend that accepted the final physical-coordinate retry, when that
@@ -732,7 +764,7 @@ impl MultiphaseEquilibriumSolution {
                 value: format!(
                     "scale={:.6e}, trigger={:?}, discovery={:?}, physical_retry={:?}, reconstructed={}",
                     evidence.physical_inventory_scale,
-                    evidence.trigger_kind,
+                    evidence.trigger,
                     evidence.discovery_backend,
                     evidence.physical_retry_backend,
                     evidence.reconstructed_physical_boundary,

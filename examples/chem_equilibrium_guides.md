@@ -17,6 +17,9 @@ application.
 | One `P,H` point | `chem_equilibrium_ph_point_guide.rs` | Equilibrium composition and solved temperature. |
 | Reactive-gas `P,H` point | `chem_equilibrium_reactive_gas_ph_example.rs` | Wider candidate universe, explicit gas standard state, and route-aware execution evidence. |
 | Facade reactive-gas `P,H` point | `chem_equilibrium_calculator_facade_example.rs` | Application-facing builder over the same canonical workflow. |
+| Elemental `P,T` point | `chem_equilibrium_element_inventory_pt_example.rs` | Direct mol-atom inventory through the public facade. |
+| Formal-carrier `P,T` point | `chem_equilibrium_formal_element_carrier_example.rs` | Formula-shaped syntax converted to canonical `ElementInventory`. |
+| Elemental `P,H` scaling | `chem_equilibrium_element_inventory_ph_example.rs` | Extensive inventory and enthalpy scaling through the facade. |
 | `P,H` enthalpy range | `chem_equilibrium_ph_enthalpy_range_guide.rs` | Continued target-enthalpy sweep with per-point evidence. |
 
 Run an example with `cargo run --example <example_name>`, for example:
@@ -117,7 +120,7 @@ Explicit backend policies do not require internal module imports:
 
 ```rust,ignore
 use KiThe::Thermodynamics::ChemEquilibrium::prelude::{
-    EquilibriumSolveOptions, LegacyEquilibriumSolver, RustedSciTheSolver,
+    EquilibriumSolveOptions, NativeEquilibriumSolver, RustedSciTheSolver,
     SolverBackend, SolverPolicy,
 };
 
@@ -127,7 +130,7 @@ let rst_only = EquilibriumSolveOptions::new().with_solver_policy(
     )),
 )?;
 
-let legacy_fallback = SolverBackend::Legacy(LegacyEquilibriumSolver::NR);
+let native_fallback = SolverBackend::Native(NativeEquilibriumSolver::NR);
 ```
 
 The historical standalone solver and one-reaction helper live under
@@ -227,14 +230,26 @@ println!("{}", report.render_table());
 
 ## 4. Solver policy and fallback order
 
-The canonical engine keeps solver ordering explicit. The policy is part of the
-contract and should be chosen intentionally, not inferred from hidden defaults.
+The canonical facade uses an explicit production cascade by default: RST
+backends are attempted first and the configured KiThe-native LM/NR/TR family
+remains an ordered fallback. Use `with_production_cascade()` when the
+choice should be visible at the call site. A single-backend policy is useful
+for diagnostics and backend characterization, not as the general production
+recommendation.
 
 ```rust,ignore
-use KiThe::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverPolicy;
+use KiThe::Thermodynamics::ChemEquilibrium::prelude::{
+    EquilibriumSolveOptions, RustedSciTheSolver, SolverBackend, SolverPolicy,
+};
 
-let policy = SolverPolicy::rusted_scithe_default();
-println!("{:?}", policy.ordered_backends());
+let production = EquilibriumSolveOptions::new().with_production_cascade();
+let rst_only = production.clone().with_solver_policy(
+    SolverPolicy::Single(SolverBackend::RustedSciThe(
+        RustedSciTheSolver::MinpackLevenbergMarquardt,
+    )),
+)?;
+println!("production = {:?}", production.reproducibility_snapshot());
+println!("diagnostic = {:?}", rst_only.reproducibility_snapshot());
 ```
 
 ## 5. Resolved phase-system equilibrium

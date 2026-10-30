@@ -43,6 +43,8 @@
 use crate::Thermodynamics::DBhandlers::NIST_parser::{
     NistError as NistParserError, Phase, SearchType,
 };
+use crate::Thermodynamics::DBhandlers::NISTdata::NISTFitError;
+use RustedSciThe::numerical::optimization::sym_fitting::FittingError as RstFittingError;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use enum_dispatch::enum_dispatch;
 use serde_json::Value;
@@ -51,14 +53,32 @@ use std::error::Error;
 use std::fmt;
 #[derive(Debug)]
 pub enum ThermoError {
-    NoCoefficientsFound { temperature: f64, range: String },
+    NoCoefficientsFound {
+        temperature: f64,
+        range: String,
+    },
     InvalidTemperatureRange,
     UnsupportedUnit(String),
     ParserError(NistParserError),
+    ParserSetupError(NistParserError),
+    NISTSchema(String),
     SerdeError(serde_json::Error),
     SymbolicError(String),
     CalculationError(String),
     FittingError(String),
+    FittingAttemptsFailed {
+        primary: Box<ThermoError>,
+        fallback: Box<ThermoError>,
+    },
+    NISTFit(NISTFitError),
+    FittingBackend {
+        stage: &'static str,
+        source: RstFittingError,
+    },
+    NoFitSamples {
+        minimum_temperature: f64,
+        maximum_temperature: f64,
+    },
 }
 
 impl fmt::Display for ThermoError {
@@ -75,6 +95,10 @@ impl fmt::Display for ThermoError {
                 write!(f, "Invalid temperature range in coefficient data")
             }
             ThermoError::ParserError(err) => write!(f, "Failed to retrieve NIST data: {}", err),
+            ThermoError::ParserSetupError(err) => {
+                write!(f, "Failed to initialize NIST parser: {err}")
+            }
+            ThermoError::NISTSchema(msg) => write!(f, "Invalid NIST data schema: {msg}"),
             ThermoError::SerdeError(msg) => {
                 write!(f, "Failed to deserialize thermodynamic data: {}", msg)
             }
@@ -94,6 +118,21 @@ impl fmt::Display for ThermoError {
             ThermoError::FittingError(msg) => {
                 write!(f, "Fitting error: {}", msg)
             }
+            ThermoError::FittingAttemptsFailed { primary, fallback } => write!(
+                f,
+                "Thermodynamic fitting routes failed; primary: {primary}; fallback: {fallback}"
+            ),
+            ThermoError::NISTFit(err) => write!(f, "NIST fit error: {}", err),
+            ThermoError::FittingBackend { stage, source } => {
+                write!(f, "Thermodynamic {stage} fitting backend failed: {source}")
+            }
+            ThermoError::NoFitSamples {
+                minimum_temperature,
+                maximum_temperature,
+            } => write!(
+                f,
+                "No fitting samples overlap the requested range {minimum_temperature}..{maximum_temperature} K"
+            ),
         }
     }
 }
@@ -103,6 +142,10 @@ impl Error for ThermoError {
         match self {
             ThermoError::SerdeError(err) => Some(err),
             ThermoError::ParserError(err) => Some(err),
+            ThermoError::ParserSetupError(err) => Some(err),
+            ThermoError::FittingBackend { source, .. } => Some(source),
+            ThermoError::NISTFit(err) => Some(err),
+            ThermoError::FittingAttemptsFailed { fallback, .. } => Some(fallback.as_ref()),
             _ => None,
         }
     }
@@ -117,13 +160,24 @@ impl From<super::NISTdata::NISTError> for ThermoError {
             super::NISTdata::NISTError::InvalidTemperatureRange => {
                 ThermoError::InvalidTemperatureRange
             }
-            super::NISTdata::NISTError::SchemaError(msg) => ThermoError::CalculationError(msg),
-            super::NISTdata::NISTError::ParserSetupError(msg) => ThermoError::CalculationError(msg),
+            super::NISTdata::NISTError::SchemaError(msg) => ThermoError::NISTSchema(msg),
+            super::NISTdata::NISTError::ParserSetupError(err) => ThermoError::ParserSetupError(err),
             super::NISTdata::NISTError::ParserError(err) => ThermoError::ParserError(err),
             super::NISTdata::NISTError::SerdeError(msg) => ThermoError::SerdeError(msg),
             super::NISTdata::NISTError::UnsupportedUnit(unit) => ThermoError::UnsupportedUnit(unit),
             super::NISTdata::NISTError::SymbolicError(msg) => ThermoError::SymbolicError(msg),
             super::NISTdata::NISTError::FittingError(msg) => ThermoError::FittingError(msg),
+            super::NISTdata::NISTError::Fit(err) => ThermoError::NISTFit(err),
+            super::NISTdata::NISTError::FittingBackend { stage, source } => {
+                ThermoError::FittingBackend { stage, source }
+            }
+            super::NISTdata::NISTError::NoFitSamples {
+                minimum_temperature,
+                maximum_temperature,
+            } => ThermoError::NoFitSamples {
+                minimum_temperature,
+                maximum_temperature,
+            },
             //    super::NISTdata::NISTError::SerdeError(err) => ThermoError::SerdeError(err),
         }
     }
@@ -142,6 +196,15 @@ impl From<super::NASAdata::NASAError> for ThermoError {
             super::NASAdata::NASAError::UnsupportedUnit(unit) => ThermoError::UnsupportedUnit(unit),
             super::NASAdata::NASAError::SymbolicError(msg) => ThermoError::SymbolicError(msg),
             super::NASAdata::NASAError::FittingError(msg) => ThermoError::FittingError(msg),
+            super::NASAdata::NASAError::FittingBackend { stage, source } => {
+                ThermoError::FittingBackend { stage, source }
+            }
+            super::NASAdata::NASAError::FittingAttemptsFailed { primary, fallback } => {
+                ThermoError::FittingAttemptsFailed {
+                    primary: Box::new((*primary).into()),
+                    fallback: Box::new((*fallback).into()),
+                }
+            }
         }
     }
 }
@@ -237,5 +300,25 @@ pub fn energy_dimension(unit: EnergyUnit) -> String {
     match unit {
         EnergyUnit::J => "J".to_owned(),
         EnergyUnit::Cal => "cal".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod error_conversion_tests {
+    use super::{NistParserError, ThermoError};
+    use crate::Thermodynamics::DBhandlers::NISTdata::NISTError;
+    use std::error::Error;
+
+    #[test]
+    fn nist_facade_conversion_preserves_schema_and_parser_setup_categories() {
+        let schema: ThermoError = NISTError::SchemaError("missing Cp rows".into()).into();
+        assert!(matches!(schema, ThermoError::NISTSchema(message) if message == "missing Cp rows"));
+
+        let setup: ThermoError = NISTError::ParserSetupError(NistParserError::ConfigurationError(
+            "invalid client timeout".into(),
+        ))
+        .into();
+        assert!(matches!(&setup, ThermoError::ParserSetupError(_)));
+        assert!(setup.source().is_some());
     }
 }

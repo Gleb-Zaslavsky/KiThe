@@ -26,10 +26,21 @@ pub(crate) enum PropertyComparisonError {
     NonFiniteInput,
     #[error("symbolic comparison produced non-finite fitted values")]
     NonFiniteOutput,
+    #[error("comparison tolerances must be finite, with absolute >= 0 and relative > 0")]
+    InvalidTolerance,
 }
 
 const SIGNIFICANT_RESIDUAL_THRESHOLD: f64 = 0.10;
 const ZERO_REFERENCE_FLOOR: f64 = 1e-12;
+
+#[derive(Clone, Copy)]
+enum ComparisonNormalization {
+    RelativeFloor,
+    AbsolutePlusRelative {
+        absolute_tolerance: f64,
+        relative_tolerance: f64,
+    },
+}
 
 /// Compare raw property samples against a symbolic fit expression.
 ///
@@ -43,6 +54,48 @@ pub(crate) fn compare_property_series(
     y_data: &[f64],
     t_vec: &[f64],
     fit_function: Expr,
+) -> Result<PropertyComparisonReport, PropertyComparisonError> {
+    compare_property_series_with_normalization(
+        y_data,
+        t_vec,
+        fit_function,
+        ComparisonNormalization::RelativeFloor,
+    )
+}
+
+/// Compare a fit using `absolute_tolerance + relative_tolerance * |reference|`
+/// as the pointwise acceptance limit. `max_norm` remains comparable to a
+/// relative tolerance: values at or below that tolerance satisfy the limit.
+pub(crate) fn compare_property_series_with_absolute_relative_tolerance(
+    y_data: &[f64],
+    t_vec: &[f64],
+    fit_function: Expr,
+    absolute_tolerance: f64,
+    relative_tolerance: f64,
+) -> Result<PropertyComparisonReport, PropertyComparisonError> {
+    if !absolute_tolerance.is_finite()
+        || absolute_tolerance < 0.0
+        || !relative_tolerance.is_finite()
+        || relative_tolerance <= 0.0
+    {
+        return Err(PropertyComparisonError::InvalidTolerance);
+    }
+    compare_property_series_with_normalization(
+        y_data,
+        t_vec,
+        fit_function,
+        ComparisonNormalization::AbsolutePlusRelative {
+            absolute_tolerance,
+            relative_tolerance,
+        },
+    )
+}
+
+fn compare_property_series_with_normalization(
+    y_data: &[f64],
+    t_vec: &[f64],
+    fit_function: Expr,
+    normalization: ComparisonNormalization,
 ) -> Result<PropertyComparisonReport, PropertyComparisonError> {
     if y_data.len() != t_vec.len() {
         return Err(PropertyComparisonError::LengthMismatch {
@@ -72,13 +125,30 @@ pub(crate) fn compare_property_series(
         y_data.iter().zip(t_vec.iter()).zip(fitted_values.iter())
     {
         let abs_error = (reference - fitted_value).abs();
-        let reference_scale = reference.abs().max(ZERO_REFERENCE_FLOOR);
+        let (reference_scale, significant_threshold) = match normalization {
+            ComparisonNormalization::RelativeFloor => (
+                reference.abs().max(ZERO_REFERENCE_FLOOR),
+                SIGNIFICANT_RESIDUAL_THRESHOLD,
+            ),
+            ComparisonNormalization::AbsolutePlusRelative {
+                absolute_tolerance,
+                relative_tolerance,
+            } => {
+                let absolute_scale = absolute_tolerance / relative_tolerance;
+                let scale = if absolute_scale == 0.0 {
+                    reference.abs().max(ZERO_REFERENCE_FLOOR)
+                } else {
+                    reference.abs() + absolute_scale
+                };
+                (scale, relative_tolerance)
+            }
+        };
         let relative_error = abs_error / reference_scale;
 
         squared_relative_sum += relative_error * relative_error;
         max_norm = max_norm.max(relative_error);
 
-        if relative_error > SIGNIFICANT_RESIDUAL_THRESHOLD {
+        if relative_error > significant_threshold {
             significant_points.push((temperature, relative_error));
         }
     }
@@ -132,5 +202,34 @@ mod tests {
         assert!(report.l2_norm.is_finite());
         assert!(report.max_norm.is_finite());
         assert_eq!(report.number_of_significant_points, 0);
+    }
+
+    #[test]
+    fn absolute_relative_comparison_accepts_small_absolute_error_near_zero() {
+        let report = compare_property_series_with_absolute_relative_tolerance(
+            &[-0.01, 0.0, 0.01],
+            &[300.0, 400.0, 500.0],
+            Expr::Const(0.02),
+            0.05,
+            0.02,
+        )
+        .expect("finite absolute-relative comparison should succeed");
+
+        assert!(report.max_norm <= 0.02);
+    }
+
+    #[test]
+    fn absolute_relative_comparison_still_detects_bad_fit_near_zero() {
+        let report = compare_property_series_with_absolute_relative_tolerance(
+            &[0.0, 0.01],
+            &[300.0, 400.0],
+            Expr::Const(0.2),
+            0.05,
+            0.02,
+        )
+        .expect("finite absolute-relative comparison should succeed");
+
+        assert!(report.max_norm > 0.02);
+        assert_eq!(report.number_of_significant_points, 2);
     }
 }

@@ -7,7 +7,7 @@
 //! mutating a broader multiphase workflow.
 //!
 //! RustedSciThe backends receive a dedicated symbolic `(ln(n), theta_T)`
-//! payload. The retained legacy solvers consume the independently implemented
+//! payload. The retained native solvers consume the independently implemented
 //! analytical Jacobian from `equilibrium_ph_formulation`, which remains a
 //! valuable validation and fallback route.
 
@@ -227,7 +227,7 @@ impl PreparedMonolithicPhRunner {
     ///
     /// Resolves the solver policy and cascade budget, then delegates to the
     /// common backend adapter. The optional RST symbolic problem is forwarded
-    /// when the policy selects a RustedSciThe backend; legacy backends receive
+    /// when the policy selects a RustedSciThe backend; native backends receive
     /// the analytical formulation from [`PhFormulation`].
     fn solve_from_initial_unknowns(
         &self,
@@ -399,7 +399,7 @@ impl PreparedMonolithicPhRunner {
     /// Resolves the effective solver policy for the monolithic `P,H` runner.
     ///
     /// Returns the explicit policy when one has been installed, or falls back
-    /// to [`SolverPolicy::legacy_default`] using the preferred legacy backend.
+    /// to [`SolverPolicy::native_default`] using the preferred native backend.
     /// This keeps the monolithic path consistent with the fixed-`P,T` cascade
     /// contract without requiring every caller to supply a policy.
     fn monolithic_policy(&self) -> Result<SolverPolicy, ReactionExtentError> {
@@ -407,7 +407,7 @@ impl PreparedMonolithicPhRunner {
             .settings
             .solver_policy
             .clone()
-            .unwrap_or_else(|| SolverPolicy::legacy_default(self.settings.solver));
+            .unwrap_or_else(|| SolverPolicy::native_default(self.settings.solver));
         Ok(policy)
     }
 }
@@ -860,7 +860,7 @@ mod tests {
         assert!(outcome.snapshot.enthalpy_error.abs() < 1.0e-5);
         assert!(matches!(
             outcome.solve_report.accepted_backend,
-            SolverBackend::Legacy(_)
+            SolverBackend::Native(_)
         ));
         assert_eq!(outcome.temperature_seed_report.attempts().len(), 1);
         assert!(!outcome.temperature_seed_report.recovered_after_retry());

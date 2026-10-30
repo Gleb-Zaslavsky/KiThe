@@ -4,7 +4,14 @@ use std::collections::HashMap;
 #[allow(dead_code)]
 /// Build a compact HMX-style reactor fixture that exercises the full BVP pipeline.
 pub(crate) fn compact_hmx_reactor() -> SimpleReactorTask {
-    let eq = "HMX=>HMXprod".to_string();
+    compact_hmx_reactor_with_product_fraction(1e-3)
+}
+
+pub(crate) fn compact_hmx_reactor_with_product_fraction(
+    product_fraction: f64,
+) -> SimpleReactorTask {
+    let product = "DecompositionProduct";
+    let eq = format!("HMX=>{product}");
     let c_p = 0.35 * 4.184 * 1000.0;
     let lambda_eff = 0.07;
     let n = 0.0;
@@ -28,7 +35,7 @@ pub(crate) fn compact_hmx_reactor() -> SimpleReactorTask {
     ]);
     let groups = Some(HashMap::from([
         ("HMX".to_string(), hmx.clone()),
-        ("HMXprod".to_string(), hmxprod),
+        (product.to_string(), hmxprod),
     ]));
 
     let mut reactor = SimpleReactorTask::new();
@@ -43,17 +50,17 @@ pub(crate) fn compact_hmx_reactor() -> SimpleReactorTask {
     reactor
         .fast_react_set(reactions)
         .expect("valid elementary reaction should be accepted");
-    reactor.kindata.substances = vec!["HMX".to_string(), "HMXprod".to_string()];
+    reactor.kindata.substances = vec!["HMX".to_string(), product.to_string()];
     reactor.kindata.groups = groups;
 
     let diffusion = {
         let ro0 = 34.2e-3 * p / (R_G * t0);
         let d = lambda_eff / (c_p * ro0);
-        HashMap::from([("HMX".to_string(), d), ("HMXprod".to_string(), d)])
+        HashMap::from([("HMX".to_string(), d), (product.to_string(), d)])
     };
     let boundary_condition = HashMap::from([
-        ("HMX".to_string(), 1.0 - 1e-3),
-        ("HMXprod".to_string(), 1e-3),
+        ("HMX".to_string(), 1.0 - product_fraction),
+        (product.to_string(), product_fraction),
         ("T".to_string(), t0),
     ]);
     let thermal_effects = vec![3000.0 * 1e3 / 100.0];

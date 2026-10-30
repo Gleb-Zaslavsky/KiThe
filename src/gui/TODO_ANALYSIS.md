@@ -129,6 +129,44 @@ solver backend has grown into a much richer typed configuration surface.
 - [ ] Remove dead wording that talks about the old backend model once the new controls exist.
 - [x] Normalize `max_iterations` to `usize` before handing the document to the solver.
 
+## Reactor IVP GUI: expanded solver controls and accessibility
+
+- [x] Expose solver-family-specific controls instead of presenting one misleading universal backend.
+  LSODE2 exposes its controller, matrix layout, execution mode, and AOT options;
+  standalone BDF and Radau visibly state their current Dense/Lambdify capability
+  constraints. Selecting another family clears incompatible LSODE2-only choices.
+- [x] Give every IVP solver `ComboBox` an accessible name linked to its visible label.
+  This includes solver family, symbolic frontend, LSODE2 controller, matrix and
+  execution backends, telemetry, logging, and conditional AOT toolchain/profile.
+- [x] Add compact-window interaction coverage for BDF/Radau family switching and
+  for changing every LSODE2 solver option through the actual controls.
+  Assertions verify the resulting typed configuration, not only rendered text.
+- [x] Add hover descriptions for IVP backend capability, matrix support, telemetry,
+  and logging controls, keeping telemetry and logging semantics distinct.
+- [x] Group the solver route, execution settings, diagnostics, and conditional AOT
+  build settings into separate visual bands with a top-to-bottom control order.
+- [x] Verify that AOT confirmation can be requested and safely cancelled with Enter;
+  cancellation must not start the worker.
+- [ ] Make solver `ComboBox` selectors keyboard-focusable and operable. In the current
+  egui version these widgets do not accept the AccessKit focus action/Enter sequence;
+  do not simulate keyboard support with a parallel hidden focus state. Revisit with a
+  keyboard-native selector or an upstream widget capability.
+
+## GUI regression status (2026-10-30)
+
+- BVP/combustion GUI filter: 105 passed, including preview, real backend switching,
+  compact-window capability controls, and successful solve/plot handoff with plot
+  enabled and disabled. The suite now uses `fixtures/bvp_problem.fixture` tracked in
+  the repository rather than the ignored root `problem_test.txt`, making the stories
+  reproducible in a clean checkout.
+- Reactor IVP GUI filter: 28 passed, including accessible labels and end-to-end
+  selection of symbolic frontend, LSODE2 controller, matrix layout, telemetry,
+  logging, execution mode, AOT toolchain, and profile.
+- IVP keyboard cancellation story passes; keyboard operation of `ComboBox` selectors
+  remains an explicit limitation rather than a claimed capability.
+- `cargo check --lib --no-default-features -j 1`: passed. Existing unrelated
+  compiler warnings remain.
+
 # Transport and Thermochemistry GUI Technical TODO
 
 Scope: `transport_gui.rs`, `thermochemistry_gui.rs`, and their dedicated

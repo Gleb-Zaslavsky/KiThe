@@ -154,11 +154,11 @@ pub struct EquilibriumInstrumentationReport {
     counters: EquilibriumEvaluationCounters,
 }
 
-/// Per-attempt diagnostics produced by the retained legacy nonlinear
+/// Per-attempt diagnostics produced by the retained native nonlinear
 /// algorithms. The adapter copies this snapshot into `SolverAttemptMetrics`,
 /// so the accepted and rejected backend trace remains the source of truth.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct LegacySolverDiagnosticsSnapshot {
+pub(crate) struct NativeSolverDiagnosticsSnapshot {
     pub residual_calls: usize,
     pub jacobian_calls: usize,
     pub same_iterate_callback_pairs: usize,
@@ -173,13 +173,13 @@ pub(crate) struct LegacySolverDiagnosticsSnapshot {
     pub globalization_micros: u128,
 }
 
-/// Coarse operations inside a retained Legacy nonlinear attempt.
+/// Coarse operations inside a retained Native nonlinear attempt.
 ///
 /// These timings are deliberately solver-facing rather than thermochemistry-
 /// facing: residual and Jacobian callback time is reported separately, while
-/// this enum explains the remainder of the Legacy backend wall time.
+/// this enum explains the remainder of the Native backend wall time.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum LegacySolverStage {
+pub(crate) enum NativeSolverStage {
     MatrixOperations,
     Norm,
     TrialVector,
@@ -189,7 +189,7 @@ pub(crate) enum LegacySolverStage {
 
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LegacyCallbackKind {
+pub(crate) enum NativeCallbackKind {
     Residual,
     Jacobian,
 }
@@ -204,43 +204,43 @@ struct IterateSignature {
 
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
 #[derive(Debug, Clone, Copy)]
-struct PreviousLegacyCallback {
-    kind: LegacyCallbackKind,
+struct PreviousNativeCallback {
+    kind: NativeCallbackKind,
     signature: IterateSignature,
 }
 
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
 #[derive(Debug, Default)]
-pub(crate) struct LegacySolverDiagnosticsState {
-    snapshot: LegacySolverDiagnosticsSnapshot,
-    previous_callback: Option<PreviousLegacyCallback>,
+pub(crate) struct NativeSolverDiagnosticsState {
+    snapshot: NativeSolverDiagnosticsSnapshot,
+    previous_callback: Option<PreviousNativeCallback>,
 }
 
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
 thread_local! {
     static ACTIVE_LEGACY_SOLVER_DIAGNOSTICS:
-        RefCell<Option<Rc<RefCell<LegacySolverDiagnosticsState>>>> =
+        RefCell<Option<Rc<RefCell<NativeSolverDiagnosticsState>>>> =
         const { RefCell::new(None) };
 }
 
-/// Restores a nested legacy diagnostic scope when the backend attempt ends.
+/// Restores a nested native diagnostic scope when the backend attempt ends.
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
 #[derive(Debug, Default)]
-pub(crate) struct LegacySolverDiagnosticsGuard {
+pub(crate) struct NativeSolverDiagnosticsGuard {
     #[cfg(any(test, feature = "equilibrium-instrumentation"))]
-    previous: Option<Rc<RefCell<LegacySolverDiagnosticsState>>>,
+    previous: Option<Rc<RefCell<NativeSolverDiagnosticsState>>>,
 }
 
-/// Opaque per-attempt session used by the legacy backend adapter.
-pub(crate) struct LegacySolverDiagnosticsSession {
+/// Opaque per-attempt session used by the native backend adapter.
+pub(crate) struct NativeSolverDiagnosticsSession {
     #[cfg(any(test, feature = "equilibrium-instrumentation"))]
-    guard: LegacySolverDiagnosticsGuard,
+    guard: NativeSolverDiagnosticsGuard,
     #[cfg(any(test, feature = "equilibrium-instrumentation"))]
-    state: Rc<RefCell<LegacySolverDiagnosticsState>>,
+    state: Rc<RefCell<NativeSolverDiagnosticsState>>,
 }
 
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
-impl Drop for LegacySolverDiagnosticsGuard {
+impl Drop for NativeSolverDiagnosticsGuard {
     fn drop(&mut self) {
         ACTIVE_LEGACY_SOLVER_DIAGNOSTICS.with(|active| {
             *active.borrow_mut() = self.previous.take();
@@ -249,7 +249,7 @@ impl Drop for LegacySolverDiagnosticsGuard {
 }
 
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
-fn legacy_solver_diagnostics_enabled() -> bool {
+fn native_solver_diagnostics_enabled() -> bool {
     #[cfg(any(test, feature = "equilibrium-instrumentation"))]
     {
         return ACTIVE_LEGACY_SOLVER_DIAGNOSTICS.with(|active| active.borrow().is_some());
@@ -262,12 +262,12 @@ fn legacy_solver_diagnostics_enabled() -> bool {
 }
 
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
-pub(crate) fn legacy_solver_timing_enabled() -> bool {
-    legacy_solver_diagnostics_enabled()
+pub(crate) fn native_solver_timing_enabled() -> bool {
+    native_solver_diagnostics_enabled()
 }
 
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
-pub(crate) fn record_legacy_residual(duration: Duration) {
+pub(crate) fn record_native_residual(duration: Duration) {
     #[cfg(any(test, feature = "equilibrium-instrumentation"))]
     ACTIVE_LEGACY_SOLVER_DIAGNOSTICS.with(|active| {
         if let Some(state) = active.borrow().as_ref() {
@@ -296,11 +296,11 @@ fn iterate_signature(values: &[f64]) -> IterateSignature {
     }
 }
 
-/// Records adjacent Legacy residual/Jacobian callbacks that received the
+/// Records adjacent Native residual/Jacobian callbacks that received the
 /// same exact floating-point iterate. The diagnostic signature avoids cloning
 /// every callback input while retaining a collision-resistant exact-bit key.
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
-pub(crate) fn record_legacy_callback(kind: LegacyCallbackKind, values: &[f64]) {
+pub(crate) fn record_native_callback(kind: NativeCallbackKind, values: &[f64]) {
     let signature = iterate_signature(values);
     ACTIVE_LEGACY_SOLVER_DIAGNOSTICS.with(|active| {
         if let Some(state) = active.borrow().as_ref() {
@@ -310,13 +310,13 @@ pub(crate) fn record_legacy_callback(kind: LegacyCallbackKind, values: &[f64]) {
                     state.snapshot.same_iterate_callback_pairs += 1;
                 }
             }
-            state.previous_callback = Some(PreviousLegacyCallback { kind, signature });
+            state.previous_callback = Some(PreviousNativeCallback { kind, signature });
         }
     });
 }
 
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
-pub(crate) fn record_legacy_jacobian(duration: Duration) {
+pub(crate) fn record_native_jacobian(duration: Duration) {
     #[cfg(any(test, feature = "equilibrium-instrumentation"))]
     ACTIVE_LEGACY_SOLVER_DIAGNOSTICS.with(|active| {
         if let Some(state) = active.borrow().as_ref() {
@@ -328,7 +328,7 @@ pub(crate) fn record_legacy_jacobian(duration: Duration) {
 }
 
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
-pub(crate) fn record_legacy_linear_system(duration: Duration) {
+pub(crate) fn record_native_linear_system(duration: Duration) {
     #[cfg(any(test, feature = "equilibrium-instrumentation"))]
     ACTIVE_LEGACY_SOLVER_DIAGNOSTICS.with(|active| {
         if let Some(state) = active.borrow().as_ref() {
@@ -340,35 +340,35 @@ pub(crate) fn record_legacy_linear_system(duration: Duration) {
 }
 
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
-pub(crate) fn record_legacy_stage(stage: LegacySolverStage, duration: Duration) {
+pub(crate) fn record_native_stage(stage: NativeSolverStage, duration: Duration) {
     ACTIVE_LEGACY_SOLVER_DIAGNOSTICS.with(|active| {
         if let Some(state) = active.borrow().as_ref() {
             let mut state = state.borrow_mut();
             let field = match stage {
-                LegacySolverStage::MatrixOperations => &mut state.snapshot.matrix_operations_micros,
-                LegacySolverStage::Norm => &mut state.snapshot.norm_micros,
-                LegacySolverStage::TrialVector => &mut state.snapshot.trial_vector_micros,
-                LegacySolverStage::Feasibility => &mut state.snapshot.feasibility_micros,
-                LegacySolverStage::Globalization => &mut state.snapshot.globalization_micros,
+                NativeSolverStage::MatrixOperations => &mut state.snapshot.matrix_operations_micros,
+                NativeSolverStage::Norm => &mut state.snapshot.norm_micros,
+                NativeSolverStage::TrialVector => &mut state.snapshot.trial_vector_micros,
+                NativeSolverStage::Feasibility => &mut state.snapshot.feasibility_micros,
+                NativeSolverStage::Globalization => &mut state.snapshot.globalization_micros,
             };
             *field += duration.as_micros();
         }
     });
 }
 
-/// Opens one legacy solver scope only inside an enabled calculator capture.
-pub(crate) fn begin_legacy_solver_diagnostics() -> Option<LegacySolverDiagnosticsSession> {
+/// Opens one native solver scope only inside an enabled calculator capture.
+pub(crate) fn begin_native_solver_diagnostics() -> Option<NativeSolverDiagnosticsSession> {
     #[cfg(any(test, feature = "equilibrium-instrumentation"))]
     {
         let capture_active = ACTIVE_COUNTERS.with(|active| active.borrow().is_some());
         if !capture_active {
             return None;
         }
-        let state = Rc::new(RefCell::new(LegacySolverDiagnosticsState::default()));
+        let state = Rc::new(RefCell::new(NativeSolverDiagnosticsState::default()));
         let previous = ACTIVE_LEGACY_SOLVER_DIAGNOSTICS
             .with(|active| active.borrow_mut().replace(Rc::clone(&state)));
-        return Some(LegacySolverDiagnosticsSession {
-            guard: LegacySolverDiagnosticsGuard { previous },
+        return Some(NativeSolverDiagnosticsSession {
+            guard: NativeSolverDiagnosticsGuard { previous },
             state,
         });
     }
@@ -379,12 +379,12 @@ pub(crate) fn begin_legacy_solver_diagnostics() -> Option<LegacySolverDiagnostic
     }
 }
 
-pub(crate) fn finish_legacy_solver_diagnostics(
-    session: LegacySolverDiagnosticsSession,
-) -> LegacySolverDiagnosticsSnapshot {
+pub(crate) fn finish_native_solver_diagnostics(
+    session: NativeSolverDiagnosticsSession,
+) -> NativeSolverDiagnosticsSnapshot {
     #[cfg(any(test, feature = "equilibrium-instrumentation"))]
     {
-        let LegacySolverDiagnosticsSession { guard, state } = session;
+        let NativeSolverDiagnosticsSession { guard, state } = session;
         drop(guard);
         return state.borrow().snapshot;
     }
@@ -392,7 +392,7 @@ pub(crate) fn finish_legacy_solver_diagnostics(
     #[cfg(not(any(test, feature = "equilibrium-instrumentation")))]
     {
         let _ = session;
-        LegacySolverDiagnosticsSnapshot::default()
+        NativeSolverDiagnosticsSnapshot::default()
     }
 }
 
@@ -643,19 +643,19 @@ mod tests {
     }
 
     #[test]
-    fn legacy_stage_capture_preserves_the_internal_breakdown() {
+    fn native_stage_capture_preserves_the_internal_breakdown() {
         let (snapshot, report) = capture(|| {
             let session =
-                begin_legacy_solver_diagnostics().expect("capture must enable Legacy scope");
-            record_legacy_stage(
-                LegacySolverStage::MatrixOperations,
+                begin_native_solver_diagnostics().expect("capture must enable Native scope");
+            record_native_stage(
+                NativeSolverStage::MatrixOperations,
                 Duration::from_micros(3),
             );
-            record_legacy_stage(LegacySolverStage::Norm, Duration::from_micros(5));
-            record_legacy_stage(LegacySolverStage::TrialVector, Duration::from_micros(7));
-            record_legacy_stage(LegacySolverStage::Feasibility, Duration::from_micros(11));
-            record_legacy_stage(LegacySolverStage::Globalization, Duration::from_micros(13));
-            finish_legacy_solver_diagnostics(session)
+            record_native_stage(NativeSolverStage::Norm, Duration::from_micros(5));
+            record_native_stage(NativeSolverStage::TrialVector, Duration::from_micros(7));
+            record_native_stage(NativeSolverStage::Feasibility, Duration::from_micros(11));
+            record_native_stage(NativeSolverStage::Globalization, Duration::from_micros(13));
+            finish_native_solver_diagnostics(session)
         });
 
         assert!(report.enabled());
@@ -667,15 +667,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_callback_capture_counts_only_adjacent_matching_iterates() {
+    fn native_callback_capture_counts_only_adjacent_matching_iterates() {
         let (snapshot, report) = capture(|| {
             let session =
-                begin_legacy_solver_diagnostics().expect("capture must enable Legacy scope");
-            record_legacy_callback(LegacyCallbackKind::Residual, &[1.0, 2.0]);
-            record_legacy_callback(LegacyCallbackKind::Jacobian, &[1.0, 2.0]);
-            record_legacy_callback(LegacyCallbackKind::Residual, &[1.0, 2.1]);
-            record_legacy_callback(LegacyCallbackKind::Jacobian, &[1.0, 2.0]);
-            finish_legacy_solver_diagnostics(session)
+                begin_native_solver_diagnostics().expect("capture must enable Native scope");
+            record_native_callback(NativeCallbackKind::Residual, &[1.0, 2.0]);
+            record_native_callback(NativeCallbackKind::Jacobian, &[1.0, 2.0]);
+            record_native_callback(NativeCallbackKind::Residual, &[1.0, 2.1]);
+            record_native_callback(NativeCallbackKind::Jacobian, &[1.0, 2.0]);
+            finish_native_solver_diagnostics(session)
         });
 
         assert!(report.enabled());

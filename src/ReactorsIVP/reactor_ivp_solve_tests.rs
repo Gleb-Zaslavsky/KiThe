@@ -3,31 +3,48 @@ mod tests {
     use super::super::SimpleReactorIVP::*;
     use super::super::solver_backend::{
         ReactorIvpExecutionBackend, ReactorIvpMatrixBackend, ReactorIvpMethod,
-        ReactorIvpSolverConfig,
+        ReactorIvpSolverConfig, ReactorIvpSolverFamily,
     };
     use crate::Kinetics::mechfinder_api::ReactionData;
+    use RustedSciThe::numerical::BDF::BDF_api::BdfSolveError;
     use RustedSciThe::numerical::LSODE2::Lsode2AlgorithmSnapshot;
     use RustedSciThe::numerical::LSODE2::solver::{
         Lsode2EvaluationTelemetry, Lsode2TelemetryScope,
     };
+    use RustedSciThe::numerical::StiffAPI::{StiffApiError, StiffSolveError};
     use approx::assert_abs_diff_eq;
     use nalgebra::{DMatrix, DVector};
     use std::collections::HashMap;
+
+    #[test]
+    fn native_solver_errors_keep_the_rst_source_chain() {
+        let native = StiffApiError::Bdf(BdfSolveError::InvalidMaxSteps);
+        let error = IvpError::from(native);
+        let source = std::error::Error::source(&error).expect("RST API error should be a source");
+        assert!(source.to_string().contains("BDF failed"));
+        assert!(source.downcast_ref::<StiffApiError>().is_some());
+
+        let native = StiffSolveError::Bdf(BdfSolveError::InvalidMaxSteps);
+        let error = IvpError::from(native);
+        let source = std::error::Error::source(&error).expect("RST solve error should be a source");
+        assert!(source.to_string().contains("BDF solve failed"));
+        assert!(source.downcast_ref::<StiffSolveError>().is_some());
+    }
 
     fn build_solve_task() -> SimpleReactorTask {
         let mut task = SimpleReactorTask::new();
         task.kindata
             .set_reaction_data_directly(
                 vec![ReactionData::new_elementary(
-                    "A=>B".to_string(),
+                    "H2=>2H".to_string(),
                     vec![1.0e2, 0.0, 1.0e4],
                     None,
                 )],
                 None,
             )
             .expect("reaction setup should succeed");
-        task.kindata.stecheodata.vec_of_molmasses = Some(vec![10.0, 20.0]);
-        task.kindata.substances = vec!["A".to_string(), "B".to_string()];
+        task.kindata.stecheodata.vec_of_molmasses = Some(vec![2.016, 1.008]);
+        task.kindata.substances = vec!["H2".to_string(), "H".to_string()];
         task.thermal_effects = vec![-2.0e5];
         task.ro = 1200.0;
         task.Cp = 1000.0;
@@ -38,12 +55,12 @@ mod tests {
         task.initial_conditions = HashMap::from([
             ("T".to_string(), 450.0),
             ("q".to_string(), 0.15),
-            ("A".to_string(), 0.7),
-            ("B".to_string(), 0.3),
+            ("H2".to_string(), 0.7),
+            ("H".to_string(), 0.3),
         ]);
         task.set_solver_backend_config(
             ReactorIvpSolverConfig::default()
-                .with_method(ReactorIvpMethod::Auto)
+                .with_lsode2_controller(ReactorIvpMethod::Auto)
                 .with_native_execution(
                     RustedSciThe::numerical::LSODE2::Lsode2NativeExecutionConfig::bridge_solve(),
                 )
@@ -60,15 +77,15 @@ mod tests {
         task.kindata
             .set_reaction_data_directly(
                 vec![ReactionData::new_elementary(
-                    "A=>B".to_string(),
+                    "H2=>2H".to_string(),
                     vec![0.0, 0.0, 0.0],
                     None,
                 )],
                 None,
             )
             .expect("reaction setup should succeed");
-        task.kindata.stecheodata.vec_of_molmasses = Some(vec![10.0, 20.0]);
-        task.kindata.substances = vec!["A".to_string(), "B".to_string()];
+        task.kindata.stecheodata.vec_of_molmasses = Some(vec![2.016, 1.008]);
+        task.kindata.substances = vec!["H2".to_string(), "H".to_string()];
         task.thermal_effects = vec![0.0];
         task.ro = 1200.0;
         task.Cp = 1000.0;
@@ -79,12 +96,12 @@ mod tests {
         task.initial_conditions = HashMap::from([
             ("T".to_string(), 450.0),
             ("q".to_string(), 0.15),
-            ("A".to_string(), 0.7),
-            ("B".to_string(), 0.3),
+            ("H2".to_string(), 0.7),
+            ("H".to_string(), 0.3),
         ]);
         task.set_solver_backend_config(
             ReactorIvpSolverConfig::default()
-                .with_method(ReactorIvpMethod::Auto)
+                .with_lsode2_controller(ReactorIvpMethod::Auto)
                 .with_native_execution(
                     RustedSciThe::numerical::LSODE2::Lsode2NativeExecutionConfig::bridge_solve(),
                 )
@@ -185,25 +202,30 @@ mod tests {
 
         assert_eq!(snapshot.time_points(), snapshot.axis.len());
         assert_eq!(snapshot.variable_count(), 4);
-        assert_eq!(snapshot.summary.time_points, snapshot.time_points());
-        assert_eq!(snapshot.summary.variable_count, snapshot.variable_count());
+        let summary = snapshot
+            .summary
+            .as_ref()
+            .expect("LSODE2 summary should be retained");
+        assert_eq!(summary.time_points, snapshot.time_points());
+        assert_eq!(summary.variable_count, snapshot.variable_count());
         assert!(!snapshot.status().trim().is_empty());
         assert!(snapshot.status().starts_with("finished"));
         assert!(snapshot.axis.iter().all(|value| value.is_finite()));
         assert!(snapshot.values.iter().all(|value| value.is_finite()));
         assert_eq!(snapshot.backend_config(), task.solver_backend_config);
         assert_eq!(snapshot.resolved_backend_plan(), task.solver_backend_config);
-        assert_eq!(snapshot.method(), ReactorIvpMethod::Auto);
+        assert_eq!(snapshot.lsode2_controller(), Some(ReactorIvpMethod::Auto));
         assert_eq!(snapshot.method_label(), "bdf");
         assert!(
             !snapshot
                 .algorithm_snapshot()
+                .expect("LSODE2 algorithm metadata should be present")
                 .controller_mode
                 .trim()
                 .is_empty()
         );
-        assert!(snapshot.backend_statistics().solve_calls > 0);
-        assert!(snapshot.native_statistics().native_step_attempts > 0);
+        assert!(snapshot.backend_statistics().unwrap().solve_calls > 0);
+        assert!(snapshot.native_statistics().unwrap().native_step_attempts > 0);
 
         let axis = task
             .solver
@@ -276,15 +298,18 @@ mod tests {
         assert_eq!(report.time_points, snapshot.time_points());
         assert_eq!(report.variable_count, snapshot.variable_count());
         assert_eq!(report.backend_plan, snapshot.backend_config());
-        assert_eq!(report.algorithm, *snapshot.algorithm_snapshot());
+        assert_eq!(report.algorithm.as_ref(), snapshot.algorithm_snapshot());
         assert_eq!(
-            report.statistics.table_report(),
-            snapshot.backend_statistics().table_report()
+            report.statistics.as_ref().unwrap().table_report(),
+            snapshot.backend_statistics().unwrap().table_report()
         );
-        assert_eq!(report.native_statistics, *snapshot.native_statistics());
         assert_eq!(
-            report.evaluation_telemetry,
-            *snapshot.evaluation_telemetry()
+            report.native_statistics.as_ref(),
+            snapshot.native_statistics()
+        );
+        assert_eq!(
+            report.evaluation_telemetry.as_ref(),
+            snapshot.evaluation_telemetry()
         );
         assert_eq!(
             task.last_solve_snapshot.as_ref().map(|s| s.status()),
@@ -357,10 +382,11 @@ mod tests {
 
         assert!(rows.iter().any(|row| row.field == "status"));
         assert!(rows.iter().any(|row| row.field == "method_label"));
+        assert!(rows.iter().any(|row| row.field == "solver_family"));
         assert!(rows.iter().any(|row| row.field == "controller_mode"));
-        assert!(rows.iter().any(|row| row.field == "resolved_source"));
-        assert!(rows.iter().any(|row| row.field == "resolved_structure"));
-        assert!(rows.iter().any(|row| row.field == "accepted_steps"));
+        assert!(rows.iter().any(|row| row.field == "symbolic_backend"));
+        assert!(rows.iter().any(|row| row.field == "matrix_backend"));
+        assert!(rows.iter().any(|row| row.field == "telemetry_mode"));
 
         let status = rows
             .iter()
@@ -453,12 +479,17 @@ mod tests {
                 "C0".to_string(),
                 "C1".to_string(),
             ],
-            summary: fake_summary("finished", 0, 4, None, None),
+            family: ReactorIvpSolverFamily::Lsode2,
+            status: "finished".into(),
+            method_label: "bdf".into(),
+            summary: Some(fake_summary("finished", 0, 4, None, None)),
             backend_plan: ReactorIvpSolverConfig::default(),
-            algorithm: fake_summary("finished", 0, 4, None, None).algorithm,
+            algorithm: Some(fake_summary("finished", 0, 4, None, None).algorithm),
             statistics: Default::default(),
             native_statistics: Default::default(),
             evaluation_telemetry: Default::default(),
+            native_telemetry: None,
+            stage_telemetry: Default::default(),
         };
 
         let result = snapshot.solution_preview_rows();
@@ -476,25 +507,32 @@ mod tests {
                 "C0".to_string(),
                 "C1".to_string(),
             ],
-            summary: fake_summary(
+            summary: Some(fake_summary(
                 "finished",
                 1,
                 4,
                 Some(0.0),
                 Some(DVector::from_vec(vec![10.0, 20.0, 0.7, 0.3])),
-            ),
+            )),
+            family: ReactorIvpSolverFamily::Lsode2,
+            status: "finished".into(),
+            method_label: "bdf".into(),
             backend_plan: ReactorIvpSolverConfig::default(),
-            algorithm: fake_summary(
-                "finished",
-                1,
-                4,
-                Some(0.0),
-                Some(DVector::from_vec(vec![10.0, 20.0, 0.7, 0.3])),
-            )
-            .algorithm,
+            algorithm: Some(
+                fake_summary(
+                    "finished",
+                    1,
+                    4,
+                    Some(0.0),
+                    Some(DVector::from_vec(vec![10.0, 20.0, 0.7, 0.3])),
+                )
+                .algorithm,
+            ),
             statistics: Default::default(),
             native_statistics: Default::default(),
             evaluation_telemetry: Default::default(),
+            native_telemetry: None,
+            stage_telemetry: Default::default(),
         };
 
         let rows = snapshot
@@ -540,7 +578,7 @@ mod tests {
                 .zip(snapshot.axis.iter().skip(1))
                 .all(|(current, next)| next >= current)
         );
-        assert!(snapshot.evaluation_telemetry().accepted_steps > 0);
+        assert!(snapshot.evaluation_telemetry().unwrap().accepted_steps > 0);
     }
 
     #[test]
@@ -550,7 +588,7 @@ mod tests {
             .expect("condensed setup should succeed");
 
         let override_config = ReactorIvpSolverConfig::default()
-            .with_method(ReactorIvpMethod::Adams)
+            .with_lsode2_controller(ReactorIvpMethod::Adams)
             .with_execution_backend(ReactorIvpExecutionBackend::Lambdify)
             .with_matrix_backend(ReactorIvpMatrixBackend::Sparse)
             .with_integration_domain(0.0, 0.02);
@@ -560,7 +598,7 @@ mod tests {
             .expect("temporary backend override should solve");
 
         assert_eq!(snapshot.backend_config(), override_config);
-        assert_eq!(snapshot.method(), ReactorIvpMethod::Adams);
+        assert_eq!(snapshot.lsode2_controller(), Some(ReactorIvpMethod::Adams));
         assert_eq!(task.solver_backend_config, override_config);
     }
 
@@ -586,7 +624,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(IvpError::CalculationError(message))
-            if message.contains("not finite")
+            if message.contains("non-finite")
         ));
     }
 

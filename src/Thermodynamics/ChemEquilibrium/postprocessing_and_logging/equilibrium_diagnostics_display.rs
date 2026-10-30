@@ -376,13 +376,14 @@ pub fn format_diagnostics(
             EquilibriumDiagnosticEvent::ExtensiveNormalizationRecoveryAccepted {
                 physical_inventory_scale,
                 trigger_kind,
+                trigger_reason,
                 discovery_backend,
                 physical_retry_backend,
                 reconstructed_physical_boundary,
             } => {
                 writeln!(
                     text,
-                    "extensive normalization accepted: scale={physical_inventory_scale:.6e} mol, trigger={trigger_kind:?}, discovery={discovery_backend}, physical_retry={}, reconstructed={reconstructed_physical_boundary}",
+                    "extensive normalization accepted: scale={physical_inventory_scale:.6e} mol, trigger={trigger_kind:?} ({trigger_reason}), discovery={discovery_backend}, physical_retry={}, reconstructed={reconstructed_physical_boundary}",
                     physical_retry_backend.as_deref().unwrap_or("none"),
                 )
                 .ok();
@@ -426,20 +427,19 @@ pub fn format_diagnostics(
     text
 }
 
-/// Explains the recovery route without presenting normalized coordinates as
-/// physical result data. The immutable evidence retains the original failure,
-/// so a successful recovery remains auditable rather than looking like a
-/// backend silently succeeded on a different problem.
+/// Explains normalization without presenting normalized coordinates as
+/// physical result data.
 fn format_extensive_recovery_detail(evidence: &ExtensiveNormalizationRecoveryEvidence) -> String {
     format!(
-        "recovery detail: physical solve failed numerically; normalized basin accepted by {:?}; publication={}; physical_failure={}; physical_retry_failure={}",
+        "normalization detail: trigger={:?}; normalized basin accepted by {:?}; publication={}; trigger_reason={}; physical_retry_failure={}",
+        evidence.trigger,
         evidence.discovery_backend,
         if evidence.reconstructed_physical_boundary {
             "reconstruction"
         } else {
             "physical retry"
         },
-        evidence.trigger_message,
+        evidence.trigger.description(),
         evidence.physical_retry_failure.as_deref().unwrap_or("none"),
     )
 }
@@ -647,9 +647,12 @@ mod tests {
     fn recovery_detail_explains_failure_and_publication_route() {
         let evidence = ExtensiveNormalizationRecoveryEvidence {
             physical_inventory_scale: 1.0e4,
-            trigger_kind: ReactionExtentErrorKind::AllBackendsFailed,
-            trigger_message: "all physical backends failed".to_string(),
-            discovery_backend: SolverBackend::Legacy(Solvers::NR),
+            trigger: crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::
+                ExtensiveNormalizationTrigger::NumericalFailure {
+                    error_kind: ReactionExtentErrorKind::AllBackendsFailed,
+                    message: "all physical backends failed".to_string(),
+                },
+            discovery_backend: SolverBackend::Native(Solvers::NR),
             physical_retry_backend: None,
             physical_retry_failure: Some("physical retry remained ill-conditioned".to_string()),
             physical_failure_attempts: Vec::new(),
@@ -664,10 +667,10 @@ mod tests {
         };
 
         let rendered = format_extensive_recovery_detail(&evidence);
-        assert!(rendered.contains("physical solve failed numerically"));
+        assert!(rendered.contains("trigger=NumericalFailure"));
         assert!(rendered.contains("normalized basin accepted"));
         assert!(rendered.contains("publication=reconstruction"));
-        assert!(rendered.contains("all physical backends failed"));
+        assert!(rendered.contains("trigger_reason=all physical backends failed"));
         assert!(rendered.contains("physical retry remained ill-conditioned"));
         assert!(!rendered.contains("normalized_moles"));
         assert!(!rendered.contains("normalized_total"));

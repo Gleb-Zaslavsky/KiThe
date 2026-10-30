@@ -11,6 +11,10 @@ use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser
 use RustedSciThe::command_interpreter::task_parser_ivp::{
     IvpSolverSettingsSpec, Lsode2TaskExecutionSpec, parse_ivp_solver_settings_from_document,
 };
+use RustedSciThe::command_interpreter::task_parser_ivp_hybrid::{
+    HybridStiffSettings, parse_hybrid_stiff_settings_from_document,
+    serialize_hybrid_solver_fragment,
+};
 use RustedSciThe::numerical::LSODE2::config::{
     Lsode2AotProfile, Lsode2AotToolchain, Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy,
     Lsode2LinearSystemStructure, Lsode2NativeExecutionConfig,
@@ -35,6 +39,8 @@ pub struct ReactorIvpDocumentSpec {
     pub thermal_effects: Vec<f64>,
     pub stop_condition: ReactorIvpStopConditionSpec,
     pub solver_settings: IvpSolverSettingsSpec,
+    pub hybrid_solver_settings: Option<HybridStiffSettings>,
+    pub hybrid_solver_fragment: Option<String>,
 }
 
 /// Local stop-condition contract for the condensed-phase IVP task document.
@@ -143,6 +149,7 @@ impl ReactorIvpDocumentSpec {
         task.set_scaling(self.scaling.clone())?;
         task.set_initial_conditions(self.initial_conditions.clone());
         task.set_thermal_effects(self.thermal_effects.clone());
+        task.set_hybrid_solver_settings(self.hybrid_solver_settings.clone());
         Ok(())
     }
 
@@ -152,15 +159,6 @@ impl ReactorIvpDocumentSpec {
     /// optional solver settings were originally supplied in a shorter form.
     pub fn document_to_string(&self) -> String {
         let mut out = String::new();
-
-        push_section(
-            &mut out,
-            "task",
-            &[
-                ("solver", "IVP".to_string()),
-                ("method", "LSODE2".to_string()),
-            ],
-        );
 
         let mut process_conditions = Vec::new();
         if let Some(name) = &self.problem_name {
@@ -235,6 +233,23 @@ impl ReactorIvpDocumentSpec {
         }
         push_section(&mut out, "stop_condition", &stop_condition);
 
+        if let Some(fragment) = &self.hybrid_solver_fragment {
+            out.push_str(fragment);
+            return out;
+        }
+
+        push_section(
+            &mut out,
+            "task",
+            &[
+                ("solver", "IVP".to_string()),
+                (
+                    "method",
+                    method_document_name(&self.solver_settings.solver.method),
+                ),
+            ],
+        );
+
         let mut solver_options = Vec::new();
         if let Some(value) = self.solver_settings.solver_options.max_iterations {
             solver_options.push(("max_iterations", value.to_string()));
@@ -259,6 +274,18 @@ impl ReactorIvpDocumentSpec {
         }
         if let Some(value) = self.solver_settings.solver_options.neighborhood_check {
             solver_options.push(("neighborhood_check", value.to_string()));
+        }
+        if let Some(value) = self.solver_settings.solver_options.telemetry {
+            let label = match value {
+                RustedSciThe::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Off => "off",
+                RustedSciThe::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Counters => "counters",
+                RustedSciThe::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Timings => "timings",
+                RustedSciThe::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Detailed => "detailed",
+            };
+            solver_options.push(("telemetry", label.to_string()));
+        }
+        if let Some(level) = self.solver_settings.solver_options.logging {
+            solver_options.push(("logging", format!("{:?}", level).to_ascii_lowercase()));
         }
 
         if let Some(lsode2) = self.solver_settings.solver_options.lsode2.as_ref() {
@@ -307,6 +334,9 @@ impl ReactorIvpDocumentSpec {
                         solver_options.push(("lsode2_linear_structure", "banded".to_string()));
                         solver_options.push(("lsode2_banded_kl", kl.to_string()));
                         solver_options.push(("lsode2_banded_ku", ku.to_string()));
+                    }
+                    Lsode2LinearSystemStructure::BandedAuto => {
+                        solver_options.push(("lsode2_linear_structure", "banded".to_string()));
                     }
                 }
             }
@@ -367,7 +397,10 @@ impl ReactorIvpDocumentSpec {
             }
         }
 
-        if solver_options.is_empty() {
+        if solver_options.is_empty()
+            && self.solver_settings.solver.method
+                == RustedSciThe::command_interpreter::task_parser_ivp::IvpMethodSpec::Lsode2
+        {
             solver_options.push(("lsode2_method_family", "auto".to_string()));
             solver_options.push(("lsode2_symbolic_assembly", "AtomView".to_string()));
             solver_options.push(("lsode2_symbolic_execution", "LambdifyExpr".to_string()));
@@ -408,6 +441,18 @@ pub fn parse_reactor_ivp_document(
     let stop_condition = parse_stop_condition(document)?;
     let solver_settings = parse_ivp_solver_settings_from_document(document)
         .map_err(|error| IvpError::InvalidConfiguration(error.to_string()))?;
+    let hybrid_solver_settings = parse_hybrid_stiff_settings_from_document(document)
+        .map_err(|error| IvpError::InvalidConfiguration(error.to_string()))?;
+    let hybrid_solver_fragment = serialize_hybrid_solver_fragment(document)
+        .map_err(|error| IvpError::InvalidConfiguration(error.to_string()))?;
+    if stop_condition.enabled
+        && solver_settings.solver.method
+            != RustedSciThe::command_interpreter::task_parser_ivp::IvpMethodSpec::Lsode2
+    {
+        return Err(IvpError::InvalidConfiguration(
+            "the condensed species stop condition is currently supported only by LSODE2".into(),
+        ));
+    }
 
     Ok(ReactorIvpDocumentSpec {
         problem_name,
@@ -420,7 +465,24 @@ pub fn parse_reactor_ivp_document(
         thermal_effects,
         stop_condition,
         solver_settings,
+        hybrid_solver_settings: Some(hybrid_solver_settings),
+        hybrid_solver_fragment: Some(hybrid_solver_fragment),
     })
+}
+
+fn method_document_name(
+    method: &RustedSciThe::command_interpreter::task_parser_ivp::IvpMethodSpec,
+) -> String {
+    use RustedSciThe::command_interpreter::task_parser_ivp::IvpMethodSpec;
+    match method {
+        IvpMethodSpec::Lsode2 => "LSODE2".to_string(),
+        IvpMethodSpec::Bdf => "BDF".to_string(),
+        IvpMethodSpec::Radau5 => "Radau5".to_string(),
+        IvpMethodSpec::BackwardEuler => "BackwardEuler".to_string(),
+        IvpMethodSpec::Lsode => "LSODE".to_string(),
+        IvpMethodSpec::Lsoda => "LSODA".to_string(),
+        IvpMethodSpec::NonStiff(name) => name.clone(),
+    }
 }
 
 /// Parse a reactor IVP document directly from text.
@@ -440,7 +502,7 @@ pub fn parse_reactor_ivp_document_from_str(
 /// Build a parser-ready canonical condensed-reactor IVP task template.
 ///
 /// Physical inputs stay local to KiThe, while solver options use the typed
-/// LSODE2 vocabulary that RustedSciThe already understands.
+/// vocabulary currently supported by RustedSciThe for the selected family.
 pub fn build_canonical_condensed_reactor_ivp_task_template() -> String {
     let mut template = String::new();
 
@@ -484,7 +546,6 @@ pub fn build_canonical_condensed_reactor_ivp_task_template() -> String {
     template.push_str("atol: 1e-8\n");
     template.push_str("max_step: 1e-3\n");
     template.push_str("first_step: Some(1e-6)\n");
-    template.push_str("parallel: false\n");
     template.push_str("lsode2_method_family: auto\n");
     template.push_str("lsode2_symbolic_assembly: AtomView\n");
     template.push_str("lsode2_symbolic_execution: LambdifyExpr\n");

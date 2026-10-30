@@ -56,8 +56,10 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
     PhaseEquilibriumBuildRequest, PhaseEquilibriumProblemBundle, SupportedPhaseModelPolicy,
 };
-use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::ExtensiveNormalizationRecoveryEvidence;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::MultiphaseEquilibriumSolution;
+use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::{
+    ExtensiveNormalizationRecoveryEvidence, ExtensiveNormalizationTrigger,
+};
 use crate::Thermodynamics::User_PhaseOrSolution::{
     ResolvedPhaseSystem, ResolvedPhaseSystemReport, SubstanceSystemFactory,
     SubstanceSystemFactoryError, SubstanceSystemSpec,
@@ -112,11 +114,27 @@ pub enum ExtensiveNormalizationPolicy {
     Disabled,
     /// Retry only after a classified numerical failure of the physical solve.
     OnNumericalFailure,
+    /// Also precondition P,H requests whose physical inventory scale is below
+    /// one mole before attempting the physical-coordinate route.
+    OnNumericalFailureAndSmallScalePhPreconditioning,
+}
+
+impl ExtensiveNormalizationPolicy {
+    pub const fn allows_numerical_failure_recovery(self) -> bool {
+        matches!(
+            self,
+            Self::OnNumericalFailure | Self::OnNumericalFailureAndSmallScalePhPreconditioning
+        )
+    }
+
+    pub const fn allows_small_scale_ph_preconditioning(self) -> bool {
+        matches!(self, Self::OnNumericalFailureAndSmallScalePhPreconditioning)
+    }
 }
 
 impl Default for ExtensiveNormalizationPolicy {
     fn default() -> Self {
-        Self::OnNumericalFailure
+        Self::OnNumericalFailureAndSmallScalePhPreconditioning
     }
 }
 
@@ -144,7 +162,7 @@ pub struct EquilibriumSolveOptions {
 /// of a reproducible numerical contract.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EquilibriumSolveOptionsSnapshot {
-    pub preferred_legacy_backend: String,
+    pub preferred_native_backend: String,
     #[serde(default)]
     pub rst_symbolic_frontend: String,
     pub effective_backend_order: Vec<String>,
@@ -249,7 +267,7 @@ impl EquilibriumSolveOptions {
     }
 
     /// Uses the standard RST-first production cascade with the configured
-    /// legacy backend family retained as a fallback.
+    /// native backend family retained as a fallback.
     pub fn with_production_cascade(mut self) -> Self {
         self.settings.solver_policy = Some(SolverPolicy::production_default(self.settings.solver));
         self
@@ -396,7 +414,7 @@ impl EquilibriumSolveOptions {
             .clone()
             .unwrap_or_else(|| SolverPolicy::production_default(self.settings.solver));
         EquilibriumSolveOptionsSnapshot {
-            preferred_legacy_backend: format!("{:?}", self.settings.solver),
+            preferred_native_backend: format!("{:?}", self.settings.solver),
             rst_symbolic_frontend: format!("{:?}", self.settings.rst_symbolic_frontend),
             effective_backend_order: policy
                 .ordered_backends()
@@ -1396,8 +1414,10 @@ pub(crate) fn recover_resolved_pt_after_numerical_failure<'a>(
     request: ResolvedPhaseEquilibriumRequest<'a>,
     physical_error: ReactionExtentError,
 ) -> Result<MultiphaseEquilibriumSolution, ReactionExtentError> {
-    if request.solve_options.extensive_normalization_policy()
-        == ExtensiveNormalizationPolicy::OnNumericalFailure
+    if request
+        .solve_options
+        .extensive_normalization_policy()
+        .allows_numerical_failure_recovery()
         && is_extensive_normalization_recovery_candidate(&physical_error)
     {
         recover_resolved_pt_by_extensive_normalization(request, physical_error)
@@ -1581,8 +1601,10 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
         return Err(physical_error);
     }
 
-    let trigger_kind = physical_error.kind();
-    let trigger_message = physical_error.to_string();
+    let trigger = ExtensiveNormalizationTrigger::NumericalFailure {
+        error_kind: physical_error.kind(),
+        message: physical_error.to_string(),
+    };
     let layout = MultiphaseEquilibriumLayout::new(request.resolved.phase_specs().to_vec())?;
     let normalized_composition =
         normalization.normalize_initial_composition(&layout, &request.initial_composition)?;
@@ -1702,8 +1724,7 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
                 ),
                 ExtensiveNormalizationRecoveryEvidence {
                     physical_inventory_scale: normalization.physical_inventory_scale(),
-                    trigger_kind,
-                    trigger_message,
+                    trigger: trigger.clone(),
                     discovery_backend,
                     physical_retry_backend: Some(physical_retry_backend),
                     physical_retry_failure: None,
@@ -1744,8 +1765,7 @@ fn recover_resolved_pt_by_extensive_normalization<'a>(
                     ),
                     ExtensiveNormalizationRecoveryEvidence {
                         physical_inventory_scale: normalization.physical_inventory_scale(),
-                        trigger_kind,
-                        trigger_message,
+                        trigger: trigger.clone(),
                         discovery_backend,
                         physical_retry_backend: None,
                         physical_retry_failure: Some(retry_message),
@@ -1780,7 +1800,8 @@ fn attach_extensive_normalization_recovery(
 ) -> MultiphaseEquilibriumSolution {
     let event = EquilibriumDiagnosticEvent::ExtensiveNormalizationRecoveryAccepted {
         physical_inventory_scale: evidence.physical_inventory_scale,
-        trigger_kind: evidence.trigger_kind,
+        trigger_kind: evidence.trigger.error_kind(),
+        trigger_reason: evidence.trigger.description(),
         discovery_backend: format!("{:?}", evidence.discovery_backend),
         physical_retry_backend: evidence
             .physical_retry_backend
@@ -1813,7 +1834,7 @@ mod tests {
         PhaseEquilibriumInputKind, PhaseEquilibriumSeedSource,
     };
     use crate::Thermodynamics::ChemEquilibrium::prelude::{
-        LegacyEquilibriumSolver, LogMolesInitialGuess, RustedSciTheSolver, SolverBackend,
+        LogMolesInitialGuess, NativeEquilibriumSolver, RustedSciTheSolver, SolverBackend,
         SolverPolicy,
     };
     use crate::Thermodynamics::User_PhaseOrSolution::{
@@ -1944,7 +1965,7 @@ mod tests {
         let rst = SolverPolicy::Single(SolverBackend::RustedSciThe(
             RustedSciTheSolver::MinpackLevenbergMarquardt,
         ));
-        let legacy = SolverPolicy::Single(SolverBackend::Legacy(LegacyEquilibriumSolver::NR));
+        let legacy = SolverPolicy::Single(SolverBackend::Native(NativeEquilibriumSolver::NR));
 
         EquilibriumSolveOptions::new()
             .with_solver_policy(rst)
@@ -2357,7 +2378,7 @@ mod tests {
             .expect("candidate phase plan must build")
             .with_solve_options(
                 EquilibriumSolveOptions::new()
-                    .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+                    .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
                     .expect("single local backend policy must validate"),
             )
             .solve()
@@ -2635,8 +2656,8 @@ mod tests {
         .unwrap();
         let conditions = EquilibriumConditions::new(500.0, 101_325.0, 101_325.0).unwrap();
         let options = EquilibriumSolveOptions::new()
-            .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
-            .expect("single legacy backend policy must validate");
+            .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
+            .expect("single native backend policy must validate");
         let pipeline = PhaseEquilibriumPipelineRequest::new(spec, vec![0.79, 0.21], conditions)
             .with_solve_options(options.clone());
         let resolved = pipeline
@@ -2903,13 +2924,31 @@ mod tests {
         let defaults = EquilibriumSolveOptions::default();
         assert_eq!(
             defaults.extensive_normalization_policy(),
-            ExtensiveNormalizationPolicy::OnNumericalFailure
+            ExtensiveNormalizationPolicy::OnNumericalFailureAndSmallScalePhPreconditioning
         );
         assert_eq!(
             defaults
                 .reproducibility_snapshot()
                 .extensive_normalization_policy,
-            "OnNumericalFailure"
+            "OnNumericalFailureAndSmallScalePhPreconditioning"
+        );
+        assert!(
+            defaults
+                .extensive_normalization_policy()
+                .allows_small_scale_ph_preconditioning()
+        );
+        let failure_only = defaults
+            .clone()
+            .with_extensive_normalization_policy(ExtensiveNormalizationPolicy::OnNumericalFailure);
+        assert!(
+            failure_only
+                .extensive_normalization_policy()
+                .allows_numerical_failure_recovery()
+        );
+        assert!(
+            !failure_only
+                .extensive_normalization_policy()
+                .allows_small_scale_ph_preconditioning()
         );
 
         let disabled =
@@ -3062,7 +3101,7 @@ mod tests {
     #[test]
     fn selecting_a_preferred_backend_clears_an_explicit_policy() {
         let settings = EquilibriumSolverSettings {
-            solver_policy: Some(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR))),
+            solver_policy: Some(SolverPolicy::Single(SolverBackend::Native(Solvers::NR))),
             ..EquilibriumSolverSettings::default()
         };
         let options = EquilibriumSolveOptions::from_settings(settings)

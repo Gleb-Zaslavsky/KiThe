@@ -1,8 +1,8 @@
-//! Adapter for the historical hand-written LM/NR/TR nonlinear solvers.
+//! Adapter for the KiThe-native LM/NR/TR nonlinear solvers.
 //!
 //! # Purpose
 //!
-//! This module provides the **mechanical mapping** from a selected legacy
+//! This module provides the **mechanical mapping** from a selected native
 //! backend (LM, NR, or TR) to its concrete solver implementation in
 //! [`equilibrium_nonlinear`](super::equilibrium_nonlinear). It is a thin
 //! adapter that:
@@ -23,17 +23,17 @@
 //!
 //! | Function | Purpose |
 //! |----------|---------|
-//! | [`solve_legacy_backend`] | Dispatches to LM, NR, or TR solver |
+//! | [`solve_native_backend`] | Dispatches to LM, NR, or TR solver |
 //!
 //! # Dataflow
 //!
 //! ```text
 //!   equilibrium_backend_adapter::solve_backend_cascade_with_control()
 //!     │
-//!     ├── Selects SolverBackend::Legacy(Solvers::LM/NR/TR)
+//!     ├── Selects SolverBackend::Native(Solvers::LM/NR/TR)
 //!     │
 //!     v
-//!   solve_legacy_backend(backend, initial_guess, residual, jacobian,
+//!   solve_native_backend(backend, initial_guess, residual, jacobian,
 //!                        feasible, params, initial_moles, reactions, max_iter)
 //!     │
 //!     ├── Solvers::LM → LMSolver { f, jacobian, feasible, lambda, tol, max_iter, alpha_min }
@@ -51,7 +51,7 @@
 //!
 //! # Non-obvious Details
 //!
-//! - The legacy backends **require an analytical Jacobian**. If `jacobian` is
+//! - The native backends **require an analytical Jacobian**. If `jacobian` is
 //!   `None`, the function returns `ReactionExtentError::InvalidProblem`.
 //! - The adapter has **no fallback logic** — it runs exactly one backend and
 //!   returns. Cascade logic is in [`equilibrium_log_moles`](super::equilibrium_log_moles).
@@ -74,13 +74,13 @@ type ResidualFn<'a> = dyn Fn(&[f64]) -> Result<Vec<f64>, ReactionExtentError> + 
 type JacobianFn<'a> = dyn Fn(&[f64]) -> Result<DMatrix<f64>, ReactionExtentError> + 'a;
 type FeasibilityFn<'a> = dyn Fn(&[f64]) -> bool + 'a;
 
-/// Runs exactly one requested legacy backend with the caller-provided budget.
+/// Runs exactly one requested native backend with the caller-provided budget.
 ///
 /// The adapter deliberately has no fallback logic and never mutates a solver
 /// instance. A missing Jacobian is a configuration error because all retained
-/// legacy algorithms require one.
+/// native algorithms require one.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn solve_legacy_backend(
+pub(crate) fn solve_native_backend(
     backend: Solvers,
     initial_guess: Vec<f64>,
     residual: &ResidualFn<'_>,
@@ -90,8 +90,8 @@ pub(crate) fn solve_legacy_backend(
     max_iterations: usize,
 ) -> Result<Vec<f64>, ReactionExtentError> {
     let jacobian = jacobian.ok_or_else(|| ReactionExtentError::InvalidProblem {
-        field: "legacy_jacobian",
-        message: "a legacy backend requires the analytical Jacobian".to_string(),
+        field: "native_jacobian",
+        message: "a native backend requires the analytical Jacobian".to_string(),
     })?;
 
     match backend {
@@ -142,17 +142,17 @@ pub(crate) fn solve_legacy_backend(
 
 #[cfg(test)]
 mod tests {
-    use super::solve_legacy_backend;
+    use super::solve_native_backend;
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{SolverParams, Solvers};
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 
     #[test]
-    fn missing_legacy_jacobian_is_a_typed_configuration_error() {
+    fn missing_native_jacobian_is_a_typed_configuration_error() {
         let residual = |_values: &[f64]| Ok(vec![0.0]);
         let feasible = |_values: &[f64]| true;
 
         assert!(matches!(
-            solve_legacy_backend(
+            solve_native_backend(
                 Solvers::LM,
                 vec![0.0],
                 &residual,
@@ -162,7 +162,7 @@ mod tests {
                 1,
             ),
             Err(ReactionExtentError::InvalidProblem {
-                field: "legacy_jacobian",
+                field: "native_jacobian",
                 ..
             })
         ));

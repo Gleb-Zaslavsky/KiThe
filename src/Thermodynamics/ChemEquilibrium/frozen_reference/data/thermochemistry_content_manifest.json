@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "release_id": "kithe-bundled-thermo-2026-10-v1",
+  "assets": [
+    {
+      "path": "library_config.json",
+      "sha256": "915afc62a50cf11f30b45e985fadacca60698539855d00ce69b7b5c4a7883448"
+    },
+    {
+      "path": "substance_base_v2.json",
+      "sha256": "72eb72fbfd63975c9c475ddb17442c15d4e412c31a56d9158c36c0cd4a2069ab"
+    },
+    {
+      "path": "all_keys_substance.json",
+      "sha256": "d5dc092ecfc138fedbeb6579979a3a6c4a7d4a4d3c90b1546be076046796a2e4"
+    },
+    {
+      "path": "elements.json",
+      "sha256": "cc98b9d46c2d139b20ea43acafc8c51e3ac150d3b775af4109dcf14b7be43cc2"
+    },
+    {
+      "path": "src/Thermodynamics/ChemEquilibrium/frozen_reference/data/nist_webbook/water_gas_shomate.json",
+      "sha256": "8ad707eb53e3af7197810b2b6c6dbd364d38b9702687d0440d00e16aca701e60"
+    },
+    {
+      "path": "src/Thermodynamics/ChemEquilibrium/frozen_reference/data/nist_webbook/water_gas_shomate.metadata.json",
+      "sha256": "a57ad350ed2aea74bf99e9a1766f06d26ca1f5fbb72e714758609d22b340d985"
+    }
+  ]
+}

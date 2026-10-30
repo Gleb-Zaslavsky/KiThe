@@ -152,16 +152,16 @@
 //! # Related Modules
 //!
 //! - [`equilibrium_log_moles`](super::equilibrium_log_moles) — orchestrator that uses these solvers
-//! - [`equilibrium_legacy_backend`](super::equilibrium_legacy_backend) — adapter wrapping these solvers
+//! - [`equilibrium_native_backend`](super::equilibrium_native_backend) — adapter wrapping these solvers
 //! - [`equilibrium_reaction_basis`](super::equilibrium_reaction_basis) — typed reaction basis wrapper
 //!
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventoryError;
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::LegacySolverStage;
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::NativeSolverStage;
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::{
-    LegacyCallbackKind, legacy_solver_timing_enabled, record_legacy_callback,
-    record_legacy_jacobian, record_legacy_linear_system, record_legacy_residual,
-    record_legacy_stage,
+    NativeCallbackKind, native_solver_timing_enabled, record_native_callback,
+    record_native_jacobian, record_native_linear_system, record_native_residual,
+    record_native_stage,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptOutcome;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverAttemptReport;
@@ -971,7 +971,7 @@ mod error_contract_tests {
     fn multi_start_failure_preserves_each_typed_cascade_and_aggregates_work() {
         let cascade_failure = |solver| ReactionExtentError::AllBackendsFailed {
             attempts: vec![SolverAttemptReport {
-                backend: SolverBackend::Legacy(solver),
+                backend: SolverBackend::Native(solver),
                 outcome: SolverAttemptOutcome::Failed {
                     kind: SolverAttemptFailureKind::Solver,
                     reason: "iteration limit".to_string(),
@@ -981,6 +981,7 @@ mod error_contract_tests {
                     termination: SolverTermination::MaxIterations,
                     backend_converged: false,
                     iterations: 3,
+                    backend_progress_available: true,
                     residual_evaluations: 4,
                     jacobian_evaluations: 3,
                     linear_solves: 3,
@@ -1032,7 +1033,7 @@ mod error_contract_tests {
 
     #[test]
     fn auto_formulation_retry_requires_only_started_numerical_failures() {
-        let backend = SolverBackend::Legacy(Solvers::NR);
+        let backend = SolverBackend::Native(Solvers::NR);
         let failed = || SolverAttemptReport {
             backend,
             outcome: SolverAttemptOutcome::Failed {
@@ -1088,7 +1089,7 @@ mod error_contract_tests {
 
     #[test]
     fn aggregate_ph_errors_report_started_backend_work_recursively() {
-        let backend = SolverBackend::Legacy(Solvers::NR);
+        let backend = SolverBackend::Native(Solvers::NR);
         let failed_seed = |temperature| {
             PhMonolithicSeedFailure::new(
                 temperature,
@@ -1211,7 +1212,7 @@ mod error_contract_tests {
         let error = ReactionExtentError::UnsupportedBackendCapability {
             backend: "RustedSciThe".to_string(),
             capability: "monolithic_p_h",
-            alternatives: "legacy LM, NR, or trust-region backends".to_string(),
+            alternatives: "native LM, NR, or trust-region backends".to_string(),
         };
 
         assert_eq!(error.kind(), ReactionExtentErrorKind::UnsupportedModel);
@@ -1219,7 +1220,7 @@ mod error_contract_tests {
         let message = error.to_string();
         assert!(message.contains("RustedSciThe"));
         assert!(message.contains("monolithic_p_h"));
-        assert!(message.contains("legacy LM"));
+        assert!(message.contains("native LM"));
     }
 
     #[test]
@@ -1294,7 +1295,7 @@ where
         let mut lambda = self.lambda;
 
         for _iter in 0..self.max_iter {
-            let f_val = timed_legacy_residual(&self.f, &x).map_err(|error| {
+            let f_val = timed_native_residual(&self.f, &x).map_err(|error| {
                 SolveError::EvalError(format!("residual evaluation failed: {error}"))
             })?;
             info!("Iteration {}, x = {:?}, f = {:?}", _iter, x, f_val);
@@ -1307,7 +1308,7 @@ where
                 return Err(SolveError::SingularMatrix);
             }
 
-            let j = timed_legacy_jacobian(&self.jacobian, &x).map_err(|error| {
+            let j = timed_native_jacobian(&self.jacobian, &x).map_err(|error| {
                 SolveError::EvalError(format!("Jacobian evaluation failed: {error}"))
             })?;
             info!("  Jacobian:\n{}", j);
@@ -1325,22 +1326,22 @@ where
             if j.iter().any(|value| !value.is_finite()) {
                 return Err(SolveError::SingularMatrix);
             }
-            let jt = timed_legacy_stage(LegacySolverStage::MatrixOperations, || j.transpose());
+            let jt = timed_native_stage(NativeSolverStage::MatrixOperations, || j.transpose());
 
-            let mut lhs = timed_legacy_stage(LegacySolverStage::MatrixOperations, || &jt * &j);
+            let mut lhs = timed_native_stage(NativeSolverStage::MatrixOperations, || &jt * &j);
             let jtj = &lhs;
             info!("  Jᵀ·J:\n{}", jtj);
-            timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+            timed_native_stage(NativeSolverStage::MatrixOperations, || {
                 for i in 0..n {
                     lhs[(i, i)] += lambda;
                 }
             });
 
-            let rhs = timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+            let rhs = timed_native_stage(NativeSolverStage::MatrixOperations, || {
                 -(&jt * DVector::from_vec(f_val))
             });
 
-            let delta_result = timed_legacy_linear_system(|| lhs.lu().solve(&rhs));
+            let delta_result = timed_native_linear_system(|| lhs.lu().solve(&rhs));
             let delta = delta_result.ok_or(SolveError::SingularMatrix)?;
             info!("  Step delta: {:?}", delta);
 
@@ -1348,22 +1349,22 @@ where
             let mut accepted = false;
 
             while alpha >= self.alpha_min {
-                let x_trial: Vec<f64> = timed_legacy_stage(LegacySolverStage::TrialVector, || {
+                let x_trial: Vec<f64> = timed_native_stage(NativeSolverStage::TrialVector, || {
                     x.iter()
                         .zip(delta.iter())
                         .map(|(xi, dxi)| xi + alpha * dxi)
                         .collect()
                 });
                 info!("    Trial x (alpha={}): {:?}", alpha, x_trial);
-                let feasible = timed_legacy_stage(LegacySolverStage::Feasibility, || {
+                let feasible = timed_native_stage(NativeSolverStage::Feasibility, || {
                     (self.feasible)(&x_trial)
                 });
                 if !feasible {
-                    alpha = timed_legacy_stage(LegacySolverStage::Globalization, || alpha * 0.5);
+                    alpha = timed_native_stage(NativeSolverStage::Globalization, || alpha * 0.5);
                     continue;
                 }
 
-                let f_trial = timed_legacy_residual(&self.f, &x_trial).map_err(|error| {
+                let f_trial = timed_native_residual(&self.f, &x_trial).map_err(|error| {
                     SolveError::EvalError(format!("residual evaluation failed: {error}"))
                 })?;
                 info!("    Trial f: {:?}", f_trial);
@@ -1371,16 +1372,16 @@ where
                 info!("    ||f_trial|| = {}", f_trial_norm);
                 if f_trial_norm < f_norm {
                     x = x_trial;
-                    lambda = timed_legacy_stage(LegacySolverStage::Globalization, || lambda * 0.3);
+                    lambda = timed_native_stage(NativeSolverStage::Globalization, || lambda * 0.3);
                     accepted = true;
                     break;
                 } else {
-                    alpha = timed_legacy_stage(LegacySolverStage::Globalization, || alpha * 0.5);
+                    alpha = timed_native_stage(NativeSolverStage::Globalization, || alpha * 0.5);
                 }
             }
 
             if !accepted {
-                lambda = timed_legacy_stage(LegacySolverStage::Globalization, || lambda * 10.0);
+                lambda = timed_native_stage(NativeSolverStage::Globalization, || lambda * 10.0);
                 info!(
                     "  No acceptable step found; increasing lambda to {}",
                     lambda
@@ -1431,7 +1432,7 @@ where
         let n = x.len();
 
         for iter in 0..self.max_iter {
-            let f_val = timed_legacy_residual(&self.f, &x)
+            let f_val = timed_native_residual(&self.f, &x)
                 .map_err(|error| SolveError::EvalError(error.to_string()))?;
             info!("NR Iteration {}, x = {:?}, f = {:?}", iter, x, f_val);
             let f_norm = l2_norm(&f_val);
@@ -1442,7 +1443,7 @@ where
             if f_norm.is_nan() || f_norm.is_infinite() {
                 return Err(SolveError::SingularMatrix);
             }
-            let j = timed_legacy_jacobian(&self.jacobian, &x)
+            let j = timed_native_jacobian(&self.jacobian, &x)
                 .map_err(|error| SolveError::EvalError(error.to_string()))?;
 
             info!(" Jacobian:\n{}", j);
@@ -1458,10 +1459,10 @@ where
                 ));
             }
             // Solve J * delta = -f
-            let rhs = timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+            let rhs = timed_native_stage(NativeSolverStage::MatrixOperations, || {
                 -DVector::from_vec(f_val)
             });
-            let delta_result = timed_legacy_linear_system(|| j.lu().solve(&rhs));
+            let delta_result = timed_native_linear_system(|| j.lu().solve(&rhs));
             let delta_vec = delta_result.ok_or(SolveError::SingularMatrix)?;
             let delta = delta_vec.data.as_vec();
             info!(" Step delta: {:?}", delta_vec);
@@ -1470,22 +1471,22 @@ where
 
             let mut accepted = false;
             while alpha >= self.alpha_min {
-                let x_trial: Vec<f64> = timed_legacy_stage(LegacySolverStage::TrialVector, || {
+                let x_trial: Vec<f64> = timed_native_stage(NativeSolverStage::TrialVector, || {
                     x.iter()
                         .zip(delta.iter())
                         .map(|(xi, dxi)| xi + alpha * dxi)
                         .collect()
                 });
                 info!(" Trial x (alpha={}): {:?}", alpha, x_trial);
-                let feasible = timed_legacy_stage(LegacySolverStage::Feasibility, || {
+                let feasible = timed_native_stage(NativeSolverStage::Feasibility, || {
                     (self.feasible)(&x_trial)
                 });
                 if !feasible {
-                    alpha = timed_legacy_stage(LegacySolverStage::Globalization, || alpha * 0.5);
+                    alpha = timed_native_stage(NativeSolverStage::Globalization, || alpha * 0.5);
                     continue;
                 }
 
-                let f_trial = timed_legacy_residual(&self.f, &x_trial)
+                let f_trial = timed_native_residual(&self.f, &x_trial)
                     .map_err(|error| SolveError::EvalError(error.to_string()))?;
 
                 info!(" Trial f: {:?}", f_trial);
@@ -1498,7 +1499,7 @@ where
                     break;
                 }
 
-                alpha = timed_legacy_stage(LegacySolverStage::Globalization, || alpha * 0.5);
+                alpha = timed_native_stage(NativeSolverStage::Globalization, || alpha * 0.5);
                 if !accepted {
                     info!(" No acceptable step found; continuing to next iteration");
                 }
@@ -1519,7 +1520,7 @@ where
 }
 
 #[inline]
-fn timed_legacy_residual<F>(f: &F, values: &[f64]) -> Result<Vec<f64>, ReactionExtentError>
+fn timed_native_residual<F>(f: &F, values: &[f64]) -> Result<Vec<f64>, ReactionExtentError>
 where
     F: Fn(&[f64]) -> Result<Vec<f64>, ReactionExtentError>,
 {
@@ -1530,20 +1531,20 @@ where
 
     #[cfg(any(test, feature = "equilibrium-instrumentation"))]
     {
-        if legacy_solver_timing_enabled() {
-            record_legacy_callback(LegacyCallbackKind::Residual, values);
+        if native_solver_timing_enabled() {
+            record_native_callback(NativeCallbackKind::Residual, values);
         }
-        let started = legacy_solver_timing_enabled().then(std::time::Instant::now);
+        let started = native_solver_timing_enabled().then(std::time::Instant::now);
         let result = f(values);
         if let Some(started) = started {
-            record_legacy_residual(started.elapsed());
+            record_native_residual(started.elapsed());
         }
         result
     }
 }
 
 #[inline]
-fn timed_legacy_jacobian<F>(
+fn timed_native_jacobian<F>(
     jacobian: &F,
     values: &[f64],
 ) -> Result<DMatrix<f64>, ReactionExtentError>
@@ -1557,13 +1558,13 @@ where
 
     #[cfg(any(test, feature = "equilibrium-instrumentation"))]
     {
-        if legacy_solver_timing_enabled() {
-            record_legacy_callback(LegacyCallbackKind::Jacobian, values);
+        if native_solver_timing_enabled() {
+            record_native_callback(NativeCallbackKind::Jacobian, values);
         }
-        let started = legacy_solver_timing_enabled().then(std::time::Instant::now);
+        let started = native_solver_timing_enabled().then(std::time::Instant::now);
         let result = jacobian(values);
         if let Some(started) = started {
-            record_legacy_jacobian(started.elapsed());
+            record_native_jacobian(started.elapsed());
         }
         result
     }
@@ -1571,7 +1572,7 @@ where
 
 #[cfg(not(any(test, feature = "equilibrium-instrumentation")))]
 #[inline]
-fn timed_legacy_linear_system<F, T>(solve: F) -> T
+fn timed_native_linear_system<F, T>(solve: F) -> T
 where
     F: FnOnce() -> T,
 {
@@ -1579,19 +1580,19 @@ where
 }
 
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
-fn timed_legacy_linear_system<F, T>(solve: F) -> T
+fn timed_native_linear_system<F, T>(solve: F) -> T
 where
     F: FnOnce() -> T,
 {
     let started = std::time::Instant::now();
     let result = solve();
-    record_legacy_linear_system(started.elapsed());
+    record_native_linear_system(started.elapsed());
     result
 }
 
 #[cfg(not(any(test, feature = "equilibrium-instrumentation")))]
 #[inline]
-fn timed_legacy_stage<T, F>(_: LegacySolverStage, operation: F) -> T
+fn timed_native_stage<T, F>(_: NativeSolverStage, operation: F) -> T
 where
     F: FnOnce() -> T,
 {
@@ -1600,14 +1601,14 @@ where
 
 #[cfg(any(test, feature = "equilibrium-instrumentation"))]
 #[inline]
-fn timed_legacy_stage<T, F>(stage: LegacySolverStage, operation: F) -> T
+fn timed_native_stage<T, F>(stage: NativeSolverStage, operation: F) -> T
 where
     F: FnOnce() -> T,
 {
-    let started = legacy_solver_timing_enabled().then(std::time::Instant::now);
+    let started = native_solver_timing_enabled().then(std::time::Instant::now);
     let result = operation();
     if let Some(started) = started {
-        record_legacy_stage(stage, started.elapsed());
+        record_native_stage(stage, started.elapsed());
     }
     result
 }
@@ -1616,7 +1617,7 @@ where
 ///
 /// Helper function for convergence checking in solvers.
 fn l2_norm(v: &[f64]) -> f64 {
-    timed_legacy_stage(LegacySolverStage::Norm, || {
+    timed_native_stage(NativeSolverStage::Norm, || {
         v.iter().map(|x| x * x).sum::<f64>().sqrt()
     })
 }
@@ -1652,7 +1653,7 @@ where
         let mut delta = self.delta_init;
 
         for _iter in 0..self.max_iter {
-            let f_val = timed_legacy_residual(&self.f, &x)
+            let f_val = timed_native_residual(&self.f, &x)
                 .map_err(|error| SolveError::EvalError(error.to_string()))?;
             if f_val.len() != n {
                 return Err(SolveError::EvalError("residual dimension mismatch".into()));
@@ -1666,7 +1667,7 @@ where
                 return Ok(x);
             }
 
-            let J = timed_legacy_jacobian(&self.jacobian, &x)
+            let J = timed_native_jacobian(&self.jacobian, &x)
                 .map_err(|error| SolveError::EvalError(error.to_string()))?;
 
             if J.nrows() != n || J.ncols() != n {
@@ -1682,36 +1683,36 @@ where
                 return Err(SolveError::SingularMatrix);
             }
 
-            let fvec = timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+            let fvec = timed_native_stage(NativeSolverStage::MatrixOperations, || {
                 DVector::from_vec(f_val)
             });
 
             // --- Cauchy step ---
-            let g = timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+            let g = timed_native_stage(NativeSolverStage::MatrixOperations, || {
                 &J.transpose() * &fvec
             });
-            let g_norm_sq = timed_legacy_stage(LegacySolverStage::Norm, || g.dot(&g));
-            let jg = timed_legacy_stage(LegacySolverStage::MatrixOperations, || &J * &g);
-            let jg_norm_sq = timed_legacy_stage(LegacySolverStage::Norm, || jg.dot(&jg));
+            let g_norm_sq = timed_native_stage(NativeSolverStage::Norm, || g.dot(&g));
+            let jg = timed_native_stage(NativeSolverStage::MatrixOperations, || &J * &g);
+            let jg_norm_sq = timed_native_stage(NativeSolverStage::Norm, || jg.dot(&jg));
             let alpha = g_norm_sq / jg_norm_sq.max(1e-16);
             let cauchy_step =
-                timed_legacy_stage(LegacySolverStage::MatrixOperations, || -alpha * g.clone());
+                timed_native_stage(NativeSolverStage::MatrixOperations, || -alpha * g.clone());
 
             // --- Dogleg step ---
-            let cauchy_norm = timed_legacy_stage(LegacySolverStage::Norm, || cauchy_step.norm());
+            let cauchy_norm = timed_native_stage(NativeSolverStage::Norm, || cauchy_step.norm());
             // A boundary Cauchy step does not use the Newton step. Delay the
             // LU solve until the dogleg path actually needs Newton data.
             let p = if cauchy_norm >= delta {
-                timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+                timed_native_stage(NativeSolverStage::MatrixOperations, || {
                     delta / cauchy_norm * cauchy_step
                 })
             } else {
                 let newton_step_result =
-                    timed_legacy_linear_system(|| J.clone().lu().solve(&(-&fvec)));
+                    timed_native_linear_system(|| J.clone().lu().solve(&(-&fvec)));
                 let newton_step = newton_step_result.ok_or(SolveError::SingularMatrix)?;
                 let newton_norm =
-                    timed_legacy_stage(LegacySolverStage::Norm, || newton_step.norm());
-                timed_legacy_stage(LegacySolverStage::MatrixOperations, || {
+                    timed_native_stage(NativeSolverStage::Norm, || newton_step.norm());
+                timed_native_stage(NativeSolverStage::MatrixOperations, || {
                     if newton_norm <= delta {
                         newton_step
                     } else {
@@ -1728,20 +1729,20 @@ where
                     }
                 })
             };
-            let p_norm = timed_legacy_stage(LegacySolverStage::Norm, || p.norm());
+            let p_norm = timed_native_stage(NativeSolverStage::Norm, || p.norm());
 
-            let x_trial: Vec<f64> = timed_legacy_stage(LegacySolverStage::TrialVector, || {
+            let x_trial: Vec<f64> = timed_native_stage(NativeSolverStage::TrialVector, || {
                 x.iter().zip(p.iter()).map(|(xi, pi)| xi + pi).collect()
             });
 
             let feasible =
-                timed_legacy_stage(LegacySolverStage::Feasibility, || (self.feasible)(&x_trial));
+                timed_native_stage(NativeSolverStage::Feasibility, || (self.feasible)(&x_trial));
             if !feasible {
-                timed_legacy_stage(LegacySolverStage::Globalization, || delta *= 0.25);
+                timed_native_stage(NativeSolverStage::Globalization, || delta *= 0.25);
                 continue;
             }
 
-            let f_trial = timed_legacy_residual(&self.f, &x_trial)
+            let f_trial = timed_native_residual(&self.f, &x_trial)
                 .map_err(|error| SolveError::EvalError(error.to_string()))?;
 
             // A numerically exact trial root must be accepted directly.  At
@@ -1765,22 +1766,22 @@ where
             // Forming the dense J^T J matrix here repeats expensive work and
             // allocates a matrix that is immediately reduced to one scalar.
             let jacobian_trial =
-                timed_legacy_stage(LegacySolverStage::MatrixOperations, || &J * &p);
-            let linear_model_term = timed_legacy_stage(LegacySolverStage::Norm, || g.dot(&p));
-            let quadratic_model_term = timed_legacy_stage(LegacySolverStage::Norm, || {
+                timed_native_stage(NativeSolverStage::MatrixOperations, || &J * &p);
+            let linear_model_term = timed_native_stage(NativeSolverStage::Norm, || g.dot(&p));
+            let quadratic_model_term = timed_native_stage(NativeSolverStage::Norm, || {
                 jacobian_trial.dot(&jacobian_trial)
             });
             let model_reduction = -2.0 * linear_model_term - quadratic_model_term;
 
             if !model_reduction.is_finite() || model_reduction <= 0.0 {
-                timed_legacy_stage(LegacySolverStage::Globalization, || delta *= 0.25);
+                timed_native_stage(NativeSolverStage::Globalization, || delta *= 0.25);
                 continue;
             }
 
             let rho = actual_reduction / model_reduction;
 
             // --- Trust region update ---
-            timed_legacy_stage(LegacySolverStage::Globalization, || {
+            timed_native_stage(NativeSolverStage::Globalization, || {
                 if rho < 0.25 {
                     delta *= 0.25;
                 } else if rho > 0.75 && (p_norm - delta).abs() < 1e-12 {

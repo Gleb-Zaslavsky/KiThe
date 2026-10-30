@@ -87,7 +87,7 @@
 //!   │  3. build_solve_contract() ──> create residual/Jacobian closures    │
 //!   │  4. solver_impl() ──> run backend cascade                           │
 //!   │     ├── solve_backend_cascade() ──> try backends in order           │
-//!   │     │   ├── Legacy(LM/NR/TR) ──> equilibrium_legacy_backend         │
+//!   │     │   ├── Native(LM/NR/TR) ──> equilibrium_native_backend         │
 //!   │     │   └── RustedSciThe ──> equilibrium_rst_backend                │
 //!   │     └── validate_equilibrium_candidate() ──> acceptance gate        │
 //!   │  5. publish_solve_candidate() ──> store accepted solution           │
@@ -180,7 +180,7 @@
 //! - [`equilibrium_validation`](super::equilibrium_validation) — backend-independent acceptance gate
 //! - [`equilibrium_solver_policy`](super::equilibrium_solver_policy) — backend selection and cascade budget
 //! - [`equilibrium_rst_backend`](super::equilibrium_rst_backend) — RustedSciThe symbolic backend
-//! - [`equilibrium_legacy_backend`](super::equilibrium_legacy_backend) — legacy LM/NR/TR adapter
+//! - [`equilibrium_native_backend`](super::equilibrium_native_backend) — legacy LM/NR/TR adapter
 //! - [`equilibrium_activity`](super::equilibrium_activity) — activity models
 //! - [`equilibrium_ids`](super::equilibrium_ids) — typed index wrappers
 //! - [`equilibrium_constant_cross_validation`](super::equilibrium_constant_cross_validation) — K_eq cross-validation
@@ -300,7 +300,7 @@ pub struct SolverParams {
 pub struct EquilibriumSolverSettings {
     /// Numerical solver parameters (max iterations, tolerances, damping, trust-region radii).
     pub solver_params: SolverParams,
-    /// Preferred legacy solver backend (LM, NR, or TR). When symbolic context
+    /// Preferred native solver backend (LM, NR, or TR). When symbolic context
     /// exists and `solver_policy` is `None`, it becomes the first legacy
     /// fallback after the RST cascade.
     pub solver: Solvers,
@@ -1586,7 +1586,7 @@ impl EquilibriumLogMoles {
     /// 1. Builds the raw unscaled residual closure `F_raw(y)` from the log-mole formulation.
     /// 2. Computes row-scaling factors via [`equilibrium_scaling`].
     /// 3. Wraps the residual in a scaled version if `scaling_flag` is enabled.
-    /// 4. Builds the analytical Jacobian closure for legacy backends (LM/NR/TR).
+    /// 4. Builds the analytical Jacobian closure for native backends (LM/NR/TR).
     /// 5. Prepares the symbolic RST problem if any RST backend is in the policy.
     ///
     /// Keeping this in one place ensures the scalar solve and all sweep
@@ -1646,20 +1646,20 @@ impl EquilibriumLogMoles {
                 if self.has_rst_symbolic_context() {
                     SolverPolicy::production_default(self.solver_settings.solver)
                 } else {
-                    SolverPolicy::legacy_default(self.solver_settings.solver)
+                    SolverPolicy::native_default(self.solver_settings.solver)
                 }
             })
             .ordered_backends();
-        let uses_legacy_backend = ordered_backends
+        let uses_native_backend = ordered_backends
             .iter()
-            .any(|backend| matches!(backend, SolverBackend::Legacy(_)));
+            .any(|backend| matches!(backend, SolverBackend::Native(_)));
         let uses_rst_backend = ordered_backends
             .iter()
             .any(|backend| matches!(backend, SolverBackend::RustedSciThe(_)));
 
         let phases_len = self.phases.len();
         let scaling_flag = self.solver_settings.scaling_flag;
-        let j = if uses_legacy_backend {
+        let j = if uses_native_backend {
             let stoich = stoich.clone();
             let species_phase = species_phase.clone();
             let delta_n = delta_n.clone();
@@ -2684,7 +2684,7 @@ impl EquilibriumLogMoles {
                 if self.has_rst_symbolic_context() {
                     SolverPolicy::production_default(self.solver_settings.solver)
                 } else {
-                    SolverPolicy::legacy_default(self.solver_settings.solver)
+                    SolverPolicy::native_default(self.solver_settings.solver)
                 }
             });
         if policy.ordered_backends().is_empty() {
@@ -3087,8 +3087,8 @@ mod solver_budget_tests {
                 &feasible,
                 &accept,
                 SolverPolicy::Cascade(vec![
-                    SolverBackend::Legacy(Solvers::LM),
-                    SolverBackend::Legacy(Solvers::NR),
+                    SolverBackend::Native(Solvers::LM),
+                    SolverBackend::Native(Solvers::NR),
                 ]),
                 None,
             )
@@ -3143,8 +3143,8 @@ mod solver_budget_tests {
             &feasible,
             &accept,
             SolverPolicy::Cascade(vec![
-                SolverBackend::Legacy(Solvers::LM),
-                SolverBackend::Legacy(Solvers::NR),
+                SolverBackend::Native(Solvers::LM),
+                SolverBackend::Native(Solvers::NR),
             ]),
             None,
         );
@@ -3177,7 +3177,7 @@ mod solver_budget_tests {
                 &feasible,
                 &accept,
                 SolverPolicy::Cascade(vec![
-                    SolverBackend::Legacy(Solvers::LM),
+                    SolverBackend::Native(Solvers::LM),
                     SolverBackend::RustedSciThe(RustedSciTheSolver::LevenbergMarquardt),
                 ]),
                 None,
@@ -3204,7 +3204,7 @@ mod solver_budget_tests {
     #[test]
     fn temperature_failure_retains_the_cascade_trace() {
         let attempts = vec![SolverAttemptReport {
-            backend: SolverBackend::Legacy(Solvers::LM),
+            backend: SolverBackend::Native(Solvers::LM),
             outcome: SolverAttemptOutcome::Skipped {
                 reason: "iteration budget exhausted".to_string(),
             },
@@ -3294,6 +3294,7 @@ mod solver_cascade_story_tests {
                                 termination: crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverTermination::Converged,
                                 backend_converged: true,
                                 iterations: 1,
+                                backend_progress_available: true,
                                 residual_evaluations: 1,
                                 jacobian_evaluations: 1,
                                 linear_solves: 1,
@@ -3355,11 +3356,11 @@ mod solver_cascade_story_tests {
     #[test]
     fn controlled_cascade_reports_each_started_backend_attempt() {
         let first = FakeBackend {
-            backend: SolverBackend::Legacy(super::Solvers::LM),
+            backend: SolverBackend::Native(super::Solvers::LM),
             behavior: FakeBackendBehavior::RecoverableFailure,
         };
         let second = FakeBackend {
-            backend: SolverBackend::Legacy(super::Solvers::NR),
+            backend: SolverBackend::Native(super::Solvers::NR),
             behavior: FakeBackendBehavior::Success {
                 solution: vec![2.0],
             },
@@ -3414,11 +3415,11 @@ mod solver_cascade_story_tests {
     #[test]
     fn first_backend_fails_recoverably_second_succeeds_and_is_accepted() {
         let fail = FakeBackend {
-            backend: SolverBackend::Legacy(super::Solvers::LM),
+            backend: SolverBackend::Native(super::Solvers::LM),
             behavior: FakeBackendBehavior::RecoverableFailure,
         };
         let success = FakeBackend {
-            backend: SolverBackend::Legacy(super::Solvers::NR),
+            backend: SolverBackend::Native(super::Solvers::NR),
             behavior: FakeBackendBehavior::Success {
                 solution: vec![2.0],
             },
@@ -3443,20 +3444,20 @@ mod solver_cascade_story_tests {
         assert_eq!(result.2.attempts[1].outcome, SolverAttemptOutcome::Accepted);
         assert_eq!(
             result.2.accepted_backend,
-            SolverBackend::Legacy(super::Solvers::NR)
+            SolverBackend::Native(super::Solvers::NR)
         );
     }
 
     #[test]
     fn first_backend_returns_a_rejected_candidate_and_the_next_one_succeeds() {
         let first = FakeBackend {
-            backend: SolverBackend::Legacy(super::Solvers::LM),
+            backend: SolverBackend::Native(super::Solvers::LM),
             behavior: FakeBackendBehavior::Success {
                 solution: vec![1.0],
             },
         };
         let second = FakeBackend {
-            backend: SolverBackend::Legacy(super::Solvers::NR),
+            backend: SolverBackend::Native(super::Solvers::NR),
             behavior: FakeBackendBehavior::Success {
                 solution: vec![2.0],
             },
@@ -3490,11 +3491,11 @@ mod solver_cascade_story_tests {
     #[test]
     fn every_backend_fails_and_the_report_keeps_the_declared_order() {
         let first = FakeBackend {
-            backend: SolverBackend::Legacy(super::Solvers::LM),
+            backend: SolverBackend::Native(super::Solvers::LM),
             behavior: FakeBackendBehavior::RecoverableFailure,
         };
         let second = FakeBackend {
-            backend: SolverBackend::Legacy(super::Solvers::NR),
+            backend: SolverBackend::Native(super::Solvers::NR),
             behavior: FakeBackendBehavior::RecoverableFailure,
         };
 
@@ -3511,11 +3512,11 @@ mod solver_cascade_story_tests {
         assert_eq!(attempts.len(), 2);
         assert_eq!(
             attempts[0].backend,
-            SolverBackend::Legacy(super::Solvers::LM)
+            SolverBackend::Native(super::Solvers::LM)
         );
         assert_eq!(
             attempts[1].backend,
-            SolverBackend::Legacy(super::Solvers::NR)
+            SolverBackend::Native(super::Solvers::NR)
         );
         assert!(matches!(
             attempts[0].outcome,
@@ -3530,11 +3531,11 @@ mod solver_cascade_story_tests {
     #[test]
     fn global_budget_exhaustion_stops_later_backends_deterministically() {
         let first = FakeBackend {
-            backend: SolverBackend::Legacy(super::Solvers::LM),
+            backend: SolverBackend::Native(super::Solvers::LM),
             behavior: FakeBackendBehavior::RecoverableFailure,
         };
         let second = FakeBackend {
-            backend: SolverBackend::Legacy(super::Solvers::NR),
+            backend: SolverBackend::Native(super::Solvers::NR),
             behavior: FakeBackendBehavior::Success {
                 solution: vec![2.0],
             },

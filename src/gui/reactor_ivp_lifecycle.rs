@@ -18,7 +18,7 @@ use super::{IvpGuiConfig, ReactorIvpApp, ReactorIvpCalculationState};
 use crate::ReactorsIVP::SimpleReactorIVP::IvpError;
 use crate::ReactorsIVP::solver_backend::{
     ReactorIvpExecutionBackend, ReactorIvpMatrixBackend, ReactorIvpMethod, ReactorIvpSolverConfig,
-    ReactorIvpSymbolicBackend,
+    ReactorIvpSolverFamily, ReactorIvpSymbolicBackend,
 };
 use crate::ReactorsIVP::task_parser_reactor_IVP::{
     ReactorIvpDocumentSpec, ReactorIvpStopConditionSpec,
@@ -71,6 +71,8 @@ impl ReactorIvpApp {
             solver_settings: reactor_solver_config_to_parser_settings(
                 &preview_task.solver_backend_config,
             ),
+            hybrid_solver_settings: None,
+            hybrid_solver_fragment: None,
         })
     }
 
@@ -429,15 +431,51 @@ fn reactor_solver_config_to_parser_settings(
         },
     };
 
+    let family_options = config.family_options;
+    let (max_iterations, lsode2) = match family_options {
+        crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Lsode2 {
+            controller,
+            native_execution,
+        } => (
+            None,
+            Some(Lsode2TaskOptionsSpec {
+                controller: Some(controller.to_controller()),
+                stop_conditions: Vec::new(),
+                symbolic_assembly: Some(config.symbolic_backend.to_rusted()),
+                symbolic_execution: Some(execution_backend.clone()),
+                linear_system_structure: Some(match config.matrix_backend {
+                    ReactorIvpMatrixBackend::Dense => Lsode2LinearSystemStructure::Dense,
+                    ReactorIvpMatrixBackend::Sparse => Lsode2LinearSystemStructure::Sparse,
+                    ReactorIvpMatrixBackend::Banded => {
+                        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 }
+                    }
+                }),
+                linear_solver_policy: Some(config.to_rusted_linear_policy()),
+                native_execution: Some(native_execution),
+            }),
+        ),
+        crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Bdf { max_steps } => {
+            (Some(max_steps), None)
+        }
+        crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Radau {
+            max_newton_iterations,
+            ..
+        } => (Some(max_newton_iterations), None),
+    };
+
     IvpSolverSettingsSpec {
         solver: SolverSelectionSpec {
             task_kind: TaskKindSpec::Ivp,
-            method: IvpMethodSpec::Lsode2,
+            method: match config.family() {
+                ReactorIvpSolverFamily::Lsode2 => IvpMethodSpec::Lsode2,
+                ReactorIvpSolverFamily::Bdf => IvpMethodSpec::Bdf,
+                ReactorIvpSolverFamily::Radau => IvpMethodSpec::Radau5,
+            },
         },
         solver_options: IvpSolverOptionsSpec {
             step_size: None,
             tolerance: None,
-            max_iterations: None,
+            max_iterations,
             rtol: Some(config.rtol),
             atol: Some(config.atol),
             max_step: Some(config.max_step),
@@ -448,27 +486,29 @@ fn reactor_solver_config_to_parser_settings(
             symbolic_assembly: Some(config.symbolic_backend.to_rusted()),
             symbolic_execution: Some(execution_backend.clone()),
             matrix_layout: Some(match config.matrix_backend {
+                ReactorIvpMatrixBackend::Dense => Lsode2LinearSystemStructure::Dense,
                 ReactorIvpMatrixBackend::Sparse => Lsode2LinearSystemStructure::Sparse,
                 ReactorIvpMatrixBackend::Banded => {
                     Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 }
                 }
             }),
             execution_policy: None,
-            telemetry: None,
-            lsode2: Some(Lsode2TaskOptionsSpec {
-                controller: Some(config.method.to_controller()),
-                stop_conditions: Vec::new(),
-                symbolic_assembly: Some(config.symbolic_backend.to_rusted()),
-                symbolic_execution: Some(execution_backend),
-                linear_system_structure: Some(match config.matrix_backend {
-                    ReactorIvpMatrixBackend::Sparse => Lsode2LinearSystemStructure::Sparse,
-                    ReactorIvpMatrixBackend::Banded => {
-                        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 }
-                    }
-                }),
-                linear_solver_policy: Some(config.to_rusted_linear_policy()),
-                native_execution: Some(config.native_execution),
+            telemetry: Some(match config.telemetry {
+                RustedSciThe::numerical::SolverTelemetryMode::Off => {
+                    RustedSciThe::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Off
+                }
+                RustedSciThe::numerical::SolverTelemetryMode::Counters => {
+                    RustedSciThe::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Counters
+                }
+                RustedSciThe::numerical::SolverTelemetryMode::Timings => {
+                    RustedSciThe::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Timings
+                }
+                RustedSciThe::numerical::SolverTelemetryMode::Detailed => {
+                    RustedSciThe::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Detailed
+                }
             }),
+            logging: Some(config.logging),
+            lsode2,
         },
     }
 }
@@ -478,7 +518,17 @@ fn parser_solver_settings_to_reactor_config(
 ) -> ReactorIvpSolverConfig {
     let mut config = ReactorIvpSolverConfig::default();
 
-    config.method = match settings
+    let family = match settings.solver.method {
+        IvpMethodSpec::Lsode2 => ReactorIvpSolverFamily::Lsode2,
+        IvpMethodSpec::Bdf => ReactorIvpSolverFamily::Bdf,
+        IvpMethodSpec::Radau5 => ReactorIvpSolverFamily::Radau,
+        _ => ReactorIvpSolverFamily::Lsode2,
+    };
+    if family != ReactorIvpSolverFamily::Lsode2 {
+        config.matrix_backend = ReactorIvpMatrixBackend::Dense;
+    }
+
+    let controller = match settings
         .solver_options
         .lsode2
         .as_ref()
@@ -552,19 +602,122 @@ fn parser_solver_settings_to_reactor_config(
         config.matrix_backend = match structure {
             Lsode2LinearSystemStructure::Sparse => ReactorIvpMatrixBackend::Sparse,
             Lsode2LinearSystemStructure::Banded { .. } => ReactorIvpMatrixBackend::Banded,
-            Lsode2LinearSystemStructure::Dense => ReactorIvpMatrixBackend::Sparse,
+            Lsode2LinearSystemStructure::BandedAuto => ReactorIvpMatrixBackend::Banded,
+            Lsode2LinearSystemStructure::Dense => ReactorIvpMatrixBackend::Dense,
         };
     }
 
-    if let Some(lsode2) = settings.solver_options.lsode2.as_ref() {
-        if let Some(native_execution) = lsode2.native_execution {
-            config.native_execution = native_execution;
-        }
-    }
+    let native_execution = settings
+        .solver_options
+        .lsode2
+        .as_ref()
+        .and_then(|lsode2| lsode2.native_execution)
+        .unwrap_or_else(|| match ReactorIvpSolverConfig::default().family_options {
+            crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Lsode2 {
+                native_execution,
+                ..
+            } => native_execution,
+            _ => unreachable!(),
+        });
 
     config.rtol = settings.solver_options.rtol.unwrap_or(config.rtol);
     config.atol = settings.solver_options.atol.unwrap_or(config.atol);
     config.max_step = settings.solver_options.max_step.unwrap_or(config.max_step);
     config.first_step = settings.solver_options.first_step;
+    config.telemetry = match settings.solver_options.telemetry {
+        Some(RustedSciThe::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Off) => {
+            RustedSciThe::numerical::SolverTelemetryMode::Off
+        }
+        Some(
+            RustedSciThe::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Counters,
+        ) => RustedSciThe::numerical::SolverTelemetryMode::Counters,
+        Some(RustedSciThe::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Timings) => {
+            RustedSciThe::numerical::SolverTelemetryMode::Timings
+        }
+        Some(
+            RustedSciThe::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Detailed,
+        ) => RustedSciThe::numerical::SolverTelemetryMode::Detailed,
+        None => config.telemetry,
+    };
+    config.logging = settings.solver_options.logging.unwrap_or(config.logging);
+    config.family_options = match family {
+        ReactorIvpSolverFamily::Lsode2 => {
+            crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Lsode2 {
+                controller,
+                native_execution,
+            }
+        }
+        ReactorIvpSolverFamily::Bdf => {
+            crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Bdf {
+                max_steps: settings.solver_options.max_iterations.unwrap_or(200_000),
+            }
+        }
+        ReactorIvpSolverFamily::Radau => {
+            crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Radau {
+                max_steps: 200_000,
+                max_newton_iterations: settings.solver_options.max_iterations.unwrap_or(6),
+            }
+        }
+    };
     config
+}
+
+#[cfg(test)]
+mod solver_family_document_tests {
+    use super::*;
+
+    #[test]
+    fn standalone_families_keep_their_native_iteration_limits() {
+        for (family, expected_method, expected_limit) in [
+            (ReactorIvpSolverFamily::Bdf, IvpMethodSpec::Bdf, 23),
+            (ReactorIvpSolverFamily::Radau, IvpMethodSpec::Radau5, 7),
+        ] {
+            let mut config = ReactorIvpSolverConfig::default().with_family(family);
+            if family == ReactorIvpSolverFamily::Bdf {
+                config = config.with_bdf_max_steps(expected_limit);
+            } else {
+                config = config.with_radau_iteration_limits(200_000, expected_limit);
+            }
+
+            let settings = reactor_solver_config_to_parser_settings(&config);
+            assert_eq!(settings.solver.method, expected_method);
+            assert_eq!(settings.solver_options.max_iterations, Some(expected_limit));
+            assert!(settings.solver_options.lsode2.is_none());
+
+            let restored = parser_solver_settings_to_reactor_config(&settings);
+            assert_eq!(restored.family(), family);
+            assert_eq!(restored.matrix_backend, ReactorIvpMatrixBackend::Dense);
+            assert_eq!(restored.telemetry, config.telemetry);
+            assert_eq!(restored.logging, config.logging);
+            if family == ReactorIvpSolverFamily::Bdf {
+                assert!(matches!(
+                    restored.family_options,
+                    crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Bdf {
+                        max_steps: 23
+                    }
+                ));
+                assert!(matches!(
+                    restored.family_options,
+                    crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Bdf {
+                        max_steps
+                    } if max_steps == expected_limit
+                ));
+            } else {
+                assert!(matches!(
+                    restored.family_options,
+                    crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Radau {
+                        max_newton_iterations: 7,
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    restored.family_options,
+                    crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Radau {
+                        max_newton_iterations,
+                        ..
+                    } if max_newton_iterations == expected_limit
+                ));
+            }
+        }
+    }
 }

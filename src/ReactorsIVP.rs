@@ -22,5 +22,9 @@ pub mod reactor_ivp_quality_tests;
 pub mod reactor_ivp_solve_tests;
 pub mod reactor_ivp_solver_backend_tests;
 pub mod reactor_ivp_story_tests;
+#[cfg(test)]
+pub mod reactor_ivp_symbolic_diagnostics;
+#[cfg(test)]
+pub(crate) mod reactor_ivp_test_support;
 pub mod solver_backend;
 pub mod task_parser_reactor_IVP;

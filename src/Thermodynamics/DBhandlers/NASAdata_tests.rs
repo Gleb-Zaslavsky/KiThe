@@ -3,7 +3,9 @@
 #[cfg(test)]
 mod tests {
 
-    use crate::Thermodynamics::DBhandlers::NASAdata::{Coeffs, Cp, NASAError, NASAdata, dh, ds};
+    use crate::Thermodynamics::DBhandlers::NASAdata::{
+        Coeffs, Cp, NASAError, NASAIntervalFitStrategy, NASAdata, dh, ds,
+    };
     use crate::Thermodynamics::DBhandlers::thermo_api::{
         EnergyUnit, ThermoCalculator, energy_dimension,
     };
@@ -671,7 +673,10 @@ mod tests {
         nasa.parse_coefficients().unwrap();
         nasa.set_T_interval(400.0, 800.0); // Both in same interval
 
-        assert!(nasa.fitting_coeffs_for_T_interval().is_ok());
+        let report = nasa.fitting_coeffs_for_T_interval_with_report().unwrap();
+        assert_eq!(report.strategy, NASAIntervalFitStrategy::ExistingInterval);
+        assert!(report.primary_failure.is_none());
+        assert!(report.property_reports.is_empty());
         assert_eq!(nasa.coeffs, (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0));
     }
 
@@ -697,7 +702,17 @@ mod tests {
         nasa.set_T_interval(900.0, 1100.0); // Adjacent intervals
         nasa.norm_threshold = 1.0; // Relax threshold for test
 
-        assert!(nasa.fitting_coeffs_for_T_interval().is_ok());
+        let report = nasa.fitting_coeffs_for_T_interval_with_report().unwrap();
+        assert!(matches!(
+            report.strategy,
+            NASAIntervalFitStrategy::AdjacentSequential
+                | NASAIntervalFitStrategy::AdjacentLinearSvd
+        ));
+        assert!(!report.property_reports.is_empty());
+        assert_eq!(
+            report.primary_failure.is_some(),
+            report.strategy == NASAIntervalFitStrategy::AdjacentLinearSvd
+        );
         // Coeffs should be fitted values, not original
         assert_ne!(nasa.coeffs, (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
     }

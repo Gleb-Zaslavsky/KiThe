@@ -7,7 +7,10 @@ mod tests {
     };
     use crate::ReactorsBVP::task_parser_reactor_BVP::normalize_reactor_physics_task_map;
     use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
+    use RustedSciThe::command_interpreter::task_parser_bvp_hybrid::parse_hybrid_bvp_solver_settings_from_document;
     use RustedSciThe::numerical::BVP_Damp::task_parser_damped;
+    use RustedSciThe::numerical::BVP_Damp::telemetry::BvpTelemetryMode;
+    use RustedSciThe::numerical::BVP_api::BvpSolverSettings;
     use RustedSciThe::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
     use RustedSciThe::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
     use egui::accesskit::Role;
@@ -24,7 +27,7 @@ mod tests {
             .and_then(|section_map| section_map.get(field))
             .and_then(|slot| slot.as_ref())
             .and_then(|values| values.first())
-            .expect("expected BVP solver field to exist")
+            .unwrap_or_else(|| panic!("expected BVP solver field {section}.{field} to exist"))
     }
 
     fn as_string(value: &Value) -> &str {
@@ -56,16 +59,15 @@ mod tests {
     }
 
     fn load_problem_test_document() -> DocumentMap {
-        let content = std::fs::read_to_string("problem_test.txt")
-            .expect("problem_test.txt must be readable from the crate root");
+        let content = include_str!("fixtures/bvp_problem.fixture").to_string();
         let mut parser = DocumentParser::new(content);
         parser
             .parse_document()
-            .expect("problem_test.txt must parse as a valid BVP document");
+            .expect("tracked BVP GUI fixture must parse as a valid document");
         parser
             .get_result()
             .cloned()
-            .expect("parsed problem_test.txt must yield a document map")
+            .expect("parsed BVP GUI fixture must yield a document map")
     }
 
     #[test]
@@ -116,6 +118,10 @@ mod tests {
             )),
             "AtomView"
         );
+        assert_eq!(
+            as_string(first_value(&app.document, "solver_settings", "telemetry")),
+            "off"
+        );
         assert!(matches!(
             first_value(&app.document, "solver_settings", "linear_sys_method"),
             Value::Optional(None)
@@ -154,6 +160,7 @@ mod tests {
             "Execution and assembly",
             "Residuals and Jacobian Backend",
             "scheme",
+            "Solver telemetry",
             "Linear algebra backend",
             "Linear system method override",
             "Symbolic backend",
@@ -162,6 +169,515 @@ mod tests {
         ] {
             harness.get_by_label(label);
         }
+    }
+
+    #[test]
+    fn bvp_solver_telemetry_choice_is_serialized_without_enabling_logging() {
+        let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
+            ProblemsEnum::BVPSimple,
+        )));
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::new_ui(move |ui| {
+            app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+        });
+
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver telemetry")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "counters")
+            .click();
+        harness.run();
+
+        let app_ref = app.borrow();
+        assert_eq!(
+            as_string(first_value(
+                &app_ref.document,
+                "solver_settings",
+                "telemetry"
+            )),
+            "counters"
+        );
+        assert!(as_bool(first_value(
+            &app_ref.document,
+            "solver_settings",
+            "dont_save_log"
+        )));
+
+        let mut normalized_document = normalize_reactor_physics_task_map(&app_ref.document);
+        let mut solver_document = DocumentMap::new();
+        for section_name in [
+            "solver_settings",
+            "strategy_params",
+            "adaptive_strategy",
+            "grid_refinement",
+            "bounds",
+            "rel_tolerance",
+        ] {
+            if let Some(section) = normalized_document.remove(section_name) {
+                solver_document.insert(section_name.to_string(), section);
+            }
+        }
+        solver_document
+            .get_mut("solver_settings")
+            .expect("GUI task has solver settings")
+            .remove("dont_save_log");
+        let settings = parse_hybrid_bvp_solver_settings_from_document(&solver_document)
+            .expect("GUI-produced solver settings should satisfy the RST hybrid contract");
+        let BvpSolverSettings::Damped(options) = settings else {
+            panic!("GUI default should remain on the Damped solver family");
+        };
+        assert_eq!(
+            options.generated_backend_config.bvp_telemetry_mode,
+            BvpTelemetryMode::Counters
+        );
+    }
+
+    #[test]
+    fn bvp_damped_aot_timings_are_explained_and_rejected_by_rst() {
+        let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
+            ProblemsEnum::BVPSimple,
+        )));
+        {
+            let mut app_ref = app.borrow_mut();
+            let settings = app_ref
+                .document
+                .get_mut("solver_settings")
+                .expect("solver_settings section exists");
+            settings.insert(
+                "generated_backend".into(),
+                Some(vec![Value::String("banded_aot_tcc".into())]),
+            );
+            settings.insert(
+                "telemetry".into(),
+                Some(vec![Value::String("timings".into())]),
+            );
+        }
+
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::new_ui(move |ui| {
+            app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+        });
+        harness.run();
+        harness.get_by_label(
+            "Timings telemetry is unavailable for the Damped AOT route; select Counters or Detailed.",
+        );
+        for (label, expected_help) in [
+            ("Residuals and Jacobian Backend", "High-level solver preset"),
+            ("AOT codegen backend", "AOT code generation backend."),
+            ("C compiler", "C compiler choice"),
+            ("AOT build policy", "AOT build lifecycle policy."),
+            ("AOT build profile", "AOT build profile."),
+            ("AOT compile preset", "AOT compile preset."),
+            ("AOT execution policy", "Runtime execution policy"),
+            ("Symbolic backend", "Symbolic assembly backend."),
+            ("Banded linear solver", "Banded linear solver policy."),
+            ("refinement_steps", "Iterative refinement steps"),
+        ] {
+            app.borrow_mut().current_help_info.clear();
+            harness.get_by_label(label).scroll_to_me();
+            harness.run();
+            harness.run();
+            if matches!(label, "AOT compile preset" | "AOT execution policy") {
+                harness.get_by_role_and_label(Role::ComboBox, label).hover();
+            } else {
+                harness.get_by_label(label).hover();
+            }
+            harness.run();
+            harness.run();
+            let actual_help = app.borrow().current_help_info.clone();
+            assert!(
+                actual_help.contains(expected_help),
+                "hover help for Damped AOT control `{label}` should contain `{expected_help}`, got `{}`",
+                actual_help
+            );
+        }
+
+        let normalized = normalize_reactor_physics_task_map(&app.borrow().document);
+        let mut solver_document = DocumentMap::new();
+        for section_name in [
+            "solver_settings",
+            "strategy_params",
+            "adaptive_strategy",
+            "grid_refinement",
+            "bounds",
+            "rel_tolerance",
+        ] {
+            if let Some(section) = normalized.get(section_name) {
+                solver_document.insert(section_name.to_string(), section.clone());
+            }
+        }
+        solver_document
+            .get_mut("solver_settings")
+            .expect("GUI task has solver settings")
+            .remove("dont_save_log");
+        assert!(parse_hybrid_bvp_solver_settings_from_document(&solver_document).is_err());
+    }
+
+    #[test]
+    fn bvp_damped_and_frozen_controls_render_content_aware_hover_help() {
+        let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
+            ProblemsEnum::BVPSimple,
+        )));
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::new_ui(move |ui| {
+            app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+        });
+
+        harness.run();
+        for (label, expected_help) in [
+            ("Solver family", "BVP solver family."),
+            ("scheme", "Spatial discretization scheme."),
+            ("Linear algebra backend", "Linear algebra backend."),
+            ("Nonlinear strategy", "Convergence strategy."),
+            (
+                "Linear system method override",
+                "Optional linear-system override.",
+            ),
+            ("abs_tolerance", "Absolute convergence tolerance."),
+            ("max_iterations", "Maximum solver iterations."),
+            ("Solver telemetry", "Internal solver telemetry."),
+            ("loglevel", "Logging verbosity level."),
+            ("dont_save_log", "Disable log file saving."),
+            ("Residuals and Jacobian Backend", "High-level solver preset"),
+            ("Symbolic backend", "Symbolic assembly backend."),
+            ("Banded linear solver", "Banded linear solver policy."),
+            ("refinement_steps", "Iterative refinement steps"),
+        ] {
+            app.borrow_mut().current_help_info.clear();
+            harness.get_by_label(label).scroll_to_me();
+            harness.run();
+            harness.get_by_label(label).hover();
+            harness.run();
+            assert!(
+                app.borrow().current_help_info.contains(expected_help),
+                "hover help for Damped control `{label}` should contain `{expected_help}`"
+            );
+        }
+
+        for (label, expected_help) in [
+            (
+                "process_conditions",
+                "Main physical and chemical parameters",
+            ),
+            ("boundary_condition", "Initial values for all variables"),
+            ("diffusion_coefficients", "Molecular diffusion coefficients"),
+            (
+                "reactions",
+                "Chemical reactions with Arrhenius kinetic parameters",
+            ),
+            ("bounds", "Variable bounds for solver convergence"),
+            ("rel_tolerance", "Relative convergence tolerances"),
+            ("strategy_params", "Advanced solver strategy parameters"),
+            (
+                "initial_guess",
+                "Initial guess values for the numerical solver",
+            ),
+            ("postprocessing", "Output and visualization options"),
+            (
+                "Adaptive grid refinement",
+                "Adaptive grid refinement settings for automatic mesh improvement.",
+            ),
+            (
+                "Maximum grid refinements",
+                "Maximum number of refinement iterations.",
+            ),
+            (
+                "Grid refinement strategy",
+                "Grid refinement method and parameters",
+            ),
+        ] {
+            app.borrow_mut().current_help_info.clear();
+            harness.get_by_label(label).scroll_to_me();
+            harness.run();
+            harness.get_by_label(label).hover();
+            harness.run();
+            let actual_help = app.borrow().current_help_info.clone();
+            assert!(
+                actual_help.contains(expected_help),
+                "hover help for BVP control `{label}` should contain `{expected_help}`, got `{actual_help}`"
+            );
+        }
+
+        harness.get_by_label("process_conditions").scroll_to_me();
+        harness.run();
+        harness.get_by_label("process_conditions").click();
+        harness.run();
+        harness.get_by_label("P").scroll_to_me();
+        harness.run();
+        harness.get_by_label("P").hover();
+        harness.run();
+        assert!(
+            app.borrow()
+                .current_help_info
+                .contains("System pressure [Pa]."),
+            "hovering the physical pressure field should show its units and meaning"
+        );
+
+        harness.get_by_label("boundary_condition").scroll_to_me();
+        harness.run();
+        harness.get_by_label("boundary_condition").click();
+        harness.run();
+        harness.get_by_label("T").scroll_to_me();
+        harness.run();
+        harness.get_by_label("T").hover();
+        harness.run();
+        assert!(
+            app.borrow()
+                .current_help_info
+                .contains("Initial/boundary temperature [K]."),
+            "hovering the temperature boundary field should show its units and meaning"
+        );
+
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "frozen")
+            .click();
+        harness.run();
+        for (label, expected_help) in [
+            ("Solver family", "BVP solver family."),
+            ("Nonlinear strategy", "Convergence strategy."),
+            ("tolerance", "Route-specific convergence tolerance."),
+            ("max_iterations", "Maximum solver iterations."),
+            ("Solver telemetry", "Internal solver telemetry."),
+            ("loglevel", "Logging verbosity level."),
+            ("dont_save_log", "Disable log file saving."),
+            ("Residuals and Jacobian Backend", "High-level solver preset"),
+            ("Symbolic backend", "Symbolic assembly backend."),
+            ("Banded linear solver", "Banded linear solver policy."),
+            ("refinement_steps", "Iterative refinement steps"),
+        ] {
+            app.borrow_mut().current_help_info.clear();
+            harness.get_by_label(label).scroll_to_me();
+            harness.run();
+            harness.get_by_label(label).hover();
+            harness.run();
+            assert!(
+                app.borrow().current_help_info.contains(expected_help),
+                "hover help for Frozen control `{label}` should contain `{expected_help}`"
+            );
+        }
+    }
+
+    #[test]
+    fn bvp_sci_family_controls_round_trip_through_rst_settings_parser() {
+        let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
+            ProblemsEnum::BVPSimple,
+        )));
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::new_ui(move |ui| {
+            app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+        });
+
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .click();
+        harness.run();
+        harness.get_by_role_and_label(Role::Button, "sci").click();
+        harness.run();
+        for label in [
+            "BVP_sci collocation solver",
+            "Execution",
+            "Symbolic assembly",
+            "Matrix layout",
+            "Maximum mesh nodes",
+            "Solver telemetry",
+        ] {
+            harness.get_by_label(label);
+        }
+        for (label, expected_help) in [
+            ("Solver family", "BVP solver family."),
+            ("Execution", "callback execution route."),
+            ("Symbolic assembly", "symbolic expression frontend."),
+            ("Matrix layout", "matrix storage layout."),
+            ("Tolerance", "Route-specific convergence tolerance."),
+            ("Boundary tolerance", "boundary residual tolerance."),
+            ("Maximum mesh nodes", "Maximum collocation mesh nodes"),
+            ("Maximum Newton iterations", "Maximum Newton iterations"),
+            ("Maximum Jacobian refreshes", "Maximum Jacobian refreshes"),
+            (
+                "Maximum mesh refinements",
+                "Maximum adaptive mesh refinements",
+            ),
+            ("Maximum backtracking steps", "Maximum backtracking steps"),
+            ("Solver telemetry", "Internal solver telemetry."),
+            ("Logging level", "Logging verbosity level."),
+        ] {
+            app.borrow_mut().current_help_info.clear();
+            harness.get_by_label(label).scroll_to_me();
+            harness.run();
+            harness.get_by_label(label).hover();
+            harness.run();
+            assert!(
+                app.borrow().current_help_info.contains(expected_help),
+                "hover help for `{label}` should contain `{expected_help}`"
+            );
+        }
+
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Matrix layout")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Matrix layout")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "banded")
+            .click();
+        harness.run();
+        for (label, expected_help) in [
+            ("Lower bandwidth", "Lower bandwidth for BVP_sci"),
+            ("Upper bandwidth", "Upper bandwidth for BVP_sci"),
+        ] {
+            app.borrow_mut().current_help_info.clear();
+            harness.get_by_label(label).scroll_to_me();
+            harness.run();
+            harness.get_by_label(label).hover();
+            harness.run();
+            assert!(
+                app.borrow().current_help_info.contains(expected_help),
+                "hover help for conditional Sci control `{label}` should contain `{expected_help}`"
+            );
+        }
+
+        let parse_gui_settings = || {
+            let app_ref = app.borrow();
+            let normalized = normalize_reactor_physics_task_map(&app_ref.document);
+            let mut solver_document = DocumentMap::new();
+            for section_name in [
+                "solver_settings",
+                "strategy_params",
+                "adaptive_strategy",
+                "grid_refinement",
+                "bounds",
+                "rel_tolerance",
+            ] {
+                if let Some(section) = normalized.get(section_name) {
+                    solver_document.insert(section_name.to_string(), section.clone());
+                }
+            }
+            solver_document
+                .get_mut("solver_settings")
+                .expect("GUI task has solver settings")
+                .remove("dont_save_log");
+            parse_hybrid_bvp_solver_settings_from_document(&solver_document)
+        };
+
+        assert!(matches!(
+            parse_gui_settings().expect("GUI-produced Sci settings should parse"),
+            BvpSolverSettings::Sci { .. }
+        ));
+
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Execution")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Execution")
+            .click();
+        harness.run();
+        harness.get_by_role_and_label(Role::Button, "aot").click();
+        harness.run();
+        harness.get_by_label("AOT build policy");
+        for (label, expected_help) in [
+            ("AOT build policy", "AOT build lifecycle policy."),
+            ("AOT build profile", "AOT build profile."),
+            ("AOT codegen backend", "AOT code generation backend."),
+            ("C compiler", "C compiler choice"),
+        ] {
+            app.borrow_mut().current_help_info.clear();
+            harness.get_by_label(label).scroll_to_me();
+            harness.run();
+            harness.get_by_label(label).hover();
+            harness.run();
+            assert!(
+                app.borrow().current_help_info.contains(expected_help),
+                "hover help for `{label}` should contain `{expected_help}`"
+            );
+        }
+        assert!(matches!(
+            parse_gui_settings().expect("Sci AOT settings should parse with telemetry Off"),
+            BvpSolverSettings::Sci { .. }
+        ));
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver telemetry")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "timings")
+            .click();
+        harness.run();
+        assert!(matches!(
+            parse_gui_settings().expect("Sci AOT Timings telemetry should parse"),
+            BvpSolverSettings::Sci { .. }
+        ));
+
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Execution")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Execution")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "lambdify")
+            .click();
+        harness.run();
+        assert!(matches!(
+            parse_gui_settings().expect("Sci Lambdify settings should parse"),
+            BvpSolverSettings::Sci { .. }
+        ));
+        assert!(
+            !app.borrow()
+                .document
+                .get("solver_settings")
+                .is_some_and(|section| section.contains_key("aot_build_policy"))
+        );
+
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "frozen")
+            .click();
+        harness.run();
+        harness.get_by_label("Fixed-mesh Frozen/Naive route");
+        let app_ref = app.borrow();
+        assert_eq!(
+            as_string(first_value(
+                &app_ref.document,
+                "solver_settings",
+                "solver_family"
+            )),
+            "frozen"
+        );
+        assert!(!app_ref.document.contains_key("bounds"));
+        drop(app_ref);
+        assert!(matches!(
+            parse_gui_settings().expect("GUI-produced Frozen settings should parse"),
+            BvpSolverSettings::Frozen(_)
+        ));
     }
 
     #[test]
@@ -311,7 +827,12 @@ mod tests {
         assert!(!app.borrow().document.contains_key("adaptive_strategy"));
         assert!(!app.borrow().document.contains_key("grid_refinement"));
 
-        harness.get_by_label("Adaptive grid refinement").click();
+        let adaptive_control = harness.get_by_label("Adaptive grid refinement");
+        adaptive_control.scroll_to_me();
+        harness.run();
+        harness
+            .get_by_label("Adaptive grid refinement")
+            .click_accesskit();
         harness.run();
 
         let app_ref = app.borrow();
@@ -619,12 +1140,23 @@ mod tests {
                 "wrong codegen backend for {}",
                 case.preset
             );
-            assert_eq!(
-                options.generated_backend_config.aot_c_compiler.as_deref(),
-                case.expected_compiler,
-                "wrong C compiler for {}",
-                case.preset
-            );
+            if case.expected_codegen == AotCodegenBackend::C {
+                assert_eq!(
+                    options.generated_backend_config.aot_c_compiler.as_deref(),
+                    case.expected_compiler,
+                    "wrong C compiler for {}",
+                    case.preset
+                );
+            } else {
+                assert!(
+                    !app_ref
+                        .document
+                        .get("solver_settings")
+                        .is_some_and(|section| section.contains_key("aot_c_compiler")),
+                    "non-C backend {} must not serialize a C compiler",
+                    case.preset
+                );
+            }
 
             let serialized = app_ref.document_to_string();
             let mut parser = DocumentParser::new(serialized);
@@ -1041,7 +1573,7 @@ mod tests {
         harness.run();
         harness.get_by_label("Atomic composition");
         harness.get_by_label("HMX");
-        harness.get_by_label("HMXprod");
+        harness.get_by_label("DecompositionProduct");
     }
 
     #[test]

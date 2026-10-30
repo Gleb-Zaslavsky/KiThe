@@ -27,23 +27,21 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_workflows::{
 };
 use crate::Thermodynamics::User_substances_error::SubsDataError;
 use RustedSciThe::numerical::Nonlinear_systems::error::SolveError as RstSolveError;
+#[cfg(test)]
+use RustedSciThe::numerical::Nonlinear_systems::prelude::SolveResult;
 use RustedSciThe::numerical::Nonlinear_systems::prelude::{
     BacktrackingLevenbergMarquardtMethod, BoundSymbolicNonlinearProblem, Bounds,
-    DampedNewtonMethod, DiagnosticsOptions, LambdifyExecutionPolicy, LevenbergMarquardtMethod,
-    LevenbergMarquardtMinpack, NielsenLevenbergMarquardtMethod, NonlinearSolverMethod,
-    PowellDoglegMethod, PreparationStage, PreparationTelemetryMode,
-    PreparedSymbolicNonlinearProblem, SolveOptions, SymbolicArtifactAction, SymbolicBackendKind,
-    SymbolicLambdifyFrontend, SymbolicProblemOptions, TerminationReason, TrustRegionLMMethod,
-};
-#[cfg(test)]
-use RustedSciThe::numerical::Nonlinear_systems::prelude::{
-    JacobianProvider, NonlinearProblem, SolveResult,
+    DampedNewtonMethod, DiagnosticsOptions, JacobianProvider, LambdifyExecutionPolicy,
+    LevenbergMarquardtMethod, LevenbergMarquardtMinpack, NielsenLevenbergMarquardtMethod,
+    NonlinearProblem, NonlinearSolverMethod, PowellDoglegMethod, PreparationStage,
+    PreparationTelemetryMode, PreparedSymbolicNonlinearProblem, SolveOptions,
+    SymbolicArtifactAction, SymbolicBackendKind, SymbolicLambdifyFrontend, SymbolicProblemOptions,
+    TerminationReason, TrustRegionLMMethod,
 };
 use RustedSciThe::numerical::SolverTelemetryMode;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
-#[cfg(test)]
-use nalgebra::DMatrix;
-use nalgebra::DVector;
+use nalgebra::{DMatrix, DVector};
+use std::cell::RefCell;
 use std::time::Instant;
 
 /// Symbolic frontend used when preparing an RST nonlinear problem.
@@ -64,9 +62,6 @@ impl From<RstSymbolicFrontend> for SymbolicLambdifyFrontend {
         }
     }
 }
-
-#[cfg(any(test, feature = "equilibrium-benchmark-rst-frontends"))]
-use std::cell::RefCell;
 
 #[cfg(any(test, feature = "equilibrium-benchmark-rst-frontends"))]
 thread_local! {
@@ -799,6 +794,109 @@ pub struct RustedSciTheSolveOutcome {
     pub metrics: SolverAttemptMetrics,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct RstCallbackTelemetry {
+    residual_calls: usize,
+    jacobian_calls: usize,
+    residual_duration: std::time::Duration,
+    jacobian_duration: std::time::Duration,
+}
+
+struct MeasuredBoundProblem<'a> {
+    inner: BoundSymbolicNonlinearProblem<'a>,
+    mode: SolverTelemetryMode,
+    telemetry: RefCell<RstCallbackTelemetry>,
+}
+
+impl<'a> MeasuredBoundProblem<'a> {
+    fn new(inner: BoundSymbolicNonlinearProblem<'a>, mode: SolverTelemetryMode) -> Self {
+        Self {
+            inner,
+            mode,
+            telemetry: RefCell::new(RstCallbackTelemetry::default()),
+        }
+    }
+
+    fn record_residual(&self, started: Option<Instant>) {
+        let mut telemetry = self.telemetry.borrow_mut();
+        if self.mode.collects_counters() {
+            telemetry.residual_calls += 1;
+        }
+        if let Some(started) = started {
+            telemetry.residual_duration += started.elapsed();
+        }
+    }
+
+    fn record_jacobian(&self, started: Option<Instant>) {
+        let mut telemetry = self.telemetry.borrow_mut();
+        if self.mode.collects_counters() {
+            telemetry.jacobian_calls += 1;
+        }
+        if let Some(started) = started {
+            telemetry.jacobian_duration += started.elapsed();
+        }
+    }
+}
+
+impl NonlinearProblem for MeasuredBoundProblem<'_> {
+    fn dimension(&self) -> usize {
+        self.inner.dimension()
+    }
+
+    fn residual(&self, x: &DVector<f64>) -> Result<DVector<f64>, RstSolveError> {
+        let started = self.mode.collects_timings().then(Instant::now);
+        let result = self.inner.residual(x);
+        self.record_residual(started);
+        result
+    }
+
+    fn supports_residual_into(&self) -> bool {
+        self.inner.supports_residual_into()
+    }
+
+    fn residual_into(&self, x: &DVector<f64>, out: &mut DVector<f64>) -> Result<(), RstSolveError> {
+        let started = self.mode.collects_timings().then(Instant::now);
+        let result = self.inner.residual_into(x, out);
+        self.record_residual(started);
+        result
+    }
+}
+
+impl JacobianProvider for MeasuredBoundProblem<'_> {
+    fn jacobian(&self, x: &DVector<f64>) -> Result<DMatrix<f64>, RstSolveError> {
+        let started = self.mode.collects_timings().then(Instant::now);
+        let result = self.inner.jacobian(x);
+        self.record_jacobian(started);
+        result
+    }
+
+    fn supports_jacobian_into(&self) -> bool {
+        self.inner.supports_jacobian_into()
+    }
+
+    fn jacobian_into(&self, x: &DVector<f64>, out: &mut DMatrix<f64>) -> Result<(), RstSolveError> {
+        let started = self.mode.collects_timings().then(Instant::now);
+        let result = self.inner.jacobian_into(x, out);
+        self.record_jacobian(started);
+        result
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RustedSciTheSolveFailure {
+    pub error: ReactionExtentError,
+    pub metrics: Option<SolverAttemptMetrics>,
+}
+
+impl From<ReactionExtentError> for RustedSciTheSolveFailure {
+    fn from(error: ReactionExtentError) -> Self {
+        Self {
+            error,
+            metrics: None,
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) struct RstSolveFailureTrace {
     pub error: ReactionExtentError,
@@ -876,7 +974,7 @@ impl RustedSciTheSolver {
         problem: &RstPreparedProblem,
         initial_log_moles: &[f64],
         contract: &RustedSciTheSolveContract,
-    ) -> Result<RustedSciTheSolveOutcome, ReactionExtentError> {
+    ) -> Result<RustedSciTheSolveOutcome, RustedSciTheSolveFailure> {
         let method = match self {
             Self::LevenbergMarquardt => {
                 NonlinearSolverMethod::LevenbergMarquardt(LevenbergMarquardtMethod::default())
@@ -911,7 +1009,8 @@ impl RustedSciTheSolver {
                     "RST log-mole bounds have {} entries for {} initial coordinates",
                     bounds.len(),
                     initial_log_moles.len()
-                )));
+                ))
+                .into());
             }
             clamp_initial_log_moles_to_roundoff_bounds(&mut initial_log_moles, bounds);
             contract = contract.with_log_mole_bounds(bounds)?;
@@ -928,12 +1027,30 @@ impl RustedSciTheSolver {
         };
         #[cfg(not(test))]
         let options = contract.to_options()?;
-        method
-            .solve(
+        let (solve_result, failed_observation) = if telemetry_mode.is_enabled() {
+            let measured_problem = MeasuredBoundProblem::new(bound_problem, telemetry_mode);
+            let solve_started = Instant::now();
+            let result = method.solve(
+                &measured_problem,
+                DVector::from_vec(initial_log_moles),
+                options,
+            );
+            (
+                result,
+                Some((
+                    solve_started.elapsed(),
+                    *measured_problem.telemetry.borrow(),
+                )),
+            )
+        } else {
+            let result = method.solve(
                 &bound_problem,
                 DVector::from_vec(initial_log_moles),
                 options,
-            )
+            );
+            (result, None)
+        };
+        solve_result
             .map(|result| {
                 #[cfg(test)]
                 if rst_test_history_capture_enabled() {
@@ -986,6 +1103,7 @@ impl RustedSciTheSolver {
                             TerminationReason::Converged
                         ),
                         iterations: result.iterations,
+                        backend_progress_available: true,
                         residual_evaluations: statistics.residual_evaluations,
                         jacobian_evaluations: statistics.jacobian_evaluations,
                         linear_solves: statistics.linear_solves,
@@ -1004,7 +1122,7 @@ impl RustedSciTheSolver {
                         evaluation_timing: timings_collected.then(|| SolverEvaluationTiming {
                             residual_evaluation_micros: statistics.residual_duration.as_micros(),
                             jacobian_evaluation_micros: statistics.jacobian_duration.as_micros(),
-                            legacy_same_iterate_callback_pairs: None,
+                            native_same_iterate_callback_pairs: None,
                             linear_system_micros: Some(
                                 statistics.linear_solve_duration.as_micros(),
                             ),
@@ -1042,7 +1160,73 @@ impl RustedSciTheSolver {
                     },
                 }
             })
-            .map_err(|error| self.map_solve_error(error))
+            .map_err(|error| {
+                let counters_collected = telemetry_mode.collects_counters();
+                let timings_collected = telemetry_mode.collects_timings();
+                let metrics = failed_observation.map(|(elapsed, observed)| {
+                    let callback_duration = observed
+                        .residual_duration
+                        .saturating_add(observed.jacobian_duration);
+                    SolverAttemptMetrics {
+                        termination: SolverTermination::BackendError,
+                        backend_converged: false,
+                        iterations: 0,
+                        backend_progress_available: false,
+                        residual_evaluations: if counters_collected {
+                            observed.residual_calls
+                        } else {
+                            0
+                        },
+                        jacobian_evaluations: if counters_collected {
+                            observed.jacobian_calls
+                        } else {
+                            0
+                        },
+                        linear_solves: 0,
+                        counters_collected,
+                        timings_collected,
+                        elapsed_millis: if timings_collected {
+                            elapsed.as_millis()
+                        } else {
+                            0
+                        },
+                        elapsed_micros: if timings_collected {
+                            elapsed.as_micros()
+                        } else {
+                            0
+                        },
+                        evaluation_timing: timings_collected.then(|| SolverEvaluationTiming {
+                            residual_evaluation_micros: observed.residual_duration.as_micros(),
+                            jacobian_evaluation_micros: observed.jacobian_duration.as_micros(),
+                            native_same_iterate_callback_pairs: None,
+                            linear_system_micros: None,
+                            solver_overhead_micros: elapsed
+                                .saturating_sub(callback_duration)
+                                .as_micros(),
+                            matrix_operations_micros: 0,
+                            norm_micros: 0,
+                            trial_vector_micros: 0,
+                            feasibility_micros: 0,
+                            globalization_micros: 0,
+                            state_residual_evaluations: None,
+                            trial_residual_evaluations: None,
+                            state_jacobian_evaluations: None,
+                            trial_jacobian_evaluations: None,
+                            linear_factorization_micros: None,
+                            linear_system_solve_micros: None,
+                            linear_factorizations: None,
+                            accepted_steps: None,
+                            rejected_steps: None,
+                            reusable_trial_points: None,
+                            iteration_telemetry: None,
+                        }),
+                    }
+                });
+                RustedSciTheSolveFailure {
+                    error: self.map_solve_error(error),
+                    metrics,
+                }
+            })
     }
 
     /// Test-only access to the native RST result with iteration history.
@@ -1954,7 +2138,7 @@ fn substitute_temperature(expression: Expr, temperature: &Expr) -> Expr {
 }
 
 /// Converts the historical preferred solver into the corresponding explicit
-/// legacy backend. Kept here so the policy module has one canonical mapping.
-pub fn legacy_backend(solver: Solvers) -> super::equilibrium_solver_policy::SolverBackend {
-    super::equilibrium_solver_policy::SolverBackend::Legacy(solver)
+/// native backend. Kept here so the policy module has one canonical mapping.
+pub fn native_backend(solver: Solvers) -> super::equilibrium_solver_policy::SolverBackend {
+    super::equilibrium_solver_policy::SolverBackend::Native(solver)
 }

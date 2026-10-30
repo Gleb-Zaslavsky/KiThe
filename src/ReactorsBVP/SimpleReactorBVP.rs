@@ -33,14 +33,21 @@ use crate::ReactorsBVP::reactor_BVP_utils::{
     BoundsConfig, ScalingConfig, ToleranceConfig, create_bounds_map, create_tolerance_map,
 };
 use crate::ReactorsBVP::solver_backend::ReactorBvpSolverConfig;
-use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{
-    DampedSolverOptions, NRBVP, SolverParams,
+use RustedSciThe::command_interpreter::task_parser_bvp_hybrid::HybridBvpSettingsError;
+#[cfg(test)]
+use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP;
+use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{DampedSolverOptions, SolverParams};
+use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
+use RustedSciThe::numerical::BVP_api::{
+    BvpApiError, BvpApiTelemetryMode, BvpBoundaryCondition, BvpBoundarySide, BvpNativeSolver,
+    BvpProblem, BvpSciSparseFactorization as ApiBvpSciSparseFactorization, BvpSettingsError,
+    BvpSolver as RstBvpSolver, BvpSolverConfig, BvpSolverSettings, BvpSolverTelemetrySnapshot,
 };
 use RustedSciThe::numerical::BVP_sci::new::{
-    BvpSciAssembly, BvpSciMatrixLayout, BvpSciSolver, BvpSciTelemetryMode,
+    BvpSciAssembly, BvpSciExecution, BvpSciMatrixLayout, BvpSciOptions, BvpSciTelemetryMode,
 };
 use RustedSciThe::symbolic::symbolic_engine::Expr;
-use log::{info, warn};
+use log::info;
 
 use nalgebra::{DMatrix, DVector};
 
@@ -86,6 +93,21 @@ pub enum ReactorError {
     ParseError(String),
     /// Array/vector index out of bounds
     IndexOutOfBounds(String),
+    /// Typed failure from the shared RustedSciThe BVP API.
+    BvpApi(BvpApiError),
+    /// Typed failure while parsing/building RustedSciThe Damped settings.
+    BvpSettings(HybridBvpSettingsError),
+    /// Typed failure while applying a facade-wide telemetry request.
+    BvpTelemetry(BvpSettingsError),
+    /// The solver returned a finite profile that violates a prescribed endpoint value.
+    BvpBoundaryConditionViolation {
+        state: String,
+        endpoint: usize,
+        expected: f64,
+        actual: f64,
+        absolute_error: f64,
+        tolerance: f64,
+    },
 }
 
 impl fmt::Display for ReactorError {
@@ -97,11 +119,38 @@ impl fmt::Display for ReactorError {
             ReactorError::CalculationError(msg) => write!(f, "Calculation error: {}", msg),
             ReactorError::ParseError(msg) => write!(f, "Parse error: {}", msg),
             ReactorError::IndexOutOfBounds(msg) => write!(f, "Index out of bounds: {}", msg),
+            ReactorError::BvpApi(source) => write!(f, "BVP solver failed: {source}"),
+            ReactorError::BvpSettings(source) => {
+                write!(f, "BVP solver settings are invalid: {source}")
+            }
+            ReactorError::BvpTelemetry(source) => {
+                write!(f, "BVP telemetry configuration is invalid: {source}")
+            }
+            ReactorError::BvpBoundaryConditionViolation {
+                state,
+                endpoint,
+                expected,
+                actual,
+                absolute_error,
+                tolerance,
+            } => write!(
+                f,
+                "BVP solution violates the boundary condition for `{state}` at endpoint {endpoint}: actual={actual}, expected={expected}, absolute error={absolute_error}, tolerance={tolerance}"
+            ),
         }
     }
 }
 
-impl std::error::Error for ReactorError {}
+impl std::error::Error for ReactorError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ReactorError::BvpApi(source) => Some(source),
+            ReactorError::BvpSettings(source) => Some(source),
+            ReactorError::BvpTelemetry(source) => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// Policy for assembling symbolic RHS expressions in `create_bvp_equations`.
 ///
@@ -160,6 +209,15 @@ pub struct FastElemReact {
     pub Q: f64,
 }
 
+impl FastElemReact {
+    /// Heat release per unit mass in J/kg.
+    ///
+    /// Prefer this accessor to the legacy public `Q` field in new code.
+    pub fn heat_of_reaction(&self) -> f64 {
+        self.Q
+    }
+}
+
 /// Main reactor modeling structure that aggregates all reactor properties and methods
 ///
 /// This structure handles the complete workflow from kinetic data to BVP solution:
@@ -186,7 +244,7 @@ pub struct SimpleReactorTask {
     pub Cp: f64,
     /// Boundary conditions for substances and temperature
     pub boundary_condition: HashMap<String, f64>,
-    /// Thermal conductivity (W/m·K)
+    /// Legacy public thermal-conductivity field (W/m·K); prefer `thermal_conductivity()`.
     pub Lambda: f64,
     /// Diffusion coefficients for each substance (m²/s)
     pub Diffusion: HashMap<String, f64>,
@@ -198,7 +256,7 @@ pub struct SimpleReactorTask {
     pub L: f64,
     /// Temperature scaling expression: T = dT*(Teta + 1)
     pub T_scaling: Expr,
-    /// Mean molar mass (kg/mol)
+    /// Legacy public mean-molar-mass field (kg/mol); prefer `mean_molar_mass_kg_per_mol()`.
     pub M: f64,
     /// Transport coefficients D*ρ for each substance
     pub D_ro_map: HashMap<String, f64>,
@@ -232,14 +290,19 @@ pub struct BVPSolver {
     pub unknowns: Vec<String>,
     /// System of differential equations dy/dx = f(x,y)
     pub eq_system: Vec<Expr>,
-    /// Boundary conditions: variable -> (boundary_index, value)
+    /// Legacy public boundary-condition map; prefer `state_boundary_conditions()`.
     pub BorderConditions: HashMap<String, (usize, f64)>,
-    /// Solution matrix (variables × mesh_points)
+    /// Solution matrix (mesh_points × variables)
     pub solution: Option<DMatrix<f64>>,
     /// Spatial mesh points
     pub x_mesh: Option<DVector<f64>>,
     /// struct that stores balance errors - filled at the end of solution
     pub quality: SolutionQuality,
+    /// Latest native, route-tagged solver telemetry, when available.
+    pub last_telemetry: Option<BvpSolverTelemetrySnapshot>,
+    /// Optional common telemetry override for direct programmatic solves.
+    /// `None` preserves the route-native mode supplied by a hybrid settings parser.
+    pub telemetry_mode_override: Option<BvpApiTelemetryMode>,
 }
 
 impl Default for BVPSolver {
@@ -253,6 +316,8 @@ impl Default for BVPSolver {
             solution: None,
             x_mesh: None,
             quality: SolutionQuality::default(),
+            last_telemetry: None,
+            telemetry_mode_override: None,
         }
     }
 }
@@ -293,11 +358,6 @@ pub(crate) struct NrbvpHandoffConfig {
     pub t_end: f64,
     pub n_steps: usize,
     pub solver_backend_config: ReactorBvpSolverConfig,
-    /// Optional solver-ready damped options built natively by RustedSciThe.
-    ///
-    /// When present, this takes precedence over the local facade conversion so
-    /// parser-driven paths can hand the backend a ready-made solver contract.
-    pub solver_options: Option<DampedSolverOptions>,
     pub scheme: String,
     pub strategy: String,
     pub strategy_params: Option<SolverParams>,
@@ -336,7 +396,6 @@ impl NrbvpHandoffConfig {
             t_end,
             n_steps,
             solver_backend_config: ReactorBvpSolverConfig::default_lambdify(),
-            solver_options: None,
             scheme,
             strategy,
             strategy_params,
@@ -360,12 +419,6 @@ impl NrbvpHandoffConfig {
         self.solver_backend_config = solver_backend_config;
         self
     }
-
-    /// Attach a solver-ready damped options object and bypass the local facade conversion.
-    pub(crate) fn with_solver_options(mut self, solver_options: DampedSolverOptions) -> Self {
-        self.solver_options = Some(solver_options);
-        self
-    }
 }
 
 /// Apply legacy Newton/runtime settings on top of the generated-backend facade.
@@ -375,14 +428,10 @@ impl NrbvpHandoffConfig {
 /// positional values. Keeping the merge here prevents parser/direct paths from
 /// drifting while the public API is migrated gradually.
 fn build_damped_options(config: &NrbvpHandoffConfig) -> Result<DampedSolverOptions, ReactorError> {
-    let mut options = if let Some(solver_options) = config.solver_options.clone() {
-        solver_options
-    } else {
-        config
-            .solver_backend_config
-            .to_rusted_options()
-            .map_err(ReactorError::InvalidConfiguration)?
-    };
+    let mut options = config
+        .solver_backend_config
+        .to_rusted_options()
+        .map_err(ReactorError::InvalidConfiguration)?;
     options = options
         .with_scheme_name(config.scheme.clone())
         .with_strategy_params(config.strategy_params.clone())
@@ -401,12 +450,164 @@ fn build_damped_options(config: &NrbvpHandoffConfig) -> Result<DampedSolverOptio
     Ok(options)
 }
 
+fn apply_bvp_telemetry_mode(
+    config: BvpSolverConfig,
+    mode: BvpApiTelemetryMode,
+) -> Result<BvpSolverConfig, ReactorError> {
+    match config {
+        BvpSolverConfig::Damped {
+            options,
+            initial_guess,
+        } => Ok(BvpSolverSettings::Damped(options)
+            .with_telemetry_mode(mode)
+            .map_err(ReactorError::BvpTelemetry)?
+            .with_initial_guess(initial_guess)),
+        BvpSolverConfig::Frozen {
+            options,
+            initial_guess,
+        } => Ok(BvpSolverSettings::Frozen(options)
+            .with_telemetry_mode(mode)
+            .map_err(ReactorError::BvpTelemetry)?
+            .with_initial_guess(initial_guess)),
+        BvpSolverConfig::Sci {
+            options,
+            sparse_factorization,
+            aot_config,
+            initial_guess,
+        } => Ok(BvpSolverSettings::Sci {
+            options,
+            sparse_factorization,
+            aot_config,
+        }
+        .with_telemetry_mode(mode)
+        .map_err(ReactorError::BvpTelemetry)?
+        .with_initial_guess(initial_guess)),
+        BvpSolverConfig::SciWithFreeParameters {
+            options,
+            sparse_factorization,
+            aot_config,
+            initial_guess,
+            free_parameters,
+        } => {
+            let settings = BvpSolverSettings::Sci {
+                options,
+                sparse_factorization,
+                aot_config: aot_config.clone(),
+            }
+            .with_telemetry_mode(mode)
+            .map_err(ReactorError::BvpTelemetry)?;
+            let BvpSolverSettings::Sci { options, .. } = settings else {
+                unreachable!("Sci settings retain their route")
+            };
+            Ok(BvpSolverConfig::SciWithFreeParameters {
+                options,
+                sparse_factorization,
+                aot_config,
+                initial_guess,
+                free_parameters,
+            })
+        }
+    }
+}
+
+fn bvp_boundary_tolerance(config: &BvpSolverConfig, state: &str, expected: f64) -> f64 {
+    match config {
+        BvpSolverConfig::Damped { options, .. } => {
+            let relative = options
+                .rel_tolerance
+                .as_ref()
+                .and_then(|tolerances| tolerances.get(state))
+                .copied()
+                .unwrap_or(0.0);
+            options.abs_tolerance + relative * expected.abs()
+        }
+        BvpSolverConfig::Frozen { options, .. } => options.tolerance,
+        BvpSolverConfig::Sci { options, .. }
+        | BvpSolverConfig::SciWithFreeParameters { options, .. } => {
+            options.boundary_tolerance.unwrap_or(options.tolerance)
+        }
+    }
+}
+
 impl BVPSolver {
+    /// Solve with the fixed-mesh Frozen/Naive family through the shared BVP API.
+    ///
+    /// KiThe accepts a full nodal profile. The RST Frozen route stores only
+    /// unconstrained nodal values, so the prescribed endpoint is removed from
+    /// each state's seed before crossing the backend boundary.
+    pub fn solve_BVPfrozen(
+        &mut self,
+        initial_guess: DMatrix<f64>,
+        options: FrozenSolverOptions,
+    ) -> Result<(), ReactorError> {
+        self.last_telemetry = None;
+        let nodes = initial_guess.ncols();
+        if initial_guess.nrows() != self.unknowns.len() || nodes < 2 {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Frozen initial guess must have shape {}xN with N >= 2, got {}x{nodes}",
+                self.unknowns.len(),
+                initial_guess.nrows()
+            )));
+        }
+        if initial_guess.iter().any(|value| !value.is_finite()) {
+            return Err(ReactorError::InvalidNumericValue(
+                "Frozen initial guess contains a non-finite value".to_string(),
+            ));
+        }
+
+        let intervals = nodes - 1;
+        let problem = self.build_bvp_problem(self.x_range.0, self.x_range.1, intervals)?;
+        let internal_initial_guess =
+            self.frozen_internal_initial_guess(&initial_guess, intervals)?;
+        self.solve_config_with_bvp_api(
+            problem,
+            BvpSolverConfig::Frozen {
+                options,
+                initial_guess: internal_initial_guess,
+            },
+            false,
+        )
+    }
+
+    fn frozen_internal_initial_guess(
+        &self,
+        full_profile: &DMatrix<f64>,
+        intervals: usize,
+    ) -> Result<DMatrix<f64>, ReactorError> {
+        let mut reduced = DMatrix::zeros(self.unknowns.len(), intervals);
+        for (state, name) in self.unknowns.iter().enumerate() {
+            let (side, _) = self.BorderConditions.get(name).copied().ok_or_else(|| {
+                ReactorError::MissingData(format!(
+                    "Missing boundary condition for BVP state `{name}`"
+                ))
+            })?;
+            let boundary_node = match side {
+                0 => 0,
+                1 => intervals,
+                other => {
+                    return Err(ReactorError::InvalidConfiguration(format!(
+                        "Boundary endpoint for `{name}` must be 0 or 1, got {other}"
+                    )));
+                }
+            };
+            for reduced_node in 0..intervals {
+                let full_node = if reduced_node < boundary_node {
+                    reduced_node
+                } else {
+                    reduced_node + 1
+                };
+                reduced[(state, reduced_node)] = full_profile[(state, full_node)];
+            }
+        }
+        Ok(reduced)
+    }
+
     /// Convert the solver boundary-condition map into the backend shape.
     ///
     /// The backend expects each physical boundary value wrapped in a single-item
     /// vector, so we build that representation in one place and reuse it across
     /// solver entry points.
+    #[cfg(test)]
     pub(crate) fn backend_boundary_conditions(&self) -> HashMap<String, Vec<(usize, f64)>> {
         let mut backend_bc = HashMap::with_capacity(self.BorderConditions.len());
         for (name, &(boundary_index, value)) in &self.BorderConditions {
@@ -420,6 +621,7 @@ impl BVPSolver {
     /// This keeps the ownership boundary explicit: the solver still owns the
     /// canonical equation system, but the backend gets its own owned copy at one
     /// well-defined handoff point.
+    #[cfg(test)]
     pub(crate) fn build_nrbvp_backend(
         &self,
         config: NrbvpHandoffConfig,
@@ -438,6 +640,254 @@ impl BVPSolver {
         );
         backend.dont_save_log(config.dont_save_log);
         Ok(backend)
+    }
+
+    fn build_bvp_problem(
+        &self,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+    ) -> Result<BvpProblem, ReactorError> {
+        if n_steps < 2 {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Damped BVP requires at least 2 intervals, got {n_steps}"
+            )));
+        }
+        n_steps.checked_add(1).ok_or_else(|| {
+            ReactorError::InvalidConfiguration("BVP interval count overflows node count".into())
+        })?;
+        if !t0.is_finite() || !t_end.is_finite() || t_end <= t0 {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "BVP domain must be finite and increasing, got [{t0}, {t_end}]"
+            )));
+        }
+        if self.eq_system.len() != self.unknowns.len() || self.unknowns.is_empty() {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "BVP equation/state dimensions differ: {} equations, {} states",
+                self.eq_system.len(),
+                self.unknowns.len()
+            )));
+        }
+        if self.BorderConditions.len() != self.unknowns.len() {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Expected one boundary condition per state: {} states, {} conditions",
+                self.unknowns.len(),
+                self.BorderConditions.len()
+            )));
+        }
+
+        let mesh = (0..=n_steps)
+            .map(|index| match index {
+                0 => t0,
+                index if index == n_steps => t_end,
+                _ => t0 + (t_end - t0) * index as f64 / n_steps as f64,
+            })
+            .collect();
+        let mut boundary_conditions = Vec::with_capacity(self.unknowns.len());
+        for (state, name) in self.unknowns.iter().enumerate() {
+            let (side, value) = self.BorderConditions.get(name).copied().ok_or_else(|| {
+                ReactorError::MissingData(format!(
+                    "Missing boundary condition for BVP state `{name}`"
+                ))
+            })?;
+            let side = match side {
+                0 => BvpBoundarySide::Left,
+                1 => BvpBoundarySide::Right,
+                other => {
+                    return Err(ReactorError::InvalidConfiguration(format!(
+                        "Boundary endpoint for `{name}` must be 0 or 1, got {other}"
+                    )));
+                }
+            };
+            boundary_conditions.push(BvpBoundaryCondition { state, side, value });
+        }
+
+        BvpProblem::new(
+            self.eq_system.clone(),
+            self.unknowns.clone(),
+            self.arg_name.clone(),
+            mesh,
+            boundary_conditions,
+        )
+        .map_err(ReactorError::BvpApi)
+    }
+
+    fn solve_config_with_bvp_api(
+        &mut self,
+        problem: BvpProblem,
+        config: BvpSolverConfig,
+        dont_save_log: bool,
+    ) -> Result<(), ReactorError> {
+        self.last_telemetry = None;
+        if dont_save_log && matches!(config, BvpSolverConfig::Sci { .. }) {
+            return Err(ReactorError::InvalidConfiguration(
+                "`dont_save_log` is not supported by the BVP_sci lifecycle".into(),
+            ));
+        }
+        let config = match self.telemetry_mode_override {
+            Some(mode) => apply_bvp_telemetry_mode(config, mode)?,
+            None => config,
+        };
+        let boundary_tolerances = self
+            .unknowns
+            .iter()
+            .map(|state| {
+                let expected = self
+                    .BorderConditions
+                    .get(state)
+                    .map(|(_, value)| *value)
+                    .unwrap_or(0.0);
+                bvp_boundary_tolerance(&config, state, expected)
+            })
+            .collect::<Vec<_>>();
+        let mut solver = RstBvpSolver::new(problem, config).map_err(ReactorError::BvpApi)?;
+        if dont_save_log {
+            match solver.native_mut() {
+                BvpNativeSolver::Damped(native) => native.dont_save_log(true),
+                BvpNativeSolver::Frozen(native) => native.dont_save_log(true),
+                BvpNativeSolver::Sci(_) => unreachable!("Sci was rejected above"),
+            }
+        }
+
+        if let Err(error) = solver.solve() {
+            self.last_telemetry = Some(solver.telemetry_snapshot());
+            return Err(ReactorError::BvpApi(error));
+        }
+        self.last_telemetry = Some(solver.telemetry_snapshot());
+        let view = solver
+            .solution_view()
+            .ok_or_else(|| ReactorError::BvpApi(BvpApiError::MissingResult))?;
+        let state_count = view.state_count();
+        let mesh = view.mesh().to_vec();
+        let node_count = mesh.len();
+        let solution = DMatrix::from_fn(node_count, state_count, |node, state| {
+            view.value(node, state).unwrap_or(f64::NAN)
+        });
+
+        validate_bvp_solution_matrix(&solution)?;
+        if state_count != self.unknowns.len()
+            || node_count == 0
+            || mesh.iter().any(|value| !value.is_finite())
+        {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "BVP API returned inconsistent solution dimensions: expected {} states, got {state_count} states and {node_count} mesh points",
+                self.unknowns.len()
+            )));
+        }
+
+        for (state, name) in self.unknowns.iter().enumerate() {
+            let &(endpoint, expected) = self.BorderConditions.get(name).ok_or_else(|| {
+                ReactorError::InvalidConfiguration(format!(
+                    "Missing boundary condition for BVP state `{name}` after solve"
+                ))
+            })?;
+            let row = match endpoint {
+                0 => 0,
+                1 => node_count - 1,
+                _ => {
+                    return Err(ReactorError::InvalidConfiguration(format!(
+                        "Boundary endpoint for `{name}` must be 0 or 1, got {endpoint}"
+                    )));
+                }
+            };
+            let actual = solution[(row, state)];
+            let absolute_error = (actual - expected).abs();
+            let tolerance = boundary_tolerances[state];
+            if absolute_error > tolerance {
+                return Err(ReactorError::BvpBoundaryConditionViolation {
+                    state: name.clone(),
+                    endpoint,
+                    expected,
+                    actual,
+                    absolute_error,
+                    tolerance,
+                });
+            }
+        }
+
+        self.solution = Some(solution);
+        self.x_mesh = Some(DVector::from_vec(mesh));
+        Ok(())
+    }
+
+    /// Set a route-independent telemetry override for subsequent solves.
+    ///
+    /// The request is validated against the selected route at solve time. This
+    /// keeps one facade setting while retaining RST's native snapshot types.
+    pub fn with_bvp_telemetry_mode(mut self, mode: BvpApiTelemetryMode) -> Self {
+        self.telemetry_mode_override = Some(mode);
+        self
+    }
+
+    pub(crate) fn solve_with_hybrid_settings(
+        &mut self,
+        settings: BvpSolverSettings,
+        initial_guess: DMatrix<f64>,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+        dont_save_log: bool,
+    ) -> Result<(), ReactorError> {
+        self.last_telemetry = None;
+        if n_steps < 2 {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "BVP requires at least two intervals, got {n_steps}"
+            )));
+        }
+        let expected_columns = match &settings {
+            BvpSolverSettings::Damped(_) => n_steps,
+            BvpSolverSettings::Frozen(_) | BvpSolverSettings::Sci { .. } => {
+                n_steps.checked_add(1).ok_or_else(|| {
+                    ReactorError::InvalidConfiguration(
+                        "BVP interval count overflows node count".into(),
+                    )
+                })?
+            }
+        };
+        if initial_guess.nrows() != self.unknowns.len()
+            || initial_guess.ncols() != expected_columns
+            || initial_guess.iter().any(|value| !value.is_finite())
+        {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Initial guess for selected BVP family must be finite with shape {}x{expected_columns}, got {}x{}",
+                self.unknowns.len(),
+                initial_guess.nrows(),
+                initial_guess.ncols()
+            )));
+        }
+        let problem = self.build_bvp_problem(t0, t_end, n_steps)?;
+        let config = settings.with_initial_guess(initial_guess);
+        self.solve_config_with_bvp_api(problem, config, dont_save_log)
+    }
+
+    /// Solve through the shared typed BVP API and publish only a validated result.
+    pub(crate) fn solve_with_bvp_api(
+        &mut self,
+        config: NrbvpHandoffConfig,
+    ) -> Result<(), ReactorError> {
+        self.last_telemetry = None;
+        let problem = self.build_bvp_problem(config.t0, config.t_end, config.n_steps)?;
+        if config.initial_guess.nrows() != self.unknowns.len()
+            || config.initial_guess.ncols() != config.n_steps
+        {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Damped initial guess must have shape {}x{}, got {}x{}",
+                self.unknowns.len(),
+                config.n_steps,
+                config.initial_guess.nrows(),
+                config.initial_guess.ncols()
+            )));
+        }
+
+        let options = build_damped_options(&config)?;
+        self.solve_config_with_bvp_api(
+            problem,
+            BvpSolverConfig::Damped {
+                options,
+                initial_guess: config.initial_guess,
+            },
+            config.dont_save_log,
+        )
     }
 
     /// Solve BVP using damped Newton-Raphson method (NRBVP)
@@ -567,7 +1017,7 @@ impl BVPSolver {
         loglevel: Option<String>,
     ) -> Result<(), ReactorError> {
         info!("starting solver!");
-        let mut bvp = self.build_nrbvp_backend(NrbvpHandoffConfig::new(
+        let config = NrbvpHandoffConfig::new(
             initial_guess,
             self.x_range.0,
             self.x_range.1,
@@ -583,131 +1033,68 @@ impl BVPSolver {
             Bounds,
             loglevel,
             false,
-        ))?;
-        let solve_result = bvp
-            .try_solve()
-            .map_err(|err| ReactorError::CalculationError(format!("{err:?}")))?;
-        let converged = solve_result.is_some();
-        if !converged {
-            warn!("BVP solver did not converge to a solution");
-        }
-
-        let solution = bvp.get_result().ok_or_else(|| {
-            ReactorError::CalculationError(
-                "BVP solver finished without producing a solution matrix".to_string(),
-            )
-        })?;
-        validate_bvp_solution_matrix(&solution)?;
-        if bvp.x_mesh.is_empty() {
-            return Err(ReactorError::CalculationError(
-                "BVP solver finished without producing an x mesh".to_string(),
-            ));
-        }
-        if bvp.x_mesh.iter().any(|value| !value.is_finite()) {
-            return Err(ReactorError::InvalidNumericValue(
-                "BVP solver x mesh contains non-finite values".to_string(),
-            ));
-        }
-
-        // Store solution for later access.
-        self.solution = Some(solution);
-        self.x_mesh = Some(bvp.x_mesh);
-
-        if converged {
-            Ok(())
-        } else {
-            Err(ReactorError::CalculationError(
-                "BVP solver did not converge to a solution".to_string(),
-            ))
-        }
+        );
+        self.solve_with_bvp_api(config)
     }
-    /// Solve with the current adaptive collocation BVP_sci implementation.
+    /// Solve with adaptive collocation through the shared BVP API.
     pub fn solve_BVPsci(
         &mut self,
         initial_guess: DMatrix<f64>,
         n_steps: usize,
         max_nodes: usize,
         tol: f64,
-    ) {
-        let dimensions = self.unknowns.len();
-        if n_steps < 2 || dimensions == 0 {
-            warn!("BVP_sci requires at least two mesh nodes and one state variable");
-            return;
+    ) -> Result<(), ReactorError> {
+        self.last_telemetry = None;
+        if n_steps < 2 {
+            return Err(ReactorError::InvalidConfiguration(
+                "BVP_sci requires at least two mesh nodes".to_string(),
+            ));
         }
-        if initial_guess.nrows() != dimensions || initial_guess.ncols() != n_steps {
-            warn!(
-                "BVP_sci initial guess shape must be {dimensions}x{n_steps}, got {}x{}",
+        if initial_guess.nrows() != self.unknowns.len() || initial_guess.ncols() != n_steps {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "BVP_sci initial guess must have shape {}x{n_steps}, got {}x{}",
+                self.unknowns.len(),
                 initial_guess.nrows(),
                 initial_guess.ncols()
-            );
-            return;
+            )));
+        }
+        if initial_guess.iter().any(|value| !value.is_finite()) {
+            return Err(ReactorError::InvalidNumericValue(
+                "BVP_sci initial guess contains a non-finite value".to_string(),
+            ));
         }
 
-        let mut boundary_values = Vec::with_capacity(self.unknowns.len());
-        for (state_index, name) in self.unknowns.iter().enumerate() {
-            let Some(&(endpoint, value)) = self.BorderConditions.get(name) else {
-                warn!("BVP_sci has no boundary condition for state '{name}'");
-                return;
-            };
-            if endpoint > 1 {
-                warn!("BVP_sci boundary endpoint for '{name}' must be 0 or 1, got {endpoint}");
-                return;
-            }
-            boundary_values.push((state_index, endpoint, value));
-        }
-        let mut initial_state = Vec::with_capacity(dimensions * n_steps);
-        for node in 0..n_steps {
-            for state in 0..dimensions {
-                initial_state.push(initial_guess[(state, node)]);
-            }
-        }
-        let boundary_callback =
-            move |ya: &[f64], yb: &[f64], _parameters: &[f64], output: &mut [f64]| {
-                for (output_index, &(state_index, endpoint, value)) in
-                    boundary_values.iter().enumerate()
-                {
-                    let endpoint_state = if endpoint == 0 { ya } else { yb };
-                    output[output_index] = endpoint_state[state_index] - value;
-                }
-                Ok(())
-            };
-        let mut bvp = match BvpSciSolver::builder(self.eq_system.clone(), self.unknowns.clone())
-            .with_frontend(BvpSciAssembly::ExprLegacy)
+        let problem = self.build_bvp_problem(self.x_range.0, self.x_range.1, n_steps - 1)?;
+        let options = BvpSciOptions::default()
+            .with_execution(BvpSciExecution::Lambdify)
+            .with_assembly(BvpSciAssembly::ExprLegacy)
             .with_matrix_layout(BvpSciMatrixLayout::Dense)
             .with_tolerance(tol)
             .with_limits(max_nodes, 100, 20)
-            .with_telemetry(BvpSciTelemetryMode::Off)
-            .with_mesh_and_initial_state(
-                (0..n_steps)
-                    .map(|node| node as f64 / (n_steps - 1) as f64)
-                    .collect(),
-                initial_state,
-            )
-            .with_boundary_callback(boundary_callback)
-            .build()
-        {
-            Ok(solver) => solver,
-            Err(error) => {
-                warn!("BVP_sci preparation failed: {error}");
-                return;
-            }
-        };
-        match bvp.solve() {
-            Ok(result) => {
-                let nodes = result.x.len();
-                self.solution = Some(DMatrix::from_fn(dimensions, nodes, |state, node| {
-                    result.y[node * dimensions + state]
-                }));
-                self.x_mesh = Some(DVector::from_vec(result.x));
-            }
-            Err(error) => warn!("BVP_sci solve failed: {error}"),
-        }
+            .with_telemetry(BvpSciTelemetryMode::Off);
+        self.solve_config_with_bvp_api(
+            problem,
+            BvpSolverConfig::Sci {
+                options,
+                sparse_factorization: ApiBvpSciSparseFactorization::StandardFaer,
+                aot_config: None,
+                initial_guess,
+            },
+            false,
+        )
     }
     /// Get reference to solution matrix
     ///
     /// Returns None if solve hasn't been called yet
     pub fn get_solution(&self) -> Option<&DMatrix<f64>> {
         self.solution.as_ref()
+    }
+
+    /// Read-only state endpoint conditions in canonical variable order.
+    ///
+    /// The public `BorderConditions` field remains available for compatibility.
+    pub fn state_boundary_conditions(&self) -> &HashMap<String, (usize, f64)> {
+        &self.BorderConditions
     }
 
     /// Debug print solution summary
@@ -845,6 +1232,16 @@ impl SimpleReactorTask {
     /// `Diffusion` field directly.
     pub fn diffusion_coefficients(&self) -> &HashMap<String, f64> {
         &self.Diffusion
+    }
+
+    /// Read-only thermal conductivity in W/(m K).
+    pub fn thermal_conductivity(&self) -> f64 {
+        self.Lambda
+    }
+
+    /// Read-only mean molar mass in kg/mol.
+    pub fn mean_molar_mass_kg_per_mol(&self) -> f64 {
+        self.M
     }
 
     /// Read-only access to the raw boundary-condition snapshot.

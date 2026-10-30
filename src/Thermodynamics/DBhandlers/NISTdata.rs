@@ -42,12 +42,15 @@
 use crate::Thermodynamics::DBhandlers::NIST_parser::{
     NistError as NistParserError, NistInput, NistParser, Phase, SearchType,
 };
+use RustedSciThe::numerical::optimization::sym_fitting::FittingError as RstFittingError;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use prettytable::{Cell, Row, Table};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use std::{error::Error, fmt::Debug};
+use thiserror::Error;
 
 #[allow(non_upper_case_globals, non_snake_case)]
 const e2: Expr = Expr::Const(2.0);
@@ -58,15 +61,107 @@ const e4: Expr = Expr::Const(4.0);
 
 #[derive(Debug)]
 pub enum NISTError {
-    NoCoefficientsFound { temperature: f64, range: String },
+    NoCoefficientsFound {
+        temperature: f64,
+        range: String,
+    },
     InvalidTemperatureRange,
     SchemaError(String),
-    ParserSetupError(String),
+    ParserSetupError(NistParserError),
     ParserError(NistParserError),
     SerdeError(serde_json::Error),
     UnsupportedUnit(String),
     SymbolicError(String),
     FittingError(String),
+    Fit(NISTFitError),
+    FittingBackend {
+        stage: &'static str,
+        source: RstFittingError,
+    },
+    NoFitSamples {
+        minimum_temperature: f64,
+        maximum_temperature: f64,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum NISTFitError {
+    #[error("invalid fit input: {0}")]
+    Input(#[source] NISTFitInputError),
+    #[error("fit preparation failed: {0}")]
+    Preparation(#[source] NISTFitPreparationError),
+    #[error("fit numerical solve failed: {0}")]
+    Numerical(#[source] NISTFitNumericalError),
+    #[error("fit quality rejected: {0}")]
+    Quality(#[source] NISTFitQualityError),
+}
+
+#[derive(Debug, Error)]
+pub enum NISTFitInputError {
+    #[error("sample vectors must not be empty")]
+    EmptySamples,
+    #[error("sample vector lengths differ: temperatures={temperatures}, Cp={cp}, H={h}, S={s}")]
+    LengthMismatch {
+        temperatures: usize,
+        cp: usize,
+        h: usize,
+        s: usize,
+    },
+    #[error("non-finite {field} at index {index}: {value}")]
+    NonFiniteValue {
+        field: &'static str,
+        index: usize,
+        value: f64,
+    },
+    #[error("temperature must be positive at index {index}: {value}")]
+    NonPositiveTemperature { index: usize, value: f64 },
+    #[error("tolerances must be finite, absolute >= 0 and relative > 0")]
+    InvalidTolerance,
+    #[error("property comparison failed: {0}")]
+    ComparisonFailed(String),
+}
+
+#[derive(Debug, Error)]
+pub enum NISTFitPreparationError {
+    #[error("invalid temperature range {minimum}..{maximum} K")]
+    InvalidRange { minimum: f64, maximum: f64 },
+    #[error("no samples overlap requested range {minimum}..{maximum} K")]
+    NoSamples { minimum: f64, maximum: f64 },
+    #[error("source temperature intervals overlap: {left:?} and {right:?}")]
+    OverlappingIntervals { left: (f64, f64), right: (f64, f64) },
+    #[error("requested sample grid size {requested} exceeds maximum {maximum}")]
+    SampleLimitExceeded { requested: f64, maximum: usize },
+    #[error("prepared sample vector lengths are inconsistent")]
+    InconsistentSampleLengths,
+}
+
+#[derive(Debug, Error)]
+pub enum NISTFitNumericalError {
+    #[error("design matrix rank {rank} is below required rank {required}")]
+    RankDeficient { rank: usize, required: usize },
+    #[error("SVD least-squares solve failed: {0}")]
+    LinearSolveFailed(String),
+    #[error("fitting produced a non-finite coefficient")]
+    NonFiniteCoefficients,
+}
+
+#[derive(Debug, Error)]
+pub enum NISTFitQualityError {
+    #[error("required property report '{property}' was not produced")]
+    MissingReport { property: String },
+    #[error("property report '{property}' contains non-finite metrics")]
+    NonFiniteMetrics { property: String },
+    #[error("{property}: normalized max error {max_error} exceeds tolerance {tolerance}")]
+    Rejected {
+        property: String,
+        max_error: f64,
+        tolerance: f64,
+    },
+    #[error("{property}: {significant_points} samples exceed the acceptance tolerance")]
+    SignificantResiduals {
+        property: String,
+        significant_points: usize,
+    },
 }
 
 impl fmt::Display for NISTError {
@@ -105,6 +200,17 @@ impl fmt::Display for NISTError {
             NISTError::FittingError(msg) => {
                 write!(f, "Fitting error: {}", msg)
             }
+            NISTError::Fit(err) => write!(f, "NIST fit error: {}", err),
+            NISTError::FittingBackend { stage, source } => {
+                write!(f, "NIST {stage} fitting backend failed: {source}")
+            }
+            NISTError::NoFitSamples {
+                minimum_temperature,
+                maximum_temperature,
+            } => write!(
+                f,
+                "No NIST fitting samples overlap the requested range {minimum_temperature}..{maximum_temperature} K"
+            ),
         }
     }
 }
@@ -122,6 +228,9 @@ impl Error for NISTError {
         match self {
             NISTError::SerdeError(err) => Some(err),
             NISTError::ParserError(err) => Some(err),
+            NISTError::ParserSetupError(err) => Some(err),
+            NISTError::FittingBackend { source, .. } => Some(source),
+            NISTError::Fit(err) => Some(err),
             _ => None,
         }
     }
@@ -158,13 +267,13 @@ pub struct NISTdata {
     pub ds: f64,
     /// heat capacity function
     #[allow(clippy::type_complexity)]
-    pub C_fun: Box<dyn Fn(f64) -> f64 + Send + Sync>,
+    pub C_fun: Arc<dyn Fn(f64) -> f64 + Send + Sync>,
     /// enthalpy function
     #[allow(clippy::type_complexity)]
-    pub dh_fun: Box<dyn Fn(f64) -> f64 + Send + Sync>,
+    pub dh_fun: Arc<dyn Fn(f64) -> f64 + Send + Sync>,
     /// entropy function
     #[allow(clippy::type_complexity)]
-    pub ds_fun: Box<dyn Fn(f64) -> f64 + Send + Sync>,
+    pub ds_fun: Arc<dyn Fn(f64) -> f64 + Send + Sync>,
     /// symbolic heat capacity
     pub Cp_sym: Expr,
     /// symbolic enthalpy
@@ -189,9 +298,9 @@ impl NISTdata {
             Cp: 0.0,
             dh: 0.0,
             ds: 0.0,
-            C_fun: Box::new(|x| x),
-            dh_fun: Box::new(|x| x),
-            ds_fun: Box::new(|x| x),
+            C_fun: Arc::new(|x| x),
+            dh_fun: Arc::new(|x| x),
+            ds_fun: Arc::new(|x| x),
             Cp_sym: Expr::Const(0.0),
             dh_sym: Expr::Const(0.0),
             ds_sym: Expr::Const(0.0),
@@ -341,8 +450,7 @@ impl NISTdata {
         search_type: SearchType,
         phase: Phase,
     ) -> Result<(), NISTError> {
-        let parser_instance =
-            NistParser::try_new().map_err(|err| NISTError::ParserSetupError(err.to_string()))?;
+        let parser_instance = NistParser::try_new().map_err(NISTError::ParserSetupError)?;
         match parser_instance.get_data(&sub_name, search_type, phase) {
             Ok(input) => {
                 self.input = input;
@@ -444,12 +552,12 @@ impl NISTdata {
             let (a, b, c, d, e, f, g, h) = (
                 coeffs.0, coeffs.1, coeffs.2, coeffs.3, coeffs.4, coeffs.5, coeffs.6, coeffs.7,
             );
-            self.C_fun = Box::new(move |t| um * calculate_cp(t / 1000.0, a, b, c, d, e));
+            self.C_fun = Arc::new(move |t| um * calculate_cp(t / 1000.0, a, b, c, d, e));
             let dh0 = self.input.dh.unwrap_or(0.0); // Use 0.0 for simple substances
-            self.dh_fun = Box::new(move |t| {
+            self.dh_fun = Arc::new(move |t| {
                 1000.0 * um * (calculate_dh(t / 1000.0, a, b, c, d, e, f, g, h) + dh0)
             });
-            self.ds_fun = Box::new(move |t| um * calculate_s(t / 1000.0, a, b, c, d, e, f, g, h));
+            self.ds_fun = Arc::new(move |t| um * calculate_s(t / 1000.0, a, b, c, d, e, f, g, h));
             return Ok(());
         }
         Err(NISTError::NoCoefficientsFound {
@@ -586,41 +694,44 @@ impl NISTdata {
 
     /// Finds the coefficient interval that contains the given temperature
     pub fn interval_for_this_T(&mut self, t: f64) -> Result<(usize, Coeffs), NISTError> {
-        let intervals = self.coeffs_map.clone();
-
-        for (interval_idx, coeffs) in intervals {
-            if coeffs.T.0 <= t && t <= coeffs.T.1 {
-                self.current_T_range = Some(coeffs.T.clone());
-                return Ok((interval_idx, coeffs.clone()));
-            }
-        }
-
-        Err(NISTError::InvalidTemperatureRange)
+        let (interval_idx, coeffs) = self.find_interval_for_T(t)?;
+        self.current_T_range = Some(coeffs.T);
+        Ok((interval_idx, coeffs))
     }
 
-    /// Main interface for temperature interval coefficient fitting with fallback
+    fn find_interval_for_T(&self, temperature: f64) -> Result<(usize, Coeffs), NISTError> {
+        self.coeffs_map
+            .iter()
+            .filter(|(_, coeffs)| coeffs.T.0 <= temperature && temperature <= coeffs.T.1)
+            .min_by(|(left_idx, left), (right_idx, right)| {
+                left.T
+                    .0
+                    .total_cmp(&right.T.0)
+                    .then_with(|| left_idx.cmp(right_idx))
+            })
+            .map(|(&index, coeffs)| (index, coeffs.clone()))
+            .ok_or(NISTError::InvalidTemperatureRange)
+    }
+
+    /// Select or fit coefficients for the requested temperature interval.
     pub fn fitting_coeffs_for_T_interval(&mut self) -> Result<(), NISTError> {
         if let Some((T_min, T_max)) = self.T_interval {
-            let (i_t_min, coeffs_min) = self.interval_for_this_T(T_min)?;
-            let (i_t_max, coeffs_max) = self.interval_for_this_T(T_max)?;
+            if !T_min.is_finite() || !T_max.is_finite() || T_min <= 0.0 || T_min >= T_max {
+                return Err(NISTError::Fit(NISTFitError::Preparation(
+                    NISTFitPreparationError::InvalidRange {
+                        minimum: T_min,
+                        maximum: T_max,
+                    },
+                )));
+            }
+            let (i_t_min, coeffs_min) = self.find_interval_for_T(T_min)?;
+            let (i_t_max, coeffs_max) = self.find_interval_for_T(T_max)?;
+            let selected_range = coeffs_max.T;
 
             if i_t_min == i_t_max {
-                // Both boundaries are in the same interval, no fitting needed
                 self.coeffs = Some(coeffs_min.coeff);
             } else if (i_t_max as isize - i_t_min as isize).abs() == 1 {
-                // Boundaries are in adjacent intervals, perform fitting with fallback
-
-                let result =
-                    self.fit_cp_dh_ds(coeffs_min.clone(), coeffs_max.clone(), T_min, T_max);
-
-                match result {
-                    Ok(_) => {} // fitting_adjacent2 succeeded
-                    _ => {
-                        // fitting_adjacent2 failed, use weighted fitting as fallback
-
-                        self.fitting_adjacent_weighted(coeffs_min, coeffs_max, T_min, T_max)?;
-                    }
-                }
+                self.fit_cp_dh_ds(coeffs_min, coeffs_max, T_min, T_max)?;
             } else if (i_t_max as isize - i_t_min as isize).abs() > 1 {
                 // Non-adjacent intervals, collect all coefficients in range
                 let mut coeffs_in_range = Vec::new();
@@ -629,16 +740,11 @@ impl NISTdata {
                         coeffs_in_range.push(coeffs.clone());
                     }
                 }
-                let result = self.fitting_non_adjacent(coeffs_in_range.clone(), T_min, T_max);
-                match result {
-                    Ok(_) => {} // fitting_non_adjacent succeeded
-                    _ => {
-                        self.fitting_cp_dh_ds_non_adjacent(coeffs_in_range, T_min, T_max)?;
-                    }
-                }
+                self.fitting_cp_dh_ds_non_adjacent(coeffs_in_range, T_min, T_max)?;
             } else {
                 return Err(NISTError::InvalidTemperatureRange);
             }
+            self.current_T_range = Some(selected_range);
             Ok(())
         } else {
             Err(NISTError::InvalidTemperatureRange)
@@ -726,87 +832,9 @@ impl Clone for NISTdata {
             Cp: self.Cp,
             dh: self.dh,
             ds: self.ds,
-            C_fun: {
-                let T_ranges = self.input.T.clone().unwrap();
-                let cp_coeffs = self.input.cp.clone().unwrap();
-                let unit_multiplier = self.unit_multiplier;
-
-                let coeffs = move |T: f64| -> Vec<f64> {
-                    for (i, T_pairs) in T_ranges.iter().enumerate() {
-                        if T >= T_pairs[0] && T <= T_pairs[1] {
-                            return cp_coeffs[i].clone();
-                        }
-                    }
-                    vec![] // Return an empty vector if no matching range is found
-                };
-
-                Box::new(move |T: f64| {
-                    let coeff = coeffs(T);
-                    if coeff.len() >= 5 {
-                        let (a, b, c, d, e) = (coeff[0], coeff[1], coeff[2], coeff[3], coeff[4]);
-                        unit_multiplier * calculate_cp(T / 1000.0, a, b, c, d, e)
-                    } else {
-                        0.0 // Return a default value if coefficients are not available
-                    }
-                })
-            },
-            dh_fun: {
-                let T_ranges = self.input.T.clone().unwrap();
-                let cp_coeffs = self.input.cp.clone().unwrap();
-                let unit_multiplier = self.unit_multiplier;
-                let dh0 = self.input.dh.unwrap_or(0.0); // Use 0.0 for simple substances
-
-                let coeffs = move |T: f64| -> Vec<f64> {
-                    for (i, T_pairs) in T_ranges.iter().enumerate() {
-                        if T >= T_pairs[0] && T <= T_pairs[1] {
-                            return cp_coeffs[i].clone();
-                        }
-                    }
-                    vec![] // Return an empty vector if no matching range is found
-                };
-
-                Box::new(move |T: f64| {
-                    let coeff = coeffs(T);
-                    if coeff.len() >= 8 {
-                        let (a, b, c, d, e, f, g, h) = (
-                            coeff[0], coeff[1], coeff[2], coeff[3], coeff[4], coeff[5], coeff[6],
-                            coeff[7],
-                        );
-                        1000.0
-                            * unit_multiplier
-                            * (calculate_dh(T / 1000.0, a, b, c, d, e, f, g, h) + dh0)
-                    } else {
-                        0.0 // Return a default value if coefficients are not available
-                    }
-                })
-            },
-            ds_fun: {
-                let T_ranges = self.input.T.clone().unwrap();
-                let cp_coeffs = self.input.cp.clone().unwrap();
-                let unit_multiplier = self.unit_multiplier;
-
-                let coeffs = move |T: f64| -> Vec<f64> {
-                    for (i, T_pairs) in T_ranges.iter().enumerate() {
-                        if T >= T_pairs[0] && T <= T_pairs[1] {
-                            return cp_coeffs[i].clone();
-                        }
-                    }
-                    vec![] // Return an empty vector if no matching range is found
-                };
-
-                Box::new(move |T: f64| {
-                    let coeff = coeffs(T);
-                    if coeff.len() >= 8 {
-                        let (a, b, c, d, e, f, g, h) = (
-                            coeff[0], coeff[1], coeff[2], coeff[3], coeff[4], coeff[5], coeff[6],
-                            coeff[7],
-                        );
-                        unit_multiplier * calculate_s(T / 1000.0, a, b, c, d, e, f, g, h)
-                    } else {
-                        0.0 // Return a default value if coefficients are not available 
-                    }
-                })
-            },
+            C_fun: self.C_fun.clone(),
+            dh_fun: self.dh_fun.clone(),
+            ds_fun: self.ds_fun.clone(),
             Cp_sym: self.Cp_sym.clone(),
             dh_sym: self.dh_sym.clone(),
             ds_sym: self.ds_sym.clone(),
@@ -911,15 +939,18 @@ impl ThermoCalculator for NISTdata {
     }
 
     fn get_C_fun(&self) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, ThermoError> {
-        Ok(self.clone().C_fun)
+        let function = self.C_fun.clone();
+        Ok(Box::new(move |temperature| function(temperature)))
     }
 
     fn get_dh_fun(&self) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, ThermoError> {
-        Ok(self.clone().dh_fun)
+        let function = self.dh_fun.clone();
+        Ok(Box::new(move |temperature| function(temperature)))
     }
 
     fn get_ds_fun(&self) -> Result<Box<dyn Fn(f64) -> f64 + Send + Sync>, ThermoError> {
-        Ok(self.clone().ds_fun)
+        let function = self.ds_fun.clone();
+        Ok(Box::new(move |temperature| function(temperature)))
     }
 
     fn get_Cp_sym(&self) -> Result<Expr, ThermoError> {
@@ -1002,6 +1033,59 @@ mod tests {
             ds: Some(100.0),
             molar_mass: Some(18.015),
         }
+    }
+
+    #[test]
+    fn clone_is_total_and_preserves_the_published_closure_source() {
+        let mut uninitialized = NISTdata::new();
+        let default_clone = uninitialized.clone();
+        assert_eq!((default_clone.C_fun)(400.0), 400.0);
+
+        uninitialized.input = base_input();
+        uninitialized.coeffs = Some((50.0, 0.0, 0.0, 0.0, 0.0, 10.0, 20.0, 3.0));
+        uninitialized
+            .create_closure_cp_dh_ds()
+            .expect("published coefficients should create closures");
+        let fitted_cp = (uninitialized.C_fun)(500.0);
+        let cloned = uninitialized.clone();
+
+        assert_eq!((cloned.C_fun)(500.0), fitted_cp);
+        assert_eq!((cloned.dh_fun)(500.0), (uninitialized.dh_fun)(500.0));
+        assert_eq!((cloned.ds_fun)(500.0), (uninitialized.ds_fun)(500.0));
+        assert_ne!(fitted_cp, calculate_cp(0.5, 1.0, 2.0, 3.0, 4.0, 5.0));
+        assert!(Arc::ptr_eq(&cloned.C_fun, &uninitialized.C_fun));
+    }
+
+    #[test]
+    fn failed_interval_fit_preserves_coefficients_and_current_range() {
+        let previous_coefficients = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0);
+        let previous_range = (100.0, 200.0);
+        let mut nist = NISTdata::new();
+        nist.coeffs = Some(previous_coefficients);
+        nist.current_T_range = Some(previous_range);
+        nist.set_T_interval(350.0, 850.0);
+        nist.coeffs_map.insert(
+            0,
+            Coeffs {
+                T: (300.0, 600.0),
+                coeff: (10.0, 0.0, 0.0, 0.0, 0.0, -10.0, 50.0, 0.0),
+            },
+        );
+        nist.coeffs_map.insert(
+            1,
+            Coeffs {
+                T: (600.0, 900.0),
+                coeff: (1000.0, 0.0, 0.0, 0.0, 0.0, 500.0, 500.0, 0.0),
+            },
+        );
+
+        let error = nist
+            .fitting_coeffs_for_T_interval()
+            .expect_err("a poor adjacent fit should be rejected");
+
+        assert!(matches!(error, NISTError::Fit(NISTFitError::Quality(_))));
+        assert_eq!(nist.coeffs, Some(previous_coefficients));
+        assert_eq!(nist.current_T_range, Some(previous_range));
     }
 
     #[test]

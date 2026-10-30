@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_setup_rejects_invalid_solver_settings_before_matrix_publication() {
+    fn native_setup_rejects_invalid_solver_settings_before_matrix_publication() {
         let mut solver = EquilibriumLogMoles::empty();
         solver.subs_data.substances = vec!["O2".to_string(), "O".to_string()];
         solver.elem_composition = DMatrix::from_row_slice(2, 1, &[2.0, 1.0]);
@@ -465,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_residual_factory_reports_typed_setup_errors() {
+    fn native_residual_factory_reports_typed_setup_errors() {
         let phases = vec![Phase {
             kind: PhaseKind::IdealGas,
             species: vec![0, 1],
@@ -937,7 +937,7 @@ mod tests {
             kind: PhaseKind::IdealGas,
             species: vec![0, 1],
         }];
-        instance.set_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)));
+        instance.set_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::LM)));
 
         instance.create_stoich_matrix().unwrap();
         instance.solve().unwrap();
@@ -968,11 +968,11 @@ mod tests {
             .expect("accepted solve must publish a backend report");
         assert_eq!(
             solve_report.accepted_backend,
-            SolverBackend::Legacy(Solvers::LM)
+            SolverBackend::Native(Solvers::LM)
         );
         assert_eq!(
             solve_report.policy,
-            SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM))
+            SolverPolicy::Single(SolverBackend::Native(Solvers::LM))
         );
         assert_eq!(solve_report.attempts.len(), 1);
         assert_eq!(
@@ -982,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn o2_o_equilibrium_uses_rst_symbolic_lm_without_the_legacy_jacobian() {
+    fn o2_o_equilibrium_uses_rst_symbolic_lm_without_the_native_jacobian() {
         use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::capture;
 
         let mut instance = gas_solver(
@@ -2538,7 +2538,7 @@ mod tests {
     #[test]
     fn solver_settings_validate_accepts_single_backend_policy() {
         let mut settings = EquilibriumSolverSettings::default();
-        settings.solver_policy = Some(SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)));
+        settings.solver_policy = Some(SolverPolicy::Single(SolverBackend::Native(Solvers::LM)));
         assert!(settings.validate().is_ok());
     }
 
@@ -2686,7 +2686,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────
-    // SourceCraft Diagnostics: D.1 — EquilibriumLogMoles::solve() with Legacy backends
+    // SourceCraft Diagnostics: D.1 — EquilibriumLogMoles::solve() with Native backends
     // ──────────────────────────────────────────────
     fn o2_dissociation_solver() -> EquilibriumLogMoles {
         // O2 = 2O, 1 element (O), 2 species
@@ -2707,7 +2707,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_lm_solve_publishes_accepted_solution() {
+    fn native_lm_solve_publishes_accepted_solution() {
         let mut solver = o2_dissociation_solver();
         solver.solver_settings.solver = Solvers::LM;
         solver.create_stoich_matrix().unwrap();
@@ -2728,7 +2728,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_nr_solve_publishes_accepted_solution() {
+    fn native_nr_solve_publishes_accepted_solution() {
         let mut solver = o2_dissociation_solver();
         solver.solver_settings.solver = Solvers::NR;
         solver.create_stoich_matrix().unwrap();
@@ -2739,7 +2739,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tr_solve_publishes_accepted_solution() {
+    fn native_tr_solve_publishes_accepted_solution() {
         let mut solver = o2_dissociation_solver();
         solver.solver_settings.solver = Solvers::TR;
         solver.create_stoich_matrix().unwrap();

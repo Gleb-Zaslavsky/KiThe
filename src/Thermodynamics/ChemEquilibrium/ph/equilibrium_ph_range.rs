@@ -554,7 +554,12 @@ impl<'a> PhRangeRequest<'a> {
         let mut formulation_builds = 0usize;
         let mut formulation_reuses = 0usize;
         let mut extensive_normalization_recoveries = 0usize;
-        let uses_prepared_fixed_layout = self.prototype.uses_fixed_declared_phases();
+        let small_scale_preconditioning = self
+            .prototype
+            .needs_small_scale_ph_preconditioning()
+            .map_err(PhRangeError::InvalidProblem)?;
+        let uses_prepared_fixed_layout =
+            self.prototype.uses_fixed_declared_phases() && !small_scale_preconditioning;
         let mut prepared_monolithic = if matches!(
             self.prototype.ph_solve_mode(),
             PhSolveMode::Monolithic | PhSolveMode::Auto

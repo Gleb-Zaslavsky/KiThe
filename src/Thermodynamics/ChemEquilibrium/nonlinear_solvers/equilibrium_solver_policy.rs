@@ -15,7 +15,7 @@
 //! A [`SolverBackend`] is one concrete numerical method that can solve the
 //! equilibrium system. Currently supported:
 //!
-//! - **Legacy backends**: [`Solvers::LM`](crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers),
+//! - **Native backends**: [`Solvers::LM`](crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers),
 //!   [`Solvers::NR`](crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers),
 //!   [`Solvers::TR`](crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers)
 //!   — hand-written implementations in [`equilibrium_nonlinear`](super::equilibrium_nonlinear).
@@ -48,7 +48,7 @@
 //!
 //! | Structure | Role |
 //! |-----------|------|
-//! | [`SolverBackend`] | Enum: Legacy(LM/NR/TR) or RustedSciThe |
+//! | [`SolverBackend`] | Enum: Native(LM/NR/TR) or RustedSciThe |
 //! | [`SolverPolicy`] | Enum: Single(backend) or Cascade(vec) |
 //! | [`SolverCascadeBudget`] | Resource limits for cascade execution |
 //! | [`EquilibriumSolveReport`] | Full cascade execution trace |
@@ -81,10 +81,10 @@
 //! ```rust, ignore
 //! use equilibrium_solver_policy::*;
 //!
-//! // Try RST symbolic first, fall back to legacy LM
+//! // Try RST symbolic first, fall back to native LM
 //! let policy = SolverPolicy::Cascade(vec![
 //!     SolverBackend::RustedSciThe(RustedSciTheSolver::LM),
-//!     SolverBackend::Legacy(Solvers::LM),
+//!     SolverBackend::Native(Solvers::LM),
 //! ]);
 //!
 //! let budget = SolverCascadeBudget {
@@ -117,12 +117,12 @@ use std::fmt;
 
 /// One concrete numerical backend accepted by an equilibrium solve policy.
 ///
-/// Legacy hand-written methods remain visible only as an explicit fallback
-/// family. New policies should prefer the RST symbolic backends.
+/// KiThe-native methods use the calculator's analytical residual/Jacobian
+/// implementation; RST backends use RustedSciThe's prepared symbolic problem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverBackend {
-    /// Historical KiThe implementation using a hand-written Jacobian.
-    Legacy(Solvers),
+    /// KiThe-native implementation using the analytical Jacobian.
+    Native(Solvers),
     /// RST symbolic backend that owns residual/Jacobian preparation.
     RustedSciThe(RustedSciTheSolver),
 }
@@ -139,7 +139,7 @@ pub enum SolverPolicy {
 /// Deterministic resource limits for one solver cascade.
 ///
 /// The limits apply to the control plane before a backend is started. They do
-/// not claim to measure every internal evaluation of legacy methods, but they
+/// not claim to measure every internal evaluation of native methods, but they
 /// guarantee that no attempt receives more iterations than allocated and that
 /// later backends are skipped in a reproducible order once the budget is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,13 +169,13 @@ impl SolverCascadeBudget {
 }
 
 impl SolverPolicy {
-    /// Builds the historical fallback order while making it explicit.
-    pub fn legacy_default(preferred: Solvers) -> Self {
+    /// Builds the native fallback order while making it explicit.
+    pub fn native_default(preferred: Solvers) -> Self {
         Self::Cascade(vec![
-            SolverBackend::Legacy(preferred),
-            SolverBackend::Legacy(Solvers::LM),
-            SolverBackend::Legacy(Solvers::NR),
-            SolverBackend::Legacy(Solvers::TR),
+            SolverBackend::Native(preferred),
+            SolverBackend::Native(Solvers::LM),
+            SolverBackend::Native(Solvers::NR),
+            SolverBackend::Native(Solvers::TR),
         ])
     }
 
@@ -190,21 +190,21 @@ impl SolverPolicy {
     }
 
     /// Builds the production cascade: RST symbolic methods first, followed by
-    /// the independent hand-written implementations as numerical fallbacks.
+    /// the independent KiThe-native implementations as numerical fallbacks.
     ///
     /// The fallback family is reached only for retryable backend failures.
     /// Invalid thermochemistry, dimensions, or solver configuration still
     /// abort the cascade immediately at the common validation boundary.
-    pub fn production_default(preferred_legacy: Solvers) -> Self {
+    pub fn production_default(preferred_native: Solvers) -> Self {
         let mut backends = RustedSciTheSolver::recommended_cascade()
             .into_iter()
             .map(SolverBackend::RustedSciThe)
             .collect::<Vec<_>>();
         backends.extend([
-            SolverBackend::Legacy(preferred_legacy),
-            SolverBackend::Legacy(Solvers::LM),
-            SolverBackend::Legacy(Solvers::NR),
-            SolverBackend::Legacy(Solvers::TR),
+            SolverBackend::Native(preferred_native),
+            SolverBackend::Native(Solvers::LM),
+            SolverBackend::Native(Solvers::NR),
+            SolverBackend::Native(Solvers::TR),
         ]);
         Self::Cascade(backends)
     }
@@ -305,7 +305,7 @@ impl SolverAttemptOutcome {
 
 /// Backend stopping reason in a solver-independent report.
 ///
-/// RST provides these values directly. Instrumented legacy adapters provide
+/// RST provides these values directly. Instrumented native adapters provide
 /// the closest mapped terminal state, while the attempt outcome remains the
 /// authority for the exact error classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,11 +320,13 @@ pub enum SolverTermination {
     Stagnation,
     /// The backend exhausted its rejected-step allowance.
     RejectedStepLimit,
+    /// The backend returned an error before a candidate was available.
+    BackendError,
 }
 
 /// Per-iteration telemetry reported by a numerical backend when it is
 /// available. The shape is backend-neutral; RST currently populates it from
-/// `SolveAttemptStatistics`, while legacy backends leave it unavailable.
+/// `SolveAttemptStatistics`, while native backends leave it unavailable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SolverIterationTelemetry {
     pub iteration: usize,
@@ -348,7 +350,7 @@ pub struct SolverIterationTelemetry {
 /// Callback-level timing reported by a numerical backend when it is available.
 ///
 /// RustedSciThe fills callback timing from a transparent wrapper around its
-/// symbolic residual and Jacobian provider. Legacy LM/NR/TR fill the same
+/// symbolic residual and Jacobian provider. Native LM/NR/TR fill the same
 /// structure, including their linear-system split, only inside an enabled
 /// calculator instrumentation capture.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,10 +359,10 @@ pub struct SolverEvaluationTiming {
     pub residual_evaluation_micros: u128,
     /// Time spent evaluating analytic or symbolic Jacobian callbacks.
     pub jacobian_evaluation_micros: u128,
-    /// Number of adjacent Legacy residual/Jacobian callback pairs receiving
+    /// Number of adjacent Native residual/Jacobian callback pairs receiving
     /// the same exact iterate. `None` means the backend does not expose this
-    /// Legacy-only diagnostic.
-    pub legacy_same_iterate_callback_pairs: Option<usize>,
+    /// Native-only diagnostic.
+    pub native_same_iterate_callback_pairs: Option<usize>,
     /// Time spent solving linearized systems. `None` means the backend did
     /// not expose this internal split.
     pub linear_system_micros: Option<u128>,
@@ -368,15 +370,15 @@ pub struct SolverEvaluationTiming {
     /// For RST, this may still include linear algebra because its adapter does
     /// not expose that internal split.
     pub solver_overhead_micros: u128,
-    /// Legacy-only matrix products and vector algebra outside linear solves.
+    /// Native-only matrix products and vector algebra outside linear solves.
     pub matrix_operations_micros: u128,
-    /// Legacy-only residual and step norm calculations.
+    /// Native-only residual and step norm calculations.
     pub norm_micros: u128,
-    /// Legacy-only construction of trial state vectors.
+    /// Native-only construction of trial state vectors.
     pub trial_vector_micros: u128,
-    /// Legacy-only feasibility predicate calls.
+    /// Native-only feasibility predicate calls.
     pub feasibility_micros: u128,
-    /// Legacy-only line-search and trust-region scalar decision logic.
+    /// Native-only line-search and trust-region scalar decision logic.
     pub globalization_micros: u128,
     /// RST's split between callbacks establishing the accepted state and
     /// callbacks evaluating trial points.
@@ -401,7 +403,7 @@ pub struct SolverEvaluationTiming {
 /// stopped with a backend error before producing a candidate.
 ///
 /// Counter and timing availability are reported independently because RST can
-/// collect either channel without the other. Legacy attempts keep the old
+/// collect either channel without the other. Native attempts keep the old
 /// zero-overhead contract unless calculator instrumentation is active.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SolverAttemptMetrics {
@@ -413,6 +415,9 @@ pub struct SolverAttemptMetrics {
     pub backend_converged: bool,
     /// Completed nonlinear iterations.
     pub iterations: usize,
+    /// Whether iteration and linear-solve totals are complete backend data.
+    /// False means those integer fields are placeholders, not measured zeros.
+    pub backend_progress_available: bool,
     /// Number of residual evaluations performed by the backend.
     pub residual_evaluations: usize,
     /// Number of Jacobian evaluations performed by the backend.
@@ -560,7 +565,7 @@ impl fmt::Display for SolverAttemptReport {
 /// Diagnostics for the backend selection phase of one accepted solve.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EquilibriumSolveReport {
-    /// Effective policy used after legacy defaults or explicit overrides.
+    /// Effective policy used after native defaults or explicit overrides.
     pub policy: SolverPolicy,
     /// Attempts in execution order.
     pub attempts: Vec<SolverAttemptReport>,
@@ -661,20 +666,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_policy_keeps_preferred_backend_first_and_removes_duplicates() {
-        let policy = SolverPolicy::legacy_default(Solvers::NR);
+    fn native_policy_keeps_preferred_backend_first_and_removes_duplicates() {
+        let policy = SolverPolicy::native_default(Solvers::NR);
         assert_eq!(
             policy.ordered_backends(),
             vec![
-                SolverBackend::Legacy(Solvers::NR),
-                SolverBackend::Legacy(Solvers::LM),
-                SolverBackend::Legacy(Solvers::TR),
+                SolverBackend::Native(Solvers::NR),
+                SolverBackend::Native(Solvers::LM),
+                SolverBackend::Native(Solvers::TR),
             ]
         );
     }
 
     #[test]
-    fn production_policy_runs_rst_first_and_keeps_legacy_fallbacks() {
+    fn production_policy_runs_rst_first_and_keeps_native_fallbacks() {
         let ordered = SolverPolicy::production_default(Solvers::TR).ordered_backends();
         let rst_count = RustedSciTheSolver::recommended_cascade().len();
 
@@ -687,9 +692,9 @@ mod tests {
         assert_eq!(
             ordered[rst_count..],
             [
-                SolverBackend::Legacy(Solvers::TR),
-                SolverBackend::Legacy(Solvers::LM),
-                SolverBackend::Legacy(Solvers::NR),
+                SolverBackend::Native(Solvers::TR),
+                SolverBackend::Native(Solvers::LM),
+                SolverBackend::Native(Solvers::NR),
             ]
         );
     }
@@ -697,18 +702,18 @@ mod tests {
     #[test]
     fn single_policy_never_adds_a_fallback_backend() {
         assert_eq!(
-            SolverPolicy::Single(SolverBackend::Legacy(Solvers::TR)).ordered_backends(),
-            vec![SolverBackend::Legacy(Solvers::TR)]
+            SolverPolicy::Single(SolverBackend::Native(Solvers::TR)).ordered_backends(),
+            vec![SolverBackend::Native(Solvers::TR)]
         );
     }
 
     #[test]
     fn solve_report_summarizes_attempts_without_manual_vector_traversal() {
         let report = EquilibriumSolveReport {
-            policy: SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)),
+            policy: SolverPolicy::Single(SolverBackend::Native(Solvers::LM)),
             attempts: vec![
                 SolverAttemptReport {
-                    backend: SolverBackend::Legacy(Solvers::LM),
+                    backend: SolverBackend::Native(Solvers::LM),
                     outcome: SolverAttemptOutcome::Failed {
                         kind: SolverAttemptFailureKind::Solver,
                         reason: "first".to_string(),
@@ -717,19 +722,19 @@ mod tests {
                     metrics: None,
                 },
                 SolverAttemptReport {
-                    backend: SolverBackend::Legacy(Solvers::NR),
+                    backend: SolverBackend::Native(Solvers::NR),
                     outcome: SolverAttemptOutcome::Accepted,
                     metrics: None,
                 },
                 SolverAttemptReport {
-                    backend: SolverBackend::Legacy(Solvers::TR),
+                    backend: SolverBackend::Native(Solvers::TR),
                     outcome: SolverAttemptOutcome::Skipped {
                         reason: "budget exhausted".to_string(),
                     },
                     metrics: None,
                 },
             ],
-            accepted_backend: SolverBackend::Legacy(Solvers::NR),
+            accepted_backend: SolverBackend::Native(Solvers::NR),
         };
 
         assert_eq!(report.attempt_count(), 3);
@@ -742,9 +747,9 @@ mod tests {
         assert_eq!(
             report.attempt_backends(),
             vec![
-                SolverBackend::Legacy(Solvers::LM),
-                SolverBackend::Legacy(Solvers::NR),
-                SolverBackend::Legacy(Solvers::TR),
+                SolverBackend::Native(Solvers::LM),
+                SolverBackend::Native(Solvers::NR),
+                SolverBackend::Native(Solvers::TR),
             ]
         );
         assert!(report.accepted_after_fallback());

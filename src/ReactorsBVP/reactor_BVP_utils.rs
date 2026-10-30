@@ -405,6 +405,11 @@ impl ToleranceConfig {
         Self { C, J, Teta, q }
     }
 
+    /// Relative tolerance for the dimensionless temperature state.
+    pub fn dimensionless_temperature_tolerance(&self) -> f64 {
+        self.Teta
+    }
+
     /// Convert to full tolerance map with entries for all variables
     ///
     /// Creates entries: Teta, q, C0, C1, ..., J0, J1, ...
@@ -478,6 +483,11 @@ impl BoundsConfig {
     /// Create new bounds configuration
     pub fn new(C: (f64, f64), J: (f64, f64), Teta: (f64, f64), q: (f64, f64)) -> Self {
         Self { C, J, Teta, q }
+    }
+
+    /// Bounds for the dimensionless temperature state.
+    pub fn dimensionless_temperature_bounds(&self) -> (f64, f64) {
+        self.Teta
     }
 
     /// Convert to full bounds map with entries for all variables

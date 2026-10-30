@@ -499,63 +499,68 @@ impl TransportData {
 
     pub fn set_lambda_unit(&mut self, unit: Option<String>) -> Result<(), TransportError> {
         if let Some(unit) = unit {
-            self.L_unit = Some(unit.clone());
-            match unit.as_str() {
-                "W/m/K" => self.L_unit_multiplier = 1.0,
-                "mW/m/K" => self.L_unit_multiplier = 1E3,
-                "mkW/m/K" => self.L_unit_multiplier = 1E6,
-                "mkW/sm/K" => self.L_unit_multiplier = 1E+4,
+            let multiplier = match unit.as_str() {
+                "W/m/K" => 1.0,
+                "mW/m/K" => 1E3,
+                "mkW/m/K" => 1E6,
+                "mkW/sm/K" => 1E+4,
                 _ => return Err(TransportError::InvalidUnit(unit)),
-            }
+            };
+            self.L_unit = Some(unit);
+            self.L_unit_multiplier = multiplier;
         }
         Ok(())
     }
 
     pub fn set_V_unit(&mut self, unit: Option<String>) -> Result<(), TransportError> {
         if let Some(unit) = unit {
-            self.V_unit = Some(unit.clone());
-            match unit.as_str() {
-                "kg/m/s" | "Pa*s" => self.V_unit_multiplier = 1.0,
-                "mkPa*s" => self.V_unit_multiplier = 1E6,
+            let multiplier = match unit.as_str() {
+                "kg/m/s" | "Pa*s" => 1.0,
+                "mkPa*s" => 1E6,
                 _ => return Err(TransportError::InvalidUnit(unit)),
-            }
+            };
+            self.V_unit = Some(unit);
+            self.V_unit_multiplier = multiplier;
         }
         Ok(())
     }
 
     pub fn set_M_unit(&mut self, unit: Option<String>) -> Result<(), TransportError> {
         if let Some(unit) = unit {
-            self.M_unit = Some(unit.clone());
-            match unit.as_str() {
-                "kg/mol" => self.M_unit_multiplier = 1.0,
-                "g/mol" => self.M_unit_multiplier = 1E-3,
+            let multiplier = match unit.as_str() {
+                "kg/mol" => 1.0,
+                "g/mol" => 1E-3,
                 _ => return Err(TransportError::InvalidUnit(unit)),
-            }
+            };
+            self.M_unit = Some(unit);
+            self.M_unit_multiplier = multiplier;
         }
         Ok(())
     }
 
     pub fn set_ro_unit(&mut self, unit: Option<String>) -> Result<(), TransportError> {
         if let Some(unit) = unit {
-            self.ro_unit = Some(unit.clone());
-            match unit.as_str() {
-                "kg/m3" => self.ro_unit_multiplier = 1.0,
-                "g/cm3" => self.ro_unit_multiplier = 1E3,
+            let multiplier = match unit.as_str() {
+                "kg/m3" => 1.0,
+                "g/cm3" => 1E3,
                 _ => return Err(TransportError::InvalidUnit(unit)),
-            }
+            };
+            self.ro_unit = Some(unit);
+            self.ro_unit_multiplier = multiplier;
         }
         Ok(())
     }
 
     pub fn set_P_unit(&mut self, unit: Option<String>) -> Result<(), TransportError> {
         if let Some(unit) = unit {
-            self.P_unit = Some(unit.clone());
-            match unit.as_str() {
-                "Pa" => self.P_unit_multiplier = 1.0,
-                "atm" => self.P_unit_multiplier = 101325.0,
-                "bar" => self.P_unit_multiplier = 101325.0 / 1000.0,
+            let multiplier = match unit.as_str() {
+                "Pa" => 1.0,
+                "atm" => 101325.0,
+                "bar" => 101325.0 / 1000.0,
                 _ => return Err(TransportError::InvalidUnit(unit)),
-            }
+            };
+            self.P_unit = Some(unit);
+            self.P_unit_multiplier = multiplier;
         }
         Ok(())
     }
@@ -986,8 +991,9 @@ impl super::transport_api::TransportCalculator for TransportData {
         M: f64,
         M_unit: Option<String>,
     ) -> Result<(), super::transport_api::TransportError> {
-        self.M = M;
+        Self::validate_molar_mass_value(M)?;
         self.set_M_unit(M_unit)?;
+        self.M = M;
         Ok(())
     }
     fn set_P(
@@ -995,8 +1001,9 @@ impl super::transport_api::TransportCalculator for TransportData {
         P: f64,
         P_unit: Option<String>,
     ) -> Result<(), super::transport_api::TransportError> {
-        self.P = P;
+        Self::validate_pressure_value(P)?;
         self.set_P_unit(P_unit)?;
+        self.P = P;
         Ok(())
     }
     fn print_instance(&self) -> Result<(), super::transport_api::TransportError> {
@@ -1082,6 +1089,7 @@ impl Clone for TransportData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Thermodynamics::DBhandlers::transport_api::TransportCalculator;
 
     use crate::Thermodynamics::DBhandlers::NASAdata::NASAdata;
     use crate::Thermodynamics::thermo_lib_api::ThermoData;
@@ -1438,11 +1446,50 @@ mod tests {
     #[test]
     fn test_invalid_units() {
         let mut tr = TransportData::new();
+        tr.set_lambda_unit(Some("W/m/K".to_owned())).unwrap();
+        tr.set_V_unit(Some("Pa*s".to_owned())).unwrap();
+        tr.set_M_unit(Some("g/mol".to_owned())).unwrap();
+        tr.set_ro_unit(Some("kg/m3".to_owned())).unwrap();
+        tr.set_P_unit(Some("atm".to_owned())).unwrap();
+        let before = (
+            tr.L_unit.clone(),
+            tr.L_unit_multiplier,
+            tr.V_unit.clone(),
+            tr.V_unit_multiplier,
+            tr.M_unit.clone(),
+            tr.M_unit_multiplier,
+            tr.ro_unit.clone(),
+            tr.ro_unit_multiplier,
+            tr.P_unit.clone(),
+            tr.P_unit_multiplier,
+        );
         assert!(tr.set_lambda_unit(Some("invalid_unit".to_owned())).is_err());
         assert!(tr.set_V_unit(Some("invalid_unit".to_owned())).is_err());
         assert!(tr.set_M_unit(Some("invalid_unit".to_owned())).is_err());
         assert!(tr.set_ro_unit(Some("invalid_unit".to_owned())).is_err());
         assert!(tr.set_P_unit(Some("invalid_unit".to_owned())).is_err());
+        assert_eq!(
+            before,
+            (
+                tr.L_unit.clone(),
+                tr.L_unit_multiplier,
+                tr.V_unit.clone(),
+                tr.V_unit_multiplier,
+                tr.M_unit.clone(),
+                tr.M_unit_multiplier,
+                tr.ro_unit.clone(),
+                tr.ro_unit_multiplier,
+                tr.P_unit.clone(),
+                tr.P_unit_multiplier,
+            )
+        );
+
+        tr.M = 28.0;
+        tr.P = 101325.0;
+        assert!(tr.set_M(f64::NAN, Some("kg/mol".to_owned())).is_err());
+        assert!(tr.set_P(0.0, Some("Pa".to_owned())).is_err());
+        assert_eq!(tr.M, 28.0);
+        assert_eq!(tr.P, 101325.0);
     }
 
     #[test]

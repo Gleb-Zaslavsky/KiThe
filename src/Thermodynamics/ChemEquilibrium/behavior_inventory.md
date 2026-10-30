@@ -24,9 +24,9 @@ behavior and retire the right legacy paths.
 - `equilibrium_nonlinear.rs`
 - `equilibrium_ids.rs`
 
-## Legacy or transitional modules
+## KiThe-native or transitional modules
 
-- `equilibrium_legacy_backend.rs`
+- `equilibrium_native_backend.rs`
 - `easy_equilibrium.rs`
 - `NR_Legacy.rs`
 
@@ -136,10 +136,10 @@ behavior and retire the right legacy paths.
 - `equilibrium_validation.rs` is the backend-independent acceptance gate and
   should remain the only place where candidate evidence is compared against
   conservation and tolerance thresholds.
-- `equilibrium_nonlinear.rs` and `equilibrium_legacy_backend.rs` contain the
-  active handwritten Legacy LM/NR/TR fallback family. They are distinct from
+- `equilibrium_nonlinear.rs` and `equilibrium_native_backend.rs` contain the
+  active handwritten KiThe-native LM/NR/TR fallback family. They are distinct from
   the deprecated standalone `NR_Legacy.rs` compatibility module.
-- Legacy and classical modules remain part of the tree for migration and
+- KiThe-native and classical modules remain part of the tree for migration and
   characterization, but they are no longer the preferred place for new
   equilibrium behavior.
 

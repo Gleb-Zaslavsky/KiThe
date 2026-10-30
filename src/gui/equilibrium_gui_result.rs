@@ -597,13 +597,14 @@ fn lifecycle_event_snapshot(
         Event::ExtensiveNormalizationRecoveryAccepted {
             physical_inventory_scale,
             trigger_kind,
+            trigger_reason,
             discovery_backend,
             physical_retry_backend,
             reconstructed_physical_boundary,
         } => (
             "Extensive normalization accepted".to_string(),
             format!(
-                "scale={physical_inventory_scale:.6e} mol; trigger={trigger_kind:?}; discovery={discovery_backend}; physical_retry={}; reconstructed={reconstructed_physical_boundary}",
+                "scale={physical_inventory_scale:.6e} mol; trigger={trigger_kind:?} ({trigger_reason}); discovery={discovery_backend}; physical_retry={}; reconstructed={reconstructed_physical_boundary}",
                 physical_retry_backend.as_deref().unwrap_or("none"),
             ),
         ),

@@ -288,7 +288,7 @@ fn canonical_fixed_topology_evidence(
         PreparedPhFormulation::new(prepared, thermochemistry, bounds, target, scale).unwrap();
     let mut settings = EquilibriumSolverSettings::default();
     settings.solver = Solvers::LM;
-    settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
+    settings.solver_policy = Some(SolverPolicy::native_default(Solvers::LM));
     settings.solver_params.tol = 1e-11;
     settings.solver_params.max_iter = 300;
     let runner =
@@ -371,7 +371,7 @@ fn p10_1_ph_inventory_target_enthalpy_scaling_preserves_intensive_state() {
     let validator = PurePhasePhValidator::default();
     let reference = validator.solve(&synthetic_problem(1.0, 0.0)).unwrap();
 
-    for inventory_scale in [0.25, 1.0, 8.0] {
+    for inventory_scale in [1.0e-6, 1.0e-4, 0.25, 1.0, 8.0] {
         let result = validator
             .solve(&synthetic_problem_with_conditions(
                 1.0,
@@ -384,17 +384,30 @@ fn p10_1_ph_inventory_target_enthalpy_scaling_preserves_intensive_state() {
             .unwrap();
         assert!((result.temperature - reference.temperature).abs() <= 1e-6);
         assert!(
-            (result.candidate_moles - inventory_scale * reference.candidate_moles).abs() <= 1e-8
+            (result.candidate_moles / inventory_scale - reference.candidate_moles).abs() <= 1e-8,
+            "inventory_scale={inventory_scale:e}, candidate_moles={:e}",
+            result.candidate_moles
         );
-        assert!((result.total_enthalpy - inventory_scale * reference.total_enthalpy).abs() <= 1e-6);
+        assert!(
+            (result.total_enthalpy / inventory_scale - reference.total_enthalpy).abs() <= 1e-6,
+            "inventory_scale={inventory_scale:e}, total_enthalpy={:e}",
+            result.total_enthalpy
+        );
         assert!(result.chemical_log_residual.abs() <= 1e-10);
-        assert!(result.enthalpy_residual.abs() <= 1e-6);
+        assert!((result.enthalpy_residual / inventory_scale).abs() <= 1e-6);
         for (actual, expected) in result.gas_moles.iter().zip(&reference.gas_moles) {
             assert!(
-                (actual - inventory_scale * expected).abs() <= 1e-8,
+                (actual / inventory_scale - expected).abs() <= 1e-8,
                 "inventory_scale={inventory_scale:e}, actual={actual:e}, expected={expected:e}"
             );
         }
+        println!(
+            "synthetic gas+condensed P,H scale={inventory_scale:.1e} delta_T={:.3e} K normalized_condensed_moles={:.9e} chemical_residual={:.3e} normalized_enthalpy_residual={:.3e}",
+            result.temperature - reference.temperature,
+            result.candidate_moles / inventory_scale,
+            result.chemical_log_residual,
+            result.enthalpy_residual / inventory_scale,
+        );
     }
 }
 

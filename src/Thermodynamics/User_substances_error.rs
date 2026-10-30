@@ -12,6 +12,21 @@ use std::fmt;
 
 type DynSourceError = Box<dyn Error + Send + Sync + 'static>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseRecordLoadStage {
+    ThermochemistryPayloadParse,
+    TransportPayloadParse,
+}
+
+impl fmt::Display for DatabaseRecordLoadStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ThermochemistryPayloadParse => f.write_str("thermochemistry payload parse"),
+            Self::TransportPayloadParse => f.write_str("transport payload parse"),
+        }
+    }
+}
+
 /// Comprehensive error type for SubsData operations
 #[derive(Debug)]
 pub enum SubsDataError {
@@ -44,6 +59,14 @@ pub enum SubsDataError {
     LibraryNotFound(String),
     /// Library name is known to the API but not supported by the current calculator dispatch
     UnsupportedLibrary(String),
+    /// A selected database row could not be parsed by its property calculator.
+    DatabaseRecordLoadFailed {
+        library: String,
+        record_key: String,
+        stage: DatabaseRecordLoadStage,
+        #[allow(dead_code)]
+        source: DynSourceError,
+    },
     /// Calculation failed
     CalculationFailed {
         substance: String,
@@ -137,6 +160,16 @@ impl fmt::Display for SubsDataError {
             SubsDataError::UnsupportedLibrary(library) => {
                 write!(f, "Unsupported library '{}'", library)
             }
+            SubsDataError::DatabaseRecordLoadFailed {
+                library,
+                record_key,
+                stage,
+                source,
+            } => write!(
+                f,
+                "failed to load database record '{}:{}' during {}: {}",
+                library, record_key, stage, source
+            ),
             SubsDataError::CalculationFailed {
                 substance,
                 operation,
@@ -200,6 +233,9 @@ impl Error for SubsDataError {
         match self {
             SubsDataError::ThermoError(err) => Some(err),
             SubsDataError::TransportError(err) => Some(err),
+            SubsDataError::DatabaseRecordLoadFailed { source, .. } => {
+                Some(source.as_ref() as &(dyn Error + 'static))
+            }
             SubsDataError::CalculationFailed { source, .. } => {
                 source.as_deref().map(|err| err as &(dyn Error + 'static))
             }
@@ -212,6 +248,24 @@ impl Error for SubsDataError {
 }
 
 impl SubsDataError {
+    /// Preserve the source error while identifying the exact database row and stage.
+    pub fn database_record_load_failed<E>(
+        library: impl Into<String>,
+        record_key: impl Into<String>,
+        stage: DatabaseRecordLoadStage,
+        source: E,
+    ) -> Self
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        Self::DatabaseRecordLoadFailed {
+            library: library.into(),
+            record_key: record_key.into(),
+            stage,
+            source: Box::new(source),
+        }
+    }
+
     /// Construct a calculation error without attaching a nested source.
     pub fn calculation_failed(
         substance: impl Into<String>,
@@ -336,6 +390,12 @@ fn log_error_from_thermo_error(error: &ThermoError) -> LogErrorType {
         ThermoError::ParserError(err) => {
             LogErrorType::NistRetrievalFailed(format!("Failed to retrieve NIST data: {}", err))
         }
+        ThermoError::ParserSetupError(err) => {
+            LogErrorType::NistRetrievalFailed(format!("Failed to initialize NIST parser: {err}"))
+        }
+        ThermoError::NISTSchema(msg) => {
+            LogErrorType::CalculationFailed(format!("Invalid NIST data schema: {msg}"))
+        }
         ThermoError::SerdeError(msg) => {
             LogErrorType::SerdeError(format!("Failed to deserialize thermodynamic data: {}", msg))
         }
@@ -352,6 +412,23 @@ fn log_error_from_thermo_error(error: &ThermoError) -> LogErrorType {
         ThermoError::FittingError(msg) => {
             LogErrorType::FittingError(format!("Fitting error: {}", msg))
         }
+        ThermoError::FittingAttemptsFailed { primary, fallback } => {
+            LogErrorType::FittingError(format!(
+                "Both thermodynamic fitting routes failed; primary: {primary}; fallback: {fallback}"
+            ))
+        }
+        ThermoError::NISTFit(err) => {
+            LogErrorType::FittingError(format!("NIST fitting error: {}", err))
+        }
+        ThermoError::FittingBackend { stage, source } => LogErrorType::FittingError(format!(
+            "Thermodynamic {stage} fitting backend failed: {source}"
+        )),
+        ThermoError::NoFitSamples {
+            minimum_temperature,
+            maximum_temperature,
+        } => LogErrorType::FittingError(format!(
+            "No fitting samples overlap {minimum_temperature}..{maximum_temperature} K"
+        )),
     }
 }
 
@@ -406,6 +483,9 @@ fn log_error_from_transport_error(error: &TransportError) -> LogErrorType {
         TransportError::FittingError(msg) => {
             LogErrorType::FittingError(format!("Fitting error: {}", msg))
         }
+        TransportError::FittingBackend { stage, source } => LogErrorType::FittingError(format!(
+            "Transport {stage} fitting backend failed: {source}"
+        )),
     }
 }
 
@@ -496,6 +576,15 @@ fn log_error_from_subs_data_error(error: &SubsDataError) -> LogErrorType {
         SubsDataError::UnsupportedLibrary(library) => {
             LogErrorType::LibraryNotFound(format!("Unsupported library '{}'", library))
         }
+        SubsDataError::DatabaseRecordLoadFailed {
+            library,
+            record_key,
+            stage,
+            source,
+        } => LogErrorType::CalculationFailed(format!(
+            "failed to load database record '{}:{}' during {}: {}",
+            library, record_key, stage, source
+        )),
         SubsDataError::CalculationFailed {
             substance,
             operation,

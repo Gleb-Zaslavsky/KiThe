@@ -13,7 +13,7 @@ use crate::Thermodynamics::ChemEquilibrium::prelude::{
     EquilibriumCandidateSelectionReport, EquilibriumCandidateSelector,
     EquilibriumConstantValidationMode, EquilibriumDiagnosticsMode, EquilibriumDiagnosticsOptions,
     EquilibriumRangeDiagnosticsPolicy, EquilibriumSolveOptions, EquilibriumTimingMode,
-    FixedPressureEnthalpySolution, InitialPhaseSet, LegacyEquilibriumSolver, PhSolveMode,
+    FixedPressureEnthalpySolution, InitialPhaseSet, NativeEquilibriumSolver, PhSolveMode,
     PhaseComponentId, PhaseControlPolicy, PhaseId, PhaseModel, PhaseSpec,
     ResolvedPhaseEquilibriumOutcome, RustedSciTheSolver, SolverBackend, SolverCascadeBudget,
     SolverPolicy, SubstanceSystemFactoryError, TemperatureBounds, TemperatureRangeSolution,
@@ -148,6 +148,21 @@ pub fn build_equilibrium_calculator(
                 temperature_bounds.seed_k,
                 TemperatureBounds::new(temperature_bounds.lower_k, temperature_bounds.upper_k)?,
             )),
+        ValidatedProblem::FixedPhRange {
+            pressure_pa,
+            reference_pressure_pa,
+            start_enthalpy_j,
+            end_enthalpy_j,
+            point_count,
+            temperature_bounds,
+        } => Ok(builder
+            .pressure_pa(pressure_pa)
+            .reference_pressure_pa(reference_pressure_pa)
+            .over_enthalpy_range(
+                linspace(start_enthalpy_j, end_enthalpy_j, point_count),
+                temperature_bounds.seed_k,
+                TemperatureBounds::new(temperature_bounds.lower_k, temperature_bounds.upper_k)?,
+            )?),
     }
 }
 
@@ -570,9 +585,9 @@ fn map_solver_backend(backend: GuiSolverBackend) -> SolverBackend {
         GuiSolverBackend::RstDampedNewton => {
             SolverBackend::RustedSciThe(RustedSciTheSolver::DampedNewton)
         }
-        GuiSolverBackend::LegacyLm => SolverBackend::Legacy(LegacyEquilibriumSolver::LM),
-        GuiSolverBackend::LegacyNr => SolverBackend::Legacy(LegacyEquilibriumSolver::NR),
-        GuiSolverBackend::LegacyTr => SolverBackend::Legacy(LegacyEquilibriumSolver::TR),
+        GuiSolverBackend::NativeLm => SolverBackend::Native(NativeEquilibriumSolver::LM),
+        GuiSolverBackend::NativeNr => SolverBackend::Native(NativeEquilibriumSolver::NR),
+        GuiSolverBackend::NativeTr => SolverBackend::Native(NativeEquilibriumSolver::TR),
     }
 }
 
@@ -590,7 +605,8 @@ fn linspace(start: f64, end: f64, count: usize) -> Vec<f64> {
 mod tests {
     use super::*;
     use crate::gui::equilibrium_gui_model::{
-        EquilibriumGuiDocument, EquilibriumLookupDraft, EquilibriumProblemDraft,
+        EquilibriumGuiDocument, EquilibriumInventoryDraft, EquilibriumLookupDraft,
+        EquilibriumProblemDraft,
     };
 
     #[test]
@@ -713,15 +729,405 @@ mod tests {
     }
 
     #[test]
-    fn solver_backend_mapping_covers_rst_and_legacy_families() {
+    fn ascending_and_descending_ph_ranges_cross_the_facade_boundary() {
+        for (start, end) in [("-4.2e5", "-4.1e5"), ("-4.1e5", "-4.2e5")] {
+            let mut document = EquilibriumGuiDocument::new();
+            document.config.problem = EquilibriumProblemDraft::FixedPhRange {
+                pressure_pa: "101325".into(),
+                reference_pressure_pa: "101325".into(),
+                start_enthalpy_j: start.into(),
+                end_enthalpy_j: end.into(),
+                point_count: "4".into(),
+                temperature_bounds:
+                    crate::gui::equilibrium_gui_model::PhTemperatureBoundsDraft::default(),
+            };
+            let validated = document
+                .validate_for_run()
+                .expect("monotone P,H grid validates");
+            let request = build_equilibrium_facade_request(validated, None)
+                .expect("P,H range facade request builds");
+            assert!(matches!(request, EquilibriumGuiSolveRequest::Facade(_)));
+        }
+    }
+
+    #[test]
+    fn ph_range_solves_through_the_gui_request_facade_in_requested_order() {
+        use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::ResolvedThermochemistry;
+        use crate::Thermodynamics::ChemEquilibrium::prelude::{
+            EquilibriumCalculator, EquilibriumCalculatorOutcome,
+        };
+        use crate::gui::equilibrium_gui_model::PhTemperatureBoundsDraft;
+
+        let reference_builder = EquilibriumCalculator::builder()
+            .single_ideal_gas(["H2O"])
+            .expect("reference gas phase is valid")
+            .initial_moles(vec![1.0])
+            .prefer_libraries(["NASA_gas"])
+            .offline_only()
+            .pressure_pa(101_325.0)
+            .reference_pressure_pa(101_325.0);
+        let reference_temperatures = [350.0, 400.0, 450.0];
+        let mut targets = Vec::new();
+        for temperature in reference_temperatures {
+            let point = match reference_builder
+                .clone()
+                .at_temperature(temperature)
+                .solve()
+                .expect("reference P,T point solves")
+            {
+                EquilibriumCalculatorOutcome::PtPoint(point) => point,
+                other => panic!("expected P,T point, got {other:?}"),
+            };
+            let thermo = ResolvedThermochemistry::from_resolved_system(point.resolved())
+                .expect("reference point has resolved thermochemistry");
+            targets.push(
+                thermo
+                    .enthalpy_model()
+                    .evaluate_total(point.solution().component_moles(), temperature)
+                    .expect("reference enthalpy evaluates"),
+            );
+        }
+
+        for descending in [false, true] {
+            let (start, end) = if descending {
+                (targets[2], targets[0])
+            } else {
+                (targets[0], targets[2])
+            };
+            let mut document = EquilibriumGuiDocument::simple_ideal_gas(["H2O"]);
+            document.config.lookup = EquilibriumLookupDraft::Explicit {
+                priority_libraries: vec!["NASA_gas".into()],
+                permitted_libraries: vec!["NASA_gas".into()],
+                explicit_search_instructions: Default::default(),
+                search_in_nist: false,
+            };
+            let EquilibriumInventoryDraft::ExplicitPhases { phases } =
+                &mut document.config.inventory
+            else {
+                panic!("simple ideal gas document uses explicit phases");
+            };
+            phases[0].components[0].initial_moles = "0.1".into();
+            document.config.problem = EquilibriumProblemDraft::FixedPhRange {
+                pressure_pa: "101325".into(),
+                reference_pressure_pa: "101325".into(),
+                start_enthalpy_j: (0.1 * start).to_string(),
+                end_enthalpy_j: (0.1 * end).to_string(),
+                point_count: "3".into(),
+                temperature_bounds: PhTemperatureBoundsDraft {
+                    lower_k: "300".into(),
+                    upper_k: "500".into(),
+                    seed_k: "400".into(),
+                },
+            };
+            let request = build_equilibrium_facade_request(
+                document.validate_for_run().expect("P,H range validates"),
+                None,
+            )
+            .expect("P,H range facade request builds");
+            let EquilibriumGuiSolveOutcome::PhRange(solution) = request
+                .solve()
+                .expect("P,H range solves through GUI request boundary")
+            else {
+                panic!("expected GUI P,H range outcome");
+            };
+            assert_eq!(solution.points().len(), 3);
+            let expected_temperatures: Vec<_> = if descending {
+                vec![450.0, 400.0, 350.0]
+            } else {
+                vec![350.0, 400.0, 450.0]
+            };
+            let actual: Vec<_> = solution
+                .points()
+                .iter()
+                .map(|point| {
+                    assert!(point.report().elapsed().as_nanos() > 0);
+                    assert!(
+                        point.report().formulation_builds() + point.report().formulation_reuses()
+                            > 0
+                    );
+                    point.report().target_enthalpy_joules()
+                })
+                .collect();
+            if descending {
+                assert!(actual.windows(2).all(|pair| pair[0] > pair[1]));
+            } else {
+                assert!(actual.windows(2).all(|pair| pair[0] < pair[1]));
+            }
+            assert!(solution.points()[0].report().used_continuation() == false);
+            assert!(
+                solution.points()[1..]
+                    .iter()
+                    .all(|point| point.report().used_continuation())
+            );
+            for point in solution.points() {
+                let evidence = point
+                    .solution()
+                    .equilibrium()
+                    .extensive_normalization_recovery()
+                    .expect("small-inventory GUI range point retains preconditioning evidence");
+                assert!(matches!(
+                        evidence.trigger,
+                        crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::
+                            ExtensiveNormalizationTrigger::SmallScalePreconditioning { .. }
+                    ));
+                assert!(evidence.reconstructed_physical_boundary);
+                assert!(
+                    (point.solution().equilibrium().component_moles()[0] - 0.1).abs() < 1.0e-8,
+                    "published moles={} target T={}",
+                    point.solution().equilibrium().component_moles()[0],
+                    point.solution().temperature(),
+                );
+            }
+            for (point, expected_temperature) in solution.points().iter().zip(expected_temperatures)
+            {
+                assert!(
+                    (point.solution().temperature() - expected_temperature).abs() < 1.0,
+                    "target {} recovered T={} rather than {}",
+                    point.report().target_enthalpy_joules(),
+                    point.solution().temperature(),
+                    expected_temperature
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "diagnostic for temperature accuracy across a wider GUI P,H range"]
+    fn i5_wide_ph_range_temperature_accuracy_characterization() {
+        use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::ResolvedThermochemistry;
+        use crate::Thermodynamics::ChemEquilibrium::prelude::{
+            EquilibriumCalculator, EquilibriumCalculatorOutcome,
+        };
+        use crate::gui::equilibrium_gui_model::PhTemperatureBoundsDraft;
+
+        let reference_builder = EquilibriumCalculator::builder()
+            .single_ideal_gas(["H2O"])
+            .expect("reference gas phase is valid")
+            .initial_moles(vec![1.0])
+            .prefer_libraries(["NASA_gas"])
+            .offline_only()
+            .pressure_pa(101_325.0)
+            .reference_pressure_pa(101_325.0);
+        let lower_reference = match reference_builder
+            .clone()
+            .at_temperature(300.0)
+            .solve()
+            .expect("lower reference P,T point solves")
+        {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected P,T point, got {other:?}"),
+        };
+        let thermo = ResolvedThermochemistry::from_resolved_system(lower_reference.resolved())
+            .expect("reference point has resolved thermochemistry");
+        let target_at = |temperature| {
+            thermo
+                .enthalpy_model()
+                .evaluate_total(&[1.0], temperature)
+                .expect("reference enthalpy evaluates")
+        };
+        let targets = [target_at(300.0), target_at(500.0)];
+        let expected_temperature_at = |target_total_enthalpy: f64| {
+            let target_per_mole = target_total_enthalpy / 0.1;
+            let mut lower = 300.0;
+            let mut upper = 500.0;
+            for _ in 0..64 {
+                let middle = 0.5 * (lower + upper);
+                if target_at(middle) < target_per_mole {
+                    lower = middle;
+                } else {
+                    upper = middle;
+                }
+            }
+            0.5 * (lower + upper)
+        };
+
+        println!("GUI H2O P,H range characterization: 0.1 mol, 300..500 K, 9 points");
+        println!(
+            "direction | target_J | expected_T_K | recovered_T_K | delta_T_K | H_error_J | H_limit_J"
+        );
+        for descending in [false, true] {
+            let (start, end) = if descending {
+                (targets[1], targets[0])
+            } else {
+                (targets[0], targets[1])
+            };
+            let mut document = EquilibriumGuiDocument::simple_ideal_gas(["H2O"]);
+            document.config.lookup = EquilibriumLookupDraft::Explicit {
+                priority_libraries: vec!["NASA_gas".into()],
+                permitted_libraries: vec!["NASA_gas".into()],
+                explicit_search_instructions: Default::default(),
+                search_in_nist: false,
+            };
+            let EquilibriumInventoryDraft::ExplicitPhases { phases } =
+                &mut document.config.inventory
+            else {
+                panic!("simple ideal gas document uses explicit phases");
+            };
+            phases[0].components[0].initial_moles = "0.1".into();
+            document.config.problem = EquilibriumProblemDraft::FixedPhRange {
+                pressure_pa: "101325".into(),
+                reference_pressure_pa: "101325".into(),
+                start_enthalpy_j: (0.1 * start).to_string(),
+                end_enthalpy_j: (0.1 * end).to_string(),
+                point_count: "9".into(),
+                temperature_bounds: PhTemperatureBoundsDraft {
+                    lower_k: "290".into(),
+                    upper_k: "510".into(),
+                    seed_k: "400".into(),
+                },
+            };
+            let request = build_equilibrium_facade_request(
+                document.validate_for_run().expect("P,H range validates"),
+                None,
+            )
+            .expect("P,H range request builds");
+            let EquilibriumGuiSolveOutcome::PhRange(solution) = request
+                .solve()
+                .expect("the facade accepts every P,H target")
+            else {
+                panic!("expected GUI P,H range outcome");
+            };
+            assert_eq!(solution.points().len(), 9);
+
+            for (position, point) in solution.points().iter().enumerate() {
+                let fraction = position as f64 / (solution.points().len() - 1) as f64;
+                let expected_target = 0.1 * (start + fraction * (end - start));
+                let ph = point.solution();
+                assert!(
+                    (point.report().target_enthalpy_joules() - expected_target).abs()
+                        <= expected_target.abs() * 1.0e-12,
+                    "range point was reordered: target={} expected={expected_target}",
+                    point.report().target_enthalpy_joules(),
+                );
+                let expected_temperature = expected_temperature_at(expected_target);
+                let enthalpy_error = ph.enthalpy_error().abs();
+                let enthalpy_limit = ph.enthalpy_error_limit_joules();
+                assert!(enthalpy_error <= enthalpy_limit);
+                assert!(ph.temperature().is_finite());
+                assert!(ph.equilibrium().component_moles()[0].is_finite());
+                assert!(ph.equilibrium().component_moles()[0] >= 0.0);
+                assert!(
+                    ph.equilibrium()
+                        .accepted_solution()
+                        .validation()
+                        .max_abs_element_balance_error
+                        <= 1.0e-6
+                );
+                assert!(point.report().used_continuation() == (position > 0));
+                let recovery = ph.equilibrium().extensive_normalization_recovery().unwrap();
+                assert!(recovery.reconstructed_physical_boundary);
+                println!(
+                    "{} | {expected_target:.6e} | {:.3} | {:.6} | {:.6} | {enthalpy_error:.3e} | {enthalpy_limit:.3e}",
+                    if descending {
+                        "descending"
+                    } else {
+                        "ascending"
+                    },
+                    expected_temperature,
+                    ph.temperature(),
+                    ph.temperature() - expected_temperature,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failing_intermediate_ph_range_point_returns_typed_index_without_partial_outcome() {
+        use crate::Thermodynamics::ChemEquilibrium::equilibrium_ph_workflow::ResolvedThermochemistry;
+        use crate::Thermodynamics::ChemEquilibrium::prelude::{
+            EquilibriumCalculator, EquilibriumCalculatorError, EquilibriumCalculatorOutcome,
+            PhRangeError,
+        };
+        use crate::gui::equilibrium_gui_model::PhTemperatureBoundsDraft;
+
+        let reference_builder = EquilibriumCalculator::builder()
+            .single_ideal_gas(["H2O"])
+            .expect("reference gas phase is valid")
+            .initial_moles(vec![1.0])
+            .prefer_libraries(["NASA_gas"])
+            .offline_only()
+            .pressure_pa(101_325.0)
+            .reference_pressure_pa(101_325.0);
+        let enthalpy_at = |temperature| {
+            let point = match reference_builder
+                .clone()
+                .at_temperature(temperature)
+                .solve()
+                .expect("reference P,T point solves")
+            {
+                EquilibriumCalculatorOutcome::PtPoint(point) => point,
+                other => panic!("expected P,T point, got {other:?}"),
+            };
+            let thermo = ResolvedThermochemistry::from_resolved_system(point.resolved())
+                .expect("reference point has resolved thermochemistry");
+            thermo
+                .enthalpy_model()
+                .evaluate_total(point.solution().component_moles(), temperature)
+                .expect("reference enthalpy evaluates")
+        };
+        let start_enthalpy = 0.1 * enthalpy_at(350.0);
+        let end_enthalpy = 0.1 * enthalpy_at(700.0);
+        let mut document = EquilibriumGuiDocument::simple_ideal_gas(["H2O"]);
+        document.config.lookup = EquilibriumLookupDraft::Explicit {
+            priority_libraries: vec!["NASA_gas".into()],
+            permitted_libraries: vec!["NASA_gas".into()],
+            explicit_search_instructions: Default::default(),
+            search_in_nist: false,
+        };
+        let EquilibriumInventoryDraft::ExplicitPhases { phases } = &mut document.config.inventory
+        else {
+            panic!("simple ideal gas document uses explicit phases");
+        };
+        phases[0].components[0].initial_moles = "0.1".into();
+        document.config.problem = EquilibriumProblemDraft::FixedPhRange {
+            pressure_pa: "101325".into(),
+            reference_pressure_pa: "101325".into(),
+            start_enthalpy_j: start_enthalpy.to_string(),
+            end_enthalpy_j: end_enthalpy.to_string(),
+            point_count: "3".into(),
+            temperature_bounds: PhTemperatureBoundsDraft {
+                lower_k: "300".into(),
+                upper_k: "500".into(),
+                seed_k: "400".into(),
+            },
+        };
+        let request = build_equilibrium_facade_request(
+            document.validate_for_run().expect("P,H range validates"),
+            None,
+        )
+        .expect("P,H range facade request builds");
+        let error = request
+            .solve()
+            .expect_err("the second target exceeds the declared temperature bounds");
+        match error {
+            EquilibriumGuiRequestError::Calculator(EquilibriumCalculatorError::PhRange(
+                PhRangeError::Point(point),
+            )) => {
+                assert_eq!(point.index(), 1);
+                assert!(point.target_enthalpy_joules() > start_enthalpy);
+            }
+            other => panic!("expected a typed second-point range error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn solver_backend_mapping_covers_rst_and_native_families() {
         assert!(matches!(
             map_solver_backend(GuiSolverBackend::RstLm),
             SolverBackend::RustedSciThe(RustedSciTheSolver::LevenbergMarquardt)
         ));
         assert!(matches!(
-            map_solver_backend(GuiSolverBackend::LegacyNr),
-            SolverBackend::Legacy(LegacyEquilibriumSolver::NR)
+            map_solver_backend(GuiSolverBackend::NativeNr),
+            SolverBackend::Native(NativeEquilibriumSolver::NR)
         ));
+        assert_eq!(
+            serde_json::to_string(&GuiSolverBackend::NativeLm).unwrap(),
+            "\"NativeLm\""
+        );
+        assert_eq!(
+            serde_json::from_str::<GuiSolverBackend>("\"LegacyLm\"").unwrap(),
+            GuiSolverBackend::NativeLm
+        );
     }
 
     #[test]

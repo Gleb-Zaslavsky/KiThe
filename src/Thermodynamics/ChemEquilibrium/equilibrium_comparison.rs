@@ -240,7 +240,7 @@ fn phase_label(phase: &Option<String>) -> String {
 mod tests {
     use super::*;
     use crate::Thermodynamics::ChemEquilibrium::prelude::{
-        EquilibriumConditions, EquilibriumSolveOptions, LegacyEquilibriumSolver,
+        EquilibriumConditions, EquilibriumSolveOptions, NativeEquilibriumSolver,
         PhaseEquilibriumPipelineRequest, SolverBackend, SolverPolicy, SubstanceSystemSpecBuilder,
         SubstancesContainer,
     };
@@ -255,8 +255,8 @@ mod tests {
         .build()
         .expect("offline local-NASA specification must validate");
         let options = EquilibriumSolveOptions::new()
-            .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(
-                LegacyEquilibriumSolver::NR,
+            .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(
+                NativeEquilibriumSolver::NR,
             )))
             .expect("single legacy-NR policy must validate");
         PhaseEquilibriumPipelineRequest::new(

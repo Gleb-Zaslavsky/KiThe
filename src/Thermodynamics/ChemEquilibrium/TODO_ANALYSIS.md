@@ -6,6 +6,24 @@ This checklist covers `Thermodynamics/ChemEquilibrium` only. Its goal is one
 maintainable equilibrium engine with explicit numerical policies, typed failure
 reporting, independent validation, and deterministic tests.
 
+## Current Regression Follow-Up
+
+- [ ] Reconcile nested P,H range formulation reuse with proactive small-scale
+  normalization. Debug runs of `live_large_element_limited_nested_ph_target_range_story`
+  and `live_nested_ph_inner_pt_cascade_release_matrix` both solve their points
+  but fail the expected `formulation_builds == 1` assertion: observed counts
+  were 9 and 3 respectively. Both fixtures use KiThe-native backends, not RST.
+  The range currently disables `PreparedNestedPhContinuationState` when small-
+  scale preconditioning is active, so each target builds independently. Decide
+  whether a normalized fixed-layout template can be safely reused; otherwise
+  revise the reuse expectation only after documenting why this lifecycle must
+  rebuild. Keep physical acceptance and conservation assertions unchanged.
+- [ ] Add the new local NIST WebBook water Shomate fixture to the frozen
+  reference catalog. `catalog_covers_every_frozen_pair_with_exact_identity_kind_version_and_row_count`
+  currently finds `nist_webbook/water_gas_shomate.metadata.json` on disk with
+  no matching catalog entry. Verify its payload/metadata identity and expected
+  row count, then keep the exact one-entry-per-metadata-file assertion.
+
 ## P8 - Independent Pure-Phase Boundary Cross-Validation
 
 The original validation kernel is scoped to synthetic ideal-gas reactions
@@ -1785,10 +1803,15 @@ coordinate and lifecycle invariants that synthetic fixtures cannot prove.
           diagnostic publishes internal (`~4e-5 J`) and reconstructed physical
           (`~2..3 J`) enthalpy errors separately, so normalized Joules cannot
           leak into physical evidence.
-        - [ ] Inspect why failed backend attempts currently publish
-          `iterations=0` with `metrics=None`: distinguish initialization,
-          Jacobian/linear-solve, bounds/step, and iteration-limit failure.
-          This is solver observability work independent of normalization.
+        - [ ] Preserve RST internal counters/timings when the solver returns
+          an error. KiThe already records failed-attempt wall time in the
+          `SolverAttemptOutcome::Failed` row, but RST 0.4.27 returns only
+          `SolveError` on this path, so `SolverAttemptReport.metrics` remains
+          `None` and iteration/callback/linear-solve attribution is lost.
+          Native failure metrics are available when calculator instrumentation
+          is enabled. The missing RST detail requires an RST API that returns
+          partial `SolveStatistics` alongside the error; do not fill unknown
+          counters with zeroes.
       - [x] Classify the `P,H` `10^4` failure as an inner bounded-`P,T`
         conditioning failure rather than a missing outer enthalpy root. The
         canonical nested route now recovers its numerical inner trials through
@@ -2179,7 +2202,7 @@ validation gate.
 ### P0.6 Isolate legacy nonlinear solvers
 
 - [x] Move `LMSolver`, `NRSolver`, and `TrustRegionSolver` behind one temporary
-  legacy adapter. `equilibrium_legacy_backend` now owns their mechanical
+  legacy adapter. `equilibrium_native_backend` now owns their mechanical
   dispatch; policy, budgets, validation, retry, and publication remain in the
   canonical orchestration path.
 - [x] Remove panics, assertions on user data, global logger initialization, and
@@ -3630,7 +3653,7 @@ transitions.
   target machine.
 - [x] Make the retained `gas_solver_for_T_range` compatibility boundary honor
   its explicit legacy `Solvers` argument. It now installs
-  `SolverPolicy::legacy_default` instead of allowing symbolic context to
+  `SolverPolicy::native_default` instead of allowing symbolic context to
   select the RST production cascade implicitly. The real T-range story pins
   that every accepted point reports a legacy backend.
 - [x] Add an opt-in typed timing report to the canonical fixed-`P,T` solve.
@@ -3836,12 +3859,13 @@ paths are stable.
     changes unexpectedly (especially renewed non-finite residual), rather
     than forcing every method to be a production default.
 
-  RST attempt metrics split residual-callback time, Jacobian-callback time,
-  and remaining engine overhead; the enhanced report prints that split for
-  each slow accepted point and typed failure attempt. Legacy methods
-  deliberately leave this optional evidence absent rather than inventing
-  incomparable counters. Do not weaken the common acceptance gate or select a
-  universal default from one inventory.
+  Successful RST `SolveResult` rows split residual-callback time,
+  Jacobian-callback time, linear-system time, and remaining engine overhead.
+  A non-converged but returned result retains that data. If RST exits with
+  `SolveError`, KiThe retains typed failure plus outer backend wall time, but
+  cannot report internal counts or stage timings. Native methods expose their
+  own metrics only while calculator instrumentation is enabled. Do not weaken
+  the common acceptance gate or select a universal default from one inventory.
 
 - [x] Add an explicit fixed-`P,T` multi-start recovery policy. The typed
   `ResolvedPhaseEquilibriumRequest` and high-level pipeline now accept an
@@ -5395,11 +5419,22 @@ must not be quietly approximated by the existing NASA-gas fixtures.
 
 ### F1. Local NIST fixture is a data-release blocker
 
-- [ ] **Create a stable, read-only local NIST thermochemistry fixture.**
+- [x] Freeze a source-attributed NIST WebBook/Shomate H2O(g) payload and
+  verify the KiThe NIST handler offline against the rounded 500 K Cp, enthalpy
+  increment, and entropy anchors. The fixture is under
+  `frozen_reference/data/nist_webbook/` and is included in the content manifest.
+  This is a handler/data foundation only, not a production repository or
+  equilibrium-facade guarantee.
+- [ ] Integrate the frozen NIST payload through a temporary, read-only thermo
+  repository and prove facade-backed P,T point/range and P,H inverse/range
+  calculations retain NIST provenance and perform no network access. Avoid
+  rewriting the large bundled catalog merely to add this test fixture.
+- [ ] **Integrate the frozen NIST fixture into an offline repository and facade.**
   The NIST parser is an online acquisition boundary, while production and
   regression equilibrium calculations must remain offline and deterministic.
-  The current local index advertises historical NIST addresses but has no
-  matching payload records; that is not an acceptable cross-format fixture.
+  The production thermo catalog still advertises historical NIST addresses
+  without matching payloads; the new frozen test payload is intentionally
+  separate and does not silently mutate or repair that catalog.
 
   Required deliverables:
   - choose a small physically meaningful record set with pinned canonical
@@ -5420,6 +5455,14 @@ must not be quietly approximated by the existing NASA-gas fixtures.
   Do not use live NIST access, a parser mock, or an incomplete historical
   index as a substitute. This fixture proves the format-agnostic contract; it
   is not a second solver implementation.
+
+- [x] Add a versioned SHA-256 content manifest for `library_config.json`, the
+  bundled substance/index/element inputs, and the frozen NIST/Shomate payload
+  plus provenance metadata. The verifier returns typed read/hash/schema errors.
+- [ ] Include the validated content-manifest release id in newly created
+  reproducibility capsules and define how non-bundled/custom repository assets
+  supply equivalent hashes. The existing structural fingerprint remains a
+  separate catalog-shape field.
 
 ### F2. Future physical extensions: explicitly outside the current model
 
@@ -6200,7 +6243,7 @@ algorithm, change tolerances, or widen the recovery trigger.
 | Options snapshot | PASS | Both recovery policies round-trip through `serde_json`. |
 | Timing accounting | PASS | Prepared-range timing includes the rejected attempt and recovery transaction; build/reuse counters remain distinct. |
 | Extreme arithmetic | PASS | Unit tests cover `1e-250` and `1e250`; unsafe operations return typed errors. |
-| Backend metrics (`iterations=0`, `metrics=None`) | DEFERRED | No normalization defect was found; missing-metrics conventions need a dedicated backend-reporting audit. |
+| Backend metrics (`iterations=0`, `metrics=None`) | PARTIAL | Failed RST attempts retain outer wall time in `SolverAttemptOutcome::Failed`; their internal metrics are unavailable because RST 0.4.27 returns no partial statistics with `SolveError`. Native failure metrics are available only with calculator instrumentation. |
 | Recovery cancellation and global budgets | PARTIAL | Ordinary execution-control tests pass; a dedicated cancellation-during-recovery matrix remains useful before release. |
 | Unsupported model capability | PASS | Recovery is reached only after the typed numerical-failure gate. |
 | Immutable source data / independent solves | PASS | Frozen-reference immutability and independent-solve coverage remain unchanged. |
@@ -7579,9 +7622,9 @@ not an established production defect.
   `phase_equilibrium_workflow` 33/33.
 - [x] **Retire disconnected standalone legacy islands deliberately.** Audit
   result (2026-09-11): `nonlinear_solvers/NR_Legacy.rs` has no production
-  caller. `SolverBackend::Legacy(Solvers::NR)` dispatches to the typed
+  caller. `SolverBackend::Native(Solvers::NR)` dispatches to the typed
   closure-based `equilibrium_nonlinear::NRSolver` through
-  `equilibrium_legacy_backend`, not to `NR_Legacy::NR`; the remaining uses are
+  `equilibrium_native_backend`, not to `NR_Legacy::NR`; the remaining uses are
   its own generic symbolic-solver tests and the public `legacy::nr` re-export.
   Decision: do not migrate or merge this implementation. The compatibility
   module and `NR` type are now explicitly deprecated in the current release
@@ -7967,40 +8010,58 @@ from the already accepted elemental-input definition of done.
   accepted temperature, graphite topology, enthalpy acceptance, and
   component moles after division by `s` remain invariant.
 - [x] Characterize the bounded public elemental P,H facade envelope without
-  widening its contract. The ignored
+  widening its contract. The active
   `elemental_calculator_ph_scale_envelope_characterization` story measures
   `1e-6..1e-1`, `1`, `10`, `1e2`, `1e3`, `1e4`, `1e6`, and `1e8`. In the
-  current simple NASA H2/O2/H2O witness, `1e-5..1e-3` and `1e-1` solve but
-  drift by about `4.1..4.3e-4 K`, `1e-2` fails `enthalpy_acceptance`, and
-  `1e-6` fails the sampled `enthalpy_non_monotone` guard. The strict existing
-  facade assertion remains justified only by the measured `1` and `10` pair.
-  The same story measures `1e2` successfully. Direct P,H points now invoke
-  the canonical typed recovery transaction after a classified physical
-  numerical failure; the dedicated `1e4` facade story asserts normalized
-  recovery provenance, physical reconstruction, and intensive/scaled output.
-  The measured `1e3..1e8` points now publish through that route. This is a
-  conditioning repair, not permission to relax acceptance thresholds or
-  advertise behavior beyond `1e8`.
+  simple NASA H2/O2/H2O witness, the pre-fix characterization had inaccurate
+  acceptance at `1e-2` and an `enthalpy_non_monotone` failure at `1e-6`.
+  Story 121's current rerun supersedes those observations: proactive normalized
+  P,H solving now passes `1e-6..1e-1` with physical reconstruction and strict
+  component, temperature, residual, and balance assertions. Factors
+  `1e3..1e8` remain covered by the existing normalized recovery path. This is
+  a measured fixture envelope, not a universal scale guarantee.
 - [x] Give direct public P,H points the same typed extensive-recovery
   transaction used by P,H ranges, with a dedicated facade story covering
   physical reconstruction, publication provenance, intensive temperature,
   and scaled component amounts at `1e4`.
-- [ ] Measure an explicit lower-scale elemental P,H preconditioning policy.
-  Failure-triggered recovery cannot correct `1e-5..1e-1` points that satisfy
-  local acceptance with a reproducible intensive drift. Before changing the
-  default, compare normalized-first and physical-first routes at `1e-6..1e-1`
-  across the simple H2/O2/H2O witness and a frozen multiphase P,H fixture;
-  require physical publication provenance, unchanged acceptance tolerances,
-  and no regression at unit scale. Keep the current default failure-triggered
-  policy until that evidence exists.
+- [x] Add explicit proactive small-scale P,H preconditioning under the new
+  `OnNumericalFailureAndSmallScalePhPreconditioning` policy. At physical
+  inventory scale `< 1 mol`, normalize before solver work, disable recursive
+  preconditioning on the normalized request, reconstruct through the existing
+  physical publication boundary, and retain `SmallScalePreconditioning`
+  evidence. The old `OnNumericalFailure` policy remains selectable and keeps
+  its original behavior; P,T recovery remains failure-triggered.
+- [x] Convert the simple H2/O2/H2O scale characterization into an active
+  acceptance gate. Factors `1e-6..1e-1` now pass temperature, component,
+  residual, relative-balance, physical-reconstruction, and trigger-provenance
+  assertions without tolerance changes. The former `1e-6` monotonicity failure
+  and inaccurate `1e-2` output are both covered.
+- [x] Activate frozen TP-1906/1907 CHON + graphite P,H scale checks at 700 K
+  and 720 K for factors `1e-4` and `1e-2`; require unit-scale component
+  covariance and unchanged graphite topology after physical reconstruction.
+- [x] Exercise proactive normalization through ascending and descending GUI
+  P,H ranges. Story 122 uses a `0.1 mol` H2O inventory and requires per-point
+  `SmallScalePreconditioning` evidence, physical reconstruction, unchanged
+  published inventory, and continuation in both directions.
+- [x] Preserve actual frozen NASA TP-1906/1907 gas + graphite P,H facade
+  evidence over four source enthalpy points, both continuation directions, and
+  P,T witness/topology checks (Story 127). This remains one pure-condensed
+  family; it does not imply liquid, solution, or general solid-phase support.
+- [ ] Extend isolated-backend low-scale acceptance to the real gas + graphite
+  facade case and add a second independently sourced condensed/mixed-phase
+  family only where its thermodynamic model and reference data are complete.
+  Story 125 remains synthetic cross-validation, not physical-database evidence.
+  Story 126 adds a nine-point GUI H2O range over 300..500 K in both directions
+  with maximum temperature deviation `1.48e-4 K` against the thermochemistry
+  model's H-to-T inversion.
 
 The implementation hardening is intentionally narrow. Extensive recovery now
 uses an internal normalized-solve tolerance capped at `1e-12`, while ordinary
 caller-selected tolerance remains unchanged. The RST adapter also clamps only
 roundoff-sized initial log-mole excursions at finite capacity bounds; materially
 infeasible seeds are still rejected. The resulting PT frozen tests pass through
-`1e8`; elemental P,H characterization is now recorded separately, but its
-point-level recovery boundary and lower-scale acceptance remain open. The
+`1e8`; elemental P,H lower-scale acceptance now has active simple-gas and
+frozen-CHON gates, while broader model-family coverage remains open. The
 `1e4` failure before the
 tighter cap was a physical balance error of `2.68e-6`; with the internal `1e-12`
 cap it is `4.00e-12`, confirming that strict recovery accuracy, rather than a
@@ -8013,6 +8074,64 @@ scale-aware conservation contract. A future hardening pass should improve the
 three isolated RST methods or narrow their documented single-backend envelope;
 the current production cascade is covered because successful RST fallbacks and
 legacy fallbacks are explicitly asserted.
+
+**Current RST 0.4.27 matrix reconciliation (2026-10-26):** Story 121 reruns
+the TP-1907 `1e8` backend matrix, public ExprLegacy/AtomView output parity at
+`1e8`, the STANJAN-15 small-constant P,H facade regression, and the elemental
+P,H scale characterization. The tested TP-1907 frontend routes publish the
+same 700 K topology and agree within `5.23e-13` maximum relative component
+delta and `8.33e-16` maximum mole-fraction delta. Trust-Region LM and native
+LM/TR pass the strict isolated TP-1907 oracle gate; this does not imply that
+every isolated backend passes. The STANJAN tiny-constant regression passes.
+These are debug correctness runs against RST 0.4.27, not refreshed release
+performance measurements. The 0.4.26 Criterion and preparation timings in
+Story 120 remain historical until rerun.
+
+**Five-item release closure status:**
+
+1. **Release matrix:** Story 121 now contains one bounded correctness table
+   separating frontend parity, production-cascade acceptance, and isolated
+   backend results. It is not a guarantee for untested systems or methods.
+2. **Small P,H inventory:** normalized-first is active and passes the simple
+   gas, frozen CHON + graphite, and GUI H2O fixtures. Story 124 adds the first
+   isolated-backend low-scale matrix; broader phase families and scale
+   boundaries remain open. The matrix covers the
+   nested H2/O2/H2O witness at `1e-2` and `1e-6`: RST LM, RST Minpack LM, and
+   all three native methods pass against their own unit-scale references. RST
+   Nielsen misses the residual gate slightly; RST Trust-Region LM, Damped
+   Newton, and Backtracking LM fail their isolated unit-scale control, so no
+   small-scale covariance claim is made for those methods. Frozen
+   condensed/mixed-phase isolated-backend coverage remains open.
+3. **GUI P,H ranges:** the request builder uses `over_enthalpy_range`; ascending
+   and descending low-scale success, a typed intermediate-point failure, and
+   stale-worker cancellation are now covered. Cancellation invalidates
+   publication but does not interrupt an in-flight nonlinear backend. Story
+   126 adds an ignored nine-point 300..500 K H2O characterization in both
+   directions. All points pass the current enthalpy gate and physical checks;
+   maximum temperature deviation is `1.48e-4 K` against independent H-to-T
+   inversion at each requested target.
+4. **RST failure telemetry:** Story 130 now captures callback counts and
+   callback durations around failed RST calls when telemetry is enabled;
+   `backend_progress_available=false` marks iteration/linear-solve totals as
+   unavailable rather than measured zero. Upstream RST partial
+   `SolveStatistics` is still needed for the terminal iterate, iteration trace,
+   and linear-operation stages.
+5. **Thermochemistry reproducibility:** Story 129 adds a verified SHA-256
+   manifest for bundled library inputs and the frozen NIST fixture. Story 128
+   freezes a real NIST WebBook/Shomate water record and checks the native
+   handler offline. Remaining work is to route this NIST record through a
+   temporary repository and equilibrium facades, then carry the validated
+   manifest release id in reproducibility capsules; the catalog structural
+   fingerprint remains intentionally distinct.
+
+The measured lower-scale P,H issue is closed for the elemental H2/O2/H2O
+witness, frozen TP-1906/1907 CHON + graphite cases, and a three-point low-scale
+GUI H2O range: the typed proactive policy reconstructs and passes their
+physical publication checks. Story 125 adds synthetic pure-condensed
+cross-validation down to `1e-6`, while Story 126 verifies a wider nine-point
+GUI range against an independent thermochemistry-based H-to-T inversion.
+Real condensed/mixed-phase production-facade low-scale coverage remains open;
+do not generalize these fixture guarantees beyond the measured cases yet.
 
 ### P1 - Decide the GUI meaning of elemental input
 
@@ -8032,9 +8151,10 @@ legacy fallbacks are explicitly asserted.
   preflight during GUI request preparation; typed failure is rendered beside
   `inventory.amounts`, and no prepared request is published. Keep candidate
   search and physical inventory as separate concepts.
-- [ ] Add the missing GUI P,H target-range stories: ascending/descending
-  targets, continuation, formulation reuse, normalization recovery,
-  per-point diagnostics, and accepted-only publication/rollback.
+- [x] Add GUI P,H target-range stories for ascending/descending targets,
+  continuation, per-point timing/formulation evidence, and public facade
+  execution. Calculator-level stories continue to own normalization recovery
+  and transactional rollback; a GUI request returns no partial range on error.
 - [x] Finish rendered hover/help coverage for the interactive control classes
   and content-aware assertions for each Help section. Story coverage includes
   labels, editors, selectors and options, checkboxes, actions, dynamic rows,
@@ -8727,8 +8847,8 @@ vector evaluation, with changing continuation temperature preserved.
 
 ##### P3.6.3 - Legacy-only residual/Jacobian/linear-system work
 
-- [x] Add `benches/equilibrium_legacy_callbacks.rs` with
-  `SolverPolicy::Single(Legacy(LM|NR|TR))`, never an RST-first cascade. Cover
+- [x] Add `benches/equilibrium_native_callbacks.rs` with
+  `SolverPolicy::Single(Native(LM|NR|TR))`, never an RST-first cascade. Cover
   P,T and P,H, molecular and ElementInventory inputs, and 3, 15, 18, and 40
   component universes. Nested and monolithic P,H routes are labeled separately;
   the same matrix retains failed/rejected single-backend attempts in the ledger
@@ -8843,7 +8963,7 @@ is not a worthwhile standalone target unless it is multiplied across a
 high-volume workload. The benchmark infrastructure and documentation are
 complete; the optimization itself remains open.
 
-- [x] Add `benches/equilibrium_legacy_overhead.rs` as a focused Legacy-only
+- [x] Add `benches/equilibrium_native_overhead.rs` as a focused Legacy-only
   release benchmark. It runs the public facade with LM, NR, and TR over small,
   15-, 18-, and 40-component P,T/P,H profiles, including molecular,
   ElementInventory, monolithic, and nested routes. Its macro table reports
@@ -9652,7 +9772,7 @@ following residual in the prepared monolithic P,H runner.
   candidate rejected and do not add a workspace abstraction.
 
 **PERF-NL-01 measurement result (2026-09-13):** the existing release
-`equilibrium_legacy_callbacks` dashboard was extended with a diagnostic
+`equilibrium_native_callbacks` dashboard was extended with a diagnostic
 same-iterate counter. Every representative accepted Legacy LM/NR/TR row with
 both callbacks showed `same_iterate_pairs = min(residual_calls,
 jacobian_calls)`, normally `100.0%` of possible adjacent pairs. The hypothesis
@@ -9858,9 +9978,14 @@ settings failures.**
   and three repetitions per route (153 observations); its compact current
   summary is Story 109. Story 104 remains the historical parallel-default
   comparison, while policy crossover evidence stays separate in Story 108.
-- [ ] Extend the RST error/result API if partial diagnostics for failed backend
-  attempts are required; the current `SolveError` path does not carry a
-  `SolveStatistics` snapshot.
+- [x] Preserve partial KiThe-side RST callback telemetry when a backend solve
+  errors. With diagnostics enabled, residual/Jacobian callback counts and
+  timings now survive `SolveError`; telemetry-off continues on the direct
+  unwrapped production call path. Story 130 covers failure inside a callback.
+- [ ] Extend the upstream RST error/result API with optional partial
+  `SolveStatistics` on failure. KiThe cannot recover failed-iteration counts,
+  terminal iterate/attempt trace, or factorization/linear-system timings from
+  the current `SolveError`; do not infer these from the callback wrapper.
 - [x] Consume the RustedSciThe 0.4.19 opt-in preparation telemetry. When the
   calculator instrumentation is enabled, the adapter now forwards the RST
   stage records for input validation, expression graph work, differentiation,

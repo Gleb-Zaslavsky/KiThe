@@ -568,7 +568,7 @@ fn prepared_multi_start_preserves_order_and_first_equal_candidate() {
 
     let solution = bundle
         .solve_with_initial_guesses(vec![seed.clone(), seed], |settings| {
-            settings.solver_policy = Some(SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)));
+            settings.solver_policy = Some(SolverPolicy::Single(SolverBackend::Native(Solvers::LM)));
         })
         .expect("identical local-NASA seeds must both produce an accepted candidate");
     let report = solution
@@ -596,7 +596,7 @@ fn prepared_multi_start_preserves_order_and_first_equal_candidate() {
 }
 
 #[test]
-fn prepared_legacy_lm_scaling_preserves_the_accepted_physical_state() {
+fn prepared_native_lm_scaling_preserves_the_accepted_physical_state() {
     let solve = |scaling_flag| {
         let resolved = resolved_local_nasa_gas();
         let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec()).unwrap();
@@ -617,7 +617,7 @@ fn prepared_legacy_lm_scaling_preserves_the_accepted_physical_state() {
             .solve_with(|settings| {
                 settings.scaling_flag = scaling_flag;
                 settings.solver_policy =
-                    Some(SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)));
+                    Some(SolverPolicy::Single(SolverBackend::Native(Solvers::LM)));
             })
             .expect("local-NASA legacy LM solve must accept both scaling modes")
     };
@@ -652,7 +652,7 @@ fn prepared_runner_honours_cancellation_before_starting_a_backend() {
     control.request_cancel();
     let result = prepared_local_nasa_gas().solve_with(|settings| {
         settings.execution_control = Some(control.clone());
-        settings.solver_policy = Some(SolverPolicy::Single(SolverBackend::Legacy(Solvers::LM)));
+        settings.solver_policy = Some(SolverPolicy::Single(SolverBackend::Native(Solvers::LM)));
     });
 
     assert!(matches!(result, Err(ReactionExtentError::Cancelled)));

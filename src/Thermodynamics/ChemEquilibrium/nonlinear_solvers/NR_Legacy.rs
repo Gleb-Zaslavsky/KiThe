@@ -16,7 +16,7 @@
 //! The module will be removed once the retained regression matrix is fully covered
 //! by the canonical backends.
 //!
-//! The production `equilibrium_legacy_backend` dispatches to the typed
+//! The production `equilibrium_native_backend` dispatches to the typed
 //! closure-based solvers in `equilibrium_nonlinear`; this standalone module is
 //! not part of production backend dispatch.
 //!
@@ -100,7 +100,7 @@
 //! # Related Modules
 //!
 //! - [`equilibrium_nonlinear`](super::equilibrium_nonlinear) — canonical solvers (preferred)
-//! - [`equilibrium_legacy_backend`](super::equilibrium_legacy_backend) — adapter that calls this module
+//! - [`equilibrium_native_backend`](super::equilibrium_native_backend) — adapter that calls this module
 //!
 #![allow(deprecated)]
 

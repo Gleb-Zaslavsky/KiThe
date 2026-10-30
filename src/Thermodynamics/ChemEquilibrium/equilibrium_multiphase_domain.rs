@@ -1,6 +1,6 @@
 //! Typed physical boundary for a multiphase equilibrium problem.
 //!
-//! The legacy solver still accepts indexed `Phase` values.  This module is the
+//! The native solver still accepts indexed `Phase` values.  This module is the
 //! boundary before that projection: phase identities are semantic, components
 //! are phase-qualified, and physical initial moles exist before a positive
 //! log-space trace seed is selected.

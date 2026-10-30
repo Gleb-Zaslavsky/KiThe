@@ -777,6 +777,7 @@ mod tests2 {
         CalculatorType, DataType, DerivedValueState, LibraryPriority, Phases, PropertySearchState,
         SearchResult, SubsData, WhatIsFound,
     };
+    use crate::Thermodynamics::User_substances_error::{DatabaseRecordLoadStage, SubsDataError};
     use crate::Thermodynamics::thermo_lib_api::ThermoData;
     use approx::assert_relative_eq;
     use core::panic;
@@ -1036,6 +1037,60 @@ mod tests2 {
         );
         assert!(user_subs.get_substance_search_state("CO2").is_none());
         assert!(user_subs.get_substance_search_state("CH4").is_none());
+    }
+
+    #[test]
+    fn production_record_parse_error_names_library_and_key_and_rolls_back() {
+        let mut user_subs = create_test_subsdata();
+        let library = "NASA_gas";
+        let record_key = "CH4";
+        let payload = serde_json::json!({ "invalid": "record" });
+        std::sync::Arc::make_mut(&mut user_subs.thermo_data.LibThermoData)
+            .entry(library.to_string())
+            .or_default()
+            .insert(record_key.to_string(), payload);
+
+        user_subs.set_explicit_search_instructions(HashMap::from([(
+            record_key.to_string(),
+            library.to_string(),
+        )]));
+        user_subs.store_search_result(
+            "H2O",
+            WhatIsFound::Thermo,
+            "sentinel_library".to_string(),
+            LibraryPriority::Priority,
+            serde_json::Value::String("sentinel".to_string()),
+            CalculatorType::Thermo(
+                crate::Thermodynamics::DBhandlers::thermo_api::ThermoEnum::NASA(
+                    crate::Thermodynamics::DBhandlers::NASAdata::NASAdata::new(),
+                ),
+            ),
+            false,
+        );
+
+        let error = user_subs
+            .search_substances()
+            .expect_err("bad row must fail");
+        assert!(std::error::Error::source(&error).is_some());
+        match error {
+            SubsDataError::DatabaseRecordLoadFailed {
+                library: actual_library,
+                record_key: actual_key,
+                stage,
+                ..
+            } => {
+                assert_eq!(actual_library, library);
+                assert_eq!(actual_key, record_key);
+                assert_eq!(stage, DatabaseRecordLoadStage::ThermochemistryPayloadParse);
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+
+        let sentinel = user_subs
+            .get_search_result("H2O", WhatIsFound::Thermo)
+            .expect("pre-existing result survives failed transaction");
+        assert_eq!(sentinel.library(), "sentinel_library");
+        assert!(user_subs.get_substance_search_state(record_key).is_none());
     }
 
     #[test]

@@ -10,7 +10,7 @@ mod tests {
         task.kindata
             .set_reaction_data_directly(
                 vec![ReactionData::new_elementary(
-                    "A=>B".to_string(),
+                    "H2=>2H".to_string(),
                     vec![1.0e3, 0.0, 1.0e4],
                     None,
                 )],
@@ -18,8 +18,8 @@ mod tests {
             )
             .expect("reaction setup should succeed");
 
-        task.kindata.stecheodata.vec_of_molmasses = Some(vec![10.0, 20.0]);
-        task.kindata.substances = vec!["A".to_string(), "B".to_string()];
+        task.kindata.stecheodata.vec_of_molmasses = Some(vec![2.016, 1.008]);
+        task.kindata.substances = vec!["H2".to_string(), "H".to_string()];
         task.thermal_effects = vec![-2.0e5];
         task.ro = 1200.0;
         task.Cp = 1000.0;
@@ -30,8 +30,8 @@ mod tests {
         task.initial_conditions = HashMap::from([
             ("T".to_string(), 450.0),
             ("q".to_string(), 0.15),
-            ("A".to_string(), 0.7),
-            ("B".to_string(), 0.3),
+            ("H2".to_string(), 0.7),
+            ("H".to_string(), 0.3),
         ]);
         task
     }
@@ -57,8 +57,8 @@ mod tests {
         assert_eq!(inputs.physical.ro, 1200.0);
         assert_eq!(inputs.initial_state.temperature, 450.0);
         assert_eq!(inputs.initial_state.heat_flux, 0.15);
-        assert_eq!(inputs.initial_state.species.get("A"), Some(&0.7));
-        assert_eq!(inputs.initial_state.species.get("B"), Some(&0.3));
+        assert_eq!(inputs.initial_state.species.get("H2"), Some(&0.7));
+        assert_eq!(inputs.initial_state.species.get("H"), Some(&0.3));
     }
 
     #[test]
@@ -118,8 +118,8 @@ mod tests {
         assert_eq!(task.map_of_equations.len(), 4);
         assert!(task.map_of_equations.contains_key("Teta"));
         assert!(task.map_of_equations.contains_key("q"));
-        assert!(task.map_of_equations.contains_key("A"));
-        assert!(task.map_of_equations.contains_key("B"));
+        assert!(task.map_of_equations.contains_key("H2"));
+        assert!(task.map_of_equations.contains_key("H"));
         assert!(
             !task
                 .solver
@@ -167,8 +167,8 @@ mod tests {
         assert_eq!(inputs.physical.L, 0.05);
         assert_eq!(inputs.initial_state.temperature, 450.0);
         assert_eq!(inputs.initial_state.heat_flux, 0.15);
-        assert_eq!(inputs.initial_state.species.get("A"), Some(&0.7));
-        assert_eq!(inputs.initial_state.species.get("B"), Some(&0.3));
+        assert_eq!(inputs.initial_state.species.get("H2"), Some(&0.7));
+        assert_eq!(inputs.initial_state.species.get("H"), Some(&0.3));
         assert_eq!(inputs.thermal_effects, vec![-2.0e5]);
     }
 
@@ -178,7 +178,7 @@ mod tests {
         let mut inputs = task
             .condensed_inputs()
             .expect("typed condensed inputs should build");
-        inputs.initial_state.species.remove("B");
+        inputs.initial_state.species.remove("H");
 
         let result = inputs.validate(&task.kindata.substances);
         assert!(matches!(result, Err(IvpError::MissingData(_))));
@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn test_a_to_b_reaction_has_expected_species_source_signs() {
+    fn test_hydrogen_dissociation_has_expected_species_source_signs() {
         let mut task = build_condensed_task();
         task.setup_condensed_ivp()
             .expect("condensed setup should succeed");
@@ -210,16 +210,16 @@ mod tests {
             .collect::<Vec<_>>();
         let y0 = config.y0.as_slice();
 
-        let rhs_a = config.eq_system[2].lower_to_linear(&names).eval(y0);
-        let rhs_b = config.eq_system[3].lower_to_linear(&names).eval(y0);
+        let rhs_h2 = config.eq_system[2].lower_to_linear(&names).eval(y0);
+        let rhs_h = config.eq_system[3].lower_to_linear(&names).eval(y0);
 
         assert!(
-            rhs_a > 0.0,
-            "A should follow the current source convention, got rhs = {rhs_a}"
+            rhs_h2 > 0.0,
+            "H2 should follow the positive source convention, got rhs = {rhs_h2}"
         );
         assert!(
-            rhs_b < 0.0,
-            "B should follow the current source convention, got rhs = {rhs_b}"
+            rhs_h < 0.0,
+            "H should follow the negative source convention, got rhs = {rhs_h}"
         );
     }
 }

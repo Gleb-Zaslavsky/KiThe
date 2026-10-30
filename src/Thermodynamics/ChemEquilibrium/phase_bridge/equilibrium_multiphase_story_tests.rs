@@ -495,13 +495,13 @@ fn gas_fixture_preserves_component_order_and_solution_across_legacy_and_rst_poli
     let composition =
         MultiphaseInitialComposition::from_dense(&layout, vec![2.0, 1.0, 0.0]).unwrap();
 
-    let mut legacy_settings = EquilibriumSolverSettings::default();
-    legacy_settings.solver = Solvers::LM;
-    legacy_settings.solver_params.max_iter = 200;
-    legacy_settings.solver_policy = Some(SolverPolicy::Cascade(vec![
-        SolverBackend::Legacy(Solvers::LM),
-        SolverBackend::Legacy(Solvers::TR),
-        SolverBackend::Legacy(Solvers::NR),
+    let mut native_settings = EquilibriumSolverSettings::default();
+    native_settings.solver = Solvers::LM;
+    native_settings.solver_params.max_iter = 200;
+    native_settings.solver_policy = Some(SolverPolicy::Cascade(vec![
+        SolverBackend::Native(Solvers::LM),
+        SolverBackend::Native(Solvers::TR),
+        SolverBackend::Native(Solvers::NR),
     ]));
 
     let mut rst_settings = EquilibriumSolverSettings::default();
@@ -510,9 +510,9 @@ fn gas_fixture_preserves_component_order_and_solution_across_legacy_and_rst_poli
         RustedSciTheSolver::TrustRegionLevenbergMarquardt,
     )));
 
-    let legacy = solve_resolved_pt(
+    let native = solve_resolved_pt(
         ResolvedPhaseEquilibriumRequest::new(&resolved, conditions(), composition.clone())
-            .with_solve_options(EquilibriumSolveOptions::from_settings(legacy_settings).unwrap()),
+            .with_solve_options(EquilibriumSolveOptions::from_settings(native_settings).unwrap()),
     )
     .unwrap();
     let rst = solve_resolved_pt(
@@ -521,25 +521,25 @@ fn gas_fixture_preserves_component_order_and_solution_across_legacy_and_rst_poli
     )
     .unwrap();
 
-    assert_eq!(legacy.metadata().components(), rst.metadata().components());
+    assert_eq!(native.metadata().components(), rst.metadata().components());
     assert_eq!(
-        legacy.metadata().layout_fingerprint(),
+        native.metadata().layout_fingerprint(),
         rst.metadata().layout_fingerprint()
     );
-    assert_eq!(legacy.phases(), rst.phases());
-    for component in legacy.metadata().components() {
-        let legacy_moles = legacy.moles_for(&component.id()).unwrap();
+    assert_eq!(native.phases(), rst.phases());
+    for component in native.metadata().components() {
+        let native_moles = native.moles_for(&component.id()).unwrap();
         let rst_moles = rst.moles_for(&component.id()).unwrap();
         assert!(
-            (legacy_moles - rst_moles).abs() <= 1e-8,
-            "component {} diverged: legacy={}, rst={}",
+            (native_moles - rst_moles).abs() <= 1e-8,
+            "component {} diverged: native={}, rst={}",
             component.label(),
-            legacy_moles,
+            native_moles,
             rst_moles
         );
     }
     assert_eq!(
-        legacy
+        native
             .summary_rows()
             .iter()
             .filter(|row| row.section != "backend" && row.section != "validation")
@@ -588,7 +588,7 @@ fn production_default_retains_a_scale_robust_backend_on_real_tp1907_story() {
             SolverBackend::RustedSciThe(
                 RustedSciTheSolver::MinpackLevenbergMarquardt
                     | RustedSciTheSolver::TrustRegionLevenbergMarquardt
-            ) | SolverBackend::Legacy(Solvers::LM | Solvers::NR | Solvers::TR)
+            ) | SolverBackend::Native(Solvers::LM | Solvers::NR | Solvers::TR)
         ),
         "production default selected a backend outside the scale-robust set: {accepted_backend:?}"
     );

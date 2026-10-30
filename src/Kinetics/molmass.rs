@@ -42,7 +42,10 @@
 
 use crate::Kinetics::error::{KineticsError, KineticsResult};
 use nalgebra::DMatrix;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
+
+const MAX_FORMULA_BYTES: usize = 4096;
+const MAX_FORMULA_NESTING: usize = 64;
 
 // Define a struct to hold element data
 pub struct Element {
@@ -243,64 +246,134 @@ pub fn is_known_element(symbol: &str) -> bool {
     ELEMENTS.iter().any(|element| element.name == symbol)
 }
 
-fn filter_phases_marks(formula: &str) -> String {
-    let mut formula = formula.to_string();
-
-    let phases = [
-        "(C)", "(c)", "(L)", "(l)", "(G)", "(g)", "(S)", "(s)", "S)", "s)",
-    ];
-    for phase in phases {
-        formula = formula.replace(phase, "");
-    }
-    formula
+fn strip_phase_suffix(formula: &str) -> &str {
+    ["(g)", "(G)", "(l)", "(L)", "(s)", "(S)", "(c)", "(C)"]
+        .into_iter()
+        .find_map(|suffix| formula.strip_suffix(suffix))
+        .unwrap_or(formula)
 }
 // Chemical formulae may contain spectial names for chemical groupls i.e. groups of atoms, e.g. Me (methyl) group, which is converted into {"C":1, "H":3}
 // so we need to convert them into regular elements
 fn handle_groups(
-    mut counts: HashMap<String, usize>,
+    counts: HashMap<String, usize>,
     groups: Option<HashMap<String, HashMap<String, usize>>>,
-) -> HashMap<String, usize> {
-    //println!("DEBUG handle_groups: Input counts: {:?}", counts);
-    //println!("DEBUG handle_groups: Groups: {:?}", groups);
-
-    if let Some(groups) = groups {
-        let mut to_remove = Vec::new();
-
-        for (chemical_group, atomic_composition) in groups.iter() {
-            // if a group is found in the dictionary
-            // we should get rid of it and turn it into regular elements, i.e. Me (methyl) group is converted into {"C":1, "H":3}
-            if let Some(&number_of_chemical_groups) = counts.get(chemical_group) {
-                // println!("DEBUG handle_groups: Found group '{}' with count {}, composition: {:?}",
-                //  chemical_group, number_of_chemical_groups, atomic_composition);
-                to_remove.push(chemical_group.clone());
-                for (atom, &quantity) in atomic_composition.iter() {
-                    // let old_count = counts.get(atom).unwrap_or(&0);
-                    // let new_count = old_count + quantity * number_of_chemical_groups;
-                    // println!("DEBUG handle_groups: Adding {} {} atoms (was {}, now {})",
-                    //  quantity * number_of_chemical_groups, atom, old_count, new_count);
-                    *counts.entry(atom.clone()).or_insert(0) +=
-                        quantity * number_of_chemical_groups;
-                }
-            }
+    formula: &str,
+) -> KineticsResult<HashMap<String, usize>> {
+    let Some(groups) = groups else {
+        return Ok(counts);
+    };
+    let mut expanded = HashMap::new();
+    for (symbol, count) in counts {
+        let Some(composition) = groups.get(&symbol) else {
+            let total = expanded.entry(symbol.clone()).or_insert(0usize);
+            *total = total.checked_add(count).ok_or_else(|| {
+                formula_error(formula, format!("atom count overflow for `{symbol}`"))
+            })?;
+            continue;
+        };
+        if symbol.is_empty()
+            || !symbol.is_ascii()
+            || !symbol.chars().all(char::is_alphabetic)
+            || is_known_element(&symbol)
+        {
+            return Err(KineticsError::InvalidCustomGroup {
+                group: symbol,
+                reason: "group name must be alphabetic and must not shadow an element".into(),
+            });
         }
-
-        for group in to_remove {
-            //   println!("DEBUG handle_groups: Removing group '{}'", group);
-            counts.remove(&group);
+        for (element, group_count) in composition {
+            if groups.contains_key(element) {
+                return Err(KineticsError::InvalidCustomGroup {
+                    group: symbol,
+                    reason: format!("nested group `{element}` is unsupported"),
+                });
+            }
+            if !is_known_element(element) {
+                return Err(KineticsError::UnknownElement {
+                    formula: formula.to_string(),
+                    symbol: element.clone(),
+                });
+            }
+            let amount = group_count.checked_mul(count).ok_or_else(|| {
+                formula_error(formula, format!("atom count overflow for `{element}`"))
+            })?;
+            let total = expanded.entry(element.clone()).or_insert(0usize);
+            *total = total.checked_add(amount).ok_or_else(|| {
+                formula_error(formula, format!("atom count overflow for `{element}`"))
+            })?;
         }
     }
+    Ok(expanded)
+}
 
-    //  println!("DEBUG handle_groups: Final counts: {:?}", counts);
-    counts
+fn validate_custom_groups(
+    groups: &HashMap<String, HashMap<String, usize>>,
+    formula: &str,
+) -> KineticsResult<()> {
+    let mut names: Vec<_> = groups.keys().collect();
+    names.sort();
+    for (index, name) in names.iter().enumerate() {
+        if name.is_empty()
+            || !name.is_ascii()
+            || !name.chars().all(char::is_alphabetic)
+            || is_known_element(name)
+        {
+            return Err(KineticsError::InvalidCustomGroup {
+                group: (*name).clone(),
+                reason: "group name must be ASCII alphabetic and must not shadow an element".into(),
+            });
+        }
+        if names[index + 1..]
+            .iter()
+            .any(|other| name.starts_with(other.as_str()) || other.starts_with(name.as_str()))
+        {
+            return Err(KineticsError::InvalidCustomGroup {
+                group: (*name).clone(),
+                reason: "group name has an ambiguous prefix overlap".into(),
+            });
+        }
+        let composition = &groups[*name];
+        if composition.is_empty() {
+            return Err(KineticsError::InvalidCustomGroup {
+                group: (*name).clone(),
+                reason: "composition must contain at least one element".into(),
+            });
+        }
+        for element in composition.keys() {
+            if groups.contains_key(element) {
+                return Err(KineticsError::InvalidCustomGroup {
+                    group: (*name).clone(),
+                    reason: format!("nested or cyclic group `{element}` is unsupported"),
+                });
+            }
+            if !is_known_element(element) {
+                return Err(KineticsError::UnknownElement {
+                    formula: formula.to_string(),
+                    symbol: element.clone(),
+                });
+            }
+            if composition[element] == 0 {
+                return Err(KineticsError::InvalidCustomGroup {
+                    group: (*name).clone(),
+                    reason: format!("atom count for `{element}` must be positive"),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 fn formula_error(formula: &str, message: impl Into<String>) -> KineticsError {
-    KineticsError::InvalidReactionData(format!("invalid formula `{}`: {}", formula, message.into()))
+    KineticsError::FormulaSyntax {
+        formula: formula.to_string(),
+        reason: message.into(),
+    }
 }
 
 fn char_at(formula: &str, idx: usize) -> KineticsResult<char> {
     formula
-        .chars()
-        .nth(idx)
+        .as_bytes()
+        .get(idx)
+        .map(|byte| *byte as char)
         .ok_or_else(|| formula_error(formula, format!("missing character at position {}", idx)))
 }
 
@@ -312,17 +385,6 @@ fn parse_usize_slice(formula: &str, start: usize, end: usize) -> KineticsResult<
         )
     })
 }
-#[allow(dead_code)]
-fn after_bracket_stoichio(end_bracket: usize, formula: String) -> KineticsResult<usize> {
-    let mut end_of_stoichio_after_bracket = end_bracket + 1;
-    while end_of_stoichio_after_bracket < formula.len()
-        && char_at(&formula, end_of_stoichio_after_bracket)?.is_digit(10)
-    {
-        end_of_stoichio_after_bracket += 1;
-    }
-    parse_usize_slice(&formula, end_bracket, end_of_stoichio_after_bracket)
-}
-
 /// Parse a numeric suffix that starts at `start` and return both the value and the first
 /// index after the suffix.
 fn parse_stoichio_suffix(formula: &str, start: usize) -> KineticsResult<(usize, usize)> {
@@ -330,17 +392,38 @@ fn parse_stoichio_suffix(formula: &str, start: usize) -> KineticsResult<(usize, 
     while end < formula.len() && char_at(formula, end)?.is_digit(10) {
         end += 1;
     }
-    Ok((parse_usize_slice(formula, start, end)?, end))
+    let count = parse_usize_slice(formula, start, end)?;
+    if count == 0 {
+        return Err(formula_error(
+            formula,
+            format!("stoichiometric count at position {start} must be positive"),
+        ));
+    }
+    Ok((count, end))
 }
 
 fn merge_counts(
     target: &mut HashMap<String, usize>,
     source: HashMap<String, usize>,
     multiplier: usize,
-) {
+    formula: &str,
+) -> KineticsResult<()> {
     for (atom, count) in source {
-        *target.entry(atom).or_insert(0) += count * multiplier;
+        let amount = count.checked_mul(multiplier).ok_or_else(|| {
+            formula_error(
+                formula,
+                format!("atom count multiplication overflow for `{atom}`"),
+            )
+        })?;
+        let total = target.entry(atom.clone()).or_insert(0usize);
+        *total = total.checked_add(amount).ok_or_else(|| {
+            formula_error(
+                formula,
+                format!("atom count addition overflow for `{atom}`"),
+            )
+        })?;
     }
+    Ok(())
 }
 
 /// Parse one formula segment until a closing parenthesis or the end of the string.
@@ -350,7 +433,15 @@ fn parse_formula_segment(
     group_names: &[String],
     in_brackets: bool,
     initial_formula: &str,
+    depth: usize,
 ) -> KineticsResult<(HashMap<String, usize>, usize)> {
+    if depth > MAX_FORMULA_NESTING {
+        return Err(KineticsError::FormulaLimitExceeded {
+            resource: "nesting depth",
+            requested: depth,
+            limit: MAX_FORMULA_NESTING,
+        });
+    }
     let mut counts = HashMap::new();
 
     while i < formula.len() {
@@ -367,8 +458,14 @@ fn parse_formula_segment(
         }
 
         if ch == '(' {
-            let (inner_counts, next_i) =
-                parse_formula_segment(formula, i + 1, group_names, true, initial_formula)?;
+            let (inner_counts, next_i) = parse_formula_segment(
+                formula,
+                i + 1,
+                group_names,
+                true,
+                initial_formula,
+                depth + 1,
+            )?;
             i = next_i;
 
             let multiplier = if i < formula.len() && char_at(formula, i)?.is_digit(10) {
@@ -379,7 +476,7 @@ fn parse_formula_segment(
                 1
             };
 
-            merge_counts(&mut counts, inner_counts, multiplier);
+            merge_counts(&mut counts, inner_counts, multiplier, initial_formula)?;
             continue;
         }
 
@@ -396,7 +493,13 @@ fn parse_formula_segment(
                 1
             };
 
-            *counts.entry(group_name.clone()).or_insert(0) += multiplier;
+            let total = counts.entry(group_name.clone()).or_insert(0usize);
+            *total = total.checked_add(multiplier).ok_or_else(|| {
+                formula_error(
+                    initial_formula,
+                    format!("count overflow for `{group_name}`"),
+                )
+            })?;
             continue;
         }
 
@@ -419,7 +522,10 @@ fn parse_formula_segment(
                 1
             };
 
-            *counts.entry(element.to_string()).or_insert(0) += multiplier;
+            let total = counts.entry(element.to_string()).or_insert(0usize);
+            *total = total.checked_add(multiplier).ok_or_else(|| {
+                formula_error(initial_formula, format!("count overflow for `{element}`"))
+            })?;
             continue;
         }
 
@@ -453,9 +559,27 @@ pub fn parse_formula(
     formula: String,
     groups: Option<HashMap<String, HashMap<String, usize>>>,
 ) -> KineticsResult<HashMap<String, usize>> {
-    let mut formula = formula.replace(" ", "");
+    if !formula.is_ascii() {
+        return Err(formula_error(&formula, "formula syntax must be ASCII"));
+    }
+    if formula.len() > MAX_FORMULA_BYTES {
+        return Err(KineticsError::FormulaLimitExceeded {
+            resource: "byte length",
+            requested: formula.len(),
+            limit: MAX_FORMULA_BYTES,
+        });
+    }
     let initial_formula = formula.clone();
-    formula = filter_phases_marks(&formula);
+    let formula = strip_phase_suffix(&formula.replace(' ', "")).to_string();
+    if formula.is_empty() {
+        return Err(formula_error(
+            &initial_formula,
+            "formula must contain at least one atom or group",
+        ));
+    }
+    if let Some(groups) = groups.as_ref() {
+        validate_custom_groups(groups, &initial_formula)?;
+    }
 
     let mut group_names = groups
         .as_ref()
@@ -472,8 +596,8 @@ pub fn parse_formula(
         group_names = Vec::new();
     }
 
-    let (counts, _) = parse_formula_segment(&formula, 0, &group_names, false, &initial_formula)?;
-    Ok(handle_groups(counts, groups))
+    let (counts, _) = parse_formula_segment(&formula, 0, &group_names, false, &initial_formula, 0)?;
+    handle_groups(counts, groups, &initial_formula)
 } // end of parse_formula
 
 // Function to calculate the molar mass of a substance given its chemical formula
@@ -481,30 +605,74 @@ pub fn calculate_molar_mass(
     formula: String,
     groups: Option<HashMap<String, HashMap<String, usize>>>,
 ) -> KineticsResult<(f64, HashMap<String, usize>)> {
-    let counts = parse_formula(formula, groups)?;
-    let mut molar_mass = 0.0;
-    for (element, count) in counts.clone() {
-        for e in ELEMENTS {
-            if e.name == element {
-                molar_mass += e.atomic_mass * count as f64;
-                break;
-            }
-        }
-    }
+    let counts = parse_formula(formula.clone(), groups)?;
+    let molar_mass = molar_mass_for_composition(counts.clone(), &formula)?;
     Ok((molar_mass, counts))
 }
 
-pub fn calculate_molar_mass_for_composition(counts: HashMap<String, usize>) -> f64 {
+fn molar_mass_for_composition(
+    counts: HashMap<String, usize>,
+    formula: &str,
+) -> KineticsResult<f64> {
+    if counts.is_empty() {
+        return Err(formula_error(
+            formula,
+            "composition must contain at least one atom",
+        ));
+    }
     let mut molar_mass = 0.0;
-    for (element, count) in counts.clone() {
-        for e in ELEMENTS {
-            if e.name == element {
-                molar_mass += e.atomic_mass * count as f64;
-                break;
-            }
+    for (element, count) in counts {
+        if count == 0 {
+            return Err(formula_error(
+                formula,
+                format!("atom count for `{element}` must be positive"),
+            ));
+        }
+        let atomic_mass = ELEMENTS
+            .iter()
+            .find(|record| record.name == element)
+            .ok_or_else(|| KineticsError::UnknownElement {
+                formula: formula.to_string(),
+                symbol: element.clone(),
+            })?
+            .atomic_mass;
+        molar_mass += atomic_mass * count as f64;
+    }
+    if !molar_mass.is_finite() {
+        return Err(formula_error(formula, "computed molar mass is non-finite"));
+    }
+    Ok(molar_mass)
+}
+
+pub fn calculate_molar_mass_for_composition(counts: HashMap<String, usize>) -> KineticsResult<f64> {
+    molar_mass_for_composition(counts, "<element composition>")
+}
+
+fn validate_physical_composition(
+    counts: &HashMap<String, usize>,
+    formula: &str,
+) -> KineticsResult<()> {
+    if counts.is_empty() {
+        return Err(formula_error(
+            formula,
+            "composition must contain at least one atom",
+        ));
+    }
+    for symbol in counts.keys() {
+        if counts[symbol] == 0 {
+            return Err(formula_error(
+                formula,
+                format!("atom count for `{symbol}` must be positive"),
+            ));
+        }
+        if !is_known_element(symbol) {
+            return Err(KineticsError::UnknownElement {
+                formula: formula.to_string(),
+                symbol: symbol.clone(),
+            });
         }
     }
-    molar_mass
+    Ok(())
 }
 
 // Function to calculate the molar mass of a vector of chemical formulas
@@ -514,30 +682,24 @@ pub fn calculate_molar_mass_of_vector_of_subs(
 ) -> KineticsResult<Vec<f64>> {
     let mut molar_masses = Vec::new();
     for formula in vec_of_formulae.iter() {
-        let counts = parse_formula(formula.to_string(), groups.clone())?;
-        let mut molar_mass = 0.0;
-        for (element, count) in counts {
-            for e in ELEMENTS {
-                if e.name == element {
-                    molar_mass += e.atomic_mass * count as f64;
-                    break;
-                }
-            }
-        }
+        let (molar_mass, _) = calculate_molar_mass((*formula).to_string(), groups.clone())?;
         molar_masses.push(molar_mass);
     }
     Ok(molar_masses)
 }
 
+/// Build a species-by-element composition matrix. The returned element vector
+/// defines the matrix column order and is deterministic (lexicographic).
 pub fn create_elem_composition_matrix(
     vec_of_formulae: Vec<&str>,
     groups: Option<HashMap<String, HashMap<String, usize>>>,
 ) -> KineticsResult<(DMatrix<f64>, Vec<String>)> {
-    let mut hashset_of_elems: HashSet<String> = HashSet::new();
+    let mut hashset_of_elems: BTreeSet<String> = BTreeSet::new();
     let mut vec_of_compositions = Vec::new();
     for formula in vec_of_formulae.iter() {
         // create a unique list of elements from the given formula vector
         let counts = parse_formula(formula.to_string(), groups.clone())?;
+        validate_physical_composition(&counts, formula)?;
         vec_of_compositions.push(counts.clone());
         let elements = counts.keys().map(|el| el.clone()).collect::<Vec<_>>();
         hashset_of_elems.extend(elements);
@@ -561,7 +723,7 @@ pub fn create_elem_composition_matrix_and_molar_masses(
     vec_of_formulae: Vec<&str>,
     groups: Option<HashMap<String, HashMap<String, usize>>>,
 ) -> KineticsResult<(DMatrix<f64>, Vec<String>, Vec<f64>)> {
-    let mut hashset_of_elems: HashSet<String> = HashSet::new();
+    let mut hashset_of_elems: BTreeSet<String> = BTreeSet::new();
     let mut vec_of_compositions = Vec::new();
     let mut vec_of_molar_masses = Vec::new();
     for formula in vec_of_formulae.iter() {
@@ -738,12 +900,147 @@ mod tests {
     #[test]
     fn test_element_matrix() {
         let vec_of_formulae = vec!["H2O", "NaCl", "C3H8", "CH4"]; // 5 elements
-        let matrix = create_elem_composition_matrix(vec_of_formulae, None)
-            .unwrap()
-            .0;
-        println!("{}", matrix);
+        let (matrix, elements) = create_elem_composition_matrix(vec_of_formulae, None).unwrap();
         assert_eq!(matrix.nrows(), 4);
         assert_eq!(matrix.ncols(), 5);
+        assert_eq!(elements, vec!["C", "Cl", "H", "Na", "O"]);
+        assert_eq!(matrix[(0, 0)], 0.0);
+        assert_eq!(matrix[(0, 2)], 2.0);
+        assert_eq!(matrix[(0, 4)], 1.0);
+        assert_eq!(matrix[(1, 1)], 1.0);
+        assert_eq!(matrix[(1, 3)], 1.0);
+    }
+
+    #[test]
+    fn physical_mass_and_composition_reject_unknown_element_symbols() {
+        let counts = parse_formula("Xx2".into(), None).expect("formula tokens remain parseable");
+        assert_eq!(counts.get("Xx"), Some(&2));
+        assert!(matches!(
+            calculate_molar_mass("Xx2".into(), None),
+            Err(KineticsError::UnknownElement { symbol, .. }) if symbol == "Xx"
+        ));
+        assert!(matches!(
+            calculate_molar_mass_for_composition(HashMap::from([("Xx".into(), 1)])),
+            Err(KineticsError::UnknownElement { symbol, .. }) if symbol == "Xx"
+        ));
+        assert!(matches!(
+            create_elem_composition_matrix(vec!["Xx2"], None),
+            Err(KineticsError::UnknownElement { symbol, .. }) if symbol == "Xx"
+        ));
+    }
+
+    #[test]
+    fn empty_formulas_and_zero_atom_counts_are_rejected() {
+        for formula in ["", "   ", "(g)", "H0", "Ca(NO3)0"] {
+            assert!(
+                matches!(
+                    parse_formula(formula.to_string(), None),
+                    Err(KineticsError::FormulaSyntax { .. })
+                ),
+                "formula {formula:?} should be rejected"
+            );
+        }
+        assert!(matches!(
+            calculate_molar_mass_for_composition(HashMap::new()),
+            Err(KineticsError::FormulaSyntax { .. })
+        ));
+        assert!(matches!(
+            calculate_molar_mass_for_composition(HashMap::from([("H".into(), 0)])),
+            Err(KineticsError::FormulaSyntax { .. })
+        ));
+        assert!(matches!(
+            parse_formula(
+                "Me".into(),
+                Some(HashMap::from([(
+                    "Me".into(),
+                    HashMap::from([("C".into(), 1), ("H".into(), 0)])
+                )]))
+            ),
+            Err(KineticsError::InvalidCustomGroup { .. })
+        ));
+    }
+
+    #[test]
+    fn formula_parser_rejects_non_ascii_before_indexing() {
+        assert!(matches!(
+            parse_formula("H₂O".into(), None),
+            Err(KineticsError::FormulaSyntax { reason, .. }) if reason.contains("ASCII")
+        ));
+    }
+
+    #[test]
+    fn formula_parser_bounds_length_and_nesting_and_checks_count_overflow() {
+        let too_long = "H".repeat(MAX_FORMULA_BYTES + 1);
+        assert!(matches!(
+            parse_formula(too_long, None),
+            Err(KineticsError::FormulaLimitExceeded {
+                resource: "byte length",
+                ..
+            })
+        ));
+
+        let deep = format!(
+            "{}H{}",
+            "(".repeat(MAX_FORMULA_NESTING + 1),
+            ")".repeat(MAX_FORMULA_NESTING + 1)
+        );
+        assert!(matches!(
+            parse_formula(deep, None),
+            Err(KineticsError::FormulaLimitExceeded {
+                resource: "nesting depth",
+                ..
+            })
+        ));
+
+        let overflow = format!("H{}H", usize::MAX);
+        assert!(matches!(
+            parse_formula(overflow, None),
+            Err(KineticsError::FormulaSyntax { reason, .. }) if reason.contains("overflow")
+        ));
+        let multiplier_overflow = format!("(H{})2", usize::MAX);
+        assert!(matches!(
+            parse_formula(multiplier_overflow, None),
+            Err(KineticsError::FormulaSyntax { reason, .. }) if reason.contains("overflow")
+        ));
+    }
+
+    #[test]
+    fn phase_markers_are_removed_only_as_recognized_suffixes() {
+        assert_eq!(
+            parse_formula("C(OH)2(g)".into(), None).unwrap(),
+            HashMap::from([("C".into(), 1), ("O".into(), 2), ("H".into(), 2),])
+        );
+        assert!(matches!(
+            parse_formula("C(g)H".into(), None),
+            Err(KineticsError::FormulaSyntax { .. })
+        ));
+    }
+
+    #[test]
+    fn custom_group_expansions_reject_unknown_nested_and_ambiguous_definitions() {
+        let unknown = HashMap::from([("Me".into(), HashMap::from([("Xx".into(), 1)]))]);
+        assert!(matches!(
+            parse_formula("Me".into(), Some(unknown)),
+            Err(KineticsError::UnknownElement { symbol, .. }) if symbol == "Xx"
+        ));
+
+        let nested = HashMap::from([
+            ("Me".into(), HashMap::from([("Ph".into(), 1)])),
+            ("Ph".into(), HashMap::from([("C".into(), 6)])),
+        ]);
+        assert!(matches!(
+            parse_formula("Me".into(), Some(nested)),
+            Err(KineticsError::InvalidCustomGroup { reason, .. }) if reason.contains("nested")
+        ));
+
+        let ambiguous = HashMap::from([
+            ("Me".into(), HashMap::from([("C".into(), 1)])),
+            ("Methyl".into(), HashMap::from([("C".into(), 1)])),
+        ]);
+        assert!(matches!(
+            parse_formula("Me".into(), Some(ambiguous)),
+            Err(KineticsError::InvalidCustomGroup { reason, .. }) if reason.contains("prefix")
+        ));
     }
     #[test]
     fn test_hmx() {

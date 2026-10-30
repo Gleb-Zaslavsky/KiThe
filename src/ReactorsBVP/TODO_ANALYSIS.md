@@ -1,6 +1,279 @@
 # ReactorsBVP Technical TODO
 
-Scope: `src/ReactorsBVP/` only. This checklist intentionally treats performance issues as high priority because BVP reactor runs can be long CPU-bound workloads.
+Scope: BVP reactor implementation in `src/ReactorsBVP/` plus its structured
+GUI adapter in `src/gui/`. This checklist treats performance as important,
+but correctness and route-contract clarity come first.
+
+## P1: Unify reactor solves on RustedSciThe `BVP_api`
+
+Scope decision: migrate the reactor's fixed-parameter BVP workflows to the
+public `RustedSciThe::numerical::BVP_api` contract. Supported solver families
+for this work are Damped, Frozen/Naive, and BVP_sci. `SciWithFreeParameters` is
+not part of the reactor problem and is explicitly out of scope. Keep this
+separate from the IVP migration, which is paused pending the next RST release.
+
+Starting point before this migration (RST 0.4.28):
+- The parser-driven production route still builds `NRBVP` directly from
+  `DampedSolverOptions`; the typed RST damped-settings parser is already used.
+- `BVPSolver::solve_BVPsci()` is a second direct-native route with hard-coded
+  ExprLegacy, Dense, and telemetry Off; it returns `()` and logs failures.
+- `ReactorBvpSolverConfig` already owns symbolic frontend, matrix backend,
+  Lambdify/AOT, and AOT build/execution settings. Extend this facade rather
+  than replacing it.
+- `BVP_api` already provides validated `BvpProblem`, typed Damped/Frozen/Sci
+  configurations, a common solution view, route-tagged telemetry snapshots,
+  typed source-preserving errors, and common logging-level forwarding.
+- RST 0.4.29 exposes `BvpSolverSettings::with_telemetry_mode` and tagged
+  native snapshots. Timings-only is intentionally rejected for Damped/Frozen
+  configurations that may select AOT; BVP_sci supports all four modes.
+- The reactor has one boundary condition per state in canonical state order.
+  Damped/Frozen require uniform legacy meshes; Damped initial guesses are
+  interval-major by columns while Frozen/Sci guesses are node-major by columns.
+  Mesh and guess conversion must be explicit and tested.
+- The GUI's `strategy = Damped/Frozen/Naive` is distinct from the explicit
+  `solver_family = damped/frozen/sci` route selector. Bounds, adaptive-grid
+  controls, and solver options must only be shown for families that accept
+  them.
+- `ReactorError` currently erases backend errors into strings in solve paths.
+
+### Implementation plan
+
+- [x] Define a capability matrix for Damped, Frozen/Naive, and BVP_sci.
+  Record which common and family-specific settings each route supports. Reject
+  unsupported combinations explicitly; never silently discard bounds,
+  tolerances, execution, or backend selections. Keep `SciWithFreeParameters`
+  excluded. See the RST 0.4.29 route matrix below.
+- [x] Confirm upstream construction/configuration contract with RST.
+  Ensure public typed APIs can produce each supported `BvpSolverConfig` from
+  solver settings and expose route telemetry after both successful and failed
+  solves. Add upstream work only for an actual missing capability; do not
+  duplicate task-document parsing in KiThe.
+- [x] Keep KiThe's generated-callback policy separate from RST solver-family
+  selection. `ReactorBvpSolverConfig` owns symbolic assembly, matrix layout,
+  and Lambdify/AOT generation for reactor callbacks; the hybrid parser and
+  `BvpSolverSettings` own Damped/Frozen/Sci selection and each route's options.
+  Telemetry is forwarded through RST's route-aware API, and execution policies
+  remain where each backend can honor them. This avoids a duplicate KiThe
+  solver-family config while retaining the Damped + AtomView + Banded + Lambdify
+  defaults.
+- [x] Add one reactor-to-`BvpProblem` adapter. Build equations/state order,
+  independent variable, explicit mesh, and indexed endpoint conditions from
+  the canonical reactor snapshot. Validate the boundary-condition count and
+  retain the current physical boundary semantics.
+- [x] Normalize initial guesses for each family. Test interval-vs-node column
+  conventions, `n_steps` meaning, endpoint inclusion, and uniform mesh
+  requirements. Use explicit errors for route-incompatible nonuniform grids.
+- [x] Route direct and parser-driven solves through `BvpSolver`. Keep physics,
+  reactor initial guesses, and postprocessing in KiThe; keep solver-settings
+  parsing and native solver configuration in RST. Replace the hard-coded
+  `solve_BVPsci` configuration with the selected typed route or remove the
+  obsolete parallel entry point once all callers are migrated.
+- [x] Make solve publication transactional. Publish solution, mesh, and
+  argument metadata only after successful convergence and finite/dimension
+  validation; preserve the previous successful state on a failed subsequent
+  solve.
+- [x] Preserve typed failures. Add a source-bearing `ReactorError` variant for
+  `BvpApiError`, with reactor stage/context where useful. Do not stringify
+  native errors. Retain the route-native telemetry snapshot with the latest
+  solve outcome, including failure outcomes when RST exposes partial data.
+- [x] Connect KiThe telemetry modes to each route's native telemetry without
+  flattening unlike snapshot fields. Verify `Off` truly disables collection;
+  clarify that logging is independent, and map the common parallel policy only
+  to capabilities supported by the selected family/backend. GUI/task settings
+  retain their route-native telemetry; direct `BVPSolver` callers can set an
+  optional facade-wide override, which RST validates and applies before solve.
+- [x] Update task-document and GUI contracts. The hybrid document continues to
+  split physics/initial guess (KiThe) from solver settings (RST). The structured
+  GUI now selects Damped/Frozen/Sci explicitly, conditionally renders each
+  family's supported settings, removes incompatible fields on route changes,
+  and round-trips Sci Lambdify/AOT settings through the RST hybrid parser.
+  Rendered hover/help stories cover pre-existing Damped/Frozen controls,
+  physical-section fields, adaptive-grid controls, Sci conditional banded
+  controls, and Damped/Sci AOT options. The structured editor is scrollable so
+  controls below the viewport remain reachable. Help assertions check expected
+  content rather than merely requiring a nonempty panel.
+- [x] Complete rendered hover/help checks for the tested BVP GUI controls.
+  Stories cover route selectors and settings, legacy physical-section headings
+  and representative inputs, adaptive-grid controls, conditional Sci banded
+  controls, and Damped/Sci AOT controls. A bounded scroll area keeps lower
+  controls reachable in a constrained viewport.
+- [x] Add focused correctness tests for problem/BC mapping, route-specific
+  mesh/guess dimensions, scalar Damped/Sci solves and Frozen boundary rejection, typed setup
+  failures, transactional state retention, telemetry modes, parser round-trip,
+  and GUI family/options round-trip. Stories record command, hypothesis,
+  observations, and conclusion.
+- [ ] Finish the compact physical-reactor acceptance matrix across the supported
+  `BVP_api` families. The compact HMX reactor now passes profile and endpoint
+  checks through Damped and BVP_sci. With the accepted Damped profile as seed,
+  Frozen returns `BvpApiError::MissingResult`; Naive returns a finite candidate
+  whose Teta endpoint error is about `1.81e-1` against a `1e-6` tolerance. A
+  new facade acceptance gate rejects the latter with typed
+  `BvpBoundaryConditionViolation`; both failures preserve the last accepted
+  solution/mesh and retain route telemetry. Keep Frozen/Naive physical
+  acceptance open until a representative reactor result satisfies the endpoint
+  contract. An analytic Frozen/Naive matrix now verifies both strategies across
+  both symbolic assemblies and Dense/Sparse/Banded layouts, but that numerical
+  control does not substitute for physical HMX endpoint acceptance.
+- [x] Update examples and API documentation to use the unified facade and show
+  route-aware telemetry/error handling.
+- [x] Add release benchmark coverage for Damped, Frozen, Naive, and BVP_sci
+  routes, including small/medium/large analytic controls, stage attribution,
+  route-native telemetry, and a separately gated AOT/Lambdify comparison where
+  supported. Frozen/Naive AOT is measured only for AtomView Sparse/Banded, the
+  available compiled routes, and the benchmark asserts profile parity before
+  recording timings. Their physical HMX acceptance remains a separate open
+  item. Implementation:
+  `benches/reactor_bvp_baseline.rs`.
+- [x] Run the release baseline campaign and record its current results in
+  `STORY_TESTS.md`. Run `reactor-bvp-all-release-20261030-142037-511Z` passed
+  all correctness steps and the 66-case Lambdify Criterion matrix. No
+  performance gates are added until repeated measurements establish stable
+  thresholds.
+- [ ] Rerun the optional AOT benchmark axis with the corrected TCC probe
+  (`tcc -v`); the completed campaign skipped AOT timings despite TCC being
+  installed, while dedicated Damped/Sci AOT correctness stories passed.
+
+### Current RST capability status
+
+| Capability | Damped | Frozen / Naive | BVP_sci |
+| --- | --- | --- | --- |
+| `solver_family` | `damped` | `frozen` | `sci` |
+| Nonlinear/collocation strategy | Damped Newton | Frozen or Naive | Fixed collocation route |
+| Core numerics | scheme, matrix method, abs tolerance, iteration limit | scheme, matrix method, tolerance, iteration limit | execution, assembly, matrix layout, tolerance and collocation limits |
+| Backend-specific options | Lambdify/AOT, symbolic frontend, banded solver, refinement, strategy/adaptive-grid settings | Lambdify/AOT, symbolic frontend, strategy parameters; no reactor bounds/adaptive-grid sections | Lambdify/AOT, ExprLegacy/AtomView, dense/sparse/banded layouts, execution and output policies |
+| Reactor guess shape | interval-major; `n_steps` columns | node-major; `n_steps + 1` columns | node-major; `n_steps + 1` columns |
+| Telemetry | Off/Counters/Detailed; Timings requires Lambdify-only backend policy | Off/Counters/Timings/Detailed | Off/Counters/Timings/Detailed, including AOT |
+| Logging lifecycle | loglevel plus native `dont_save_log` toggle | loglevel plus native `dont_save_log` toggle | loglevel; no portable `dont_save_log` toggle |
+
+- [x] Frozen and Naive analytic story matrix covers ExprLegacy/AtomView and
+  Dense/Sparse/Banded through the KiThe `solve_BVPfrozen` facade; compact-HMX physical acceptance is
+  still not met at the production endpoint tolerance.
+- [x] Release baseline includes Frozen and Naive routes with separate native
+  telemetry rows; current single-host timings are recorded in `STORY_TESTS.md`.
+
+The GUI exposes these route-specific settings without conflating the family
+selector with the `strategy` choice. Damped AOT plus Timings is visibly called
+out and rejected by the RST parser; Sci AOT Timings remains available because
+that route accepts it.
+
+- [x] RST 0.4.29 exposes telemetry mapping through `BvpSolverSettings` and the
+  hybrid parser. The structured GUI exposes the four telemetry choices for all
+  three families; route-specific unsupported combinations are rejected by the
+  parser.
+- [x] Direct programmatic `BVPSolver` callers can select the common telemetry
+  mode through `with_bvp_telemetry_mode`; no second telemetry collector or
+  flattened snapshot was introduced.
+- [x] The structured BVP GUI exposes `telemetry` as Off/Counters/Timings/
+  Detailed for Damped, Frozen, and Sci, defaults to Off, and keeps it
+  independent from Rust logging and `dont_save_log`; GUI stories verify route
+  serialization and Sci parser acceptance.
+- [x] The RST 0.4.29 settings-only parser produces typed Damped, Frozen, and
+  Sci `BvpSolverSettings` without owning equations, mesh, boundary values, or
+  initial guesses. KiThe filters the hybrid task document to solver-owned
+  sections and attaches its own initial guess through `with_initial_guess`.
+- [x] Legacy documents without `solver_family` remain accepted at the KiThe
+  boundary: `strategy: Frozen|Naive` infers the Frozen family, otherwise the
+  legacy strategy-only form maps to Damped. New task templates declare
+  `solver_family` explicitly.
+- [x] `dont_save_log` remains a native post-construction lifecycle toggle, not
+  a portable settings-parser field. KiThe extracts it before invoking the RST
+  parser; Sci rejects this toggle because that route has no equivalent API.
+- [x] Verify Damped/Frozen native telemetry after unsuccessful outcomes and
+  preserve the status and available partial counters through the KiThe facade.
+  RustedSciThe 0.4.30 adds `BvpSolveStatus` (`NotStarted`, `InProgress`,
+  `Converged`, `NoResult`, `Failed`) to snapshots; its native error path keeps
+  accumulated Counters and last-attempt timings when enabled. KiThe's compact
+  Frozen story checks `NoResult`, retained Counters, and transactional solution
+  publication; its successful Naive retry checks `Converged`. RST's BVP_api
+  failure matrix covers native `Failed` status and source-preserving errors.
+
+Progress (2026-10-29):
+- The current direct and parser-driven Damped solve paths now construct a
+  `BvpProblem` and run through `BVP_api::BvpSolver`; the old direct NRBVP
+  constructor remains only as a compatibility/test helper for now.
+- The separate fixed-parameter `solve_BVPsci()` route now also uses
+  `BVP_api::BvpSolver` with a typed `BvpSolverConfig::Sci`. Its former warning-
+  and-return failure behavior is now `Result<_, ReactorError>`, and it retains
+  Sci telemetry and publishes the adaptive mesh/profile only after validation.
+  `SciWithFreeParameters` remains explicitly out of scope.
+- A public `solve_BVPfrozen(initial_guess, FrozenSolverOptions)` entry point
+  now uses `BvpSolverConfig::Frozen`; it infers node count from the initial
+  guess, validates node-major conventions at the boundary, and retains the
+  Frozen telemetry snapshot. The GUI's `strategy` field is deliberately not
+  used as a proxy for this solver-family choice.
+- `ReactorError` now retains `BvpApiError` and RST hybrid settings errors as
+  error sources; `BVPSolver` stores the latest route-tagged telemetry snapshot.
+- A scalar BVP story verifies a real Damped API solve, node/solution layout,
+  mesh publication, telemetry capture, and preservation of the last successful
+  result after a rejected retry. A separate story asserts that an RST
+  configuration failure remains a `BvpApiError` source rather than a string;
+  a scalar collocation story verifies the API Sci route, adaptive mesh,
+  analytic endpoint value, and route telemetry; a Frozen story verifies its
+  fixed node mesh, analytic endpoint, and telemetry variant. All are recorded
+  in `STORY_TESTS.md`.
+- RST 0.4.29's hybrid settings parser is now the parser-driven production
+  route. Damped settings still require per-state `bounds` and `rel_tolerance`;
+  missing or malformed fields are preserved as typed settings errors. Direct
+  API defaults remain governed by the direct BVP API contract.
+- A parser story now exercises Damped, Frozen, and Sci selection through the
+  KiThe-to-RST adapter, verifies legacy family inference and the distinct
+  interval/node initial-guess dimensions, and checks that a Sci settings map
+  does not need reactor-owned physics sections.
+- The structured GUI now exposes the RST telemetry mode for its current
+  Damped, Frozen, and Sci forms, defaults it to Off, and preserves the
+  independent logging policy. The family selector independently chooses the
+  route; route-specific controls and bounds/adaptive sections are conditional.
+  Damped AOT plus Timings is surfaced as unavailable and rejected before solve,
+  while Sci AOT Timings round-trips successfully through RST 0.4.29. The
+  existing nonlinear `strategy` remains a separate choice within Damped/Frozen.
+- Direct programmatic solves now accept an optional common telemetry override
+  on `BVPSolver`. It is applied through RST's public
+  `BvpSolverSettings::with_telemetry_mode`; absent an override, route-native
+  parser settings remain intact. RST's typed unsupported-mode error is retained
+  as `ReactorError::BvpTelemetry`. The Sci Counters story checks nonzero callback
+  counts and the native Sci snapshot variant.
+- The reporting split is verified through data-level tests: task, equation,
+  reaction-rate, balance, estimate, postprocessing, and render snapshots are
+  available independently, and the existing print/export/plot methods consume
+  those snapshots rather than requiring tests to parse console output.
+- Idiomatic read-only accessors now cover thermal conductivity, mean molar
+  mass, state boundary conditions, reaction heat, and dimensionless-temperature
+  tolerance/bounds. Public legacy fields remain for source compatibility and
+  direct new callers toward these accessors.
+- The new GUI family story covers Damped-to-Sci/Frozen switching, Sci
+  Lambdify/AOT serialization, removal of AOT-only values on return to Lambdify,
+  route-specific bounds, and parser acceptance. The GUI suite passes 45/45;
+  the focused RST hybrid settings parser story also passes.
+- BVP GUI hover stories now exercise actual hover paths across Damped/Frozen/Sci,
+  legacy physical sections, adaptive refinement, and conditional AOT/banded
+  controls. The editor has a bounded vertical scroll area; `Maximum grid
+  refinements` now forwards help from both its label and numeric widget.
+- The compact HMX test fixtures now use a non-overlapping product label, and
+  the synthetic A/B/C policy fixture defines A as a valid custom group while
+  retaining B and C as element symbols. Production validation remains strict.
+- The API adapter now publishes solution matrices in KiThe's established
+  node-major layout (`mesh_points x state_count`), matching postprocessing,
+  plotting, and balance checks. The previous state-major publication caused
+  real parser/postprocessing and plot failures.
+- Compact physical-reactor stories exercise all three API families. Against
+  RustedSciThe 0.4.30, KiThe converts its public full nodal Frozen seed to the
+  reduced `n_steps` unknown vector by omitting each state's prescribed endpoint.
+  RST then publishes `n_steps + 1` mesh/profile values with the boundary values
+  restored. The scalar `y'=-y`, `y(0)=1` story now confirms the first sample is
+  exactly the x=0 boundary; `0.9961089494` was the first interior value, not a
+  boundary violation. On compact HMX, Frozen returns typed `MissingResult`
+  (`NoResult` telemetry) and preserves the previous Damped profile; Naive now
+  publishes a profile with restored endpoints (`Converged` telemetry). These
+  stories verify shape, boundary, and lifecycle contracts, not an all-node
+  discretization error bound.
+- A second compact inlet composition (`product_fraction = 0.02`, versus the
+  baseline `0.001`) passes endpoint and finite-profile checks through both
+  Damped and BVP_sci. This broadens measured compact-case evidence but is not a
+  universal model-family guarantee.
+- Current Debug `ReactorsBVP` lib run: 131 passed, 0 failed. This includes the
+  parser solve/postprocessing paths and compact generated-backend matrix. AOT
+  compiler-gated cases returned early because `KITHE_RUN_BVP_AOT_TESTS` was not
+  set; they are not evidence that AOT compilers were exercised.
 
 ## P0: correctness, crashes, and user-facing failures
 
@@ -323,7 +596,7 @@ RustedSciThe `0.4.8` exposes the modern damped BVP API through `NRBVP::new_with_
   Done when:
   KiThe solve path no longer rewrites solver settings locally, and the only remaining solver-facing code here is a thin bridge to the native RustedSciThe parser or builder.
 
-- [ ] Native RustedSciThe parser notes for the next pass.
+- [x] Native RustedSciThe parser handoff for the KiThe client.
   Target files:
   - `task_parser_bvp.rs`
   - `task_parser_damped.rs`
@@ -350,8 +623,14 @@ RustedSciThe `0.4.8` exposes the modern damped BVP API through `NRBVP::new_with_
   - unknown grid refinement method dispatch
   - missing / malformed solver settings sections
   - postprocessing parser fallthroughs that should be typed errors instead of process aborts
-  End state:
-  KiThe no longer carries solver-settings compatibility helpers except for a very small migration bridge, and RustedSciThe exposes a typed parser that the KiThe reactor facade can call directly.
+  Current status:
+  RST 0.4.29 provides settings-only BVP and Damped parser entry points with
+  typed settings/spec results and fallible `try_*` application paths. Its hybrid
+  parser accepts solver-owned settings without KiThe equations, mesh, boundary
+  conditions, or initial guesses. KiThe calls those public entry points and
+  keeps only physics-side normalization plus the handoff of its own problem and
+  initial guess. Older mutating parser methods remain RST compatibility APIs;
+  they are not used as the typed KiThe production handoff.
 
 ## P1: numerical contract and validation coverage
 
@@ -411,7 +690,7 @@ RustedSciThe `0.4.8` exposes the modern damped BVP API through `NRBVP::new_with_
   Current status:
   `required_section()`, `required_values()`, `required_f64()`, `required_usize()`, `required_string()`, `optional_string()`, `required_vector_f64()`, and `required_bool()` now centralize the recurring `DocumentMap` extraction patterns, so the parser no longer hand-rolls the same nested lookup logic in each caller.
 
-- [ ] Normalize naming without breaking public callers abruptly.
+- [x] Normalize naming without breaking public callers abruptly.
   Targets:
   - `Lambda`, `Diffusion`, `BorderConditions`, `Teta`, `Pe_D`, `Pe_q`, `Q`, `M`
   Why:
@@ -420,9 +699,9 @@ RustedSciThe `0.4.8` exposes the modern damped BVP API through `NRBVP::new_with_
   idiomatic accessors or aliases exist, old public names are documented as compatibility fields or deprecated in a planned migration.
   Current status:
   scientific names that are standard in the domain, such as `Pe_D`, `Pe_q`, `Q`, and `M`, should stay as-is; the cleanup here is about API clarity and compatibility wrappers, not forcing the physics vocabulary into snake_case. Read-only accessors now expose `Diffusion`, `boundary_condition`, `D_ro_map`, `Pe_D`, `Pe_q`, and the scaling triple through a cleaner surface without breaking old callers.
-  `scaling_config()` now exposes the grouped `ScalingConfig` snapshot directly, so callers no longer need to rebuild the dimensionless setup from `dT`, `L`, and `T_scale` by hand.
+  `scaling_config()` exposes the grouped `ScalingConfig`; `thermal_conductivity()`, `mean_molar_mass_kg_per_mol()`, `state_boundary_conditions()`, `heat_of_reaction()`, `dimensionless_temperature_tolerance()`, and `dimensionless_temperature_bounds()` cover the remaining legacy field names. Existing public fields remain available for compatibility and are documented as such where applicable.
 
-- [ ] Separate pure reporting from printing and plotting side effects.
+- [x] Separate pure reporting from printing and plotting side effects.
   Functions:
   - `SimpleReactorBVP2.rs::pretty_print_task`
   - `SimpleReactorBVP2.rs::pretty_print_equations`
@@ -454,6 +733,17 @@ RustedSciThe `0.4.8` exposes the modern damped BVP API through `NRBVP::new_with_
   `check_balances()`, `check_energy_balance()`, `check_material_balance()`, `postprocessing()`, and `estimate_values()` now return typed errors, and `postprocessing_report()` gives tests a pure snapshot of the transformed solution before the solver state is rewritten.
 
 ## P3: cleanup and documentation
+
+- [x] Extend the BVP performance matrix with BVP_sci SuperLU, callback execution
+  policies, and KiThe-side setup cost.
+  Current status: the benchmark conditionally adds the SuperLU route only when
+  a configured bridge library exists, then checks native factorization use and
+  fallback counters. The largest analytic case now compares Sequential, Auto,
+  and Forced Parallel callback policies for both Damped and BVP_sci. A separate
+  40-species/39-reaction fixture times KiThe `setup_bvp()` before RST handoff
+  under Sequential/Auto/Parallel symbolic RHS assembly and asserts equation
+  parity. The callback-policy story passes in Debug; refreshed release timings
+  are pending the next campaign. See `STORY_TESTS.md`.
 
 - [x] Document expected units and dimensional assumptions in API docs.
   Targets:
@@ -490,4 +780,6 @@ RustedSciThe `0.4.8` exposes the modern damped BVP API through `NRBVP::new_with_
   Why:
   examples should reflect the safer API after parser and solver error handling are fixed.
   Current status:
-  `examples/reactors_bvp_guides.md` now covers direct setup, parser-to-solver, custom tolerances and bounds, and postprocessing snapshots.
+  `examples/reactors_bvp_guides.md` now covers direct setup, parser-to-solver,
+  custom tolerances and bounds, postprocessing snapshots, native route-tagged
+  telemetry, and source-preserving solve/configuration errors.

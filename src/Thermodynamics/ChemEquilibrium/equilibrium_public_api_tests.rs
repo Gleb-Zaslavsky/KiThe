@@ -23,10 +23,10 @@ mod tests {
         .expect("the public offline gas specification must validate")
     }
 
-    fn legacy_nr_options() -> EquilibriumSolveOptions {
+    fn native_nr_options() -> EquilibriumSolveOptions {
         EquilibriumSolveOptions::new()
-            .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(
-                LegacyEquilibriumSolver::NR,
+            .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(
+                NativeEquilibriumSolver::NR,
             )))
             .expect("the public single-backend policy must validate")
     }
@@ -36,7 +36,7 @@ mod tests {
         let conditions =
             EquilibriumConditions::new(TEMPERATURE_K, PRESSURE_PA, PRESSURE_PA).unwrap();
         let initial_moles = vec![0.79, 0.21];
-        let options = legacy_nr_options();
+        let options = native_nr_options();
 
         let fixed = PhaseEquilibriumPipelineRequest::new(
             offline_gas_spec(),
@@ -56,7 +56,7 @@ mod tests {
         let ranged_solution = range.points()[0].solution();
         assert_eq!(
             fixed_solution.solve_report().accepted_backend,
-            SolverBackend::Legacy(LegacyEquilibriumSolver::NR)
+            SolverBackend::Native(NativeEquilibriumSolver::NR)
         );
         assert_eq!(
             fixed_solution.component_moles().len(),
@@ -100,7 +100,7 @@ mod tests {
             vec![(duplicate.clone(), 0.79), (duplicate, 0.21)],
             EquilibriumConditions::new(TEMPERATURE_K, PRESSURE_PA, PRESSURE_PA).unwrap(),
         )
-        .with_solve_options(legacy_nr_options());
+        .with_solve_options(native_nr_options());
 
         let error = request
             .solve()

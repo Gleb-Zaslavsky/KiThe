@@ -358,8 +358,10 @@ pub enum EquilibriumDiagnosticEvent {
     ExtensiveNormalizationRecoveryAccepted {
         /// Sum of positive physical input component moles used as the scale.
         physical_inventory_scale: f64,
-        /// Failure family that authorized recovery.
-        trigger_kind: ReactionExtentErrorKind,
+        /// Physical failure kind, absent for proactive small-scale P,H use.
+        trigger_kind: Option<ReactionExtentErrorKind>,
+        /// Human-readable failure or preconditioning reason.
+        trigger_reason: String,
         /// Backend that accepted the normalized equivalent problem.
         discovery_backend: String,
         /// Backend that accepted the optional physical retry.
@@ -576,8 +578,9 @@ mod tests {
             EquilibriumDiagnosticsMode::Summary,
             EquilibriumDiagnosticEvent::ExtensiveNormalizationRecoveryAccepted {
                 physical_inventory_scale: 1.0e4,
-                trigger_kind: ReactionExtentErrorKind::AllBackendsFailed,
-                discovery_backend: "Legacy(LM)".to_string(),
+                trigger_kind: Some(ReactionExtentErrorKind::AllBackendsFailed),
+                trigger_reason: "all physical backends failed".into(),
+                discovery_backend: "Native(LM)".to_string(),
                 physical_retry_backend: None,
                 reconstructed_physical_boundary: true,
             },

@@ -1,0 +1,68 @@
+	initial_guess
+	universal: 1e-2
+        process_conditions
+        problem_name: Some(HMXTest)
+        problem_description: Some(HMXdecompositiontest)
+        substances: HMX, DecompositionProduct
+        t0: 0.0
+        t_end: 1.0
+        n_steps: 200
+        arg:x
+        Tm: 1500.0
+        L: 9e-4
+        dT: 600.0
+        T_scale: 600.0
+        P: 1e6
+        Cp: 1464.4
+        Lambda: 0.07
+        m: 0.0043
+        M: 0.0342
+        thermal_effects: [102000.0]
+        groups:true
+        boundary_condition
+        HMX: 0.999
+        DecompositionProduct: 0.001
+        T: 800.0
+        diffusion_coefficients
+        HMX: 0.000009296
+        DecompositionProduct: 0.000009296
+        HMX
+        H: 4
+        N: 8
+        C: 8
+        O: 8
+        DecompositionProduct
+        H: 6
+        C: 1
+        O: 1
+        reactions
+        HMX=>10DecompositionProduct: [130000.0, 0.0, 20920.0, 102000.0]
+        solver_settings
+        scheme: forward
+        method: Sparse
+        strategy: Damped
+        linear_sys_method: None
+        abs_tolerance: 1e-5
+        max_iterations: 100
+        loglevel: Some(info)
+        dont_save_log: true
+        bounds
+        C: -10.0, 10.0
+        J:  -1e20, 1e20
+        Teta:-100.0, 100.0
+        q: -1e20, 1e20
+        rel_tolerance
+        C: 1e-5
+        J: 1e-5
+        Teta: 1e-5
+        q:  1e-5
+        strategy_params
+        max_jac: Some(3)
+        max_damp_iter: Some(10)
+        damp_factor: Some(0.5)
+        adaptive: None
+        postprocessing
+        gnuplot:true
+        save_to_csv:false
+	save:true
+        filename: calculation

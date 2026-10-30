@@ -403,7 +403,7 @@ fn production_phase_control_runner_with_candidate_inventory(
     let mut runner = PreparedPhaseControlRunner::new(problem, false)
         .expect("production phase-control runner must prepare the synthetic problem");
     let settings = runner.configure_solver();
-    settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
+    settings.solver_policy = Some(SolverPolicy::native_default(Solvers::LM));
     // This is test-local precision for comparison with the independent scalar
     // bisection route.  It does not alter production defaults.
     settings.solver_params.tol = 1e-12;
@@ -482,7 +482,7 @@ fn canonical_fixed_phase_solution_for_target_k(target_k: f64) -> Vec<f64> {
     let mut runner =
         PreparedEquilibriumRunner::new(prepared).expect("numeric canonical runner must prepare");
     let settings = runner.configure();
-    settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
+    settings.solver_policy = Some(SolverPolicy::native_default(Solvers::LM));
     // Test-local accuracy matches the independent scalar bisection reference.
     settings.solver_params.tol = 1e-12;
     settings.solver_params.max_iter = 200;
@@ -623,7 +623,7 @@ fn second_family_production_runner(target_k: f64) -> PreparedPhaseControlRunner 
     let mut runner = PreparedPhaseControlRunner::new(canonical_problem, false)
         .expect("second-family runner must prepare");
     let settings = runner.configure_solver();
-    settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
+    settings.solver_policy = Some(SolverPolicy::native_default(Solvers::LM));
     settings.solver_params.tol = 1e-12;
     settings.solver_params.max_iter = 200;
     runner

@@ -2,8 +2,9 @@
 mod tests {
     use super::super::SimpleReactorIVP::*;
     use super::super::solver_backend::{
-        ReactorIvpExecutionBackend, ReactorIvpMatrixBackend, ReactorIvpMethod,
-        ReactorIvpSolverConfig, ReactorIvpSymbolicBackend,
+        ReactorIvpExecutionBackend, ReactorIvpFamilyOptions, ReactorIvpMatrixBackend,
+        ReactorIvpMethod, ReactorIvpSolverConfig, ReactorIvpSolverFamily,
+        ReactorIvpSymbolicBackend,
     };
     use crate::Kinetics::mechfinder_api::ReactionData;
     use RustedSciThe::numerical::LSODE2::{
@@ -12,6 +13,7 @@ mod tests {
         Lsode2ResidualJacobianSource, Lsode2StopComparator, Lsode2SymbolicAssemblyBackend,
         Lsode2SymbolicExecutionMode,
     };
+    use RustedSciThe::numerical::StiffAPI::{StiffSolverKind, StiffSolverRequest};
     use std::collections::HashMap;
 
     fn build_condensed_task() -> SimpleReactorTask {
@@ -19,15 +21,15 @@ mod tests {
         task.kindata
             .set_reaction_data_directly(
                 vec![ReactionData::new_elementary(
-                    "A=>B".to_string(),
+                    "H2=>2H".to_string(),
                     vec![1.0e3, 0.0, 1.0e4],
                     None,
                 )],
                 None,
             )
             .expect("reaction setup should succeed");
-        task.kindata.stecheodata.vec_of_molmasses = Some(vec![10.0, 20.0]);
-        task.kindata.substances = vec!["A".to_string(), "B".to_string()];
+        task.kindata.stecheodata.vec_of_molmasses = Some(vec![2.016, 1.008]);
+        task.kindata.substances = vec!["H2".to_string(), "H".to_string()];
         task.thermal_effects = vec![-2.0e5];
         task.ro = 1200.0;
         task.Cp = 1000.0;
@@ -38,10 +40,42 @@ mod tests {
         task.initial_conditions = HashMap::from([
             ("T".to_string(), 450.0),
             ("q".to_string(), 0.15),
-            ("A".to_string(), 0.7),
-            ("B".to_string(), 0.3),
+            ("H2".to_string(), 0.7),
+            ("H".to_string(), 0.3),
         ]);
         task
+    }
+
+    #[test]
+    fn family_specific_builders_cannot_leak_options_between_solvers() {
+        let bdf = ReactorIvpSolverConfig::default().with_bdf_max_steps(321);
+        assert_eq!(bdf.family(), ReactorIvpSolverFamily::Bdf);
+        assert_eq!(bdf.lsode2_controller(), None);
+        assert!(matches!(
+            bdf.family_options,
+            ReactorIvpFamilyOptions::Bdf { max_steps: 321 }
+        ));
+
+        let radau = bdf.with_radau_iteration_limits(456, 12);
+        assert_eq!(radau.family(), ReactorIvpSolverFamily::Radau);
+        assert!(matches!(
+            radau.family_options,
+            ReactorIvpFamilyOptions::Radau {
+                max_steps: 456,
+                max_newton_iterations: 12
+            }
+        ));
+
+        let lsode2 = radau.with_lsode2_controller(ReactorIvpMethod::Adams);
+        assert_eq!(lsode2.family(), ReactorIvpSolverFamily::Lsode2);
+        assert_eq!(lsode2.lsode2_controller(), Some(ReactorIvpMethod::Adams));
+        assert!(matches!(
+            lsode2.family_options,
+            ReactorIvpFamilyOptions::Lsode2 {
+                controller: ReactorIvpMethod::Adams,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -85,6 +119,58 @@ mod tests {
     }
 
     #[test]
+    fn test_condensed_route_prepares_through_shared_stiff_api_as_lsode2() {
+        let mut task = build_condensed_task();
+        task.setup_condensed_ivp()
+            .expect("condensed setup should succeed");
+
+        let request = task
+            .build_condensed_stiff_request()
+            .expect("shared StiffAPI request should build");
+        assert!(matches!(request, StiffSolverRequest::Lsode2 { .. }));
+
+        let prepared = task
+            .build_condensed_stiff_solver()
+            .expect("shared StiffAPI should prepare LSODE2");
+        assert_eq!(prepared.kind(), StiffSolverKind::Lsode2);
+    }
+
+    #[test]
+    fn test_standalone_bdf_prepares_from_the_same_condensed_symbolic_model() {
+        let mut task = build_condensed_task();
+        task.set_solver_backend_config(
+            ReactorIvpSolverConfig::default().with_family(ReactorIvpSolverFamily::Bdf),
+        );
+        task.setup_condensed_ivp()
+            .expect("condensed setup should succeed");
+
+        assert_eq!(
+            task.solver_backend_config.matrix_backend,
+            ReactorIvpMatrixBackend::Dense,
+            "standalone BDF should select its supported Dense default"
+        );
+        let prepared = task
+            .build_condensed_stiff_solver()
+            .expect("standalone BDF should prepare through StiffAPI");
+        assert_eq!(prepared.kind(), StiffSolverKind::Bdf);
+    }
+
+    #[test]
+    fn test_radau_prepares_from_the_same_condensed_symbolic_model() {
+        let mut task = build_condensed_task();
+        task.set_solver_backend_config(
+            ReactorIvpSolverConfig::default().with_family(ReactorIvpSolverFamily::Radau),
+        );
+        task.setup_condensed_ivp()
+            .expect("condensed setup should succeed");
+
+        let prepared = task
+            .build_condensed_stiff_solver()
+            .expect("Radau should prepare through StiffAPI");
+        assert_eq!(prepared.kind(), StiffSolverKind::Radau);
+    }
+
+    #[test]
     fn test_method_selection_maps_to_controller_modes() {
         assert_eq!(
             ReactorIvpMethod::Auto.to_controller(),
@@ -111,7 +197,7 @@ mod tests {
         let mut task = build_condensed_task();
         task.set_solver_backend_config(
             ReactorIvpSolverConfig::default()
-                .with_method(ReactorIvpMethod::Adams)
+                .with_lsode2_controller(ReactorIvpMethod::Adams)
                 .with_symbolic_backend(ReactorIvpSymbolicBackend::ExprLegacy)
                 .with_matrix_backend(ReactorIvpMatrixBackend::Banded)
                 .with_aot_backend(Lsode2AotToolchain::CTcc, Lsode2AotProfile::Debug)
@@ -141,7 +227,7 @@ mod tests {
         );
         assert_eq!(
             config.linear_system_structure,
-            Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 }
+            Lsode2LinearSystemStructure::BandedAuto
         );
         assert_eq!(
             config.native_execution,
@@ -160,7 +246,7 @@ mod tests {
         let mut task = build_condensed_task();
         task.set_solver_backend_config(
             ReactorIvpSolverConfig::default()
-                .with_method(ReactorIvpMethod::Auto)
+                .with_lsode2_controller(ReactorIvpMethod::Auto)
                 .with_execution_backend(ReactorIvpExecutionBackend::Lambdify),
         );
         task.setup_condensed_ivp()
@@ -213,10 +299,7 @@ mod tests {
 
         assert!(backend.validate_for_dimension(2).is_ok());
         assert!(backend.is_banded());
-        assert_eq!(
-            backend.to_rusted(),
-            Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 }
-        );
+        assert_eq!(backend.to_rusted(), Lsode2LinearSystemStructure::BandedAuto);
     }
 
     #[test]

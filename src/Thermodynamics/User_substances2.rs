@@ -171,7 +171,15 @@ impl SubsData {
                     .iter()
                     .map(|(k, v)| (k.clone(), *v as usize))
                     .collect();
-                let molar_mass = calculate_molar_mass_for_composition(composition_usize.clone());
+                let molar_mass = calculate_molar_mass_for_composition(composition_usize.clone())
+                    .map_err(|error| {
+                        SubsDataError::calculation_failed_with_source(
+                            substance.to_string(),
+                            "molar mass calculation from composition",
+                            error.to_string(),
+                            error,
+                        )
+                    })?;
                 let composition = composition
                     .into_iter()
                     .map(|(k, v)| (k, v as f64))

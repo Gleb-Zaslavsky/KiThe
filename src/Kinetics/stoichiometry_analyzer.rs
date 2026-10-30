@@ -16,9 +16,9 @@
 //!   - `vec_of_molmasses`: Molecular masses of substances
 //!
 //! ## Key Logic Implementation
-//! 1. **Artifact Cleaning**: Removes database parsing artifacts like '_DUP', 'M)', phase markers
-//! 2. **Regex Parsing**: Uses complex regex patterns to handle various reaction arrow formats (=, ->, =>, <=>)
-//! 3. **Substance Extraction**: Parses stoichiometric coefficients and power coefficients (A**0.3)
+//! 1. **Artifact Cleaning**: Removes duplicate-ID suffixes and third-body markers without erasing formula parentheses or phase identity
+//! 2. **Reaction Parsing**: Handles supported arrows, charged species, and balanced parenthesized names
+//! 3. **Substance Extraction**: Parses positive decimal/scientific coefficients and explicit kinetic powers (A**0.3)
 //! 4. **Matrix Construction**: Builds multiple matrices for different aspects of kinetic modeling
 //! 5. **Third Body Handling**: Recognizes and filters out collision partners marked as 'M'
 //!
@@ -98,66 +98,239 @@ use regex::Regex;
 /// ReactionAnalyzer_instance.analyse_reactions().unwrap();
 /// println!("{:?}", ReactionAnalyzer_instance);
 /// ```
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+fn reaction_syntax(input: &str, reason: impl Into<String>) -> KineticsError {
+    KineticsError::ReactionSyntax {
+        input: input.to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn split_reaction(reaction: &str) -> KineticsResult<(&str, &str)> {
+    let arrow_re =
+        Regex::new(r"<=\s*>|<\s*=>|<=>|=>|->|=").map_err(|source| KineticsError::RegexCompile {
+            context: "reaction arrow",
+            source,
+        })?;
+    let mut arrows = arrow_re.find_iter(reaction);
+    let arrow = arrows
+        .next()
+        .ok_or_else(|| reaction_syntax(reaction, "no supported reaction arrow"))?;
+    if arrows.next().is_some() {
+        return Err(reaction_syntax(reaction, "more than one reaction arrow"));
+    }
+    let left = reaction[..arrow.start()].trim();
+    let right = reaction[arrow.end()..].trim();
+    if left.is_empty() || right.is_empty() {
+        return Err(reaction_syntax(
+            reaction,
+            "reaction sides must not be empty",
+        ));
+    }
+    Ok((left, right))
+}
+
+struct ParsedParticipant {
+    name: String,
+    coefficient: f64,
+    kinetic_order: f64,
+}
+
+struct ParsedReaction {
+    equation: String,
+    reactants: Vec<ParsedParticipant>,
+    products: Vec<ParsedParticipant>,
+}
+
+fn parse_reaction(input: &str) -> KineticsResult<ParsedReaction> {
+    let equation = input.replace("**", "^").trim().to_string();
+    let mut cleaned = equation.clone();
+    let equation_for_parse = clean_off_DUP(&mut cleaned);
+    let (left, right) = split_reaction(equation_for_parse)?;
+    let parse_side = |side: &str, side_name: &str| -> KineticsResult<Vec<ParsedParticipant>> {
+        let (names, coefficients, orders) = analyse_substances(side)
+            .map_err(|error| error.with_context(format!("{side_name} side of `{equation}`")))?;
+        Ok(names
+            .into_iter()
+            .zip(coefficients)
+            .zip(orders)
+            .map(|((name, coefficient), kinetic_order)| ParsedParticipant {
+                name,
+                coefficient,
+                kinetic_order,
+            })
+            .collect())
+    };
+
+    let reactants = parse_side(left, "reactant")?;
+    let products = parse_side(right, "product")?;
+    Ok(ParsedReaction {
+        equation,
+        reactants,
+        products,
+    })
+}
+
+fn parse_reaction_rows(
+    reactions: &[String],
+    reaction_contexts: Option<&[String]>,
+) -> KineticsResult<Vec<ParsedReaction>> {
+    if let Some(contexts) = reaction_contexts {
+        if contexts.len() != reactions.len() {
+            return Err(KineticsError::LengthMismatch {
+                context: "reaction equations and diagnostic identities",
+                left: reactions.len(),
+                right: contexts.len(),
+            });
+        }
+    }
+    reactions
+        .iter()
+        .enumerate()
+        .map(|(index, equation)| {
+            parse_reaction(equation).map_err(|error| {
+                let location = reaction_contexts
+                    .and_then(|contexts| contexts.get(index))
+                    .map(|context| format!(" ({context})"))
+                    .unwrap_or_default();
+                error.with_context(format!("reaction row {index}{location}: `{equation}`"))
+            })
+        })
+        .collect()
+}
 
 /*
         #  строковая переменная на которые разделяет по знаку "+" половину уравнения относящююся к
         # реагентам/продуктам может содержать '(', ')', а также 'M' - символ третьей частицы которая не относится к
         # продуктам и реагентам
 */
-fn clean_off_artifacts(item: &mut String) -> &mut String {
-    #[allow(unused_variables)]
-    let items_to_clean = [" (", "(", "M)", "M)", ">", "S)", "s)"];
-    if item.contains("M)")
-        || item.contains("M)")
-        || item.contains(" (")
-        || item.contains("(")
-        || item.contains(">")
-        || item.contains("S)")
-        || item.contains("s)")
-    {
-        *item = item
-            .replace("M)", "")
-            .replace("M)", "")
-            .replace(" (", "")
-            .replace("(", "")
-            .replace(">", "")
-            .replace("S)", "")
-            .replace("s)", "");
-
-        return item;
-    } else {
-        item
+fn clean_third_body_marker(species: &str) -> Option<&str> {
+    if matches!(species, "M" | "m" | "(M)" | "(+M)" | "(+m)") {
+        return None;
     }
+    let species = species
+        .strip_suffix("(+M)")
+        .or_else(|| species.strip_suffix("(+m)"))
+        .or_else(|| species.strip_suffix("(M)"))
+        .or_else(|| species.strip_suffix("M)"))
+        .unwrap_or(species)
+        .trim();
+    (!species.is_empty()).then_some(species)
 }
-///   half_reaction` - A string representing a half-reaction.
+
+fn validate_species_parentheses(species: &str, source: &str) -> KineticsResult<()> {
+    let mut depth = 0usize;
+    for character in species.chars() {
+        match character {
+            '(' => depth += 1,
+            ')' if depth == 0 => {
+                return Err(reaction_syntax(source, "unmatched closing parenthesis"));
+            }
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err(reaction_syntax(
+            source,
+            "unclosed parenthesis in species name",
+        ));
+    }
+    Ok(())
+}
+
+fn has_explicit_charge_magnitude(species: &str) -> bool {
+    let Some((_, suffix)) = species.rsplit_once('^') else {
+        return false;
+    };
+    let magnitude = suffix
+        .strip_suffix('+')
+        .or_else(|| suffix.strip_suffix('-'));
+    magnitude.is_some_and(|value| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn split_participants(side: &str) -> KineticsResult<Vec<&str>> {
+    let characters: Vec<(usize, char)> = side.char_indices().collect();
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    for (index, (byte, character)) in characters.iter().copied().enumerate() {
+        match character {
+            '(' => depth += 1,
+            ')' if depth == 0
+                && index + 1 == characters.len()
+                && characters[index.saturating_sub(1)].1 == 'M' => {}
+            ')' => {
+                if depth == 0 {
+                    return Err(reaction_syntax(side, "unmatched closing parenthesis"));
+                }
+                depth -= 1;
+            }
+            '+' if depth == 0 => {
+                let next = characters[index + 1..]
+                    .iter()
+                    .find(|(_, ch)| !ch.is_whitespace())
+                    .map(|(_, ch)| *ch);
+                let previous_is_species = side[..byte]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|ch| !ch.is_whitespace());
+                let is_charge = matches!(next, None | Some('=') | Some('>'))
+                    || (next == Some('+') && previous_is_species);
+                if !is_charge {
+                    pieces.push(&side[start..byte]);
+                    start = byte + character.len_utf8();
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err(reaction_syntax(side, "unclosed parenthesis"));
+    }
+    pieces.push(&side[start..]);
+    Ok(pieces)
+}
+
 pub fn analyse_substances(
     half_reaction: &str,
 ) -> KineticsResult<(Vec<String>, Vec<f64>, Vec<f64>)> {
+    // Participant separators are plus signs outside parentheses; a terminal
+    // plus on an ion is retained as part of the species name.
     let mut s_list = Vec::new();
     let mut g_list = Vec::new();
     let mut subs: Vec<String> = Vec::new();
 
-    let re_coeff = Regex::new(r"(\d+(\.\d*)?)\*?").map_err(|e| {
-        KineticsError::InvalidReactionData(format!("invalid coefficient regex: {e}"))
-    })?;
+    let re_coeff =
+        Regex::new(r"^((?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\*?\s*").map_err(|source| {
+            KineticsError::RegexCompile {
+                context: "stoichiometric coefficient",
+                source,
+            }
+        })?;
     //let re_power = Regex::new(r"\^\ *(\d+(\.\d*)?)").unwrap();
-    let re_power = Regex::new(r"\^(\d+(\.\d*)?)")
-        .map_err(|e| KineticsError::InvalidReactionData(format!("invalid power regex: {e}")))?;
+    let re_power =
+        Regex::new(r"\^((?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)$").map_err(|source| {
+            KineticsError::RegexCompile {
+                context: "kinetic order",
+                source,
+            }
+        })?;
 
-    for s in half_reaction.split('+') {
+    for s in split_participants(half_reaction)? {
         let mut s = s.trim();
-        let mut stec_coeff = 1.0;
+        if s.is_empty() {
+            return Err(reaction_syntax(half_reaction, "empty participant"));
+        }
+        let mut stec_coeff: f64 = 1.0;
         let _end_of_stoichiometric: usize = 0;
         //  captures.get(1) is used to access the first capture group in the regular expression match.
         if let Some(captures) = re_coeff.captures(s) {
             // refers to the first capture group in the regular expression match, example: Match { start: 0, end: 1, string: "2" }
-            let regmatch = captures.get(0).ok_or_else(|| {
-                KineticsError::InvalidReactionData(format!(
-                    "invalid stoichiometric prefix in `{}`",
-                    half_reaction
-                ))
-            })?;
+            let regmatch = captures
+                .get(0)
+                .ok_or_else(|| reaction_syntax(half_reaction, "invalid stoichiometric prefix"))?;
             let start_of_stoichiometric = regmatch.start();
             let end_of_stoichiometric = regmatch.end();
             // стехиометрический коэффициент должен быть перед формулой вещества, т.е. номер его позиции должен начинаться с нуля
@@ -166,48 +339,42 @@ pub fn analyse_substances(
                 stec_coeff = captures
                     .get(1)
                     .ok_or_else(|| {
-                        KineticsError::InvalidReactionData(format!(
-                            "missing stoichiometric coefficient in `{}`",
-                            half_reaction
-                        ))
+                        reaction_syntax(half_reaction, "missing stoichiometric coefficient")
                     })?
                     .as_str()
                     .parse()
                     .map_err(|_| {
-                        KineticsError::InvalidReactionData(format!(
-                            "invalid stoichiometric coefficient in `{}`",
-                            half_reaction
-                        ))
+                        reaction_syntax(half_reaction, "invalid stoichiometric coefficient")
                     })?;
+                if !stec_coeff.is_finite() || stec_coeff <= 0.0 {
+                    return Err(reaction_syntax(
+                        half_reaction,
+                        "stoichiometric coefficient must be finite and positive",
+                    ));
+                }
             }
         }
         // Default the kinetic power to the stoichiometric coefficient until
         // we see an explicit power override in the reaction text.
-        let mut power_coeff = stec_coeff;
+        let mut power_coeff: f64 = stec_coeff;
 
-        if let Some(captures) = re_power.captures(s) {
-            let regmatch = captures.get(0).ok_or_else(|| {
-                KineticsError::InvalidReactionData(format!(
-                    "invalid kinetic power in `{}`",
-                    half_reaction
-                ))
-            })?;
+        let charged_with_magnitude = has_explicit_charge_magnitude(s);
+        if let Some(captures) = re_power.captures(s).filter(|_| !charged_with_magnitude) {
+            let regmatch = captures
+                .get(0)
+                .ok_or_else(|| reaction_syntax(half_reaction, "invalid kinetic order"))?;
             power_coeff = captures
                 .get(1)
-                .ok_or_else(|| {
-                    KineticsError::InvalidReactionData(format!(
-                        "missing kinetic power in `{}`",
-                        half_reaction
-                    ))
-                })?
+                .ok_or_else(|| reaction_syntax(half_reaction, "missing kinetic order"))?
                 .as_str()
                 .parse()
-                .map_err(|_| {
-                    KineticsError::InvalidReactionData(format!(
-                        "invalid kinetic power in `{}`",
-                        half_reaction
-                    ))
-                })?;
+                .map_err(|_| reaction_syntax(half_reaction, "invalid kinetic order"))?;
+            if !power_coeff.is_finite() || power_coeff <= 0.0 {
+                return Err(reaction_syntax(
+                    half_reaction,
+                    "kinetic order must be finite and positive",
+                ));
+            }
             let start = regmatch.start();
             #[allow(unused_variables)]
             let end = regmatch.end();
@@ -215,12 +382,20 @@ pub fn analyse_substances(
         }
 
         s = s.trim();
-        if (s == "M") || (s == "(M)") {
+        if s.starts_with('/') {
+            return Err(reaction_syntax(
+                half_reaction,
+                "rational stoichiometric coefficients are unsupported; use decimal notation",
+            ));
+        }
+        if s.contains('^') && !charged_with_magnitude {
+            return Err(reaction_syntax(half_reaction, "invalid kinetic order"));
+        }
+        let Some(s) = clean_third_body_marker(s) else {
             continue;
-        } // "M" means "third body" it is not a real substance
-        let s_to_filter: &mut String = &mut s.to_string();
-        let s_filtered = clean_off_artifacts(s_to_filter);
-        let s: String = s_filtered.to_string();
+        };
+        validate_species_parentheses(s, half_reaction)?;
+        let s = s.to_string();
         s_list.push(stec_coeff);
         g_list.push(power_coeff);
         subs.push(s);
@@ -254,6 +429,7 @@ pub struct StoichAnalyzer {
     pub matrix_of_elements: Option<DMatrix<f64>>, // matrix of elemental composition
     pub vec_of_molmasses: Option<Vec<f64>>, // vector of molecular masses
     pub unique_vec_of_elems: Option<Vec<String>>,
+    composition_source: Option<(Vec<String>, Option<HashMap<String, HashMap<String, usize>>>)>,
 }
 
 impl StoichAnalyzer {
@@ -270,141 +446,171 @@ impl StoichAnalyzer {
             matrix_of_elements: None,
             vec_of_molmasses: None,
             unique_vec_of_elems: None,
+            composition_source: None,
         }
     }
 
     pub fn analyse_reactions(&mut self) -> KineticsResult<()> {
-        let reactions_trimmed = self
-            .reactions
+        self.analyse_reactions_with_context(None)
+    }
+
+    pub(crate) fn analyse_reactions_with_context(
+        &mut self,
+        reaction_contexts: Option<&[String]>,
+    ) -> KineticsResult<()> {
+        self.invalidate_composition_if_source_changed();
+        let parsed_reactions = parse_reaction_rows(&self.reactions, reaction_contexts)?;
+        let rows = parsed_reactions.len();
+        let columns = self.substances.len();
+        let species_index: HashMap<&str, usize> = self
+            .substances
             .iter()
-            .map(|s| s.replace("**", "^").trim().to_string())
+            .enumerate()
+            .map(|(index, name)| (name.as_str(), index))
             .collect();
-        self.reactions = reactions_trimmed;
-        // allocate memory for matrices
-        self.stecheo_matrx
-            .resize(self.reactions.len(), vec![0.0; self.substances.len()]);
-        self.stecheo_reags
-            .resize(self.reactions.len(), vec![0.0; self.substances.len()]);
-        self.stecheo_prods
-            .resize(self.reactions.len(), vec![0.0; self.substances.len()]);
-        self.G_matrix_reag
-            .resize(self.reactions.len(), vec![0.0; self.substances.len()]);
-        self.G_matrix_prod
-            .resize(self.reactions.len(), vec![0.0; self.substances.len()]);
-        for mut reaction in &self.reactions {
-            // номер реакции
-            if let Some(i) = self.reactions.iter().position(|s| s == reaction) {
-                let reaction_: &mut String = &mut reaction.to_string();
-                reaction = clean_off_DUP(reaction_);
-                // разделяем уравнение реакции на половины относящиеся к реагентам и продуктам по соответствующему знаку = или -> или =>
-                let re = Regex::new(r"<= >|< =>|<=>|=>|->|=").map_err(|e| {
-                    KineticsError::InvalidReactionData(format!("invalid reaction split regex: {e}"))
-                })?;
-                let sides: Vec<String> = re // divide reaction ino products and reagents
-                    .split(reaction) // reaction.split(|s| s == '=' )
-                    .map(|s| s.trim())
-                    .map(|s| s.to_string())
-                    .collect();
-                let mut subs = Vec::new();
-                let mut subs_r = Vec::new();
-                let mut s_list = Vec::new();
-                let mut g_list = Vec::new();
-                let mut s_list_r = Vec::new();
-                let mut g_list_r: Vec<f64> = Vec::new();
-                // left side of reaction equation
-                let (left_subs, mut left_s_list, mut left_g_list) = analyse_substances(&sides[0])?;
-                let mut left_subs = left_subs.iter().map(|s| s.as_str()).collect();
-                subs.append(&mut left_subs);
-                s_list.append(&mut left_s_list);
-                g_list.append(&mut left_g_list);
-
-                for j in 0..subs.len() {
-                    let subs_j = subs[j];
-                    if let Some(k) = self.substances.iter().position(|s| s == subs_j) {
-                        self.stecheo_matrx[i][k] -= s_list[j];
-                        self.stecheo_reags[i][k] = s_list[j];
-                        self.G_matrix_reag[i][k] = g_list[j];
+        let mut stoich = vec![vec![0.0; columns]; rows];
+        let mut reactants = stoich.clone();
+        let mut products = stoich.clone();
+        let mut reactant_orders = stoich.clone();
+        let mut product_orders = stoich.clone();
+        for (row, reaction) in parsed_reactions.iter().enumerate() {
+            for (participants, is_reactant) in
+                [(&reaction.reactants, true), (&reaction.products, false)]
+            {
+                for participant in participants {
+                    let column = species_index
+                        .get(participant.name.as_str())
+                        .ok_or_else(|| KineticsError::UnknownReactionSpecies {
+                            reaction: reaction.equation.clone(),
+                            species: participant.name.clone(),
+                        })?;
+                    if is_reactant {
+                        stoich[row][*column] -= participant.coefficient;
+                        reactants[row][*column] += participant.coefficient;
+                        reactant_orders[row][*column] += participant.kinetic_order;
+                    } else {
+                        stoich[row][*column] += participant.coefficient;
+                        products[row][*column] += participant.coefficient;
+                        product_orders[row][*column] += participant.kinetic_order;
                     }
                 }
-
-                let (right_subs, mut right_s_list, mut right_g_list) =
-                    analyse_substances(&sides[1])?;
-                let mut right_subs = right_subs.iter().map(|s| s.as_str()).collect();
-                subs_r.append(&mut right_subs);
-                s_list_r.append(&mut right_s_list);
-                g_list_r.append(&mut right_g_list);
-                for j in 0..subs_r.len() {
-                    let subs_j = subs_r[j];
-                    // индекс реагента в векторе реагентов
-                    if let Some(k) = self.substances.iter().position(|s| s == subs_j) {
-                        self.stecheo_matrx[i][k] += s_list_r[j];
-                        self.stecheo_prods[i][k] = s_list_r[j];
-                        self.G_matrix_prod[i][k] = g_list_r[j];
-                    }
-                }
-                // Add code to populate self.stecheo_matrx, self.G_matrix_reag, self.G_matrix_prod,
-                // self.stecheo_reags, and self.stecheo_prods with the appropriate values.
             }
         } // end of for reaction in &self.reactions {
+        self.reactions = parsed_reactions
+            .into_iter()
+            .map(|reaction| reaction.equation)
+            .collect();
+        self.stecheo_matrx = stoich;
+        self.stecheo_reags = reactants;
+        self.stecheo_prods = products;
+        self.G_matrix_reag = reactant_orders;
+        self.G_matrix_prod = product_orders;
         Ok(())
     }
 
     pub fn search_substances(&mut self) -> KineticsResult<()> {
-        let reactions_trimmed = self
-            .reactions
-            .iter()
-            .map(|s| s.replace("**", "^").trim().to_string())
-            .collect();
-        self.reactions = reactions_trimmed;
-        let mut found_substances: Vec<String> = Vec::new();
-        for mut reaction in &self.reactions {
-            // номер реакции
-            if let Some(_i) = self.reactions.iter().position(|s| s == reaction) {
-                let reaction_: &mut String = &mut reaction.to_string();
-                reaction = clean_off_DUP(reaction_);
-                // разделяем уравнение реакции на половины относящиеся к реагентам и продуктам по соответствующему знаку = или -> или =>
-                // let re = Regex::new(r"=|->|=>").unwrap();
-                let re = Regex::new(r"<= >|< =>|<=>|=>|->|=").map_err(|e| {
-                    KineticsError::InvalidReactionData(format!("invalid reaction split regex: {e}"))
-                })?;
-                let sides: Vec<String> = re
-                    .split(reaction) // reaction.split(|s| s == '=' )
-                    .map(|s| s.trim())
-                    .map(|s| s.to_string())
-                    .collect();
-                let mut subs = Vec::new();
-                let (left_subs, _, _) = analyse_substances(&sides[0])?;
-                let mut left_subs = left_subs.iter().map(|s| s.as_str()).collect();
-                subs.append(&mut left_subs);
+        self.search_substances_with_context(None)
+    }
 
-                let (right_subs, _, _) = analyse_substances(&sides[1])?;
-                let mut right_subs = right_subs.iter().map(|s| s.as_str()).collect();
-                subs.append(&mut right_subs);
-                let subs_mut = &mut subs.clone();
-                subs_mut.retain(|s| !found_substances.contains(&s.to_string())); // remove duplicates
-                found_substances.extend(subs_mut.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-            } // end of if let
+    pub(crate) fn search_substances_with_context(
+        &mut self,
+        reaction_contexts: Option<&[String]>,
+    ) -> KineticsResult<()> {
+        let parsed_reactions = parse_reaction_rows(&self.reactions, reaction_contexts)?;
+        let mut found_substances: Vec<String> = Vec::new();
+        let mut seen = HashSet::new();
+        for reaction in &parsed_reactions {
+            for participant in reaction.reactants.iter().chain(&reaction.products) {
+                if seen.insert(participant.name.clone()) {
+                    found_substances.push(participant.name.clone());
+                }
+            }
         } // end of for reaction in &self.reactions {
+        if self.substances != found_substances {
+            self.invalidate_composition_data();
+        }
+        self.reactions = parsed_reactions
+            .into_iter()
+            .map(|reaction| reaction.equation)
+            .collect();
         self.substances = found_substances;
         Ok(())
     }
     pub fn create_matrix_of_elements(&mut self) -> KineticsResult<()> {
-        // Only calculate molar masses if they haven't been set manually
-        if self.vec_of_molmasses.is_none() {
-            self.vec_of_molmasses = Some(calculate_molar_mass_of_vector_of_subs(
-                self.substances.iter().map(|s| s.as_str()).collect(),
-                self.groups.clone(),
-            )?);
+        self.invalidate_composition_if_source_changed();
+        let formulae: Vec<String> = self
+            .substances
+            .iter()
+            .map(|species| composition_formula(species))
+            .collect();
+        let formula_refs: Vec<&str> = formulae.iter().map(String::as_str).collect();
+        let computed_masses =
+            calculate_molar_mass_of_vector_of_subs(formula_refs.clone(), self.groups.clone())?;
+        let (matrix, vec_of_elems) =
+            create_elem_composition_matrix(formula_refs, self.groups.clone())?;
+        if let Some(masses) = &self.vec_of_molmasses {
+            if masses.len() != self.substances.len() {
+                return Err(KineticsError::LengthMismatch {
+                    context: "species and explicitly supplied molar masses",
+                    left: self.substances.len(),
+                    right: masses.len(),
+                });
+            }
         }
-        let (matrix, vec_of_elems) = create_elem_composition_matrix(
-            self.substances.iter().map(|s| s.as_str()).collect(),
-            self.groups.clone(),
-        )?;
+        let masses = self.vec_of_molmasses.clone().unwrap_or(computed_masses);
         self.matrix_of_elements = Some(matrix);
+        self.vec_of_molmasses = Some(masses);
         self.unique_vec_of_elems = Some(vec_of_elems);
+        self.composition_source = Some((self.substances.clone(), self.groups.clone()));
         Ok(())
     }
+
+    /// Replace the species universe and invalidate all composition-derived data.
+    pub fn set_substances(&mut self, substances: Vec<String>) {
+        if self.substances != substances {
+            self.substances = substances;
+            self.invalidate_composition_data();
+        }
+    }
+
+    fn invalidate_composition_if_source_changed(&mut self) {
+        if self
+            .composition_source
+            .as_ref()
+            .is_some_and(|(species, groups)| species != &self.substances || groups != &self.groups)
+        {
+            self.invalidate_composition_data();
+        }
+    }
+
+    fn invalidate_composition_data(&mut self) {
+        self.matrix_of_elements = None;
+        self.vec_of_molmasses = None;
+        self.unique_vec_of_elems = None;
+        self.composition_source = None;
+    }
 } // end of impl ReactionAnalyzer
+
+fn composition_formula(species: &str) -> String {
+    let phase_stripped = [
+        "(aq)", "(g)", "(G)", "(l)", "(L)", "(s)", "(S)", "(c)", "(C)", "(cr)",
+    ]
+    .iter()
+    .find_map(|suffix| species.strip_suffix(suffix))
+    .unwrap_or(species);
+    if has_explicit_charge_magnitude(phase_stripped) {
+        return phase_stripped
+            .rsplit_once('^')
+            .map(|(formula, _)| formula)
+            .unwrap_or(phase_stripped)
+            .to_string();
+    }
+    phase_stripped
+        .strip_suffix('+')
+        .or_else(|| phase_stripped.strip_suffix('-'))
+        .unwrap_or(phase_stripped)
+        .to_string()
+}
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // TESTS
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -448,11 +654,7 @@ mod tests {
         assert_eq!(stecheo_matrx, result);
     }
     #[test]
-    fn test_clean_off_artifacts_and_DUP() {
-        let mut item = "A=2BM)".to_string();
-        let cleaned_item = clean_off_artifacts(&mut item);
-        assert_eq!(cleaned_item, "A=2B");
-
+    fn test_clean_off_DUP() {
         let mut item = "B->A + 3C_DUP".to_string();
         let cleaned_item = clean_off_DUP(&mut item);
         assert_eq!(cleaned_item, "B->A + 3C");
@@ -490,5 +692,206 @@ mod tests {
         ];
         let result: Vec<Vec<f64>> = result.iter().map(|row| row.to_vec()).collect();
         assert_eq!(stecheo_matrx, result);
+    }
+
+    #[test]
+    fn repeated_analysis_and_duplicate_reaction_rows_are_stable() {
+        let mut analyzer = StoichAnalyzer::new();
+        analyzer.reactions = vec!["A=>B".into(), "A=>B".into()];
+        analyzer.substances = vec!["A".into(), "B".into()];
+
+        analyzer.analyse_reactions().unwrap();
+        let first = analyzer.stecheo_matrx.clone();
+        analyzer.analyse_reactions().unwrap();
+
+        assert_eq!(analyzer.stecheo_matrx, vec![vec![-1.0, 1.0]; 2]);
+        assert_eq!(analyzer.stecheo_matrx, first);
+        assert_eq!(analyzer.stecheo_reags, vec![vec![1.0, 0.0]; 2]);
+        assert_eq!(analyzer.stecheo_prods, vec![vec![0.0, 1.0]; 2]);
+    }
+
+    #[test]
+    fn repeated_participants_sum_stoichiometry_and_kinetic_orders() {
+        let (names, coefficients, orders) =
+            analyse_substances("H + H^0.5 + 2H").expect("repeated participants are valid");
+        assert_eq!(names, vec!["H", "H", "H"]);
+        assert_eq!(coefficients, vec![1.0, 1.0, 2.0]);
+        assert_eq!(orders, vec![1.0, 0.5, 2.0]);
+
+        let mut analyzer = StoichAnalyzer::new();
+        analyzer.reactions = vec!["H + H^0.5 + 2H => H2".into()];
+        analyzer.substances = vec!["H".into(), "H2".into()];
+        analyzer.analyse_reactions().unwrap();
+        assert_eq!(analyzer.stecheo_matrx, vec![vec![-4.0, 1.0]]);
+        assert_eq!(analyzer.stecheo_reags, vec![vec![4.0, 0.0]]);
+        assert_eq!(analyzer.G_matrix_reag, vec![vec![3.5, 0.0]]);
+    }
+
+    #[test]
+    fn parser_preserves_charges_phases_and_formula_parentheses() {
+        let (species, coefficients, _) =
+            analyse_substances("H+ + OH-(aq) + Fe^3+ + SO4^2- + 0.5Ca(OH)2(s) + A(+M)")
+                .expect("charged, phased, and parenthesized participants are valid");
+        assert_eq!(
+            species,
+            vec!["H+", "OH-(aq)", "Fe^3+", "SO4^2-", "Ca(OH)2(s)", "A"]
+        );
+        assert_eq!(coefficients, vec![1.0, 1.0, 1.0, 1.0, 0.5, 1.0]);
+
+        let (species, coefficients, _) =
+            analyse_substances("1e-3H2 + 2H2O").expect("scientific coefficients are valid");
+        assert_eq!(species, vec!["H2", "H2O"]);
+        assert_eq!(coefficients, vec![1e-3, 2.0]);
+    }
+
+    #[test]
+    fn parser_rejects_zero_coefficients_and_unbalanced_species_parentheses() {
+        assert!(matches!(
+            analyse_substances("0H2"),
+            Err(KineticsError::ReactionSyntax { .. })
+        ));
+        assert!(matches!(
+            analyse_substances("1/2H2"),
+            Err(KineticsError::ReactionSyntax { .. })
+        ));
+        assert!(matches!(
+            analyse_substances("Ca(OH2"),
+            Err(KineticsError::ReactionSyntax { .. })
+        ));
+    }
+
+    #[test]
+    fn reaction_parser_rejects_missing_multiple_and_empty_sides() {
+        assert!(matches!(
+            split_reaction("A + B"),
+            Err(KineticsError::ReactionSyntax { input, reason })
+                if input == "A + B" && reason.contains("arrow")
+        ));
+        assert!(matches!(
+            split_reaction("A => B = C"),
+            Err(KineticsError::ReactionSyntax { reason, .. })
+                if reason.contains("more than one")
+        ));
+        assert!(matches!(
+            split_reaction("=> B"),
+            Err(KineticsError::ReactionSyntax { reason, .. })
+                if reason.contains("empty")
+        ));
+        assert!(matches!(
+            analyse_substances("A + + B"),
+            Err(KineticsError::ReactionSyntax { input, .. }) if input == "A + + B"
+        ));
+    }
+
+    #[test]
+    fn failed_analysis_does_not_publish_partial_matrices_or_drop_unknown_species() {
+        let mut analyzer = StoichAnalyzer::new();
+        analyzer.reactions = vec!["A=>B".into(), "B=>C".into()];
+        analyzer.substances = vec!["A".into(), "B".into()];
+        analyzer.stecheo_matrx = vec![vec![42.0]];
+        analyzer.G_matrix_reag = vec![vec![17.0]];
+
+        assert!(matches!(
+            analyzer.analyse_reactions(),
+            Err(KineticsError::UnknownReactionSpecies { reaction, species })
+                if reaction == "B=>C" && species == "C"
+        ));
+        assert_eq!(analyzer.stecheo_matrx, vec![vec![42.0]]);
+        assert_eq!(analyzer.G_matrix_reag, vec![vec![17.0]]);
+        assert_eq!(analyzer.reactions, vec!["A=>B", "B=>C"]);
+    }
+
+    #[test]
+    fn substance_discovery_deduplicates_within_and_across_reactions() {
+        let mut analyzer = StoichAnalyzer::new();
+        analyzer.reactions = vec!["A + A => B".into(), "B => A".into()];
+        analyzer.search_substances().unwrap();
+        assert_eq!(analyzer.substances, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn matrix_rebuild_tracks_dimension_changes_and_balanced_reference_reaction() {
+        let mut analyzer = StoichAnalyzer::new();
+        analyzer.reactions = vec!["2H2 + O2 => 2H2O".into(), "A => B".into()];
+        analyzer.substances = vec![
+            "H2".into(),
+            "O2".into(),
+            "H2O".into(),
+            "A".into(),
+            "B".into(),
+        ];
+        analyzer.analyse_reactions().unwrap();
+        assert_eq!(analyzer.stecheo_matrx.len(), 2);
+        assert!(analyzer.stecheo_matrx.iter().all(|row| row.len() == 5));
+
+        let hydrogen_balance =
+            analyzer.stecheo_matrx[0][0] * 2.0 + analyzer.stecheo_matrx[0][2] * 2.0;
+        let oxygen_balance = analyzer.stecheo_matrx[0][1] * 2.0 + analyzer.stecheo_matrx[0][2];
+        assert_eq!(hydrogen_balance, 0.0);
+        assert_eq!(oxygen_balance, 0.0);
+        assert_eq!(analyzer.G_matrix_reag[0], analyzer.stecheo_reags[0]);
+        assert_eq!(analyzer.G_matrix_prod[0], analyzer.stecheo_prods[0]);
+
+        analyzer.reactions = vec!["A => B".into()];
+        analyzer.substances = vec!["A".into(), "B".into()];
+        analyzer.analyse_reactions().unwrap();
+        assert_eq!(analyzer.stecheo_matrx, vec![vec![-1.0, 1.0]]);
+        assert_eq!(analyzer.G_matrix_reag, vec![vec![1.0, 0.0]]);
+    }
+
+    #[test]
+    fn elemental_and_mass_data_follow_species_and_group_revisions() {
+        let mut analyzer = StoichAnalyzer::new();
+        analyzer.set_substances(vec!["H2".into(), "O2".into()]);
+        analyzer.create_matrix_of_elements().unwrap();
+        let initial_masses = analyzer.vec_of_molmasses.as_ref().unwrap();
+        assert!((initial_masses[0] - 2.016).abs() < 0.001);
+        assert!((initial_masses[1] - 31.998).abs() < 0.001);
+        assert_eq!(analyzer.matrix_of_elements.as_ref().unwrap().ncols(), 2);
+
+        analyzer.substances = vec!["CO2".into(), "Ca(OH)2".into()];
+        analyzer.analyse_reactions().unwrap();
+        assert!(analyzer.vec_of_molmasses.is_none());
+        assert!(analyzer.matrix_of_elements.is_none());
+        analyzer.create_matrix_of_elements().unwrap();
+        assert_eq!(analyzer.vec_of_molmasses.as_ref().unwrap().len(), 2);
+        assert_eq!(
+            analyzer.unique_vec_of_elems.as_ref().unwrap(),
+            &["C", "Ca", "H", "O"]
+        );
+
+        analyzer.groups = Some(HashMap::from([(
+            "Fuel".into(),
+            HashMap::from([("C".into(), 1), ("H".into(), 4)]),
+        )]));
+        analyzer.set_substances(vec!["Fuel".into()]);
+        analyzer.create_matrix_of_elements().unwrap();
+        assert_eq!(analyzer.unique_vec_of_elems.as_ref().unwrap(), &["C", "H"]);
+
+        analyzer.set_substances(vec!["H2".into()]);
+        analyzer.vec_of_molmasses = Some(vec![99.0]);
+        analyzer.create_matrix_of_elements().unwrap();
+        assert_eq!(analyzer.vec_of_molmasses.as_ref().unwrap(), &[99.0]);
+    }
+
+    #[test]
+    fn composition_projection_strips_charge_and_phase_but_species_identity_keeps_them() {
+        let mut analyzer = StoichAnalyzer::new();
+        analyzer.set_substances(vec![
+            "H+".into(),
+            "OH-(aq)".into(),
+            "Fe^3+".into(),
+            "SO4^2-".into(),
+        ]);
+        analyzer.create_matrix_of_elements().unwrap();
+        assert_eq!(
+            analyzer.substances,
+            vec!["H+", "OH-(aq)", "Fe^3+", "SO4^2-"]
+        );
+        assert_eq!(
+            analyzer.unique_vec_of_elems.as_ref().unwrap(),
+            &["Fe", "H", "O", "S"]
+        );
+        assert_eq!(analyzer.vec_of_molmasses.as_ref().unwrap().len(), 4);
     }
 }

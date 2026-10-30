@@ -46,8 +46,8 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::{
     EnthalpyScale, EquilibriumConstraint, TemperatureBounds, additive_total_enthalpy,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_diagnostics::{
-    EquilibriumDiagnosticEvent, EquilibriumDiagnosticsMode, EquilibriumDiagnosticsOptions,
-    PhDiagnosticRoute,
+    EquilibriumDiagnosticEvent, EquilibriumDiagnosticsCollector, EquilibriumDiagnosticsMode,
+    EquilibriumDiagnosticsOptions, PhDiagnosticRoute,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_element_inventory::ElementInventory;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
@@ -101,11 +101,14 @@ use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
     PhaseEquilibriumBuildRequest, PreparedPhaseEquilibriumTemplate, SupportedPhaseModelPolicy,
     build_phase_equilibrium_problem_with_timing,
 };
-use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::ExtensiveNormalizationRecoveryEvidence;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::MultiphaseEquilibriumSolution;
+use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::{
+    ExtensiveNormalizationRecoveryEvidence, ExtensiveNormalizationTrigger,
+};
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
-    EquilibriumSolveOptions, PhaseControlPolicy, PhaseEquilibriumSolveMode,
-    ResolvedPhaseEquilibriumRequest, normalized_recovery_trace_policy, solve_resolved_pt,
+    EquilibriumSolveOptions, ExtensiveNormalizationPolicy, PhaseControlPolicy,
+    PhaseEquilibriumSolveMode, ResolvedPhaseEquilibriumRequest, normalized_recovery_trace_policy,
+    solve_resolved_pt,
 };
 use crate::Thermodynamics::User_PhaseOrSolution::ResolvedPhaseSystem;
 
@@ -1686,6 +1689,25 @@ impl<'a> ResolvedPhaseEnthalpyRequest<'a> {
         }
     }
 
+    pub(crate) fn needs_small_scale_ph_preconditioning(&self) -> Result<bool, ReactionExtentError> {
+        if !self
+            .solve_options
+            .extensive_normalization_policy()
+            .allows_small_scale_ph_preconditioning()
+        {
+            return Ok(false);
+        }
+        let normalization = match &self.physical_input {
+            PhPhysicalInput::Composition => {
+                ExtensiveNormalization::from_physical_moles(self.initial_composition.moles())?
+            }
+            PhPhysicalInput::ElementInventory(inventory) => {
+                ExtensiveNormalization::from_element_inventory(inventory)?
+            }
+        };
+        Ok(normalization.physical_inventory_scale() < 1.0)
+    }
+
     /// Returns the `P,H` constraint.
     pub fn constraint(&self) -> EquilibriumConstraint {
         self.constraint
@@ -2133,6 +2155,15 @@ impl PreparedPhContinuationState {
 pub fn solve_resolved_ph(
     request: ResolvedPhaseEnthalpyRequest<'_>,
 ) -> Result<FixedPressureEnthalpySolution, ReactionExtentError> {
+    if request
+        .solve_options
+        .extensive_normalization_policy()
+        .allows_small_scale_ph_preconditioning()
+    {
+        if let Some(solution) = solve_small_scale_ph_normalized_first(&request)? {
+            return Ok(solution);
+        }
+    }
     let diagnostics = request.solve_options.diagnostics_options().clone();
     match request.ph_solve_mode {
         PhSolveMode::NestedTemperature => solve_resolved_ph_nested(request),
@@ -2266,6 +2297,166 @@ pub(crate) fn solve_resolved_ph_transaction(
     }
 }
 
+fn solve_small_scale_ph_normalized_first(
+    request: &ResolvedPhaseEnthalpyRequest<'_>,
+) -> Result<Option<FixedPressureEnthalpySolution>, ReactionExtentError> {
+    let normalization = match &request.physical_input {
+        PhPhysicalInput::Composition => {
+            ExtensiveNormalization::from_physical_moles(request.initial_composition.moles())?
+        }
+        PhPhysicalInput::ElementInventory(inventory) => {
+            ExtensiveNormalization::from_element_inventory(inventory)?
+        }
+    };
+    if normalization.physical_inventory_scale() >= 1.0 {
+        return Ok(None);
+    }
+
+    let transaction_started = Instant::now();
+    let normalization_started = Instant::now();
+    let normalized_request = build_normalized_ph_request(request, normalization)?;
+    let normalization_duration = normalization_started.elapsed();
+    let discovery_started = Instant::now();
+    let normalized_solution = solve_resolved_ph(normalized_request)?;
+    let discovery_duration = discovery_started.elapsed();
+    let discovery_backend = normalized_solution
+        .equilibrium()
+        .solve_report()
+        .accepted_backend
+        .clone();
+    let normalized_discovery_attempts = normalized_solution
+        .equilibrium()
+        .solve_report()
+        .attempts
+        .clone();
+
+    let reconstruction_started = Instant::now();
+    let physical_build_report = build_phase_equilibrium_problem_with_timing(
+        request.build_pt_request(normalized_solution.equilibrium().conditions())?,
+        request.solve_options.timing_mode(),
+    )?
+    .report()
+    .clone();
+    let mut recovered = normalized_solution
+        .reconstruct_physical_extensive_boundary(normalization, physical_build_report)?;
+    let reconstruction_duration = reconstruction_started.elapsed();
+    let trigger = ExtensiveNormalizationTrigger::SmallScalePreconditioning {
+        physical_inventory_scale: normalization.physical_inventory_scale(),
+    };
+    let evidence = ExtensiveNormalizationRecoveryEvidence {
+        physical_inventory_scale: normalization.physical_inventory_scale(),
+        trigger: trigger.clone(),
+        discovery_backend,
+        physical_retry_backend: None,
+        physical_retry_failure: None,
+        physical_failure_attempts: Vec::new(),
+        normalized_discovery_attempts,
+        physical_retry_attempts: Vec::new(),
+        physical_failure_duration: Duration::ZERO,
+        normalization_duration,
+        normalized_discovery_duration: discovery_duration,
+        physical_retry_duration: Duration::ZERO,
+        reconstruction_duration,
+        reconstructed_physical_boundary: true,
+    };
+    let event = EquilibriumDiagnosticEvent::ExtensiveNormalizationRecoveryAccepted {
+        physical_inventory_scale: evidence.physical_inventory_scale,
+        trigger_kind: trigger.error_kind(),
+        trigger_reason: trigger.description(),
+        discovery_backend: format!("{:?}", evidence.discovery_backend),
+        physical_retry_backend: None,
+        reconstructed_physical_boundary: true,
+    };
+    let mut diagnostics = recovered.equilibrium().diagnostics_report().map_or_else(
+        || {
+            EquilibriumDiagnosticsCollector::new(
+                request.solve_options.diagnostics_options().clone(),
+            )
+        },
+        |report| {
+            EquilibriumDiagnosticsCollector::from_report(
+                request.solve_options.diagnostics_options().clone(),
+                report,
+            )
+        },
+    );
+    diagnostics.record(EquilibriumDiagnosticsMode::Summary, event);
+    recovered.solution = recovered
+        .solution
+        .clone()
+        .with_diagnostics(diagnostics.finish())
+        .with_extensive_normalization_recovery(evidence);
+    let total = transaction_started.elapsed();
+    recovered.solution = recovered
+        .solution
+        .with_timing_stage(
+            EquilibriumTimingStage::Normalization,
+            normalization_duration,
+        )
+        .with_timing_total(total);
+    recovered.report.inner_timing = *recovered.solution.timing_report();
+    if request.solve_options.timing_mode() == EquilibriumTimingMode::Enabled {
+        recovered.report.timing.total = total;
+    }
+    Ok(Some(recovered))
+}
+
+fn build_normalized_ph_request<'a>(
+    request: &ResolvedPhaseEnthalpyRequest<'a>,
+    normalization: ExtensiveNormalization,
+) -> Result<ResolvedPhaseEnthalpyRequest<'a>, ReactionExtentError> {
+    let layout = MultiphaseEquilibriumLayout::new(request.resolved.phase_specs().to_vec())?;
+    let normalized_composition =
+        normalization.normalize_initial_composition(&layout, &request.initial_composition)?;
+    let normalized_physical_input = match &request.physical_input {
+        PhPhysicalInput::Composition => PhPhysicalInput::Composition,
+        PhPhysicalInput::ElementInventory(inventory) => {
+            PhPhysicalInput::ElementInventory(normalization.normalize_element_inventory(inventory)?)
+        }
+    };
+    let (target, seed) = validated_ph_parameters(request.constraint)?;
+    let normalized_target = normalization.normalize_total_enthalpy(
+        crate::Thermodynamics::ChemEquilibrium::equilibrium_constraints::TotalEnthalpyJoules::new(
+            target,
+        )?,
+    )?;
+    let normalized_constraint = EquilibriumConstraint::ph_joules(
+        request.constraint.pressure(),
+        request.constraint.reference_pressure(),
+        normalized_target,
+        seed,
+    )?;
+    let mut normalized_temperature_options = request.temperature_options.clone();
+    normalized_temperature_options.absolute_enthalpy_tolerance_joules = normalization
+        .normalize_physical_energy_tolerance(
+            normalized_temperature_options.absolute_enthalpy_tolerance_joules,
+        )?;
+    let normalized_options = request
+        .solve_options
+        .clone()
+        .with_extensive_normalization_policy(ExtensiveNormalizationPolicy::Disabled)
+        .with_diagnostics(EquilibriumDiagnosticsOptions::disabled())
+        .with_trace_seed_policy(normalized_recovery_trace_policy(
+            normalization,
+            request.solve_options.trace_seed_policy(),
+        )?);
+    let normalized_request = ResolvedPhaseEnthalpyRequest {
+        resolved: request.resolved.clone(),
+        physical_input: normalized_physical_input,
+        initial_composition: normalized_composition,
+        constraint: normalized_constraint,
+        temperature_bounds: request.temperature_bounds,
+        enthalpy: request.enthalpy.clone(),
+        solve_options: normalized_options,
+        solve_mode: request.solve_mode.clone(),
+        ph_solve_mode: request.ph_solve_mode,
+        temperature_options: normalized_temperature_options,
+        thermochemistry: request.thermochemistry.clone(),
+        candidate_selection: request.candidate_selection.clone(),
+    };
+    Ok(normalized_request)
+}
+
 /// Recovers one rejected P,H point in an exactly equivalent normalized
 /// extensive representation.
 ///
@@ -2278,9 +2469,10 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
     physical_error: ReactionExtentError,
     physical_failure_duration: Duration,
 ) -> Result<FixedPressureEnthalpySolution, ReactionExtentError> {
-    if request.solve_options.extensive_normalization_policy()
-        != crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::
-            ExtensiveNormalizationPolicy::OnNumericalFailure
+    if !request
+        .solve_options
+        .extensive_normalization_policy()
+        .allows_numerical_failure_recovery()
         || !matches!(
             physical_error.kind(),
             ReactionExtentErrorKind::AllBackendsFailed
@@ -2306,8 +2498,10 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
     {
         return Err(physical_error);
     }
-    let trigger_kind = physical_error.kind();
-    let trigger_message = physical_error.to_string();
+    let trigger = ExtensiveNormalizationTrigger::NumericalFailure {
+        error_kind: physical_error.kind(),
+        message: physical_error.to_string(),
+    };
 
     let layout = MultiphaseEquilibriumLayout::new(request.resolved.phase_specs().to_vec())?;
     let normalized_composition =
@@ -2433,8 +2627,7 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
                 .solution
                 .with_extensive_normalization_recovery(ExtensiveNormalizationRecoveryEvidence {
                     physical_inventory_scale: normalization.physical_inventory_scale(),
-                    trigger_kind,
-                    trigger_message,
+                    trigger: trigger.clone(),
                     discovery_backend,
                     physical_retry_backend: Some(physical_retry_backend),
                     physical_retry_failure: None,
@@ -2469,8 +2662,7 @@ pub(crate) fn recover_resolved_ph_after_numerical_failure<'a>(
     recovered.solution = recovered.solution.with_extensive_normalization_recovery(
         ExtensiveNormalizationRecoveryEvidence {
             physical_inventory_scale: normalization.physical_inventory_scale(),
-            trigger_kind,
-            trigger_message,
+            trigger: trigger.clone(),
             discovery_backend,
             physical_retry_backend: None,
             physical_retry_failure: physical_retry_attempts
@@ -3699,7 +3891,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_request_accepts_a_borrowed_enthalpy_callback() {
+    fn native_request_accepts_a_borrowed_enthalpy_callback() {
         let slope = 10.0_f64;
         let mut data = SubsData::new();
         data.set_substances(vec!["A".to_string()]);
@@ -3732,7 +3924,7 @@ mod tests {
             SolverAttemptOutcome, SolverAttemptReport, SolverBackend, SolverPolicy,
         };
 
-        let backend = SolverBackend::Legacy(Solvers::NR);
+        let backend = SolverBackend::Native(Solvers::NR);
         PhTrialInnerEvidence {
             solve_report: EquilibriumSolveReport {
                 policy: SolverPolicy::Single(backend),

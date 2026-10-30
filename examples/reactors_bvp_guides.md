@@ -98,6 +98,54 @@ fn main() {
 }
 ```
 
+## 5. Route-aware telemetry and errors
+
+The direct facade can request one telemetry mode while keeping the selected
+solver's native snapshot intact. `Off` is the default; use counters while
+profiling callback volume or detailed snapshots when decision traces matter.
+
+```rust
+use KiThe::ReactorsBVP::SimpleReactorBVP::{BVPSolver, ReactorError};
+use RustedSciThe::numerical::BVP_api::{BvpApiTelemetryMode, BvpSolverTelemetrySnapshot};
+
+fn inspect_solver(solver: &BVPSolver) {
+    match solver.last_telemetry.as_ref() {
+        Some(BvpSolverTelemetrySnapshot::Damped(snapshot)) => {
+            println!("Damped residual calls: {}", snapshot.counters.residual_calls);
+        }
+        Some(BvpSolverTelemetrySnapshot::Frozen(snapshot)) => {
+            println!("Frozen residual calls: {}", snapshot.counters.residual_calls);
+        }
+        Some(BvpSolverTelemetrySnapshot::Sci(snapshot)) => {
+            println!("Sci RHS calls: {}", snapshot.rhs_calls);
+        }
+        None => println!("No solve telemetry available"),
+    }
+}
+
+fn configure_diagnostics(solver: BVPSolver) -> BVPSolver {
+    solver.with_bvp_telemetry_mode(BvpApiTelemetryMode::Counters)
+}
+
+fn report_failure(error: &ReactorError) {
+    match error {
+        ReactorError::BvpApi(source) => eprintln!("BVP solve failed: {source}"),
+        ReactorError::BvpTelemetry(source) => eprintln!("Telemetry request rejected: {source}"),
+        other => eprintln!("Reactor setup failed: {other}"),
+    }
+}
+```
+
+The snapshot is route-tagged because Damped/Frozen and Sci expose different
+native counters and timings. `Timings` may be rejected for Damped/Frozen when
+the generated backend can select AOT; that typed error is returned before the
+numerical solve. After a route returns a candidate, the facade also checks
+every prescribed endpoint against that route's configured tolerance. A finite
+candidate that misses a boundary returns
+`ReactorError::BvpBoundaryConditionViolation` and does not replace the last
+accepted solution or mesh. Logging remains independent from telemetry
+collection.
+
 ## Notes
 
 - The high-level helpers in `SimpleReactorTask` are thin wrappers around the

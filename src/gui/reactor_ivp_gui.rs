@@ -16,8 +16,9 @@ use crate::ReactorsIVP::SimpleReactorIVP::{
     SimpleReactorTask,
 };
 use crate::ReactorsIVP::solver_backend::{
-    ReactorIvpExecutionBackend, ReactorIvpMatrixBackend, ReactorIvpMethod, ReactorIvpSolverConfig,
-    ReactorIvpStopCondition, ReactorIvpSymbolicBackend,
+    ReactorIvpExecutionBackend, ReactorIvpFamilyOptions, ReactorIvpMatrixBackend, ReactorIvpMethod,
+    ReactorIvpSolverConfig, ReactorIvpSolverFamily, ReactorIvpStopCondition,
+    ReactorIvpSymbolicBackend,
 };
 use crate::gui::document_lifecycle::DocumentLifecycleState;
 use crate::gui::gui_plot::PlotWindow;
@@ -28,6 +29,8 @@ use log::{info, warn};
 use RustedSciThe::numerical::LSODE2::{
     Lsode2AotProfile, Lsode2AotToolchain, Lsode2NativeExecutionConfig,
 };
+use RustedSciThe::numerical::SolverTelemetryMode;
+use RustedSciThe::numerical::logging::SolverLogLevel;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -295,6 +298,7 @@ pub struct IvpGuiConfig {
     pub stop_condition_enabled: bool,
     pub stop_condition_species_index: usize,
     pub stop_condition_threshold: f64,
+    pub solver_family: ReactorIvpSolverFamily,
     pub method: ReactorIvpMethod,
     pub symbolic_backend: ReactorIvpSymbolicBackend,
     pub matrix_backend: ReactorIvpMatrixBackend,
@@ -307,6 +311,8 @@ pub struct IvpGuiConfig {
     pub max_step: f64,
     pub rtol: f64,
     pub atol: f64,
+    pub telemetry: SolverTelemetryMode,
+    pub logging: SolverLogLevel,
     pub postprocessing: IvpPostprocessingConfig,
     pub native_execution: Lsode2NativeExecutionConfig,
 }
@@ -333,6 +339,7 @@ impl Default for IvpGuiConfig {
             stop_condition_enabled: false,
             stop_condition_species_index: 0,
             stop_condition_threshold: 1e-4,
+            solver_family: ReactorIvpSolverFamily::Lsode2,
             method: ReactorIvpMethod::default(),
             symbolic_backend: ReactorIvpSymbolicBackend::default(),
             matrix_backend: ReactorIvpMatrixBackend::default(),
@@ -345,6 +352,8 @@ impl Default for IvpGuiConfig {
             max_step: 1.0e-3,
             rtol: 1e-6,
             atol: 1e-8,
+            telemetry: SolverTelemetryMode::Off,
+            logging: SolverLogLevel::Off,
             postprocessing: IvpPostprocessingConfig::default(),
             // Interactive GUI defaults should favor the stable bridge path.
             native_execution: Lsode2NativeExecutionConfig::bridge_solve(),
@@ -363,11 +372,24 @@ impl IvpGuiConfig {
             },
         };
 
+        let family_options = match self.solver_family {
+            ReactorIvpSolverFamily::Lsode2 => ReactorIvpFamilyOptions::Lsode2 {
+                controller: self.method,
+                native_execution: self.native_execution,
+            },
+            ReactorIvpSolverFamily::Bdf => ReactorIvpFamilyOptions::Bdf { max_steps: 200_000 },
+            ReactorIvpSolverFamily::Radau => ReactorIvpFamilyOptions::Radau {
+                max_steps: 200_000,
+                max_newton_iterations: 6,
+            },
+        };
+
         ReactorIvpSolverConfig {
-            method: self.method,
+            family_options,
             symbolic_backend: self.symbolic_backend,
             matrix_backend: self.matrix_backend,
             execution_backend,
+            callback_policy: None,
             stop_condition: self.stop_condition_enabled.then(|| {
                 ReactorIvpStopCondition::new(
                     self.stop_condition_species_index,
@@ -380,7 +402,8 @@ impl IvpGuiConfig {
             max_step: self.max_step,
             rtol: self.rtol,
             atol: self.atol,
-            native_execution: self.native_execution,
+            telemetry: self.telemetry,
+            logging: self.logging,
         }
     }
 
@@ -408,12 +431,15 @@ impl IvpGuiConfig {
             })
             .collect();
         config.thermal_effects = task.thermal_effects.clone();
+        config.solver_family = task.solver_backend_config.family();
         if let Some(stop_condition) = task.solver_backend_config.stop_condition {
             config.stop_condition_enabled = true;
             config.stop_condition_species_index = stop_condition.species_index;
             config.stop_condition_threshold = stop_condition.threshold;
         }
-        config.method = task.solver_backend_config.method;
+        if let Some(controller) = task.solver_backend_config.lsode2_controller() {
+            config.method = controller;
+        }
         config.symbolic_backend = task.solver_backend_config.symbolic_backend;
         config.matrix_backend = task.solver_backend_config.matrix_backend;
         config.execution_mode = match task.solver_backend_config.execution_backend {
@@ -430,7 +456,14 @@ impl IvpGuiConfig {
         config.max_step = task.solver_backend_config.max_step;
         config.rtol = task.solver_backend_config.rtol;
         config.atol = task.solver_backend_config.atol;
-        config.native_execution = task.solver_backend_config.native_execution;
+        config.telemetry = task.solver_backend_config.telemetry;
+        config.logging = task.solver_backend_config.logging;
+        if let ReactorIvpFamilyOptions::Lsode2 {
+            native_execution, ..
+        } = task.solver_backend_config.family_options
+        {
+            config.native_execution = native_execution;
+        }
         config
     }
 
@@ -483,6 +516,7 @@ impl IvpGuiConfig {
         task.set_initial_conditions(initial_conditions);
         task.set_thermal_effects(self.thermal_effects.clone());
         task.set_solver_backend_config(self.to_solver_config());
+        task.set_hybrid_solver_settings(None);
         Ok(())
     }
 
@@ -655,8 +689,27 @@ pub fn build_reactor_ivp_task_preview_snapshot(
         ),
         preview_row(
             "solver",
+            "family",
+            format!("{:?}", preview_task.solver_backend_config.family()),
+        ),
+        preview_row(
+            "solver",
+            "telemetry",
+            format!("{:?}", preview_task.solver_backend_config.telemetry),
+        ),
+        preview_row(
+            "solver",
+            "logging",
+            format!("{:?}", preview_task.solver_backend_config.logging),
+        ),
+        preview_row(
+            "solver",
             "method",
-            format!("{:?}", preview_task.solver_backend_config.method),
+            preview_task
+                .solver_backend_config
+                .lsode2_controller()
+                .map(|method| format!("{method:?}"))
+                .unwrap_or_else(|| "family-native".to_string()),
         ),
         preview_row(
             "solver",
@@ -810,13 +863,13 @@ fn summarize_reactor_ivp_status(
 ) -> String {
     let base_status = if result
         .summary
-        .native_termination_kind
-        .as_deref()
+        .as_ref()
+        .and_then(|summary| summary.native_termination_kind.as_deref())
         .is_some_and(|kind| kind == "reached_stop_condition")
     {
         "stopped_by_condition".to_string()
     } else {
-        result.summary.status.clone()
+        result.status.clone()
     };
 
     match postprocessing_summary {
@@ -1067,11 +1120,18 @@ impl ReactorIvpApp {
             });
 
         ui.horizontal_wrapped(|ui| {
-            ui.label("Stop condition");
-            ui.checkbox(
-                &mut self.config.stop_condition_enabled,
-                "Enable fuel depletion stop",
-            );
+            ui.label("Stop condition")
+                .on_hover_text("Stop when the selected species reaches its threshold. This control is supported by LSODE2 only.");
+            let stop_supported = self.config.solver_family == ReactorIvpSolverFamily::Lsode2;
+            ui.add_enabled_ui(stop_supported, |ui| {
+                ui.checkbox(
+                    &mut self.config.stop_condition_enabled,
+                    "Enable fuel depletion stop",
+                );
+            });
+            if !stop_supported {
+                ui.label("Available for LSODE2 only");
+            }
 
             let species_count = self.task.kindata.substances.len();
             if species_count == 0 {
@@ -1082,8 +1142,8 @@ impl ReactorIvpApp {
                 }
 
                 ui.add_enabled_ui(self.config.stop_condition_enabled, |ui| {
-                    ui.label("Species");
-                    ComboBox::from_id_salt("ivp_stop_condition_species")
+                    let label = ui.label("Species");
+                    let response = ComboBox::from_id_salt("ivp_stop_condition_species")
                         .selected_text(
                             self.task
                                 .kindata
@@ -1102,6 +1162,7 @@ impl ReactorIvpApp {
                                 );
                             }
                         });
+                    let _ = response.response.labelled_by(label.id);
                     ui.label("Threshold");
                     ui.add(
                         DragValue::new(&mut self.config.stop_condition_threshold)
@@ -1163,28 +1224,48 @@ impl ReactorIvpApp {
 
     fn render_solver_backend_section(&mut self, ui: &mut egui::Ui) {
         ui.heading("Solver backend");
-        Grid::new("ivp_solver_grid")
+
+        ui.strong("Solver route");
+        Grid::new("ivp_solver_route_grid")
             .num_columns(4)
             .spacing([16.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Method");
-                ComboBox::from_id_salt("ivp_method")
-                    .selected_text(format!("{:?}", self.config.method))
+                let family_label = ui.label("Solver family").on_hover_text(
+                    "LSODE2 is the legacy-compatible controller route; standalone BDF and Radau are separate solver families.",
+                );
+                let family_combo = ComboBox::from_id_salt("ivp_solver_family")
+                    .selected_text(match self.config.solver_family {
+                        ReactorIvpSolverFamily::Lsode2 => "LSODE2",
+                        ReactorIvpSolverFamily::Bdf => "BDF (standalone)",
+                        ReactorIvpSolverFamily::Radau => "Radau",
+                    })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
-                            &mut self.config.method,
-                            ReactorIvpMethod::Auto,
-                            "Auto",
+                            &mut self.config.solver_family,
+                            ReactorIvpSolverFamily::Lsode2,
+                            "LSODE2",
                         );
-                        ui.selectable_value(&mut self.config.method, ReactorIvpMethod::Bdf, "BDF");
                         ui.selectable_value(
-                            &mut self.config.method,
-                            ReactorIvpMethod::Adams,
-                            "Adams",
+                            &mut self.config.solver_family,
+                            ReactorIvpSolverFamily::Bdf,
+                            "BDF (standalone)",
+                        );
+                        ui.selectable_value(
+                            &mut self.config.solver_family,
+                            ReactorIvpSolverFamily::Radau,
+                            "Radau",
                         );
                     });
-                ui.label("Residual/Jacobian");
-                ComboBox::from_id_salt("ivp_symbolic_backend")
+                let _ = family_combo.response.labelled_by(family_label.id);
+                if self.config.solver_family != ReactorIvpSolverFamily::Lsode2 {
+                    self.config.matrix_backend = ReactorIvpMatrixBackend::Dense;
+                    self.config.execution_mode = ReactorIvpGuiExecutionMode::Lambdify;
+                    self.config.stop_condition_enabled = false;
+                }
+                let symbolic_label = ui.label("Symbolic frontend").on_hover_text(
+                    "Select the symbolic expression frontend used to prepare residual and Jacobian callbacks.",
+                );
+                let symbolic_combo = ComboBox::from_id_salt("ivp_symbolic_backend")
                     .selected_text(format!("{:?}", self.config.symbolic_backend))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
@@ -1198,51 +1279,161 @@ impl ReactorIvpApp {
                             "ExprLegacy",
                         );
                     });
+                let _ = symbolic_combo.response.labelled_by(symbolic_label.id);
                 ui.end_row();
+            });
 
-                ui.label("Matrix backend");
-                ComboBox::from_id_salt("ivp_matrix_backend")
-                    .selected_text(format!("{:?}", self.config.matrix_backend))
+        ui.strong("Execution");
+        Grid::new("ivp_solver_execution_grid")
+            .num_columns(4)
+            .spacing([16.0, 8.0])
+            .show(ui, |ui| {
+                if self.config.solver_family == ReactorIvpSolverFamily::Lsode2 {
+                    let method_label = ui.label("LSODE2 controller");
+                    let method_combo = ComboBox::from_id_salt("ivp_method")
+                        .selected_text(format!("{:?}", self.config.method))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.config.method,
+                                ReactorIvpMethod::Auto,
+                                "Auto (Adams/BDF)",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.method,
+                                ReactorIvpMethod::Bdf,
+                                "BDF only",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.method,
+                                ReactorIvpMethod::Adams,
+                                "Adams only",
+                            );
+                        });
+                    let _ = method_combo.response.labelled_by(method_label.id);
+                    let matrix_label = ui.label("Matrix backend").on_hover_text(
+                        "LSODE2 supports sparse and banded layouts. Standalone BDF currently requires Dense.",
+                    );
+                    let matrix_combo = ComboBox::from_id_salt("ivp_matrix_backend")
+                        .selected_text(format!("{:?}", self.config.matrix_backend))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.config.matrix_backend,
+                                ReactorIvpMatrixBackend::Sparse,
+                                "Sparse",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.matrix_backend,
+                                ReactorIvpMatrixBackend::Banded,
+                                "Banded",
+                            );
+                        });
+                    let _ = matrix_combo.response.labelled_by(matrix_label.id);
+                    ui.end_row();
+
+                    let execution_label = ui.label("Execution backend").on_hover_text(
+                        "AOT is currently available only for LSODE2 and requires explicit confirmation before invoking a toolchain.",
+                    );
+                    let execution_combo = ComboBox::from_id_salt("ivp_execution_mode")
+                        .selected_text(match self.config.execution_mode {
+                            ReactorIvpGuiExecutionMode::Lambdify => "Lambdify",
+                            ReactorIvpGuiExecutionMode::Aot => "AOT",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.config.execution_mode,
+                                ReactorIvpGuiExecutionMode::Lambdify,
+                                "Lambdify",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.execution_mode,
+                                ReactorIvpGuiExecutionMode::Aot,
+                                "AOT",
+                            );
+                        });
+                    let _ = execution_combo.response.labelled_by(execution_label.id);
+                    ui.label("AOT / stop controls are LSODE2-only");
+                    ui.end_row();
+                } else {
+                    ui.label("Matrix backend").on_hover_text(
+                        "Standalone BDF and Radau currently use the Dense matrix layout through this GUI.",
+                    );
+                    ui.label("Dense (required by selected family)");
+                    ui.label("Execution backend");
+                    ui.label("Lambdify (supported route)");
+                    ui.end_row();
+                }
+            });
+
+        ui.separator();
+        ui.strong("Diagnostics");
+        Grid::new("ivp_solver_diagnostics_grid")
+            .num_columns(4)
+            .spacing([16.0, 8.0])
+            .show(ui, |ui| {
+                let telemetry_label = ui.label("Telemetry").on_hover_text(
+                    "Telemetry collection is independent from solver logging; Off avoids collecting counters and timings.",
+                );
+                let telemetry_combo = ComboBox::from_id_salt("ivp_telemetry_mode")
+                    .selected_text(format!("{:?}", self.config.telemetry))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
-                            &mut self.config.matrix_backend,
-                            ReactorIvpMatrixBackend::Sparse,
-                            "Sparse",
+                            &mut self.config.telemetry,
+                            SolverTelemetryMode::Off,
+                            "Off",
                         );
                         ui.selectable_value(
-                            &mut self.config.matrix_backend,
-                            ReactorIvpMatrixBackend::Banded,
-                            "Banded",
+                            &mut self.config.telemetry,
+                            SolverTelemetryMode::Counters,
+                            "Counters",
+                        );
+                        ui.selectable_value(
+                            &mut self.config.telemetry,
+                            SolverTelemetryMode::Timings,
+                            "Timings",
+                        );
+                        ui.selectable_value(
+                            &mut self.config.telemetry,
+                            SolverTelemetryMode::Detailed,
+                            "Detailed",
                         );
                     });
-                ui.label("Execution backend");
-                ComboBox::from_id_salt("ivp_execution_mode")
-                    .selected_text(match self.config.execution_mode {
-                        ReactorIvpGuiExecutionMode::Lambdify => "Lambdify",
-                        ReactorIvpGuiExecutionMode::Aot => "AOT",
-                    })
+                let _ = telemetry_combo.response.labelled_by(telemetry_label.id);
+                let logging_label = ui.label("Solver logging").on_hover_text(
+                    "Logging controls solver messages only and does not enable telemetry collection.",
+                );
+                let logging_combo = ComboBox::from_id_salt("ivp_logging_level")
+                    .selected_text(format!("{:?}", self.config.logging))
                     .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.config.logging, SolverLogLevel::Off, "Off");
                         ui.selectable_value(
-                            &mut self.config.execution_mode,
-                            ReactorIvpGuiExecutionMode::Lambdify,
-                            "Lambdify",
+                            &mut self.config.logging,
+                            SolverLogLevel::Error,
+                            "Error",
                         );
+                        ui.selectable_value(&mut self.config.logging, SolverLogLevel::Warn, "Warn");
+                        ui.selectable_value(&mut self.config.logging, SolverLogLevel::Info, "Info");
                         ui.selectable_value(
-                            &mut self.config.execution_mode,
-                            ReactorIvpGuiExecutionMode::Aot,
-                            "AOT",
+                            &mut self.config.logging,
+                            SolverLogLevel::Debug,
+                            "Debug",
                         );
                     });
+                let _ = logging_combo.response.labelled_by(logging_label.id);
                 ui.end_row();
+            });
 
-                if matches!(self.config.execution_mode, ReactorIvpGuiExecutionMode::Aot) {
-                    ui.end_row();
-                    ui.label("AOT settings");
-                    ui.label("Compiler and build profile are only relevant for AOT.");
-                    ui.end_row();
-
-                    ui.label("toolchain");
-                    ComboBox::from_id_salt("ivp_aot_toolchain")
+        if self.config.solver_family == ReactorIvpSolverFamily::Lsode2
+            && matches!(self.config.execution_mode, ReactorIvpGuiExecutionMode::Aot)
+        {
+            ui.separator();
+            ui.strong("AOT build");
+            ui.label("Compiler and build profile are only relevant for AOT.");
+            Grid::new("ivp_aot_settings_grid")
+                .num_columns(4)
+                .spacing([16.0, 8.0])
+                .show(ui, |ui| {
+                    let toolchain_label = ui.label("AOT toolchain");
+                    let toolchain_combo = ComboBox::from_id_salt("ivp_aot_toolchain")
                         .selected_text(format!("{:?}", self.config.aot_toolchain))
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
@@ -1266,8 +1457,9 @@ impl ReactorIvpApp {
                                 "Rust",
                             );
                         });
-                    ui.label("profile");
-                    ComboBox::from_id_salt("ivp_aot_profile")
+                    let _ = toolchain_combo.response.labelled_by(toolchain_label.id);
+                    let profile_label = ui.label("AOT profile");
+                    let profile_combo = ComboBox::from_id_salt("ivp_aot_profile")
                         .selected_text(format!("{:?}", self.config.aot_profile))
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
@@ -1281,12 +1473,13 @@ impl ReactorIvpApp {
                                 "Debug",
                             );
                         });
+                    let _ = profile_combo.response.labelled_by(profile_label.id);
                     ui.end_row();
                     ui.label("AOT confirmation");
                     ui.label("AOT runs must be explicitly confirmed before execution.");
                     ui.end_row();
-                }
-            });
+                });
+        }
     }
 
     fn render_integration_section(&mut self, ui: &mut egui::Ui) {
@@ -1763,10 +1956,16 @@ impl ReactorIvpApp {
             hasher.write_u64(effect.to_bits());
         }
 
-        config.method.hash(&mut hasher);
+        config.solver_family.hash(&mut hasher);
+        if config.solver_family == ReactorIvpSolverFamily::Lsode2 {
+            config.method.hash(&mut hasher);
+            format!("{:?}", config.native_execution).hash(&mut hasher);
+        }
         config.symbolic_backend.hash(&mut hasher);
         config.matrix_backend.hash(&mut hasher);
         config.execution_mode.hash(&mut hasher);
+        format!("{:?}", config.telemetry).hash(&mut hasher);
+        format!("{:?}", config.logging).hash(&mut hasher);
         format!("{:?}", config.aot_toolchain).hash(&mut hasher);
         format!("{:?}", config.aot_profile).hash(&mut hasher);
 
@@ -1793,8 +1992,6 @@ impl ReactorIvpApp {
         config.postprocessing.gnuplot_png.hash(&mut hasher);
         config.postprocessing.gnuplot_dir.hash(&mut hasher);
         config.postprocessing.terminal_plot.hash(&mut hasher);
-        format!("{:?}", config.native_execution).hash(&mut hasher);
-
         hasher.finish()
     }
 
@@ -1886,15 +2083,15 @@ fn build_demo_task() -> Result<SimpleReactorTask, IvpError> {
     task.kindata
         .set_reaction_data_directly(
             vec![ReactionData::new_elementary(
-                "A=>B".to_string(),
+                "H2=>2H".to_string(),
                 vec![1.0e3, 0.0, 1.0e4],
                 None,
             )],
             None,
         )
         .map_err(|err| IvpError::InvalidConfiguration(err.to_string()))?;
-    task.kindata.stecheodata.vec_of_molmasses = Some(vec![10.0, 20.0]);
-    task.kindata.substances = vec!["A".to_string(), "B".to_string()];
+    task.kindata.stecheodata.vec_of_molmasses = Some(vec![2.016, 1.008]);
+    task.kindata.substances = vec!["H2".to_string(), "H".to_string()];
     task.problem_name = Some("CondensedBurn".to_string());
     task.problem_description = Some("Canonical condensed-phase IVP demo".to_string());
     task.set_density(1200.0)?;
@@ -1906,8 +2103,8 @@ fn build_demo_task() -> Result<SimpleReactorTask, IvpError> {
     task.set_initial_conditions(HashMap::from([
         ("T".to_string(), 450.0),
         ("q".to_string(), 0.15),
-        ("A".to_string(), 0.7),
-        ("B".to_string(), 0.3),
+        ("H2".to_string(), 0.7),
+        ("H".to_string(), 0.3),
     ]));
     task.set_thermal_effects(vec![-2.0e5]);
     task.set_solver_backend_config(
@@ -1965,9 +2162,14 @@ mod tests {
         config.execution_mode = ReactorIvpGuiExecutionMode::Aot;
         config.aot_toolchain = Lsode2AotToolchain::CTcc;
         config.aot_profile = Lsode2AotProfile::Debug;
+        config.telemetry = SolverTelemetryMode::Detailed;
+        config.logging = SolverLogLevel::Info;
 
         let solver = config.to_solver_config();
-        assert_eq!(solver.method, ReactorIvpMethod::Adams);
+        assert_eq!(solver.family(), ReactorIvpSolverFamily::Lsode2);
+        assert_eq!(solver.telemetry, SolverTelemetryMode::Detailed);
+        assert_eq!(solver.logging, SolverLogLevel::Info);
+        assert_eq!(solver.lsode2_controller(), Some(ReactorIvpMethod::Adams));
         assert_eq!(solver.matrix_backend, ReactorIvpMatrixBackend::Banded);
         assert_eq!(
             solver.symbolic_backend,
@@ -1980,5 +2182,28 @@ mod tests {
                 profile: Lsode2AotProfile::Debug
             }
         ));
+    }
+
+    #[test]
+    fn gui_solver_family_is_preserved_in_backend_config() {
+        let mut config = IvpGuiConfig::default();
+        config.solver_family = ReactorIvpSolverFamily::Radau;
+
+        let solver = config.to_solver_config();
+        assert_eq!(solver.family(), ReactorIvpSolverFamily::Radau);
+    }
+
+    #[test]
+    fn standalone_gui_fingerprint_ignores_inactive_lsode2_controls() {
+        let mut first = IvpGuiConfig::default();
+        first.solver_family = ReactorIvpSolverFamily::Bdf;
+        let mut second = first.clone();
+        second.method = ReactorIvpMethod::Adams;
+        second.native_execution = Lsode2NativeExecutionConfig::faithful_bdf_solve(17, 19);
+
+        assert_eq!(
+            ReactorIvpApp::fingerprint_config(&first),
+            ReactorIvpApp::fingerprint_config(&second)
+        );
     }
 }

@@ -7,7 +7,10 @@
 //! label is optional until the repository owns a versioned payload manifest.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_candidate_selection::EquilibriumCandidateSelectionReport;
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::PhaseEquilibriumInputKind;
@@ -18,6 +21,99 @@ use crate::Thermodynamics::thermo_lib_api::ThermoCatalogConsistencyReport;
 
 /// Current JSON-compatible capsule schema.
 pub const EQUILIBRIUM_REPRODUCIBILITY_SCHEMA_VERSION: u32 = 2;
+pub const THERMO_DATA_CONTENT_MANIFEST_SCHEMA_VERSION: u32 = 1;
+
+/// A pinned content hash for one bundled input to thermo-catalog resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThermoDataAssetHash {
+    pub path: String,
+    pub sha256: String,
+}
+
+/// Versioned SHA-256 manifest for the bundled thermochemistry catalog inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThermoDataContentManifest {
+    pub schema_version: u32,
+    pub release_id: String,
+    pub assets: Vec<ThermoDataAssetHash>,
+}
+
+/// Failure while loading or verifying the bundled thermo-data manifest.
+#[derive(Debug)]
+pub enum ThermoDataManifestError {
+    Json(serde_json::Error),
+    UnsupportedSchema(u32),
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    HashMismatch {
+        path: String,
+        expected: String,
+        actual: String,
+    },
+}
+
+impl fmt::Display for ThermoDataManifestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Json(error) => write!(formatter, "invalid thermo-data manifest: {error}"),
+            Self::UnsupportedSchema(version) => write!(
+                formatter,
+                "unsupported thermo-data manifest schema {version}"
+            ),
+            Self::Read { path, source } => {
+                write!(
+                    formatter,
+                    "failed to read thermo-data asset {}: {source}",
+                    path.display()
+                )
+            }
+            Self::HashMismatch {
+                path,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "thermo-data SHA-256 mismatch for {path}: expected {expected}, got {actual}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ThermoDataManifestError {}
+
+impl ThermoDataContentManifest {
+    /// Loads and verifies every asset in the checked-in manifest.
+    pub fn load_and_verify_bundled() -> Result<Self, ThermoDataManifestError> {
+        let manifest: Self = serde_json::from_str(include_str!(
+            "frozen_reference/data/thermochemistry_content_manifest.json"
+        ))
+        .map_err(ThermoDataManifestError::Json)?;
+        if manifest.schema_version != THERMO_DATA_CONTENT_MANIFEST_SCHEMA_VERSION {
+            return Err(ThermoDataManifestError::UnsupportedSchema(
+                manifest.schema_version,
+            ));
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for asset in &manifest.assets {
+            let path = root.join(&asset.path);
+            let bytes = fs::read(&path).map_err(|source| ThermoDataManifestError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            let actual = format!("{:x}", Sha256::digest(bytes));
+            if actual != asset.sha256 {
+                return Err(ThermoDataManifestError::HashMismatch {
+                    path: asset.path.clone(),
+                    expected: asset.sha256.clone(),
+                    actual,
+                });
+            }
+        }
+        Ok(manifest)
+    }
+}
 
 /// Phase-stability mathematics represented by a reproducibility capsule.
 ///
@@ -500,6 +596,18 @@ mod tests {
     use crate::Thermodynamics::thermo_lib_api::ThermoData;
 
     #[test]
+    fn bundled_thermochemistry_content_manifest_matches_checked_in_data() {
+        let manifest = ThermoDataContentManifest::load_and_verify_bundled()
+            .expect("bundled thermo-data files must match their pinned SHA-256 manifest");
+        assert_eq!(
+            manifest.schema_version,
+            THERMO_DATA_CONTENT_MANIFEST_SCHEMA_VERSION
+        );
+        assert_eq!(manifest.assets.len(), 6);
+        assert!(manifest.release_id.starts_with("kithe-bundled-thermo-"));
+    }
+
+    #[test]
     fn local_outcome_exports_stable_policy_provenance_and_catalog_evidence() {
         let repository = ThermoData::try_default_repository().unwrap();
         let spec = SubstanceSystemSpecBuilder::new(SubstancesContainer::SinglePhase(vec![
@@ -511,7 +619,7 @@ mod tests {
         .build()
         .unwrap();
         let options = EquilibriumSolveOptions::new()
-            .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+            .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
             .unwrap();
         let outcome = PhaseEquilibriumPipelineRequest::new(
             spec,
@@ -543,7 +651,7 @@ mod tests {
         assert_eq!(capsule.canonical_b, [1.58, 0.42]);
         assert_eq!(
             capsule.solve_options.effective_backend_order,
-            vec!["Legacy(NR)"]
+            vec!["Native(NR)"]
         );
         assert!(capsule.selected_record_identity_fingerprint != 0);
         assert!(capsule.catalog.is_some());
@@ -585,7 +693,7 @@ mod tests {
         .build()
         .unwrap();
         let options = EquilibriumSolveOptions::new()
-            .with_solver_policy(SolverPolicy::Single(SolverBackend::Legacy(Solvers::NR)))
+            .with_solver_policy(SolverPolicy::Single(SolverBackend::Native(Solvers::NR)))
             .unwrap();
         let outcome = PhaseEquilibriumPipelineRequest::from_element_inventory(
             spec,
@@ -659,7 +767,7 @@ mod tests {
             snapshot
                 .effective_backend_order
                 .iter()
-                .any(|backend| backend.contains("Legacy"))
+                .any(|backend| backend.contains("Native"))
         );
         assert_eq!(snapshot.timing_mode, "Disabled");
         assert!(!snapshot.execution_control_attached);

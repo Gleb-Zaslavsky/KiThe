@@ -136,7 +136,7 @@ fn ternary_runner(
     .unwrap();
     let mut runner = PreparedPhaseControlRunner::new(problem, false).unwrap();
     let settings = runner.configure_solver();
-    settings.solver_policy = Some(SolverPolicy::legacy_default(Solvers::LM));
+    settings.solver_policy = Some(SolverPolicy::native_default(Solvers::LM));
     settings.solver_params.tol = 1.0e-11;
     settings.solver_params.max_iter = 250;
     runner

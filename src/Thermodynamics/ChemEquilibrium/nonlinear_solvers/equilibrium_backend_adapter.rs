@@ -4,7 +4,7 @@
 //!
 //! This module defines the **adapter contract** between the solver policy
 //! (which decides which backend to run) and the concrete backend implementations
-//! (legacy LM/NR/TR and RustedSciThe). It provides:
+//! (KiThe-native LM/NR/TR and RustedSciThe). It provides:
 //!
 //! - [`BackendSolveRequest`] — uniform input to any backend.
 //! - [`BackendSolveResult`] — uniform output from any backend.
@@ -52,7 +52,7 @@
 //!
 //! | Backend | Module | Description |
 //! |---------|--------|-------------|
-//! | Legacy(LM/NR/TR) | [`equilibrium_legacy_backend`](super::equilibrium_legacy_backend) | Hand-written solvers |
+//! | Native(LM/NR/TR) | [`equilibrium_native_backend`](super::equilibrium_native_backend) | Hand-written solvers |
 //! | RustedSciThe | [`equilibrium_rst_backend`](super::equilibrium_rst_backend) | Symbolic computation engine |
 //! | FakeBackend | (test-only) | Deterministic mock for cascade tests |
 //!
@@ -68,7 +68,7 @@
 //! # Related Modules
 //!
 //! - [`equilibrium_solver_policy`](super::equilibrium_solver_policy) — backend selection
-//! - [`equilibrium_legacy_backend`](super::equilibrium_legacy_backend) — legacy adapter
+//! - [`equilibrium_native_backend`](super::equilibrium_native_backend) — native adapter
 //! - [`equilibrium_rst_backend`](super::equilibrium_rst_backend) — RST adapter
 //!
 
@@ -76,13 +76,13 @@ use crate::Thermodynamics::ChemEquilibrium::equilibrium_execution::{
     EquilibriumExecutionControl, EquilibriumProgressEvent, EquilibriumProgressStage,
 };
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::{
-    LegacySolverDiagnosticsSnapshot, begin_legacy_solver_diagnostics,
-    finish_legacy_solver_diagnostics,
+    NativeSolverDiagnosticsSnapshot, begin_native_solver_diagnostics,
+    finish_native_solver_diagnostics,
 };
-use crate::Thermodynamics::ChemEquilibrium::equilibrium_legacy_backend::solve_legacy_backend;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::{
     SolverParams, recoverable_backend_failure_kind,
 };
+use crate::Thermodynamics::ChemEquilibrium::equilibrium_native_backend::solve_native_backend;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::ReactionExtentError;
 use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::{
     RstPreparedProblem, RustedSciTheSolveContract,
@@ -162,7 +162,7 @@ pub(crate) struct BackendSolveResult {
 }
 
 /// Backend error plus any diagnostics collected before the backend stopped.
-/// Keeping these together prevents failed Legacy attempts from becoming a
+/// Keeping these together prevents failed Native attempts from becoming a
 /// wall-only row in the cascade ledger.
 #[derive(Debug)]
 pub(crate) struct BackendSolveError {
@@ -180,8 +180,8 @@ pub(crate) trait EquilibriumNonlinearBackend {
     ) -> Result<BackendSolveResult, BackendSolveError>;
 }
 
-fn legacy_solver_metrics(
-    diagnostics: LegacySolverDiagnosticsSnapshot,
+fn native_solver_metrics(
+    diagnostics: NativeSolverDiagnosticsSnapshot,
     elapsed: std::time::Duration,
     termination: SolverTermination,
     backend_converged: bool,
@@ -194,6 +194,7 @@ fn legacy_solver_metrics(
         termination,
         backend_converged,
         iterations: diagnostics.jacobian_calls,
+        backend_progress_available: true,
         residual_evaluations: diagnostics.residual_calls,
         jacobian_evaluations: diagnostics.jacobian_calls,
         linear_solves: diagnostics.linear_system_solves,
@@ -204,7 +205,7 @@ fn legacy_solver_metrics(
         evaluation_timing: Some(SolverEvaluationTiming {
             residual_evaluation_micros: diagnostics.residual_micros,
             jacobian_evaluation_micros: diagnostics.jacobian_micros,
-            legacy_same_iterate_callback_pairs: Some(diagnostics.same_iterate_callback_pairs),
+            native_same_iterate_callback_pairs: Some(diagnostics.same_iterate_callback_pairs),
             linear_system_micros: Some(diagnostics.linear_system_micros),
             solver_overhead_micros: elapsed.as_micros().saturating_sub(accounted_micros),
             matrix_operations_micros: diagnostics.matrix_operations_micros,
@@ -227,7 +228,7 @@ fn legacy_solver_metrics(
     }
 }
 
-fn legacy_failure_termination(error: &ReactionExtentError) -> SolverTermination {
+fn native_failure_termination(error: &ReactionExtentError) -> SolverTermination {
     match error {
         ReactionExtentError::SolveError(crate::Thermodynamics::ChemEquilibrium::equilibrium_nonlinear::SolveError::MaxIterations) => {
             SolverTermination::MaxIterations
@@ -256,10 +257,10 @@ impl EquilibriumNonlinearBackend for SolverBackend {
             });
         }
         match *self {
-            SolverBackend::Legacy(legacy_backend) => {
-                let Some(diagnostics_session) = begin_legacy_solver_diagnostics() else {
-                    return solve_legacy_backend(
-                        legacy_backend,
+            SolverBackend::Native(native_backend) => {
+                let Some(diagnostics_session) = begin_native_solver_diagnostics() else {
+                    return solve_native_backend(
+                        native_backend,
                         request.initial_guess,
                         request.system.residual,
                         request.system.jacobian,
@@ -277,8 +278,8 @@ impl EquilibriumNonlinearBackend for SolverBackend {
                     });
                 };
                 let started = Instant::now();
-                let solution_result = solve_legacy_backend(
-                    legacy_backend,
+                let solution_result = solve_native_backend(
+                    native_backend,
                     request.initial_guess,
                     request.system.residual,
                     request.system.jacobian,
@@ -286,12 +287,12 @@ impl EquilibriumNonlinearBackend for SolverBackend {
                     request.params,
                     request.max_iterations,
                 );
-                let diagnostics = finish_legacy_solver_diagnostics(diagnostics_session);
+                let diagnostics = finish_native_solver_diagnostics(diagnostics_session);
                 let elapsed = started.elapsed();
                 match solution_result {
                     Ok(solution) => Ok(BackendSolveResult {
                         solution,
-                        metrics: Some(legacy_solver_metrics(
+                        metrics: Some(native_solver_metrics(
                             diagnostics,
                             elapsed,
                             SolverTermination::Converged,
@@ -299,10 +300,10 @@ impl EquilibriumNonlinearBackend for SolverBackend {
                         )),
                     }),
                     Err(error) => Err(BackendSolveError {
-                        metrics: Some(legacy_solver_metrics(
+                        metrics: Some(native_solver_metrics(
                             diagnostics,
                             elapsed,
-                            legacy_failure_termination(&error),
+                            native_failure_termination(&error),
                             false,
                         )),
                         error,
@@ -328,8 +329,8 @@ impl EquilibriumNonlinearBackend for SolverBackend {
                         metrics: Some(outcome.metrics),
                     })
                     .map_err(|error| BackendSolveError {
-                        error,
-                        metrics: None,
+                        error: error.error,
+                        metrics: error.metrics,
                     }),
                 None => Err(BackendSolveError {
                     error: ReactionExtentError::InvalidProblem {
@@ -566,6 +567,7 @@ mod tests {
                         termination: crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::SolverTermination::Converged,
                         backend_converged: true,
                         iterations: 1,
+                        backend_progress_available: true,
                         residual_evaluations: 1,
                         jacobian_evaluations: 1,
                         linear_solves: 1,
@@ -612,7 +614,7 @@ mod tests {
         };
 
         let backend = FakeBackend {
-            backend: SolverBackend::Legacy(Solvers::LM),
+            backend: SolverBackend::Native(Solvers::LM),
             behavior: FakeBackendBehavior::Succeed,
         };
         let result = backend.solve(request).unwrap();
@@ -663,15 +665,70 @@ mod tests {
 
         assert!(metrics.counters_collected);
         assert!(metrics.timings_collected);
+        assert!(metrics.backend_progress_available);
         assert!(metrics.residual_evaluations > 0);
-        assert!(
-            metrics
-                .evaluation_timing
-                .as_ref()
-                .unwrap()
-                .iteration_telemetry
-                .is_some()
+        let iteration_telemetry = metrics
+            .evaluation_timing
+            .as_ref()
+            .unwrap()
+            .iteration_telemetry
+            .as_ref()
+            .expect("Detailed RST telemetry should retain per-iteration progress");
+        assert!(!iteration_telemetry.is_empty());
+    }
+
+    #[test]
+    fn failed_rst_callback_keeps_partial_callback_telemetry() {
+        let rst_problem = RstPreparedProblem::new(
+            RstSymbolicProblem::from_expressions(
+                vec![Expr::parse_expression("ln(x)")],
+                vec!["x".to_string()],
+                None,
+                None,
+            )
+            .unwrap(),
         );
+        let residual = |_values: &[f64]| Ok(vec![0.0]);
+        let feasible = |_values: &[f64]| true;
+        let validate = |_values: &[f64]| {
+            Err(ReactionExtentError::ResidualEvaluation(
+                "candidate validation must not be reached".to_string(),
+            ))
+        };
+        let backend = SolverBackend::RustedSciThe(RustedSciTheSolver::LevenbergMarquardt);
+        let backends: [&dyn EquilibriumNonlinearBackend; 1] = [&backend];
+        let error = solve_backend_cascade_with_control_and_telemetry(
+            &backends,
+            vec![-1.0],
+            &residual,
+            None,
+            &feasible,
+            &validate,
+            SolverPolicy::Single(backend),
+            SolverCascadeBudget::new(1, 20, 20),
+            &SolverParams::default(),
+            Some(&rst_problem),
+            None,
+            SolverTelemetryMode::Detailed,
+        )
+        .expect_err("the negative square-root callback must fail numerically");
+
+        let reports = error.backend_attempt_reports();
+        let metrics = reports[0]
+            .metrics
+            .as_ref()
+            .expect("enabled callback instrumentation must survive RST errors");
+        assert!(metrics.counters_collected);
+        assert!(metrics.timings_collected);
+        assert!(metrics.residual_evaluations > 0);
+        assert_eq!(
+            metrics.iterations, 0,
+            "RST does not expose failed partial iterations"
+        );
+        let timing = metrics.evaluation_timing.as_ref().unwrap();
+        assert!(timing.residual_evaluation_micros > 0);
+        assert!(timing.iteration_telemetry.is_none());
+        assert!(timing.linear_system_micros.is_none());
     }
 
     #[test]
@@ -687,7 +744,7 @@ mod tests {
         };
 
         let backend = FakeBackend {
-            backend: SolverBackend::Legacy(Solvers::LM),
+            backend: SolverBackend::Native(Solvers::LM),
             behavior: FakeBackendBehavior::Fail,
         };
         assert!(matches!(
@@ -708,7 +765,7 @@ mod tests {
                 panic!("failed backend must not reach candidate validation")
             };
         let backend = FakeBackend {
-            backend: SolverBackend::Legacy(Solvers::LM),
+            backend: SolverBackend::Native(Solvers::LM),
             behavior: FakeBackendBehavior::FailAfterDelay,
         };
         let backends: [&dyn EquilibriumNonlinearBackend; 1] = [&backend];
@@ -739,17 +796,17 @@ mod tests {
     }
 
     #[test]
-    fn failed_legacy_attempt_preserves_callback_metrics() {
+    fn failed_native_attempt_preserves_callback_metrics() {
         use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::capture;
 
         let residual = |_values: &[f64]| {
             Err(ReactionExtentError::ResidualEvaluation(
-                "forced legacy residual failure".to_string(),
+                "forced native residual failure".to_string(),
             ))
         };
         let jacobian = |_values: &[f64]| Ok(DMatrix::identity(1, 1));
         let feasible = |_values: &[f64]| true;
-        let backend = SolverBackend::Legacy(Solvers::LM);
+        let backend = SolverBackend::Native(Solvers::LM);
         let (result, _) = capture(|| {
             backend.solve(BackendSolveRequest {
                 initial_guess: vec![0.0],
@@ -769,23 +826,23 @@ mod tests {
         let error = result.expect_err("forced residual failure must be returned");
         let metrics = error
             .metrics
-            .expect("failed Legacy attempt must retain diagnostics");
+            .expect("failed Native attempt must retain diagnostics");
         assert!(!metrics.backend_converged);
         assert_eq!(metrics.residual_evaluations, 1);
         assert!(metrics.evaluation_timing.is_some());
     }
 
     #[test]
-    fn legacy_solver_diagnostics_are_scoped_to_calculator_capture() {
+    fn native_solver_diagnostics_are_scoped_to_calculator_capture() {
         use crate::Thermodynamics::ChemEquilibrium::equilibrium_instrumentation::capture;
 
         let residual = |values: &[f64]| Ok(vec![values[0] - 1.0]);
         let jacobian = |_values: &[f64]| Ok(DMatrix::identity(1, 1));
         let feasible = |_values: &[f64]| true;
         for backend in [
-            SolverBackend::Legacy(Solvers::LM),
-            SolverBackend::Legacy(Solvers::NR),
-            SolverBackend::Legacy(Solvers::TR),
+            SolverBackend::Native(Solvers::LM),
+            SolverBackend::Native(Solvers::NR),
+            SolverBackend::Native(Solvers::TR),
         ] {
             let solve = || {
                 backend.solve(BackendSolveRequest {
@@ -808,19 +865,19 @@ mod tests {
             let metrics = captured
                 .unwrap()
                 .metrics
-                .expect("capture must attach legacy solver diagnostics");
+                .expect("capture must attach native solver diagnostics");
             assert!(metrics.residual_evaluations > 0);
             assert!(metrics.jacobian_evaluations > 0);
-            if !matches!(backend, SolverBackend::Legacy(Solvers::TR)) {
+            if !matches!(backend, SolverBackend::Native(Solvers::TR)) {
                 assert!(metrics.linear_solves > 0);
             }
             let timing = metrics
                 .evaluation_timing
-                .expect("capture must attach legacy timing split");
+                .expect("capture must attach native timing split");
             assert!(timing.linear_system_micros.is_some());
         }
 
-        let uncaptured = SolverBackend::Legacy(Solvers::LM)
+        let uncaptured = SolverBackend::Native(Solvers::LM)
             .solve(BackendSolveRequest {
                 initial_guess: vec![0.0],
                 system: PreparedNonlinearSystem::new(
@@ -838,7 +895,7 @@ mod tests {
             .unwrap();
         assert!(
             uncaptured.metrics.is_none(),
-            "legacy diagnostics must stay disabled outside calculator capture"
+            "native diagnostics must stay disabled outside calculator capture"
         );
     }
 
@@ -867,7 +924,7 @@ mod tests {
             max_iterations: 1,
             rst_telemetry_mode: SolverTelemetryMode::Off,
         };
-        let backend = SolverBackend::Legacy(Solvers::LM);
+        let backend = SolverBackend::Native(Solvers::LM);
 
         assert!(matches!(
             backend.solve(request),

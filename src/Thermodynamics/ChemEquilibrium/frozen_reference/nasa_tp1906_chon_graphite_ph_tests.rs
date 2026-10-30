@@ -38,6 +38,7 @@ mod tests {
     };
     use crate::Thermodynamics::ChemEquilibrium::frozen_reference_nasa_tp1907_chon_graphite::TP1907_REFERENCE_PRESSURE_PA;
     use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::PhaseEquilibriumInputKind;
+    use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::ExtensiveNormalizationTrigger;
     use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
         EquilibriumSolveOptions, ExtensiveNormalizationPolicy,
     };
@@ -984,7 +985,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "release characterization of real TP-1906 P,H scale and threshold bands"]
     fn i5_tp1906_extensive_ph_scale_matrix_characterization() {
         const TRACE_FLOOR: f64 = 1.0e-30;
         const DEFAULT_PHASE_EPS: f64 = 1.0e-30;
@@ -1097,6 +1097,16 @@ mod tests {
                         assert!(!evidence.reconstructed_physical_boundary);
                         assert!(evidence.physical_retry_backend.is_some());
                     }
+                } else if factor < 1.0 {
+                    let evidence = recovery.expect(
+                        "low-inventory frozen P,H solves must retain proactive normalization evidence",
+                    );
+                    assert!(matches!(
+                        evidence.trigger,
+                        ExtensiveNormalizationTrigger::SmallScalePreconditioning { .. }
+                    ));
+                    assert!(evidence.reconstructed_physical_boundary);
+                    assert!(evidence.physical_retry_backend.is_none());
                 } else {
                     assert!(
                         recovery.is_none(),

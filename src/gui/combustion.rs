@@ -41,9 +41,9 @@ use crate::ReactorsBVP::task_parser_reactor_BVP::{
 use crate::ReactorsBVP::task_value_conversion::{UsizeConversionError, try_value_as_usize};
 use crate::cli::reactor_help::REACTOR_ENG_HELPER;
 use crate::gui::bvp_gui_config::{
-    AotToolchainRequest, BvpGuiConfig, BvpGuiMigrationReport, GuiAotCodegenBackend,
-    GuiExecutionBackend, aot_toolchain_request, normalize_bvp_solver_backend_section,
-    validate_aot_toolchain_fields,
+    AotToolchainRequest, BvpGuiConfig, BvpGuiMigrationReport, BvpSolverFamily,
+    GuiAotCodegenBackend, GuiExecutionBackend, aot_toolchain_request,
+    normalize_bvp_solver_backend_section, set_bvp_solver_family, validate_aot_toolchain_fields,
 };
 pub use crate::gui::document_lifecycle::{
     DocumentLifecycleState, GuiFileOperationKind, GuiFileOperationResult,
@@ -144,43 +144,49 @@ impl std::fmt::Display for ProblemsEnum {
 /// * `Vector` - Multiple drag widgets for each vector element
 /// * `Boolean` - Checkbox widget
 /// * `Optional` - Read/edit an existing typed payload without inventing its type
-fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) {
+fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) -> bool {
     match value {
         Value::String(s) => {
-            if ui.text_edit_singleline(s).changed() {
+            let response = ui.text_edit_singleline(s);
+            if response.changed() {
                 info!("Field '{}' changed to: {}", field_name, s);
             }
+            response.hovered()
         }
         Value::Float(f) => {
-            if ui
-                .add(egui::DragValue::new(f).speed(0.1).custom_formatter(|n, _| {
-                    if n.abs() < 1e-3 && n != 0.0 {
-                        format!("{:.2e}", n)
-                    } else if n.abs() >= 100.0 {
-                        format!("{:.1}", n)
-                    } else {
-                        format!("{:.6}", n)
-                    }
-                }))
-                .changed()
-            {
+            let response = ui.add(egui::DragValue::new(f).speed(0.1).custom_formatter(|n, _| {
+                if n.abs() < 1e-3 && n != 0.0 {
+                    format!("{:.2e}", n)
+                } else if n.abs() >= 100.0 {
+                    format!("{:.1}", n)
+                } else {
+                    format!("{:.6}", n)
+                }
+            }));
+            if response.changed() {
                 info!("Field '{}' changed to: {}", field_name, f);
             }
+            response.hovered()
         }
         Value::Integer(i) => {
-            if ui.add(egui::DragValue::new(i).speed(1)).changed() {
+            let response = ui.add(egui::DragValue::new(i).speed(1));
+            if response.changed() {
                 info!("Field '{}' changed to: {}", field_name, i);
             }
+            response.hovered()
         }
         Value::Usize(u) => {
-            if ui.add(egui::DragValue::new(u).speed(1)).changed() {
+            let response = ui.add(egui::DragValue::new(u).speed(1));
+            if response.changed() {
                 info!("Field '{}' changed to: {}", field_name, u);
             }
+            response.hovered()
         }
         Value::Vector(vec) => {
+            let mut hovered = false;
             for (i, v) in vec.iter_mut().enumerate() {
-                if ui
-                    .add(egui::DragValue::new(v).speed(0.1).custom_formatter(|n, _| {
+                let response =
+                    ui.add(egui::DragValue::new(v).speed(0.1).custom_formatter(|n, _| {
                         if n.abs() < 1e-3 && n != 0.0 {
                             format!("{:.2e}", n)
                         } else if n.abs() >= 100.0 {
@@ -188,23 +194,27 @@ fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) {
                         } else {
                             format!("{:.6}", n)
                         }
-                    }))
-                    .changed()
-                {
+                    }));
+                hovered |= response.hovered();
+                if response.changed() {
                     info!("Field '{}[{}]' changed to: {}", field_name, i, v);
                 }
             }
+            hovered
         }
         Value::Boolean(b) => {
-            if ui.checkbox(b, "").changed() {
+            let response = ui.checkbox(b, "");
+            if response.changed() {
                 info!("Field '{}' changed to: {}", field_name, b);
             }
+            response.hovered()
         }
         Value::Optional(opt) => {
+            let mut hovered = false;
             ui.horizontal(|ui| {
                 if let Some(inner) = opt {
                     ui.label("Some:");
-                    render_value(ui, inner, field_name);
+                    hovered = render_value(ui, inner, field_name);
                 } else {
                     // A generic `None` carries no information about its inner
                     // type. Typed optional controls are responsible for
@@ -212,6 +222,7 @@ fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) {
                     ui.label("None");
                 }
             });
+            hovered
         }
     }
 }
@@ -570,13 +581,27 @@ fn render_bvp_adaptive_grid_panel(
                             .and_then(|values| values.first())
                             .map(try_value_as_usize)
                             .unwrap_or(Ok(3));
-                        ui.label("Maximum grid refinements");
+                        let label = ui.label("Maximum grid refinements");
+                        let help_text = help_map.and_then(|map| {
+                            map.iter()
+                                .find(|(key, _)| *key == "adaptive_strategy.max_refinements")
+                                .map(|(_, help_text)| *help_text)
+                        });
+                        if label.hovered() {
+                            if let Some(help_text) = help_text {
+                                *current_help = help_text.to_string();
+                            }
+                        }
                         match current_result {
                             Ok(mut max_refinements) => {
-                                if ui
-                                    .add(egui::DragValue::new(&mut max_refinements).speed(1))
-                                    .changed()
-                                {
+                                let response =
+                                    ui.add(egui::DragValue::new(&mut max_refinements).speed(1));
+                                if response.hovered() {
+                                    if let Some(help_text) = help_text {
+                                        *current_help = help_text.to_string();
+                                    }
+                                }
+                                if response.changed() {
                                     adaptive_strategy.insert(
                                         "max_refinements".to_string(),
                                         Some(vec![Value::Usize(max_refinements)]),
@@ -890,35 +915,80 @@ fn ensure_field_slot<'a>(
 /// API and gives users a visible starting point for both lambdify and AOT
 /// routes.
 fn ensure_bvp_solver_backend_defaults(document: &mut DocumentMap) {
+    let family = BvpGuiConfig::from_document(document).0.core.family;
     let section = ensure_section_mut(document, "solver_settings");
-    let _ = normalize_matrix_backend_aliases(section);
-    let defaults = [
-        ("scheme", Value::String("forward".to_string())),
-        ("strategy", Value::String("Damped".to_string())),
-        ("linear_sys_method", Value::Optional(None)),
-        (
-            "generated_backend",
-            Value::String("banded_lambdify".to_string()),
-        ),
-        ("symbolic_backend", Value::String("AtomView".to_string())),
-        ("banded_linear_solver", Value::String("auto".to_string())),
-        ("refinement_steps", Value::Usize(5)),
-        ("abs_tolerance", Value::Float(1e-7)),
-        ("max_iterations", Value::Usize(100)),
+    set_string_field(section, "solver_family", family.as_document_value());
+    let common_defaults = [
+        ("telemetry", Value::String("off".to_string())),
         (
             "loglevel",
             Value::Optional(Some(Box::new(Value::String("info".to_string())))),
         ),
-        ("dont_save_log", Value::Boolean(true)),
     ];
-
-    for (field_name, default_value) in defaults {
-        let _ = ensure_field_slot(section, field_name, default_value);
+    for (field_name, value) in common_defaults {
+        let _ = ensure_field_slot(section, field_name, value);
     }
 
-    let _ = normalize_usize_field(section, "max_iterations");
-    let _ = normalize_usize_field(section, "refinement_steps");
-    normalize_bvp_solver_backend_section(section);
+    match family {
+        BvpSolverFamily::Damped => {
+            let defaults = [
+                ("scheme", Value::String("forward".to_string())),
+                ("strategy", Value::String("Damped".to_string())),
+                ("linear_sys_method", Value::Optional(None)),
+                (
+                    "generated_backend",
+                    Value::String("banded_lambdify".to_string()),
+                ),
+                ("symbolic_backend", Value::String("AtomView".to_string())),
+                ("banded_linear_solver", Value::String("auto".to_string())),
+                ("refinement_steps", Value::Usize(5)),
+                ("abs_tolerance", Value::Float(1e-7)),
+                ("max_iterations", Value::Usize(100)),
+                ("dont_save_log", Value::Boolean(true)),
+            ];
+            for (field_name, value) in defaults {
+                let _ = ensure_field_slot(section, field_name, value);
+            }
+            let _ = normalize_matrix_backend_aliases(section);
+            let _ = normalize_usize_field(section, "max_iterations");
+            let _ = normalize_usize_field(section, "refinement_steps");
+            normalize_bvp_solver_backend_section(section);
+        }
+        BvpSolverFamily::Frozen => {
+            let defaults = [
+                ("scheme", Value::String("forward".to_string())),
+                ("strategy", Value::String("Frozen".to_string())),
+                ("linear_sys_method", Value::Optional(None)),
+                (
+                    "generated_backend",
+                    Value::String("banded_lambdify".to_string()),
+                ),
+                ("symbolic_backend", Value::String("AtomView".to_string())),
+                ("tolerance", Value::Float(1e-6)),
+                ("max_iterations", Value::Usize(50)),
+                ("dont_save_log", Value::Boolean(true)),
+            ];
+            for (field_name, value) in defaults {
+                let _ = ensure_field_slot(section, field_name, value);
+            }
+            let _ = normalize_matrix_backend_aliases(section);
+            let _ = normalize_usize_field(section, "max_iterations");
+            normalize_bvp_solver_backend_section(section);
+        }
+        BvpSolverFamily::Sci => {
+            let defaults = [
+                ("execution", Value::String("lambdify".to_string())),
+                ("assembly", Value::String("atom_view_native".to_string())),
+                ("matrix_layout", Value::String("banded_auto".to_string())),
+                ("tolerance", Value::Float(1e-4)),
+                ("max_nodes", Value::Usize(256)),
+            ];
+            for (field_name, value) in defaults {
+                let _ = ensure_field_slot(section, field_name, value);
+            }
+            let _ = normalize_usize_field(section, "max_nodes");
+        }
+    }
 }
 
 /// Seeds the BVP document once during load or problem construction.
@@ -1141,6 +1211,15 @@ fn render_solver_backend_optional_string_choice_row(
         .unwrap_or(default_label);
 
     let label_response = ui.label(display_name);
+    if let Some(help_text) = help_map
+        .and_then(|map| {
+            map.iter()
+                .find(|(key, _)| *key == format!("solver_settings.{field_name}"))
+        })
+        .map(|(_, text)| *text)
+    {
+        label_response.clone().on_hover_text(help_text);
+    }
     if label_response.hovered() {
         if let Some(map) = help_map {
             let help_key = format!("solver_settings.{}", field_name);
@@ -1159,7 +1238,16 @@ fn render_solver_backend_optional_string_choice_row(
                     ui.selectable_value(&mut selected_label, (*label).to_string(), *label);
                 }
             });
+    let combo_hovered = combo_response.response.hovered();
     let _ = combo_response.response.labelled_by(label_response.id);
+    if combo_hovered {
+        if let Some(map) = help_map {
+            let help_key = format!("solver_settings.{}", field_name);
+            if let Some((_, help_text)) = map.iter().find(|(key, _)| *key == help_key) {
+                *current_help = help_text.to_string();
+            }
+        }
+    }
 
     if selected_label != current_label {
         let selected_value = choices
@@ -1189,6 +1277,7 @@ fn render_solver_backend_row(
 ) {
     let values = ensure_field_slot(section, field_name, default_value);
     let label_response = ui.label(display_name);
+    let mut input_hovered = false;
 
     if label_response.hovered() {
         if let Some(map) = help_map {
@@ -1205,7 +1294,7 @@ fn render_solver_backend_row(
                 ui.label("None");
             } else {
                 for value in values.iter_mut() {
-                    render_value(ui, value, field_name);
+                    input_hovered |= render_value(ui, value, field_name);
                 }
             }
         }
@@ -1213,8 +1302,24 @@ fn render_solver_backend_row(
             ui.label("None");
         }
     }
+    if input_hovered {
+        update_solver_field_help(field_name, help_map, current_help);
+    }
 
     ui.end_row();
+}
+
+fn update_solver_field_help(
+    field_name: &str,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) {
+    if let Some(map) = help_map {
+        let help_key = format!("solver_settings.{field_name}");
+        if let Some((_, help_text)) = map.iter().find(|(key, _)| *key == help_key) {
+            *current_help = help_text.to_string();
+        }
+    }
 }
 
 /// Renders a solver backend row that must stay as `usize`.
@@ -1253,15 +1358,16 @@ fn render_solver_backend_usize_row(
     match current_value {
         Ok(mut current_value) => {
             let _ = normalize_usize_field(section, field_name);
-            if ui
-                .add(egui::DragValue::new(&mut current_value).speed(1))
-                .changed()
-            {
+            let response = ui.add(egui::DragValue::new(&mut current_value).speed(1));
+            if response.changed() {
                 section.insert(
                     field_name.to_string(),
                     Some(vec![Value::Usize(current_value)]),
                 );
                 info!("Field '{}' changed to: {}", field_name, current_value);
+            }
+            if response.hovered() {
+                update_solver_field_help(field_name, help_map, current_help);
             }
         }
         Err(error) => {
@@ -1316,7 +1422,16 @@ fn render_solver_backend_choice_row(
                     ui.selectable_value(&mut selected_value, (*choice).to_string(), *choice);
                 }
             });
+    let combo_hovered = combo_response.response.hovered();
     let _ = combo_response.response.labelled_by(label_response.id);
+    if combo_hovered {
+        if let Some(map) = help_map {
+            let help_key = format!("solver_settings.{}", field_name);
+            if let Some((_, help_text)) = map.iter().find(|(key, _)| *key == help_key) {
+                *current_help = help_text.to_string();
+            }
+        }
+    }
 
     if selected_value != current_value {
         set_string_field(section, field_name, &selected_value);
@@ -1369,7 +1484,18 @@ fn render_generated_backend_mode_row(
             ui.selectable_value(&mut selected_mode, "Lambdify".to_string(), "Lambdify");
             ui.selectable_value(&mut selected_mode, "AOT".to_string(), "AOT");
         });
+    let combo_hovered = combo_response.response.hovered();
     let _ = combo_response.response.labelled_by(label_response.id);
+    if combo_hovered {
+        if let Some(map) = help_map {
+            if let Some((_, help_text)) = map
+                .iter()
+                .find(|(key, _)| *key == "solver_settings.generated_backend")
+            {
+                *current_help = help_text.to_string();
+            }
+        }
+    }
 
     let changed = selected_mode != current_label;
     if changed {
@@ -1402,14 +1528,47 @@ fn render_bvp_solver_backend_panel(
     // render path must reconcile the backend contract even when the user has
     // not changed a control yet.
     ensure_bvp_solver_backend_defaults(document);
-    let section = ensure_section_mut(document, "solver_settings");
-    normalize_bvp_solver_backend_section(section);
+    let family_before = BvpGuiConfig::from_document(document).0.core.family;
 
     ui.separator();
     ui.label("Solver backend");
-    ui.label("Default route: Lambdify + AtomView + Banded");
-    ui.label("Residuals and Jacobian backend is exclusive: Lambdify or AOT.");
+    ui.label("Solver family and its route-specific settings");
     ui.add_space(6.0);
+
+    {
+        let section = ensure_section_mut(document, "solver_settings");
+        render_solver_backend_choice_row(
+            ui,
+            section,
+            "solver_family",
+            "Solver family",
+            &["damped", "frozen", "sci"],
+            "damped",
+            help_map,
+            current_help,
+        );
+    }
+    let family = BvpGuiConfig::from_document(document).0.core.family;
+    if family != family_before {
+        set_bvp_solver_family(document, family);
+        ensure_bvp_solver_backend_defaults(document);
+    }
+    let section = ensure_section_mut(document, "solver_settings");
+    if family != BvpSolverFamily::Sci {
+        normalize_bvp_solver_backend_section(section);
+    }
+
+    if family == BvpSolverFamily::Sci {
+        render_sci_solver_backend_controls(ui, section, help_map, current_help);
+        return;
+    }
+
+    ui.label(match family {
+        BvpSolverFamily::Damped => "Damped Newton route",
+        BvpSolverFamily::Frozen => "Fixed-mesh Frozen/Naive route",
+        BvpSolverFamily::Sci => unreachable!(),
+    });
+    ui.label("Residuals and Jacobian backend is exclusive: Lambdify or AOT.");
 
     ui.label("Core solve");
     egui::Grid::new("bvp_solver_backend_core_grid")
@@ -1453,9 +1612,17 @@ fn render_bvp_solver_backend_panel(
                 ui,
                 section,
                 "strategy",
-                "strategy",
-                &["Damped"],
-                "Damped",
+                "Nonlinear strategy",
+                if family == BvpSolverFamily::Damped {
+                    &["Damped"][..]
+                } else {
+                    &["Frozen", "Naive"][..]
+                },
+                if family == BvpSolverFamily::Damped {
+                    "Damped"
+                } else {
+                    "Frozen"
+                },
                 help_map,
                 current_help,
             );
@@ -1472,9 +1639,21 @@ fn render_bvp_solver_backend_panel(
             render_solver_backend_row(
                 ui,
                 section,
-                "abs_tolerance",
-                "abs_tolerance",
-                Value::Float(1e-7),
+                if family == BvpSolverFamily::Damped {
+                    "abs_tolerance"
+                } else {
+                    "tolerance"
+                },
+                if family == BvpSolverFamily::Damped {
+                    "abs_tolerance"
+                } else {
+                    "tolerance"
+                },
+                Value::Float(if family == BvpSolverFamily::Damped {
+                    1e-7
+                } else {
+                    1e-6
+                }),
                 help_map,
                 current_help,
             );
@@ -1487,6 +1666,34 @@ fn render_bvp_solver_backend_panel(
                 help_map,
                 current_help,
             );
+            let aot_enabled = string_field_value(section, "generated_backend")
+                .as_deref()
+                .and_then(GuiExecutionBackend::from_generated_backend)
+                == Some(GuiExecutionBackend::Aot);
+            let telemetry = string_field_value(section, "telemetry")
+                .unwrap_or_else(|| "off".to_string());
+            let telemetry_choices: &[&str] = if aot_enabled {
+                &["off", "counters", "detailed"]
+            } else {
+                &["off", "counters", "timings", "detailed"]
+            };
+            render_solver_backend_choice_row(
+                ui,
+                section,
+                "telemetry",
+                "Solver telemetry",
+                telemetry_choices,
+                "off",
+                help_map,
+                current_help,
+            );
+            if aot_enabled && telemetry.eq_ignore_ascii_case("timings") {
+                ui.colored_label(
+                    egui::Color32::from_rgb(160, 90, 20),
+                    "Timings telemetry is unavailable for the Damped AOT route; select Counters or Detailed.",
+                );
+                ui.end_row();
+            }
             render_solver_backend_optional_string_choice_row(
                 ui,
                 section,
@@ -1633,6 +1840,215 @@ fn render_bvp_solver_backend_panel(
                 current_help,
             );
             let _ = aot_enabled;
+        });
+}
+
+fn render_sci_solver_backend_controls(
+    ui: &mut egui::Ui,
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) {
+    let execution = string_field_value(section, "execution").unwrap_or_else(|| {
+        set_string_field(section, "execution", "lambdify");
+        "lambdify".to_string()
+    });
+    let aot_enabled = execution.eq_ignore_ascii_case("aot");
+
+    ui.label("BVP_sci collocation solver");
+    egui::Grid::new("bvp_sci_solver_settings_grid")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            render_solver_backend_choice_row(
+                ui,
+                section,
+                "execution",
+                "Execution",
+                &["lambdify", "aot"],
+                "lambdify",
+                help_map,
+                current_help,
+            );
+            render_solver_backend_choice_row(
+                ui,
+                section,
+                "assembly",
+                "Symbolic assembly",
+                &["atom_view_native", "expr_legacy"],
+                "atom_view_native",
+                help_map,
+                current_help,
+            );
+            render_solver_backend_choice_row(
+                ui,
+                section,
+                "matrix_layout",
+                "Matrix layout",
+                &["dense", "sparse", "banded", "banded_auto"],
+                "banded_auto",
+                help_map,
+                current_help,
+            );
+            if string_field_value(section, "matrix_layout")
+                .is_some_and(|layout| layout.eq_ignore_ascii_case("banded"))
+            {
+                render_solver_backend_usize_row(
+                    ui,
+                    section,
+                    "banded_lower",
+                    "Lower bandwidth",
+                    1,
+                    help_map,
+                    current_help,
+                );
+                render_solver_backend_usize_row(
+                    ui,
+                    section,
+                    "banded_upper",
+                    "Upper bandwidth",
+                    1,
+                    help_map,
+                    current_help,
+                );
+            } else {
+                section.remove("banded_lower");
+                section.remove("banded_upper");
+            }
+            render_solver_backend_row(
+                ui,
+                section,
+                "tolerance",
+                "Tolerance",
+                Value::Float(1e-4),
+                help_map,
+                current_help,
+            );
+            render_solver_backend_row(
+                ui,
+                section,
+                "boundary_tolerance",
+                "Boundary tolerance",
+                Value::Float(1e-6),
+                help_map,
+                current_help,
+            );
+            for (field, label, default) in [
+                ("max_nodes", "Maximum mesh nodes", 256),
+                ("max_newton_iterations", "Maximum Newton iterations", 10),
+                ("max_jacobian_refreshes", "Maximum Jacobian refreshes", 4),
+                ("max_mesh_refinements", "Maximum mesh refinements", 4),
+                ("max_backtracking_steps", "Maximum backtracking steps", 8),
+            ] {
+                render_solver_backend_usize_row(
+                    ui,
+                    section,
+                    field,
+                    label,
+                    default,
+                    help_map,
+                    current_help,
+                );
+            }
+            render_solver_backend_choice_row(
+                ui,
+                section,
+                "telemetry",
+                "Solver telemetry",
+                &["off", "counters", "timings", "detailed"],
+                "off",
+                help_map,
+                current_help,
+            );
+            render_solver_backend_optional_string_choice_row(
+                ui,
+                section,
+                "loglevel",
+                "Logging level",
+                &[
+                    ("None", None),
+                    ("error", Some("error")),
+                    ("warn", Some("warn")),
+                    ("info", Some("info")),
+                    ("debug", Some("debug")),
+                    ("trace", Some("trace")),
+                ],
+                "None",
+                help_map,
+                current_help,
+            );
+            if aot_enabled {
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "aot_build_policy",
+                    "AOT build policy",
+                    &[
+                        "use_if_available",
+                        "build_if_missing",
+                        "require_prebuilt",
+                        "rebuild_always",
+                    ],
+                    "build_if_missing",
+                    help_map,
+                    current_help,
+                );
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "aot_build_profile",
+                    "AOT build profile",
+                    &["release", "debug"],
+                    "release",
+                    help_map,
+                    current_help,
+                );
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "aot_codegen_backend",
+                    "AOT codegen backend",
+                    &["C", "Rust", "Zig"],
+                    "C",
+                    help_map,
+                    current_help,
+                );
+                let c_codegen = string_field_value(section, "aot_codegen_backend")
+                    .is_some_and(|backend| backend.eq_ignore_ascii_case("c"));
+                if c_codegen {
+                    render_solver_backend_choice_row(
+                        ui,
+                        section,
+                        "aot_c_compiler",
+                        "C compiler",
+                        &["tcc", "gcc"],
+                        "tcc",
+                        help_map,
+                        current_help,
+                    );
+                } else {
+                    section.remove("aot_c_compiler");
+                }
+            } else {
+                for field in [
+                    "aot_build_policy",
+                    "aot_build_profile",
+                    "aot_codegen_backend",
+                    "aot_c_compiler",
+                    "aot_output_dir",
+                    "aot_handoff_path",
+                    "aot_crate_name",
+                    "aot_module_name",
+                    "aot_residual_chunking",
+                    "aot_residual_chunk_size",
+                    "aot_sparse_jacobian_chunking",
+                    "aot_sparse_jacobian_chunk_size",
+                    "aot_banded_jacobian_chunking",
+                    "aot_banded_jacobian_chunk_size",
+                ] {
+                    section.remove(field);
+                }
+            }
         });
 }
 
@@ -2431,23 +2847,33 @@ impl CombustionApp {
             help_map,
             &mut self.current_help_info,
         );
-        render_bvp_section_group(
-            ui,
-            "Advanced solver settings",
-            BVP_SOLVER_ADVANCED_SECTIONS,
-            &mut editor_document,
-            help_map,
-            &mut self.current_help_info,
-            &mut self.new_field_names,
-            &mut self.new_field_values,
-            &mut self.pending_document_deletion,
-        );
-        render_bvp_adaptive_grid_panel(
-            ui,
-            &mut editor_document,
-            help_map,
-            &mut self.current_help_info,
-        );
+        let family = BvpGuiConfig::from_document(&editor_document).0.core.family;
+        let advanced_sections: &[&str] = match family {
+            BvpSolverFamily::Damped => BVP_SOLVER_ADVANCED_SECTIONS,
+            BvpSolverFamily::Frozen => &["strategy_params"],
+            BvpSolverFamily::Sci => &[],
+        };
+        if !advanced_sections.is_empty() {
+            render_bvp_section_group(
+                ui,
+                "Advanced solver settings",
+                advanced_sections,
+                &mut editor_document,
+                help_map,
+                &mut self.current_help_info,
+                &mut self.new_field_names,
+                &mut self.new_field_values,
+                &mut self.pending_document_deletion,
+            );
+        }
+        if family == BvpSolverFamily::Damped {
+            render_bvp_adaptive_grid_panel(
+                ui,
+                &mut editor_document,
+                help_map,
+                &mut self.current_help_info,
+            );
+        }
         render_bvp_section_group(
             ui,
             "Initial guess",
@@ -2829,7 +3255,11 @@ impl CombustionApp {
                 };
 
                 if matches!(self.selected_problem, ProblemsEnum::BVPSimple) {
-                    self.render_bvp_structured_editor(ui, help_map);
+                    let editor_height = (ui.available_height() - 80.0).max(220.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("bvp_structured_editor_scroll")
+                        .max_height(editor_height)
+                        .show(ui, |ui| self.render_bvp_structured_editor(ui, help_map));
                 }
 
                 ui.separator();
@@ -2872,10 +3302,15 @@ impl CombustionApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if matches!(self.selected_problem, ProblemsEnum::BVPSimple) {
                         let bvp_species_sections = bvp_species_section_names(&self.document);
+                        let family = BvpGuiConfig::from_document(&self.document).0.core.family;
+                        let mut physics_sections = BVP_PHYSICS_SECTIONS.to_vec();
+                        if family != BvpSolverFamily::Damped {
+                            physics_sections.retain(|section| *section != "bounds");
+                        }
                         render_bvp_section_group(
                             ui,
                             "Physics",
-                            BVP_PHYSICS_SECTIONS,
+                            &physics_sections,
                             &mut self.document,
                             help_map,
                             &mut self.current_help_info,
@@ -3269,6 +3704,7 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     ("diffusion_coefficients", "Molecular diffusion coefficients for each chemical substance [m²/s]."),
     ("reactions", "Chemical reactions with Arrhenius kinetic parameters [A, n, E, Q]."),
     ("solver_settings", "Structured solver backend controls. Residuals/Jacobian assembly is exclusive: choose Lambdify or AOT, then refine matrix and symbolic backends with explicit dropdowns."),
+    ("solver_settings.solver_family", "BVP solver family. Damped and Frozen use the BVP_api routes; Sci selects the collocation-based BVP_sci route. Each family exposes only its supported settings."),
     ("bounds", "Variable bounds for solver convergence. Format: lower_bound, upper_bound for each variable type."),
     ("rel_tolerance", "Relative convergence tolerances for each variable type in the numerical solver."),
     ("strategy_params", "Advanced solver strategy parameters for damped Newton-Raphson method."),
@@ -3309,9 +3745,26 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     ("solver_settings.scheme", "Spatial discretization scheme. Type: String. Options: forward, trapezoid. forward remains the lightest-weight route."),
     ("solver_settings.method", "Linear algebra backend. Type: String. Options: Banded, Sparse. This is the canonical matrix-storage selector."),
     ("solver_settings.strategy", "Convergence strategy. Type: String. Options: Damped, Frozen, Naive. Damped remains the robust default."),
+    ("solver_settings.execution", "BVP_sci callback execution route. Options: lambdify or aot. AOT-specific fields are shown only for AOT."),
+    ("solver_settings.assembly", "BVP_sci symbolic expression frontend. Options: atom_view_native or expr_legacy."),
+    ("solver_settings.matrix_layout", "BVP_sci matrix storage layout. Options: dense, sparse, banded, banded_auto."),
+    ("solver_settings.banded_lower", "Lower bandwidth for BVP_sci when matrix_layout is banded."),
+    ("solver_settings.banded_upper", "Upper bandwidth for BVP_sci when matrix_layout is banded."),
+    ("solver_settings.tolerance", "Route-specific convergence tolerance. Used by Frozen and BVP_sci; Damped uses abs_tolerance."),
+    ("solver_settings.boundary_tolerance", "BVP_sci boundary residual tolerance. Defaults to the solver's route default when omitted."),
+    ("solver_settings.max_nodes", "Maximum collocation mesh nodes for BVP_sci."),
+    ("solver_settings.max_newton_iterations", "Maximum Newton iterations for BVP_sci collocation."),
+    ("solver_settings.max_jacobian_refreshes", "Maximum Jacobian refreshes during a BVP_sci solve."),
+    ("solver_settings.max_mesh_refinements", "Maximum adaptive mesh refinements in BVP_sci."),
+    ("solver_settings.max_backtracking_steps", "Maximum backtracking steps per BVP_sci nonlinear iteration."),
+    ("solver_settings.execution_policy", "BVP_sci callback execution policy: sequential, parallel, or auto. Defaults to sequential."),
+    ("solver_settings.execution_min_work", "Minimum callback work used by BVP_sci parallel/auto execution policies; requires execution_policy."),
+    ("solver_settings.output_policy", "BVP_sci solution output selection policy."),
+    ("solver_settings.sparse_factorization", "Sparse factorization backend for BVP_sci sparse matrix layout."),
     ("solver_settings.linear_sys_method", "Optional linear-system override. Type: Optional<String>. Leave None for the default matrix-backend policy."),
     ("solver_settings.abs_tolerance", "Absolute convergence tolerance. Type: Float. Range: 1e-12 to 1e-3. Smaller=more accurate"),
     ("solver_settings.max_iterations", "Maximum solver iterations. Type: Usize. Range: 10-1000. Higher=more attempts to converge"),
+    ("solver_settings.telemetry", "Internal solver telemetry. Type: String. Options: off, counters, timings, detailed. Defaults to off; logging is configured separately. A route may reject unsupported telemetry modes."),
     ("solver_settings.loglevel", "Logging verbosity level. Type: Optional<String>. Options: Some(info), Some(debug), None"),
     ("solver_settings.dont_save_log", "Disable log file saving. Type: Boolean. true=no log files, false=save logs"),
     ("solver_settings.generated_backend", "High-level solver preset used by the RustedSciThe backend. Type: String. Default: banded_lambdify."),

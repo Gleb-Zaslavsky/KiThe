@@ -89,10 +89,11 @@
 //! - **Error Recovery**: Robust handling of missing data and parsing errors
 
 //mod mechfinder_api;
-use crate::Kinetics::error::{KineticsError, KineticsResult};
+use crate::Kinetics::error::{KinDataStateRequirement, KineticsError, KineticsResult};
 use crate::Kinetics::kinetics_lib_api::KineticData;
 use crate::Kinetics::mechfinder_api::{
     Mechanism_search, ReactionData, ReactionKinetics, parse_kinetic_data_vec,
+    parse_kinetic_data_vec_with_context,
 };
 use crate::Kinetics::parsetask::{
     decipher_vector_of_shortcuts, decipher_vector_of_shortcuts_to_pairs,
@@ -417,6 +418,17 @@ pub enum ReactionIdentity {
 }
 
 impl ReactionIdentity {
+    fn diagnostic_label(&self) -> String {
+        match self {
+            Self::Shortcut(shortcut) => format!("shortcut `{shortcut}`"),
+            Self::LibraryReaction {
+                library,
+                reaction_id,
+            } => format!("library `{library}` reaction `{reaction_id}`"),
+            Self::Document { source, index } => format!("document `{source}` item {index}"),
+        }
+    }
+
     /// Return the internal document source tag when this identity refers to a document branch.
     fn document_source_kind(&self) -> Option<DocumentSourceKind> {
         let ReactionIdentity::Document { source, .. } = self else {
@@ -457,6 +469,21 @@ pub enum KinDataState {
     MechanismBuilt,
     Analyzed,
     Sorted,
+}
+
+impl KinDataState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Empty => "Empty",
+            Self::ShortcutsSelected => "ShortcutsSelected",
+            Self::LibraryResolved => "LibraryResolved",
+            Self::DirectReactionsLoaded => "DirectReactionsLoaded",
+            Self::ReactionDataParsed => "ReactionDataParsed",
+            Self::MechanismBuilt => "MechanismBuilt",
+            Self::Analyzed => "Analyzed",
+            Self::Sorted => "Sorted",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -967,10 +994,10 @@ impl KinData {
         if allowed_states.iter().any(|state| *state == self.state) {
             Ok(())
         } else {
-            Err(KineticsError::InvalidState(format!(
-                "{} is not allowed in state {:?}",
-                operation, self.state
-            )))
+            Err(KineticsError::OperationNotAllowedInState {
+                operation,
+                state: self.state.label(),
+            })
         }
     }
 
@@ -1101,7 +1128,7 @@ impl KinData {
             let shortcuts = Self::derived_shortcut_names_from_ids(ids)?;
             let shortcut_refs: Vec<&str> =
                 shortcuts.iter().map(|shortcut| shortcut.as_str()).collect();
-            return Some(decipher_vector_of_shortcuts(shortcut_refs));
+            return decipher_vector_of_shortcuts(shortcut_refs).ok();
         }
 
         if !Self::ids_are_all_library_reactions(ids) {
@@ -1234,7 +1261,6 @@ impl KinData {
 
     /// Check whether the computed state is actually compatible with the current payload.
     pub(crate) fn validate_state_contract(&self, state: KinDataState) -> KineticsResult<()> {
-        let mismatch = |message: String| KineticsError::InvalidState(message);
         let snapshot = self.workflow_snapshot();
 
         match state {
@@ -1264,21 +1290,26 @@ impl KinData {
                 Ok(())
             }
             KinDataState::Sorted if snapshot.normalized_view_ready => Ok(()),
-            KinDataState::ShortcutsSelected => Err(mismatch(
-                "ShortcutsSelected requires shortcut metadata or shortcut reaction ids".to_string(),
-            )),
-            KinDataState::LibraryResolved => Err(mismatch(
-                "LibraryResolved requires library pairs or library reaction ids".to_string(),
-            )),
-            KinDataState::DirectReactionsLoaded => Err(mismatch(
-                "DirectReactionsLoaded requires raw reaction values or document ids".to_string(),
-            )),
-            KinDataState::ReactionDataParsed => Err(mismatch(
-                "ReactionDataParsed requires parsed reaction data".to_string(),
-            )),
-            KinDataState::MechanismBuilt => Err(mismatch(
-                "MechanismBuilt requires reaction data from mechanism construction".to_string(),
-            )),
+            KinDataState::ShortcutsSelected => Err(KineticsError::StateContractMismatch {
+                state: state.label(),
+                requirement: KinDataStateRequirement::ShortcutMetadataOrIds,
+            }),
+            KinDataState::LibraryResolved => Err(KineticsError::StateContractMismatch {
+                state: state.label(),
+                requirement: KinDataStateRequirement::LibraryPairsOrIds,
+            }),
+            KinDataState::DirectReactionsLoaded => Err(KineticsError::StateContractMismatch {
+                state: state.label(),
+                requirement: KinDataStateRequirement::RawValuesOrDocumentIds,
+            }),
+            KinDataState::ReactionDataParsed => Err(KineticsError::StateContractMismatch {
+                state: state.label(),
+                requirement: KinDataStateRequirement::ParsedReactionData,
+            }),
+            KinDataState::MechanismBuilt => Err(KineticsError::StateContractMismatch {
+                state: state.label(),
+                requirement: KinDataStateRequirement::MechanismReactionData,
+            }),
             KinDataState::Analyzed => {
                 if snapshot.has_analyzed_artifacts
                     || snapshot.has_parsed_branch
@@ -1286,15 +1317,16 @@ impl KinData {
                 {
                     Ok(())
                 } else {
-                    Err(mismatch(
-                        "Analyzed requires parsed reaction data, equations, or analyzed artifacts"
-                            .to_string(),
-                    ))
+                    Err(KineticsError::StateContractMismatch {
+                        state: state.label(),
+                        requirement: KinDataStateRequirement::AnalyzedDataOrArtifacts,
+                    })
                 }
             }
-            KinDataState::Sorted => Err(mismatch(
-                "Sorted requires a coherent normalized reaction view".to_string(),
-            )),
+            KinDataState::Sorted => Err(KineticsError::StateContractMismatch {
+                state: state.label(),
+                requirement: KinDataStateRequirement::NormalizedReactionView,
+            }),
         }
     }
 
@@ -1710,7 +1742,7 @@ impl KinData {
         // Canonical shortcut ids win when they are available, so a stale legacy cache cannot
         // steer library resolution toward the wrong reactions.
         let vec: Vec<&str> = shortcut_reactions.iter().map(|s| s.as_str()).collect();
-        let vec_of_pairs = decipher_vector_of_shortcuts_to_pairs(vec);
+        let vec_of_pairs = decipher_vector_of_shortcuts_to_pairs(vec)?;
         // Cache loaded libraries so we only parse each JSON library once per workflow.
         let mut vec_of_reaction_values = Vec::new();
         let mut loaded_libraries: HashMap<String, KineticData> = HashMap::new();
@@ -1874,8 +1906,19 @@ impl KinData {
             ],
         )?;
         if let Some(vec_of_reaction_values) = self.reaction_values() {
-            let (vec_ReactionData, vec_of_equations) =
-                parse_kinetic_data_vec(vec_of_reaction_values.to_vec())?;
+            let reaction_contexts = self.canonical_reaction_ids().map(|identities| {
+                identities
+                    .iter()
+                    .map(ReactionIdentity::diagnostic_label)
+                    .collect::<Vec<_>>()
+            });
+            let parsed = match reaction_contexts.as_deref() {
+                Some(contexts) => {
+                    parse_kinetic_data_vec_with_context(vec_of_reaction_values.to_vec(), contexts)
+                }
+                None => parse_kinetic_data_vec(vec_of_reaction_values.to_vec()),
+            }?;
+            let (vec_ReactionData, vec_of_equations) = parsed;
             //  info!("map_of_reaction_data: {:?}", &vec_of_reaction_data);
             //   info!("vec_of_equations: {:?}", &vec_of_equations);
             self.store_parsed_reaction_views(vec_ReactionData, vec_of_equations);
@@ -1930,11 +1973,17 @@ impl KinData {
         // copy vector of reactions to ReactionAnalyzer_instance
         StoichAnalyzer_instance.reactions = self.equations().to_vec();
         StoichAnalyzer_instance.groups = self.groups.clone();
+        let reaction_contexts = self.canonical_reaction_ids().map(|identities| {
+            identities
+                .iter()
+                .map(ReactionIdentity::diagnostic_label)
+                .collect::<Vec<_>>()
+        });
         // Parse to find substance names. Commit the result only after the whole analysis
         // succeeds, so invalid formulae cannot leave a half-updated KinData workspace.
         let next_substances = if self.substances.is_empty() {
             // no need to parse for substances if they are already known
-            StoichAnalyzer_instance.search_substances()?;
+            StoichAnalyzer_instance.search_substances_with_context(reaction_contexts.as_deref())?;
             StoichAnalyzer_instance.substances.clone()
         } else {
             self.substances.clone()
@@ -1945,7 +1994,7 @@ impl KinData {
         // the reaction-analysis refresh.
         StoichAnalyzer_instance.vec_of_molmasses = self.stecheodata.vec_of_molmasses.clone();
         //find stoichiometric matrix and other matrices
-        StoichAnalyzer_instance.analyse_reactions()?;
+        StoichAnalyzer_instance.analyse_reactions_with_context(reaction_contexts.as_deref())?;
         StoichAnalyzer_instance.create_matrix_of_elements()?;
         self.substances = next_substances;
         self.stecheodata = StoichAnalyzer_instance;

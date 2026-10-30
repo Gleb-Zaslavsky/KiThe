@@ -11,6 +11,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub enum ThermoLibraryError {
@@ -96,6 +97,59 @@ impl std::fmt::Display for ThermoLibraryError {
 }
 
 impl Error for ThermoLibraryError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThermoRepositoryCacheStatus {
+    Hit,
+    Miss,
+    ConcurrentLoadReused,
+    FreshSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThermoCatalogFileStage {
+    Open,
+    Read,
+    Deserialize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ThermoCatalogFileTelemetry {
+    pub name: String,
+    pub path: String,
+    pub bytes_read: Option<u64>,
+    pub open: Option<Duration>,
+    pub read: Option<Duration>,
+    pub deserialize: Option<Duration>,
+    pub failure_stage: Option<ThermoCatalogFileStage>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ThermoRepositoryLoadTelemetry {
+    pub cache_status: Option<ThermoRepositoryCacheStatus>,
+    pub total: Option<Duration>,
+    pub files: Vec<ThermoCatalogFileTelemetry>,
+    pub schema_validation: Option<Duration>,
+    pub index_materialization: Option<Duration>,
+}
+
+#[derive(Debug)]
+pub struct ThermoRepositoryOpenFailure {
+    pub telemetry: ThermoRepositoryLoadTelemetry,
+    pub source: ThermoLibraryError,
+}
+
+impl std::fmt::Display for ThermoRepositoryOpenFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "thermo repository open failed: {}", self.source)
+    }
+}
+
+impl Error for ThermoRepositoryOpenFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.source)
+    }
+}
 
 /// Coarse-grained capability of a library record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -705,6 +759,108 @@ impl ThermoData {
         })
     }
 
+    fn load_json_from_path_with_telemetry<T: DeserializeOwned>(
+        name: &str,
+        path: &str,
+        telemetry: &mut ThermoRepositoryLoadTelemetry,
+    ) -> Result<T, ThermoLibraryError> {
+        let mut file_timing = ThermoCatalogFileTelemetry {
+            name: name.to_string(),
+            path: path.to_string(),
+            ..ThermoCatalogFileTelemetry::default()
+        };
+        let started = Instant::now();
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(source) => {
+                file_timing.open = Some(started.elapsed());
+                file_timing.failure_stage = Some(ThermoCatalogFileStage::Open);
+                telemetry.files.push(file_timing);
+                return Err(ThermoLibraryError::MissingLibraryFile {
+                    path: path.to_string(),
+                    source,
+                });
+            }
+        };
+        file_timing.open = Some(started.elapsed());
+
+        let started = Instant::now();
+        let mut file_contents = String::new();
+        if let Err(source) = file.read_to_string(&mut file_contents) {
+            file_timing.read = Some(started.elapsed());
+            file_timing.failure_stage = Some(ThermoCatalogFileStage::Read);
+            telemetry.files.push(file_timing);
+            return Err(ThermoLibraryError::MissingLibraryFile {
+                path: path.to_string(),
+                source,
+            });
+        }
+        file_timing.read = Some(started.elapsed());
+        file_timing.bytes_read = Some(file_contents.len() as u64);
+
+        let started = Instant::now();
+        let parsed = serde_json::from_str(&file_contents);
+        file_timing.deserialize = Some(started.elapsed());
+        let parsed = match parsed {
+            Ok(parsed) => parsed,
+            Err(source) => {
+                file_timing.failure_stage = Some(ThermoCatalogFileStage::Deserialize);
+                telemetry.files.push(file_timing);
+                return Err(ThermoLibraryError::InvalidLibraryJson {
+                    path: path.to_string(),
+                    source,
+                });
+            }
+        };
+        telemetry.files.push(file_timing);
+        Ok(parsed)
+    }
+
+    fn load_repository_from_paths_with_telemetry(
+        all_keys_path: &str,
+        substance_base_path: &str,
+        elements_path: &str,
+        telemetry: &mut ThermoRepositoryLoadTelemetry,
+    ) -> Result<ThermoRepository, ThermoLibraryError> {
+        let vec_of_subs_adresses: Vec<(String, String)> =
+            Self::load_json_from_path_with_telemetry("substance index", all_keys_path, telemetry)?;
+        let lib_thermo_data: HashMap<String, HashMap<String, Value>> =
+            Self::load_json_from_path_with_telemetry(
+                "thermodynamic payloads",
+                substance_base_path,
+                telemetry,
+            )?;
+        let elements_data: HashMap<String, Vec<Vec<String>>> =
+            Self::load_json_from_path_with_telemetry("element index", elements_path, telemetry)?;
+
+        let started = Instant::now();
+        Self::validate_loaded_catalog(
+            all_keys_path,
+            substance_base_path,
+            elements_path,
+            &vec_of_subs_adresses,
+            &lib_thermo_data,
+            &elements_data,
+        )?;
+        telemetry.schema_validation = Some(started.elapsed());
+
+        let started = Instant::now();
+        let all_libraries: Vec<String> = lib_thermo_data.keys().cloned().collect();
+        let (thermo_libs, transport_libs) = Self::split_libraries_by_handler(&lib_thermo_data);
+        let repository = ThermoRepository::from_parts(
+            vec_of_subs_adresses,
+            lib_thermo_data,
+            elements_data,
+            all_libraries,
+            (*Self::default_library_aliases()).clone(),
+            (*Self::default_library_handlers()).clone(),
+            thermo_libs,
+            transport_libs,
+        );
+        telemetry.index_materialization = Some(started.elapsed());
+        Ok(repository)
+    }
+
     fn try_load_repository_from_default_paths() -> Result<ThermoRepository, ThermoLibraryError> {
         let all_keys_path =
             with_library_manager(|manager| manager.all_keys_substance_path().to_string());
@@ -805,6 +961,101 @@ impl ThermoData {
     pub fn try_new() -> Result<Self, ThermoLibraryError> {
         let repository = Self::default_repository()?;
         Ok(Self::from_repository(repository))
+    }
+
+    /// Open a caller-owned view of the shared immutable repository.
+    ///
+    /// The catalog is loaded and parsed only on the first default open; later
+    /// views share the repository through `Arc` until the process exits.
+    pub fn open() -> Result<Self, ThermoLibraryError> {
+        Self::try_new()
+    }
+
+    /// Open the shared default repository and report cache/load stages.
+    ///
+    /// The ordinary `open()` path remains uninstrumented. When loading fails,
+    /// the returned error retains both the typed source and completed timings.
+    pub fn open_with_telemetry()
+    -> Result<(Self, ThermoRepositoryLoadTelemetry), ThermoRepositoryOpenFailure> {
+        let started = Instant::now();
+        let mut telemetry = ThermoRepositoryLoadTelemetry::default();
+        if let Some(repository) = DEFAULT_THERMO_REPOSITORY.get() {
+            telemetry.cache_status = Some(ThermoRepositoryCacheStatus::Hit);
+            telemetry.total = Some(started.elapsed());
+            return Ok((Self::from_repository(Arc::clone(repository)), telemetry));
+        }
+
+        telemetry.cache_status = Some(ThermoRepositoryCacheStatus::Miss);
+        let (all_keys_path, substance_base_path, elements_path) = with_library_manager(|manager| {
+            (
+                manager.all_keys_substance_path().to_string(),
+                manager.substance_base_path().to_string(),
+                manager.elements_path().to_string(),
+            )
+        });
+        let repository = match Self::load_repository_from_paths_with_telemetry(
+            &all_keys_path,
+            &substance_base_path,
+            &elements_path,
+            &mut telemetry,
+        ) {
+            Ok(repository) => Arc::new(repository),
+            Err(source) => {
+                telemetry.total = Some(started.elapsed());
+                return Err(ThermoRepositoryOpenFailure { telemetry, source });
+            }
+        };
+
+        let _ = DEFAULT_THERMO_REPOSITORY.set(Arc::clone(&repository));
+        let published = DEFAULT_THERMO_REPOSITORY
+            .get()
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::clone(&repository));
+        if !Arc::ptr_eq(&published, &repository) {
+            telemetry.cache_status = Some(ThermoRepositoryCacheStatus::ConcurrentLoadReused);
+        }
+        telemetry.total = Some(started.elapsed());
+        Ok((Self::from_repository(published), telemetry))
+    }
+
+    /// Load an isolated repository from explicit paths with per-file timings.
+    pub fn try_new_from_paths_with_telemetry(
+        all_keys_path: &str,
+        substance_base_path: &str,
+        elements_path: &str,
+    ) -> Result<(Self, ThermoRepositoryLoadTelemetry), ThermoRepositoryOpenFailure> {
+        let started = Instant::now();
+        let mut telemetry = ThermoRepositoryLoadTelemetry {
+            cache_status: Some(ThermoRepositoryCacheStatus::FreshSnapshot),
+            ..ThermoRepositoryLoadTelemetry::default()
+        };
+        let repository = match Self::load_repository_from_paths_with_telemetry(
+            all_keys_path,
+            substance_base_path,
+            elements_path,
+            &mut telemetry,
+        ) {
+            Ok(repository) => Arc::new(repository),
+            Err(source) => {
+                telemetry.total = Some(started.elapsed());
+                return Err(ThermoRepositoryOpenFailure { telemetry, source });
+            }
+        };
+        telemetry.total = Some(started.elapsed());
+        Ok((Self::from_repository(repository), telemetry))
+    }
+
+    /// Whether this view currently holds a non-empty repository snapshot.
+    pub fn is_open(&self) -> bool {
+        !self.LibThermoData.is_empty()
+    }
+
+    /// Release this value's repository handle and local query state.
+    ///
+    /// Other views remain valid. The process-wide default cache is retained
+    /// for later opens, matching the shared-repository lifecycle.
+    pub fn close(&mut self) {
+        *self = Self::empty();
     }
 
     pub fn try_new_fresh() -> Result<Self, ThermoLibraryError> {
@@ -1268,6 +1519,90 @@ mod tests {
 
         let err = ThermoData::load_json_from_path::<Vec<(String, String)>>(&path).unwrap_err();
         assert!(matches!(err, ThermoLibraryError::MissingLibraryFile { .. }));
+    }
+
+    #[test]
+    fn explicit_repository_open_reports_file_timings_and_partial_json_failure() {
+        let mut all_keys = NamedTempFile::new().unwrap();
+        let mut substance_base = NamedTempFile::new().unwrap();
+        let mut elements = NamedTempFile::new().unwrap();
+        writeln!(all_keys, "[[\"NASA_gas\", \"CO\"]]").unwrap();
+        writeln!(
+            substance_base,
+            "{{\"NASA_gas\":{{\"CO\":{{\"payload\":true}}}}}}"
+        )
+        .unwrap();
+        writeln!(elements, "{{\"C\":[[\"CO\",\"NASA_gas\"]]}}").unwrap();
+
+        let (database, telemetry) = ThermoData::try_new_from_paths_with_telemetry(
+            all_keys.path().to_str().unwrap(),
+            substance_base.path().to_str().unwrap(),
+            elements.path().to_str().unwrap(),
+        )
+        .expect("valid explicit catalog should load with diagnostics");
+        assert!(database.is_open());
+        assert_eq!(
+            telemetry.cache_status,
+            Some(ThermoRepositoryCacheStatus::FreshSnapshot)
+        );
+        assert_eq!(telemetry.files.len(), 3);
+        assert!(telemetry.total.is_some());
+        assert!(telemetry.schema_validation.is_some());
+        assert!(telemetry.index_materialization.is_some());
+        assert!(telemetry.files.iter().all(|file| {
+            file.bytes_read.is_some()
+                && file.open.is_some()
+                && file.read.is_some()
+                && file.deserialize.is_some()
+                && file.failure_stage.is_none()
+        }));
+
+        writeln!(substance_base, "{{ malformed json").unwrap();
+        let failure = ThermoData::try_new_from_paths_with_telemetry(
+            all_keys.path().to_str().unwrap(),
+            substance_base.path().to_str().unwrap(),
+            elements.path().to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            failure.source,
+            ThermoLibraryError::InvalidLibraryJson { .. }
+        ));
+        assert_eq!(failure.telemetry.files.len(), 2);
+        assert_eq!(
+            failure.telemetry.files[1].failure_stage,
+            Some(ThermoCatalogFileStage::Deserialize)
+        );
+        assert!(failure.telemetry.files[0].deserialize.is_some());
+        assert!(failure.telemetry.total.is_some());
+    }
+
+    #[test]
+    fn shared_repository_open_telemetry_distinguishes_cache_reuse() {
+        let (mut first, first_telemetry) =
+            ThermoData::open_with_telemetry().expect("shared repository opens");
+        let (mut second, second_telemetry) =
+            ThermoData::open_with_telemetry().expect("shared repository reopens");
+
+        assert!(first.is_open());
+        assert!(second.is_open());
+        assert!(matches!(
+            first_telemetry.cache_status,
+            Some(
+                ThermoRepositoryCacheStatus::Hit
+                    | ThermoRepositoryCacheStatus::Miss
+                    | ThermoRepositoryCacheStatus::ConcurrentLoadReused
+            )
+        ));
+        assert_eq!(
+            second_telemetry.cache_status,
+            Some(ThermoRepositoryCacheStatus::Hit)
+        );
+        assert!(second_telemetry.files.is_empty());
+        assert!(second_telemetry.total.is_some());
+
+        first.close();
+        second.close();
     }
 
     #[test]
@@ -1872,6 +2207,25 @@ mod tests {
 
         left.subs_to_search.push("synthetic_substance".to_string());
         assert!(right.subs_to_search.is_empty());
+    }
+
+    #[test]
+    fn test_open_close_releases_only_the_callers_repository_view() {
+        let mut opened = ThermoData::open().expect("default repository opens");
+        let retained_view = ThermoData::open().expect("second view opens from shared cache");
+        assert!(opened.is_open());
+        assert!(retained_view.is_open());
+
+        opened.close();
+
+        assert!(!opened.is_open());
+        assert!(opened.LibThermoData.is_empty());
+        assert!(retained_view.is_open());
+        assert!(retained_view.LibThermoData.contains_key("NASA_gas"));
+
+        let reopened = ThermoData::open().expect("default repository remains reusable");
+        assert!(reopened.is_open());
+        assert!(Arc::ptr_eq(&retained_view.repository, &reopened.repository));
     }
 
     #[test]

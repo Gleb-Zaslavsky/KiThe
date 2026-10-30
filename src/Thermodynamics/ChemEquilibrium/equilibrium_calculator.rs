@@ -1831,8 +1831,15 @@ mod tests {
         CandidateSelectionError, CandidateTemperatureRange, EquilibriumCandidatePhaseAssignment,
         EquilibriumCandidatePhasePlan, EquilibriumCandidatePolicy, EquilibriumCandidateSelector,
     };
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_log_moles::Solvers;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_rst_backend::RustedSciTheSolver;
+    use crate::Thermodynamics::ChemEquilibrium::equilibrium_solver_policy::{
+        SolverBackend, SolverPolicy,
+    };
     use crate::Thermodynamics::ChemEquilibrium::equilibrium_temperature_postprocessing::TemperatureResamplingGrid;
     use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::PhaseEquilibriumInputKind;
+    use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_solution::ExtensiveNormalizationTrigger;
+    use std::time::Duration;
 
     const PRESSURE_PA: f64 = 101_325.0;
     const REFERENCE_PRESSURE_PA: f64 = 100_000.0;
@@ -2761,7 +2768,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bounded numerical characterization of the lower elemental P,H scale"]
     fn elemental_calculator_ph_scale_envelope_characterization() {
         let reference = match gas_point_builder()
             .at_temperature(2_500.0)
@@ -2806,9 +2812,27 @@ mod tests {
             EquilibriumCalculatorOutcome::PhPoint(point) => point,
             other => panic!("expected baseline elemental P,H point, got {other:?}"),
         };
+        let normalized_first =
+            match solve(1.0 / 6.0).expect("unit-inventory normalized-first P,H point must solve") {
+                EquilibriumCalculatorOutcome::PhPoint(point) => point,
+                other => panic!("expected normalized-first P,H point, got {other:?}"),
+            };
         println!(
-            "elemental P,H lower-scale characterization baseline T={:.9} K",
-            baseline.solution().temperature()
+            "elemental P,H lower-scale characterization baseline T={:.9} K normalized_first_T={:.9} K normalized_first_residual={:.6e} normalized_first_balance={:.6e}",
+            baseline.solution().temperature(),
+            normalized_first.solution().temperature(),
+            normalized_first
+                .solution()
+                .equilibrium()
+                .accepted_solution()
+                .validation()
+                .residual_l2_norm,
+            normalized_first
+                .solution()
+                .equilibrium()
+                .accepted_solution()
+                .validation()
+                .max_abs_element_balance_error,
         );
 
         for scale in [
@@ -2837,16 +2861,200 @@ mod tests {
                         .validation();
                     let relative_balance =
                         validation.max_abs_element_balance_error / (6.0 * scale).max(1.0e-30);
+                    let normalized_moles: Vec<_> = normalized_first
+                        .solution()
+                        .equilibrium()
+                        .component_moles()
+                        .iter()
+                        .map(|moles| moles * 6.0 * scale)
+                        .collect();
+                    let normalized_enthalpy = thermochemistry
+                        .enthalpy_model()
+                        .evaluate_total(
+                            &normalized_moles,
+                            normalized_first.solution().temperature(),
+                        )
+                        .expect("normalized-first physical enthalpy evaluates");
+                    let normalized_h_error = normalized_enthalpy - target_enthalpy * scale;
+                    let normalized_balance = [
+                        (2.0 * normalized_moles[0] + 2.0 * normalized_moles[2] - 4.0 * scale).abs(),
+                        (2.0 * normalized_moles[1] + normalized_moles[2] - 2.0 * scale).abs(),
+                    ]
+                    .into_iter()
+                    .fold(0.0_f64, f64::max);
+                    assert!(temperature_delta < 1.0e-4, "scale={scale:e}");
+                    assert!(max_relative_mole_error < 1.0e-5, "scale={scale:e}");
+                    assert!(relative_balance < 1.0e-6, "scale={scale:e}");
+                    assert!(validation.residual_l2_norm < 1.0e-6, "scale={scale:e}");
+                    if 6.0 * scale < 1.0 {
+                        let evidence = point
+                            .solution()
+                            .equilibrium()
+                            .extensive_normalization_recovery()
+                            .expect("small physical inventory must retain normalization evidence");
+                        assert!(matches!(
+                            evidence.trigger,
+                            ExtensiveNormalizationTrigger::SmallScalePreconditioning { .. }
+                        ));
+                        assert!(evidence.reconstructed_physical_boundary);
+                        assert!(evidence.physical_retry_backend.is_none());
+                        assert!(evidence.normalized_discovery_duration > Duration::ZERO);
+                        assert!(normalized_balance / (6.0 * scale) < 1.0e-6);
+                        assert!(
+                            normalized_h_error.abs()
+                                < point.solution().enthalpy_error_limit_joules()
+                        );
+                    }
                     println!(
-                        "elemental P,H scale={scale:.1e} status=ok delta_T={temperature_delta:.6e} K max_relative_mole_error={max_relative_mole_error:.6e} residual={:.6e} relative_balance={relative_balance:.6e}",
+                        "elemental P,H scale={scale:.1e} status=ok delta_T={temperature_delta:.6e} K max_relative_mole_error={max_relative_mole_error:.6e} residual={:.6e} relative_balance={relative_balance:.6e} enthalpy_error={:.6e} enthalpy_error_limit={:.6e} scaled_enthalpy_error={:.6e} normalized_first_delta_T={:.6e} K normalized_first_balance={normalized_balance:.6e} normalized_first_enthalpy_error={normalized_h_error:.6e}",
                         validation.residual_l2_norm,
+                        point.solution().enthalpy_error(),
+                        point.solution().enthalpy_error_limit_joules(),
+                        point.solution().scaled_enthalpy_error(),
+                        (normalized_first.solution().temperature()
+                            - baseline.solution().temperature())
+                        .abs(),
                     );
                 }
                 Ok(other) => panic!("scale {scale:e} returned unexpected outcome {other:?}"),
-                Err(error) => {
-                    println!("elemental P,H scale={scale:.1e} status=error error={error:?}")
-                }
+                Err(error) => panic!("elemental P,H scale={scale:e} failed: {error:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn elemental_ph_small_scale_backend_matrix() {
+        let reference = match gas_point_builder()
+            .at_temperature(2_500.0)
+            .solve()
+            .expect("reference P,T point must solve")
+        {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected reference P,T point, got {other:?}"),
+        };
+        let thermochemistry =
+            ResolvedThermochemistry::from_resolved_system(reference.resolved()).unwrap();
+        let target_enthalpy = thermochemistry
+            .enthalpy_model()
+            .evaluate_total(reference.solution().component_moles(), 2_500.0)
+            .unwrap();
+
+        let mut backends = RustedSciTheSolver::recommended_cascade()
+            .into_iter()
+            .map(|backend| (backend.name(), SolverBackend::RustedSciThe(backend)))
+            .collect::<Vec<_>>();
+        backends.extend([
+            ("native_lm", SolverBackend::Native(Solvers::LM)),
+            ("native_nr", SolverBackend::Native(Solvers::NR)),
+            ("native_tr", SolverBackend::Native(Solvers::TR)),
+        ]);
+        let mut temperature_options = PhTemperatureSolveOptions::default();
+        temperature_options.scaled_enthalpy_tolerance = 1.0e-7;
+
+        let solve = |scale, backend| {
+            EquilibriumCalculator::builder()
+                .single_ideal_gas(["H2", "O2", "H2O"])
+                .unwrap()
+                .element_inventory(
+                    ElementInventory::from_amounts([("H", 4.0 * scale), ("O", 2.0 * scale)])
+                        .unwrap(),
+                )
+                .prefer_libraries(["NASA_gas"])
+                .offline_only()
+                .pressure_pa(PRESSURE_PA)
+                .reference_pressure_pa(REFERENCE_PRESSURE_PA)
+                .at_total_enthalpy(
+                    TotalEnthalpyJoules::new(target_enthalpy * scale).unwrap(),
+                    2_300.0,
+                    TemperatureBounds::new(2_100.0, 2_900.0).unwrap(),
+                )
+                .ph_solve_mode(PhSolveMode::NestedTemperature)
+                .ph_temperature_options(temperature_options.clone())
+                .solver_policy(SolverPolicy::Single(backend))
+                .expect("single backend policy must validate")
+                .solve()
+        };
+
+        println!("Elemental H2/O2/H2O P,H per-backend small-scale matrix");
+        println!(
+            "backend | scale | status | delta_T_K | max_relative_moles | residual | relative_balance"
+        );
+        let mut passed = Vec::new();
+        for (name, backend) in backends {
+            let baseline = match solve(1.0, backend) {
+                Ok(EquilibriumCalculatorOutcome::PhPoint(point)) => point,
+                Ok(other) => panic!("{name} returned unexpected baseline outcome {other:?}"),
+                Err(error) => {
+                    println!("{name} | 1e0 | FAILED_BASELINE | {error}");
+                    continue;
+                }
+            };
+
+            for scale in [1.0e-2, 1.0e-6] {
+                let point = match solve(scale, backend) {
+                    Ok(EquilibriumCalculatorOutcome::PhPoint(point)) => point,
+                    Ok(other) => panic!("{name} returned unexpected scaled outcome {other:?}"),
+                    Err(error) => {
+                        println!("{name} | {scale:.0e} | FAILED | - | - | - | - | {error}");
+                        continue;
+                    }
+                };
+                let temperature_delta =
+                    (point.solution().temperature() - baseline.solution().temperature()).abs();
+                let max_relative_moles = baseline
+                    .solution()
+                    .equilibrium()
+                    .component_moles()
+                    .iter()
+                    .zip(point.solution().equilibrium().component_moles())
+                    .map(|(&expected, &actual)| {
+                        (expected - actual / scale).abs() / expected.abs().max(1.0e-30)
+                    })
+                    .fold(0.0_f64, f64::max);
+                let validation = point
+                    .solution()
+                    .equilibrium()
+                    .accepted_solution()
+                    .validation();
+                let relative_balance = validation.max_abs_element_balance_error / (6.0 * scale);
+
+                assert!(temperature_delta < 1.0e-4, "{name} scale={scale:e}");
+                assert!(max_relative_moles < 1.0e-5, "{name} scale={scale:e}");
+                assert!(
+                    validation.residual_l2_norm < 1.0e-6,
+                    "{name} scale={scale:e}"
+                );
+                assert!(relative_balance < 1.0e-6, "{name} scale={scale:e}");
+                let evidence = point
+                    .solution()
+                    .equilibrium()
+                    .extensive_normalization_recovery()
+                    .expect("sub-mole physical inventory must report normalization evidence");
+                assert!(matches!(
+                    evidence.trigger,
+                    ExtensiveNormalizationTrigger::SmallScalePreconditioning { .. }
+                ));
+                assert!(evidence.reconstructed_physical_boundary);
+                assert!(evidence.physical_retry_backend.is_none());
+                println!(
+                    "{name} | {scale:.0e} | PASS | {temperature_delta:.3e} | {max_relative_moles:.3e} | {:.3e} | {relative_balance:.3e}",
+                    validation.residual_l2_norm,
+                );
+                passed.push((name, scale));
+            }
+        }
+        for required in [
+            ("rst_levenberg_marquardt", 1.0e-2),
+            ("rst_levenberg_marquardt", 1.0e-6),
+            ("rst_minpack_levenberg_marquardt", 1.0e-2),
+            ("rst_minpack_levenberg_marquardt", 1.0e-6),
+            ("native_lm", 1.0e-2),
+            ("native_lm", 1.0e-6),
+        ] {
+            assert!(
+                passed.contains(&required),
+                "required small-scale backend witness did not pass: {required:?}; passed={passed:?}"
+            );
         }
     }
 

@@ -65,7 +65,7 @@ mod tests {
         abs_tolerance: f64,
         loglevel: Option<String>,
     ) -> Result<(), ReactorError> {
-        let substances = vec!["HMX".to_string(), "HMXprod".to_string()];
+        let substances = vec!["HMX".to_string(), "DecompositionProduct".to_string()];
         reactor.solver.solve_NRBVP_with_configs(
             initial_guess,
             n_steps,
@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn hmx_test3() {
         /////////////////// setting up kinetics
-        let eq = "HMX=>HMXprod".to_string();
+        let eq = "HMX=>DecompositionProduct".to_string();
         let Q_g = 0.0; // Дж/кг
         let C_p = 0.35 * 4.184 * 1000.0;
         let Lambda_eff = 0.07; // W/m-K 
@@ -110,7 +110,7 @@ mod tests {
         ]);
         let groups = Some(HashMap::from([
             ("HMX".to_string(), hmx.clone()),
-            ("HMXprod".to_string(), hmxprod),
+            ("DecompositionProduct".to_string(), hmxprod),
         ]));
         //////////// instance of problem constructor/////////////
         let mut reactor = SimpleReactorTask::new();
@@ -124,17 +124,20 @@ mod tests {
         let vec_of_structs = vec![struct_with_params];
 
         let _ = reactor.fast_react_set(vec_of_structs);
-        reactor.kindata.substances = vec!["HMX".to_string(), "HMXprod".to_string()];
+        reactor.kindata.substances = vec!["HMX".to_string(), "DecompositionProduct".to_string()];
         reactor.kindata.groups = groups;
         // info!("reactor {:?}", reactor.kindata);
         ///////////// parameters //////////////////
         let ro0 = M * P / (R_G * T0);
         let D = Lambda_eff / (C_p * ro0);
         info!("D = {}", D);
-        let Diffusion = HashMap::from([("HMX".to_string(), D), ("HMXprod".to_string(), D)]);
+        let Diffusion = HashMap::from([
+            ("HMX".to_string(), D),
+            ("DecompositionProduct".to_string(), D),
+        ]);
         let boundary_condition = HashMap::from([
             ("HMX".to_string(), 1.0 - 1e-3),
-            ("HMXprod".to_string(), 1e-3),
+            ("DecompositionProduct".to_string(), 1e-3),
             ("T".to_string(), T0),
         ]);
         let thermal_effects = vec![Q_g];

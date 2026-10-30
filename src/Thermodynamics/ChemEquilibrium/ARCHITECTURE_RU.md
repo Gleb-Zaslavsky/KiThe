@@ -69,7 +69,7 @@ filesystem organization does not change established Rust imports or test names.
 ├─────────────────────────────────────────────────────────────┤
 │              Слой бэкенда (адаптеры)                         │
 │  nonlinear_solvers/equilibrium_rst_backend.rs   (RustedSciThe — символьный)   │
-│  nonlinear_solvers/equilibrium_legacy_backend.rs (Legacy — численный)          │
+│  nonlinear_solvers/equilibrium_native_backend.rs (KiThe-native — аналитический)          │
 │  nonlinear_solvers/equilibrium_backend_adapter.rs (единый интерфейс)           │
 ├─────────────────────────────────────────────────────────────┤
 │              Слой валидации                                  │
@@ -88,7 +88,7 @@ filesystem organization does not change established Rust imports or test names.
 **Ключевые принципы архитектуры:**
 
 1. **Типобезопасность** — идентификаторы SpeciesId, ElementId, PhaseIndex, ReactionId исключают путаницу между индексами разных сущностей.
-2. **Явная политика решателя** — выбор бэкенда (RST или Legacy) и порядок каскада задаются типизированной политикой, а не цепочкой if-else.
+2. **Явная политика решателя** — выбор бэкенда (RST или KiThe-native) и порядок каскада задаются типизированной политикой, а не цепочкой if-else.
 3. **Транзакционность** — ни один бэкенд не публикует состояние напрямую; решение проходит валидацию и только затем публикуется.
 4. **Независимая валидация** — K_eq решатель использует отдельную формулировку (закон действующих масс), не пересекающуюся с основной residual/Jacobian.
 5. **Управление фазами** — bounded outer loop с гистерезисом, детекцией циклов и typed transition plan.
@@ -206,7 +206,7 @@ EquilibriumSolverSettings {
 
 ```rust
 enum SolverBackend {
-    Legacy(Solvers),           // LM, NR, TR
+    Native(Solvers),           // LM, NR, TR
     RustedSciThe(RustedSciTheSolver),  // 7 методов
 }
 
@@ -558,16 +558,16 @@ f_{r+el}(y) = Σ_i a_{i,el} · exp(y_i) - b_el = 0
 **Где:**
 - Символьный: [`equilibrium_rst_backend.rs`](nonlinear_solvers/equilibrium_rst_backend.rs), [`equilibrium_workflows.rs`](phase_control/equilibrium_workflows.rs) → `multiphase_equilibrium_residual_generator_sym`
 - Численный: [`equilibrium_nonlinear.rs`](nonlinear_solvers/equilibrium_nonlinear.rs) → `LMSolver`, `NRSolver`, `TrustRegionSolver`
-- Legacy адаптер: [`equilibrium_legacy_backend.rs`](nonlinear_solvers/equilibrium_legacy_backend.rs)
+- KiThe-native адаптер: [`equilibrium_native_backend.rs`](nonlinear_solvers/equilibrium_native_backend.rs)
 - Единый интерфейс: [`equilibrium_backend_adapter.rs`](nonlinear_solvers/equilibrium_backend_adapter.rs)
 
-**Зачем:** Два независимых стека реализуют одну и ту же математическую формулировку. Символьный стек (RustedSciThe) строит residual и Jacobian как символьные выражения, затем лямбдифицирует их в численные функции. Численный стек (Legacy) использует hand-written Jacobian.
+**Зачем:** Два независимых стека реализуют одну и ту же математическую формулировку. Символьный стек (RustedSciThe) строит residual и Jacobian как символьные выражения, затем лямбдифицирует их в численные функции. Численный стек (KiThe-native) использует hand-written Jacobian.
 
 **Как:**
 1. **Символьный путь:** `RstSymbolicThermochemistry::from_solver()` → `prepare_rst_symbolic_problem()` → `PreparedSymbolicNonlinearProblem` → RST решатели (7 методов: LM, BacktrackingLM, MinpackLM, NielsenLM, TrustRegionLM, PowellDogleg, DampedNewton)
-2. **Численный путь:** `solve_legacy_backend()` → `LMSolver`/`NRSolver`/`TrustRegionSolver` с hand-written residual и Jacobian
+2. **Численный путь:** `solve_native_backend()` → `LMSolver`/`NRSolver`/`TrustRegionSolver` с hand-written residual и Jacobian
 
-Выбор между стеками — через `SolverPolicy::RustedSciThe` vs `SolverPolicy::Legacy`.
+Выбор между стеками — через `SolverBackend::RustedSciThe` vs `SolverBackend::Native`.
 
 ### 4.3 Масштабирование строк residual/Jacobian
 
@@ -752,9 +752,9 @@ return PhaseControlDidNotConverge
    - `failure_kind`: Solver / Backend / ResidualEvaluation / JacobianEvaluation
    - `metrics`: termination, iterations, residual_evaluations, elapsed_millis
 
-Production default: the recommended RST cascade followed by Legacy LM/NR/TR
+Production default: the recommended RST cascade followed by KiThe-native LM/NR/TR
 fallbacks. `rusted_scithe_default()` is the explicit RST-only policy;
-`legacy_default()` is the compatibility numerical policy; callers can also
+`native_default()` is the compatibility numerical policy; callers can also
 provide `Single` or a custom ordered cascade.
 
 ### 4.12 Температурные серии и постобработка
@@ -822,7 +822,7 @@ provide `Single` or a custom ordered cascade.
 | [`equilibrium_solver_policy.rs`](nonlinear_solvers/equilibrium_solver_policy.rs) | Политика выбора бэкенда | `SolverPolicy`, `SolverBackend`, `SolverCascadeBudget`, `SolverAttemptReport` |
 | [`equilibrium_backend_adapter.rs`](nonlinear_solvers/equilibrium_backend_adapter.rs) | Единый интерфейс бэкенда | `EquilibriumNonlinearBackend`, `BackendSolveRequest` |
 | [`equilibrium_rst_backend.rs`](nonlinear_solvers/equilibrium_rst_backend.rs) | Адаптер RustedSciThe (символьный) | `RstPreparedProblem`, `RustedSciTheSolver`, `RustedSciTheSolveOutcome` |
-| [`equilibrium_legacy_backend.rs`](nonlinear_solvers/equilibrium_legacy_backend.rs) | Адаптер Legacy (численный) | `solve_legacy_backend()` |
+| [`equilibrium_native_backend.rs`](nonlinear_solvers/equilibrium_native_backend.rs) | Адаптер KiThe-native (аналитический) | `solve_native_backend()` |
 | [`equilibrium_constant_problem.rs`](equilibrium_constants/equilibrium_constant_problem.rs) | K_eq постановка задачи | `EquilibriumConstantProblem` |
 | [`equilibrium_constant_solver.rs`](equilibrium_constants/equilibrium_constant_solver.rs) | K_eq решатель | `EquilibriumConstantSolver`, `EquilibriumConstantSolveResult` |
 | [`equilibrium_constant_validation.rs`](equilibrium_constants/equilibrium_constant_validation.rs) | K_eq отчёт валидации | `EquilibriumConstantValidationReport` |
@@ -836,7 +836,7 @@ provide `Single` or a custom ordered cascade.
 | [`prepared_phase_control_runner.rs`](phase_control/prepared_phase_control_runner.rs) | Immutable bounded lifecycle | `PreparedPhaseControlRunner`, `PhaseControlledSolveReport` |
 | [`equilibrium_temperature_postprocessing.rs`](postprocessing_and_logging/equilibrium_temperature_postprocessing.rs) | Постобработка температурных серий | `TemperaturePostprocessingPolicy`, `TemperatureSweepSeries` |
 | [`easy_equilibrium.rs`](easy_equilibrium.rs) | Упрощённый интерфейс (одна реакция) | `EasyEquilibrium` |
-| [`NR_Legacy.rs`](nonlinear_solvers/NR_Legacy.rs) | Legacy Newton-Raphson | `NRSolver` (legacy) |
+| [`NR_Legacy.rs`](nonlinear_solvers/NR_Legacy.rs) | KiThe-native Newton-Raphson | `NRSolver` (legacy) |
 
 ### 5.3 Типичные сценарии использования
 
@@ -898,7 +898,7 @@ equilibrium_ids.rs
     │               │       │
     │               │       ├── nonlinear_solvers/equilibrium_backend_adapter.rs
     │               │       │       ├── nonlinear_solvers/equilibrium_rst_backend.rs
-    │               │       │       └── nonlinear_solvers/equilibrium_legacy_backend.rs
+    │               │       │       └── nonlinear_solvers/equilibrium_native_backend.rs
     │               │       │
     │               │       ├── nonlinear_solvers/equilibrium_solver_policy.rs
     │               │       ├── nonlinear_solvers/equilibrium_validation.rs
@@ -930,7 +930,7 @@ fixed-`P,T` и `solve_resolved_ph` для fixed-`P,H`.
 сохраняют accepted-state continuation и transactional publication.
 
 `gas_solver`, `easy_equilibrium` и mutable `EquilibriumLogMoles` workflows —
-только compatibility/characterization surface. Legacy LM/NR/TR внутри
-`equilibrium_legacy_backend` сохраняются как численные fallback-backends, но
+только compatibility/characterization surface. KiThe-native LM/NR/TR внутри
+`equilibrium_native_backend` сохраняются как численные fallback-backends, но
 не являются отдельной orchestration-архитектурой и не должны появляться в
 новой пользовательской документации.

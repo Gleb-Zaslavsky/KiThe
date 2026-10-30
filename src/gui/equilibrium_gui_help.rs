@@ -67,6 +67,7 @@ pub const EQUILIBRIUM_TOOLTIP_CATALOG: &[EquilibriumTooltipDescriptor] = tooltip
     "action.kithe_plot",
     "mode.pt",
     "mode.ph",
+    "problem.ph_range",
     "inventory.explicit",
     "inventory.elements",
     "inventory.element_inventory",
@@ -118,6 +119,9 @@ pub const EQUILIBRIUM_TOOLTIP_CATALOG: &[EquilibriumTooltipDescriptor] = tooltip
     "field.pressure",
     "field.reference_pressure",
     "field.target_enthalpy",
+    "field.start_enthalpy",
+    "field.end_enthalpy",
+    "field.point_count",
     "field.phase_id",
     "field.substance",
     "field.moles",
@@ -366,6 +370,9 @@ pub fn legacy_tooltip(language: EquilibriumHelpLanguage, control_key: &str) -> &
             "Опорное давление активности газа; оно отличается от давления системы."
         }
         "field.target_enthalpy" => "Целевая полная энтальпия в джоулях для ограничения P,H.",
+        "field.start_enthalpy" => "Начальная полная энтальпия диапазона P,H в джоулях.",
+        "field.end_enthalpy" => "Конечная полная энтальпия диапазона P,H в джоулях.",
+        "field.point_count" => "Количество равномерно расположенных целевых значений энтальпии.",
         "field.phase_id" => "Стабильный идентификатор фазы в отчетах и графиках.",
         "field.substance" => "Идентификатор вещества, разрешаемый политикой библиотек.",
         "field.moles" => {
@@ -420,6 +427,9 @@ pub fn field_tooltip(language: EquilibriumHelpLanguage, label: &str) -> &'static
         "Pressure [Pa]" => "field.pressure",
         "Reference pressure [Pa]" => "field.reference_pressure",
         "Target total enthalpy [J]" => "field.target_enthalpy",
+        "Start total enthalpy [J]" => "field.start_enthalpy",
+        "End total enthalpy [J]" => "field.end_enthalpy",
+        "Solved points" => "field.point_count",
         "Phase id" => "field.phase_id",
         "Substance" => "field.substance",
         "Moles" => "field.moles",
@@ -441,8 +451,8 @@ pub fn field_tooltip(language: EquilibriumHelpLanguage, label: &str) -> &'static
         "Candidate temperature lower [K]" => "candidate.bounds",
         "Candidate temperature upper [K]" => "candidate.bounds",
         "Max candidates" => "candidate.max",
-        "Temperature [K]" | "Start [K]" | "End [K]" | "Solved points" | "Lower bound [K]"
-        | "Upper bound [K]" | "Initial seed [K]" => "temperature.range",
+        "Temperature [K]" | "Start [K]" | "End [K]" | "Lower bound [K]" | "Upper bound [K]"
+        | "Initial seed [K]" => "temperature.range",
         _ => "field.generic",
     };
     tooltip(language, key)
@@ -881,6 +891,28 @@ mod tests {
             super::option_tooltip(EquilibriumHelpLanguage::Russian, "state.gas"),
             super::option_tooltip(EquilibriumHelpLanguage::English, "state.gas")
         );
+        assert!(
+            tooltip(EquilibriumHelpLanguage::English, "problem.ph_range")
+                .contains("uniform total-enthalpy grid")
+        );
+        assert!(
+            tooltip(EquilibriumHelpLanguage::Russian, "problem.ph_range")
+                .contains("равномерную сетку полной энтальпии")
+        );
+        for key in [
+            "field.start_enthalpy",
+            "field.end_enthalpy",
+            "field.point_count",
+        ] {
+            assert!(tooltip(EquilibriumHelpLanguage::English, key).len() > 20);
+            assert!(tooltip(EquilibriumHelpLanguage::Russian, key).len() > 20);
+        }
+        let english_help = include_str!("../assets/equilibrium_help_eng.md");
+        let russian_help = include_str!("../assets/equilibrium_help_rus.md");
+        assert!(english_help.contains("ascending and descending targets"));
+        assert!(english_help.contains("published transactionally"));
+        assert!(russian_help.contains("возрастающие и убывающие цели"));
+        assert!(russian_help.contains("публикуется только целиком"));
     }
 
     #[test]

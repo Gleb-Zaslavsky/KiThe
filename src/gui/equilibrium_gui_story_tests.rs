@@ -582,7 +582,7 @@ fn hover_tooltips_cover_combo_options_and_dynamic_rows() {
     harness.get_by_label_contains("AtomView-native");
     harness.get_by_label("Concrete backend").click_accesskit();
     harness.run();
-    harness.get_by_label("Legacy LM fallback").hover();
+    harness.get_by_label("KiThe-native LM").hover();
     harness.run();
     harness.get_by_label_contains("one concrete nonlinear backend");
 

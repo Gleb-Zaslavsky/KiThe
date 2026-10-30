@@ -36,10 +36,16 @@ use crate::ReactorsIVP::solver_backend::{
     ReactorIvpBackendError, ReactorIvpMethod, ReactorIvpSolverConfig,
 };
 
+use RustedSciThe::command_interpreter::task_parser_ivp_hybrid::HybridStiffSettings;
 use RustedSciThe::numerical::LSODE2::solver::Lsode2EvaluationTelemetry;
 use RustedSciThe::numerical::LSODE2::{
     Lsode2AlgorithmSnapshot, Lsode2Error, Lsode2NativeStatistics, Lsode2ProblemConfig,
-    Lsode2SolveSummary, Lsode2Solver,
+    Lsode2SolveSummary,
+};
+use RustedSciThe::numerical::SolverTelemetryMode;
+use RustedSciThe::numerical::StiffAPI::{
+    PreparedStiffSolver, StiffApiError, StiffSolveError, StiffSolveOutcome, StiffSolverRequest,
+    StiffTelemetrySnapshot,
 };
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use RustedSciThe::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
@@ -50,6 +56,7 @@ use tabled::{Table, Tabled};
 
 use std::collections::HashMap;
 use std::fmt;
+use std::time::Instant;
 
 /// Universal gas constant in J/(mol·K)
 
@@ -61,13 +68,19 @@ use std::fmt;
 pub const REACTOR_IVP_INDEPENDENT_VARIABLE: &str = "x";
 
 /// Local IVP error type for condensed-phase helpers.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum IvpError {
     MissingData(String),
     InvalidConfiguration(String),
     InvalidNumericValue(String),
     CalculationError(String),
     IndexOutOfBounds(String),
+    SolverBackend(ReactorIvpBackendError),
+    SolverPreparation(StiffApiError),
+    SolverExecution {
+        error: StiffSolveError,
+        telemetry: Option<StiffTelemetrySnapshot>,
+    },
 }
 
 impl fmt::Display for IvpError {
@@ -78,11 +91,27 @@ impl fmt::Display for IvpError {
             IvpError::InvalidNumericValue(msg) => write!(f, "Invalid numeric value: {}", msg),
             IvpError::CalculationError(msg) => write!(f, "Calculation error: {}", msg),
             IvpError::IndexOutOfBounds(msg) => write!(f, "Index out of bounds: {}", msg),
+            IvpError::SolverBackend(error) => write!(f, "Solver backend error: {error}"),
+            IvpError::SolverPreparation(error) => {
+                write!(f, "Solver preparation failed: {error}")
+            }
+            IvpError::SolverExecution { error, .. } => {
+                write!(f, "Solver execution failed: {error}")
+            }
         }
     }
 }
 
-impl std::error::Error for IvpError {}
+impl std::error::Error for IvpError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::SolverBackend(error) => Some(error),
+            Self::SolverPreparation(error) => Some(error),
+            Self::SolverExecution { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<ReactorError> for IvpError {
     fn from(value: ReactorError) -> Self {
@@ -93,6 +122,7 @@ impl From<ReactorError> for IvpError {
             ReactorError::CalculationError(msg) => Self::CalculationError(msg),
             ReactorError::ParseError(msg) => Self::CalculationError(msg),
             ReactorError::IndexOutOfBounds(msg) => Self::IndexOutOfBounds(msg),
+            other => Self::CalculationError(other.to_string()),
         }
     }
 }
@@ -105,6 +135,9 @@ impl From<IvpError> for ReactorError {
             IvpError::InvalidNumericValue(msg) => Self::InvalidNumericValue(msg),
             IvpError::CalculationError(msg) => Self::CalculationError(msg),
             IvpError::IndexOutOfBounds(msg) => Self::IndexOutOfBounds(msg),
+            IvpError::SolverBackend(error) => Self::CalculationError(error.to_string()),
+            IvpError::SolverPreparation(error) => Self::CalculationError(error.to_string()),
+            IvpError::SolverExecution { error, .. } => Self::CalculationError(error.to_string()),
         }
     }
 }
@@ -115,8 +148,37 @@ impl From<ReactorIvpBackendError> for IvpError {
             ReactorIvpBackendError::InvalidConfiguration(msg) => {
                 IvpError::InvalidConfiguration(msg)
             }
+            ReactorIvpBackendError::StiffApiPreparation(error) => {
+                IvpError::SolverPreparation(error)
+            }
+            other => IvpError::SolverBackend(other),
         }
     }
+}
+
+impl From<StiffApiError> for IvpError {
+    fn from(value: StiffApiError) -> Self {
+        Self::SolverPreparation(value)
+    }
+}
+
+impl From<StiffSolveError> for IvpError {
+    fn from(value: StiffSolveError) -> Self {
+        Self::SolverExecution {
+            error: value,
+            telemetry: None,
+        }
+    }
+}
+
+fn failed_solve_telemetry(solver: &PreparedStiffSolver) -> Option<StiffTelemetrySnapshot> {
+    if let Some(radau) = solver.as_radau() {
+        return radau
+            .last_solve_telemetry()
+            .cloned()
+            .map(StiffTelemetrySnapshot::Radau);
+    }
+    solver.telemetry_snapshot().ok()
 }
 
 impl From<Lsode2Error> for IvpError {
@@ -253,12 +315,17 @@ pub struct IvpSolveSnapshot {
     pub axis: DVector<f64>,
     pub values: DMatrix<f64>,
     pub variable_names: Vec<String>,
-    pub summary: Lsode2SolveSummary,
+    pub family: crate::ReactorsIVP::solver_backend::ReactorIvpSolverFamily,
+    pub status: String,
+    pub method_label: String,
+    pub summary: Option<Lsode2SolveSummary>,
     pub backend_plan: ReactorIvpSolverConfig,
-    pub algorithm: Lsode2AlgorithmSnapshot,
-    pub statistics: IvpBackendStatistics,
-    pub native_statistics: Lsode2NativeStatistics,
-    pub evaluation_telemetry: Lsode2EvaluationTelemetry,
+    pub algorithm: Option<Lsode2AlgorithmSnapshot>,
+    pub statistics: Option<IvpBackendStatistics>,
+    pub native_statistics: Option<Lsode2NativeStatistics>,
+    pub evaluation_telemetry: Option<Lsode2EvaluationTelemetry>,
+    pub native_telemetry: Option<StiffTelemetrySnapshot>,
+    pub stage_telemetry: IvpStageTelemetry,
 }
 
 /// Lightweight solve report derived from a validated snapshot.
@@ -272,10 +339,78 @@ pub struct IvpSolveReport {
     pub time_points: usize,
     pub variable_count: usize,
     pub backend_plan: ReactorIvpSolverConfig,
-    pub algorithm: Lsode2AlgorithmSnapshot,
-    pub statistics: IvpBackendStatistics,
-    pub native_statistics: Lsode2NativeStatistics,
-    pub evaluation_telemetry: Lsode2EvaluationTelemetry,
+    pub algorithm: Option<Lsode2AlgorithmSnapshot>,
+    pub statistics: Option<IvpBackendStatistics>,
+    pub native_statistics: Option<Lsode2NativeStatistics>,
+    pub evaluation_telemetry: Option<Lsode2EvaluationTelemetry>,
+    pub native_telemetry: Option<StiffTelemetrySnapshot>,
+    pub stage_telemetry: IvpStageTelemetry,
+}
+
+/// KiThe-owned stage timings surrounding the native solver's own telemetry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IvpStageTelemetry {
+    pub mode: SolverTelemetryMode,
+    pub stages: Vec<IvpStageMeasurement>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IvpStageMeasurement {
+    pub name: &'static str,
+    pub calls: Option<u64>,
+    pub elapsed_ms: Option<f64>,
+}
+
+impl IvpStageTelemetry {
+    pub(super) fn new(mode: SolverTelemetryMode) -> Self {
+        Self {
+            mode,
+            stages: Vec::new(),
+        }
+    }
+
+    pub(super) fn run<T, E>(
+        &mut self,
+        name: &'static str,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        let started = matches!(
+            self.mode,
+            SolverTelemetryMode::Timings | SolverTelemetryMode::Detailed
+        )
+        .then(Instant::now);
+        let result = operation();
+        let elapsed_ms = started.map(|start| start.elapsed().as_secs_f64() * 1_000.0);
+        self.record(name, elapsed_ms);
+        result
+    }
+
+    fn record(&mut self, name: &'static str, elapsed_ms: Option<f64>) {
+        if self.mode.is_enabled() {
+            let calls = self.mode.collects_counters();
+            if let Some(existing) = self.stages.iter_mut().find(|stage| stage.name == name) {
+                if calls {
+                    existing.calls = Some(existing.calls.unwrap_or_default() + 1);
+                }
+                existing.elapsed_ms = match (existing.elapsed_ms, elapsed_ms) {
+                    (Some(total), Some(value)) => Some(total + value),
+                    _ => None,
+                };
+            } else {
+                self.stages.push(IvpStageMeasurement {
+                    name,
+                    calls: calls.then_some(1),
+                    elapsed_ms,
+                });
+            }
+        }
+    }
+}
+
+impl Default for IvpStageTelemetry {
+    fn default() -> Self {
+        Self::new(SolverTelemetryMode::Off)
+    }
 }
 
 /// Borrowed result view over a validated condensed-IVP solve snapshot.
@@ -374,7 +509,7 @@ impl IvpSolveSnapshot {
 
     /// Return the solver status string.
     pub fn status(&self) -> &str {
-        &self.summary.status
+        &self.status
     }
 
     /// Return the typed LSODE2 backend plan that produced this snapshot.
@@ -387,34 +522,42 @@ impl IvpSolveSnapshot {
         self.backend_plan
     }
 
-    /// Return the resolved LSODE2 method family from the published plan.
-    pub fn method(&self) -> ReactorIvpMethod {
-        self.backend_plan.method
+    /// Return the selected solver family.
+    pub fn family(&self) -> crate::ReactorsIVP::solver_backend::ReactorIvpSolverFamily {
+        self.family
+    }
+
+    /// Return LSODE2's internal controller selection.
+    ///
+    /// This value is meaningful only when `family() == Lsode2`; standalone
+    /// BDF and Radau do not use the LSODE2 Auto/Adams/BDF controller.
+    pub fn lsode2_controller(&self) -> Option<ReactorIvpMethod> {
+        self.backend_plan.lsode2_controller()
     }
 
     /// Return the resolved method family from the published summary.
     pub fn method_label(&self) -> &str {
-        self.summary.method
+        &self.method_label
     }
 
     /// Return the published algorithm snapshot.
-    pub fn algorithm_snapshot(&self) -> &Lsode2AlgorithmSnapshot {
-        &self.algorithm
+    pub fn algorithm_snapshot(&self) -> Option<&Lsode2AlgorithmSnapshot> {
+        self.algorithm.as_ref()
     }
 
     /// Return the published backend statistics.
-    pub fn backend_statistics(&self) -> &IvpBackendStatistics {
-        &self.statistics
+    pub fn backend_statistics(&self) -> Option<&IvpBackendStatistics> {
+        self.statistics.as_ref()
     }
 
     /// Return the published native LSODE2 statistics.
-    pub fn native_statistics(&self) -> &Lsode2NativeStatistics {
-        &self.native_statistics
+    pub fn native_statistics(&self) -> Option<&Lsode2NativeStatistics> {
+        self.native_statistics.as_ref()
     }
 
     /// Return the published evaluation telemetry.
-    pub fn evaluation_telemetry(&self) -> &Lsode2EvaluationTelemetry {
-        &self.evaluation_telemetry
+    pub fn evaluation_telemetry(&self) -> Option<&Lsode2EvaluationTelemetry> {
+        self.evaluation_telemetry.as_ref()
     }
 
     /// Build compact preview rows for the stored solution matrix.
@@ -428,8 +571,8 @@ impl IvpSolveSnapshot {
     /// Build a small diagnostics report without cloning the solution matrix.
     pub fn diagnostics_report(&self) -> IvpSolveReport {
         IvpSolveReport {
-            status: self.summary.status.clone(),
-            method_label: self.summary.method.to_string(),
+            status: self.status.clone(),
+            method_label: self.method_label.clone(),
             time_points: self.axis.len(),
             variable_count: self.values.ncols(),
             backend_plan: self.backend_plan,
@@ -437,6 +580,8 @@ impl IvpSolveSnapshot {
             statistics: self.statistics.clone(),
             native_statistics: self.native_statistics.clone(),
             evaluation_telemetry: self.evaluation_telemetry.clone(),
+            native_telemetry: self.native_telemetry.clone(),
+            stage_telemetry: self.stage_telemetry.clone(),
         }
     }
 
@@ -446,19 +591,14 @@ impl IvpSolveSnapshot {
     /// inspect or format them without coupling to `println!`.
     pub fn diagnostics_report_rows(&self) -> Vec<IvpReportRow> {
         let report = self.diagnostics_report();
-        let algorithm = &report.algorithm;
-        let stats = &report.statistics;
-        let native = &report.native_statistics;
-        let telemetry = &report.evaluation_telemetry;
-
-        vec![
+        let mut rows = vec![
             IvpReportRow {
                 field: "status".to_string(),
-                value: report.status,
+                value: report.status.clone(),
             },
             IvpReportRow {
                 field: "method_label".to_string(),
-                value: report.method_label,
+                value: report.method_label.clone(),
             },
             IvpReportRow {
                 field: "time_points".to_string(),
@@ -469,42 +609,247 @@ impl IvpSolveSnapshot {
                 value: report.variable_count.to_string(),
             },
             IvpReportRow {
-                field: "controller_mode".to_string(),
-                value: algorithm.controller_mode.to_string(),
+                field: "solver_family".to_string(),
+                value: format!("{:?}", report.backend_plan.family()),
             },
             IvpReportRow {
-                field: "active_family".to_string(),
-                value: algorithm.active_family.to_string(),
+                field: "symbolic_backend".to_string(),
+                value: format!("{:?}", report.backend_plan.symbolic_backend),
             },
             IvpReportRow {
-                field: "resolved_source".to_string(),
-                value: format!("{:?}", report.backend_plan.execution_backend),
-            },
-            IvpReportRow {
-                field: "resolved_structure".to_string(),
+                field: "matrix_backend".to_string(),
                 value: format!("{:?}", report.backend_plan.matrix_backend),
             },
             IvpReportRow {
-                field: "solve_calls".to_string(),
-                value: stats.solve_calls.to_string(),
+                field: "execution_backend".to_string(),
+                value: format!("{:?}", report.backend_plan.execution_backend),
             },
             IvpReportRow {
-                field: "residual_calls".to_string(),
-                value: stats.residual_calls.to_string(),
+                field: "telemetry_mode".to_string(),
+                value: format!("{:?}", report.backend_plan.telemetry),
             },
             IvpReportRow {
-                field: "jacobian_calls".to_string(),
-                value: stats.jacobian_calls.to_string(),
+                field: "logging_level".to_string(),
+                value: format!("{:?}", report.backend_plan.logging),
             },
-            IvpReportRow {
-                field: "native_step_attempts".to_string(),
+        ];
+        if let Some(algorithm) = report.algorithm.as_ref() {
+            rows.extend([
+                IvpReportRow {
+                    field: "controller_mode".into(),
+                    value: algorithm.controller_mode.to_string(),
+                },
+                IvpReportRow {
+                    field: "active_family".into(),
+                    value: algorithm.active_family.to_string(),
+                },
+            ]);
+        }
+        if let Some(stats) = report.statistics.as_ref() {
+            rows.extend([
+                IvpReportRow {
+                    field: "solve_calls".into(),
+                    value: stats.solve_calls.to_string(),
+                },
+                IvpReportRow {
+                    field: "residual_calls".into(),
+                    value: stats.residual_calls.to_string(),
+                },
+                IvpReportRow {
+                    field: "jacobian_calls".into(),
+                    value: stats.jacobian_calls.to_string(),
+                },
+            ]);
+        }
+        if let Some(native) = report.native_statistics.as_ref() {
+            rows.push(IvpReportRow {
+                field: "native_step_attempts".into(),
                 value: native.native_step_attempts.to_string(),
-            },
-            IvpReportRow {
-                field: "accepted_steps".to_string(),
+            });
+        }
+        if let Some(telemetry) = report.evaluation_telemetry.as_ref() {
+            rows.push(IvpReportRow {
+                field: "accepted_steps".into(),
                 value: telemetry.accepted_steps.to_string(),
-            },
-        ]
+            });
+        }
+        append_native_telemetry_rows(&mut rows, report.native_telemetry.as_ref());
+        rows.extend(report.stage_telemetry.stages.iter().flat_map(|stage| {
+            let mut stage_rows = Vec::new();
+            if let Some(calls) = stage.calls {
+                stage_rows.push(IvpReportRow {
+                    field: format!("ivp_stage::{}::calls", stage.name),
+                    value: calls.to_string(),
+                });
+            }
+            if let Some(elapsed_ms) = stage.elapsed_ms {
+                stage_rows.push(IvpReportRow {
+                    field: format!("ivp_stage::{}::elapsed_ms", stage.name),
+                    value: format!("{elapsed_ms:.6}"),
+                });
+            }
+            stage_rows
+        }));
+        rows
+    }
+}
+
+fn append_native_telemetry_rows(
+    rows: &mut Vec<IvpReportRow>,
+    telemetry: Option<&StiffTelemetrySnapshot>,
+) {
+    let Some(telemetry) = telemetry else {
+        rows.push(IvpReportRow {
+            field: "native_telemetry".into(),
+            value: "unavailable".into(),
+        });
+        return;
+    };
+
+    match telemetry {
+        StiffTelemetrySnapshot::Bdf {
+            mode,
+            statistics,
+            symbolic,
+        } => {
+            append_backend_statistics(rows, *mode, statistics);
+            if let Some(symbolic) = symbolic {
+                append_symbolic_callback_telemetry(rows, symbolic);
+            }
+        }
+        StiffTelemetrySnapshot::Lsode2 {
+            mode,
+            statistics,
+            symbolic,
+            ..
+        } => {
+            append_backend_statistics(rows, *mode, statistics);
+            append_symbolic_callback_telemetry(rows, symbolic);
+        }
+        StiffTelemetrySnapshot::BackwardEuler {
+            mode, statistics, ..
+        } => append_backend_statistics(rows, *mode, statistics),
+        StiffTelemetrySnapshot::Radau(report) => {
+            rows.push(IvpReportRow {
+                field: "native_telemetry_mode".into(),
+                value: format!("{:?}", report.mode),
+            });
+            if matches!(
+                report.mode,
+                RustedSciThe::numerical::Radau::api::RadauTelemetryMode::Counters
+                    | RustedSciThe::numerical::Radau::api::RadauTelemetryMode::Detailed
+            ) {
+                rows.extend(report.counters.iter().map(|(name, value)| IvpReportRow {
+                    field: format!("native_counter::{name}"),
+                    value: value.to_string(),
+                }));
+            }
+            if matches!(
+                report.mode,
+                RustedSciThe::numerical::Radau::api::RadauTelemetryMode::Timings
+                    | RustedSciThe::numerical::Radau::api::RadauTelemetryMode::Detailed
+            ) {
+                rows.extend(report.timings_ms.iter().map(|(name, value)| IvpReportRow {
+                    field: format!("native_timing_ms::{name}"),
+                    value: format!("{value:.6}"),
+                }));
+            }
+        }
+    }
+}
+
+fn append_backend_statistics(
+    rows: &mut Vec<IvpReportRow>,
+    mode: SolverTelemetryMode,
+    statistics: &RustedSciThe::symbolic::symbolic_ivp_generated::IvpBackendStatistics,
+) {
+    rows.push(IvpReportRow {
+        field: "native_telemetry_mode".into(),
+        value: format!("{mode:?}"),
+    });
+    if matches!(
+        mode,
+        SolverTelemetryMode::Counters | SolverTelemetryMode::Detailed
+    ) {
+        for (field, value) in [
+            ("residual_calls", statistics.residual_calls),
+            ("jacobian_calls", statistics.jacobian_calls),
+            ("accepted_steps", statistics.accepted_steps_total),
+            ("rejected_steps", statistics.rejected_step_attempts_total),
+            (
+                "linear_solve_attempts",
+                statistics.linear_solve_attempts_total,
+            ),
+        ] {
+            rows.push(IvpReportRow {
+                field: format!("native_counter::{field}"),
+                value: value.to_string(),
+            });
+        }
+    }
+    if matches!(
+        mode,
+        SolverTelemetryMode::Timings | SolverTelemetryMode::Detailed
+    ) {
+        for (field, value) in [
+            ("solve_ms", statistics.solve_ms_total),
+            ("integration_loop_ms", statistics.integration_loop_ms_total),
+            ("residual_ms", statistics.residual_ms_total),
+            ("jacobian_ms", statistics.jacobian_ms_total),
+            ("linear_solve_ms", statistics.linear_solve_ms_total),
+        ] {
+            rows.push(IvpReportRow {
+                field: format!("native_timing_ms::{field}"),
+                value: format!("{value:.6}"),
+            });
+        }
+    }
+}
+
+fn append_symbolic_callback_telemetry(
+    rows: &mut Vec<IvpReportRow>,
+    symbolic: &RustedSciThe::symbolic::ivp_telemetry::IvpTelemetrySnapshot,
+) {
+    rows.push(IvpReportRow {
+        field: "callback_telemetry_mode".into(),
+        value: format!("{:?}", symbolic.mode),
+    });
+    rows.push(IvpReportRow {
+        field: "callback_execution_policy".into(),
+        value: format!("{:?}", symbolic.lambdify_execution_policy),
+    });
+    if matches!(
+        symbolic.mode,
+        RustedSciThe::symbolic::ivp_telemetry::IvpTelemetryMode::Counters
+            | RustedSciThe::symbolic::ivp_telemetry::IvpTelemetryMode::Detailed
+    ) {
+        for (field, value) in [
+            ("parallel_dispatches", symbolic.parallel_dispatches),
+            ("sequential_dispatches", symbolic.sequential_dispatches),
+            ("residual_callbacks", symbolic.residual_evaluations),
+            ("jacobian_callbacks", symbolic.jacobian_evaluations),
+        ] {
+            rows.push(IvpReportRow {
+                field: format!("native_counter::{field}"),
+                value: value.to_string(),
+            });
+        }
+    }
+    if matches!(
+        symbolic.mode,
+        RustedSciThe::symbolic::ivp_telemetry::IvpTelemetryMode::Timings
+            | RustedSciThe::symbolic::ivp_telemetry::IvpTelemetryMode::Detailed
+    ) {
+        for stage in [
+            RustedSciThe::symbolic::ivp_telemetry::IvpWarmStage::ResidualCallback,
+            RustedSciThe::symbolic::ivp_telemetry::IvpWarmStage::JacobianCallback,
+        ] {
+            let elapsed = symbolic.warm[stage as usize].elapsed.as_secs_f64() * 1_000.0;
+            rows.push(IvpReportRow {
+                field: format!("native_timing_ms::callback_{}", stage.label()),
+                value: format!("{elapsed:.6}"),
+            });
+        }
     }
 }
 
@@ -667,6 +1012,8 @@ pub struct SimpleReactorTask {
     pub canonical_state_order: IvpCanonicalStateOrder,
     /// Typed solver facade configuration for the condensed-phase IVP path.
     pub solver_backend_config: ReactorIvpSolverConfig,
+    /// Solver-only settings parsed from a mixed KiThe/RST task document.
+    pub hybrid_solver_settings: Option<HybridStiffSettings>,
     /// Last successful condensed-phase LSODE2 solve snapshot.
     pub last_solve_snapshot: Option<IvpSolveSnapshot>,
     /// Last computed condensed-phase conservation report.
@@ -803,6 +1150,7 @@ impl SimpleReactorTask {
             heat_release: Expr::Const(0.0),
             canonical_state_order: IvpCanonicalStateOrder::default(),
             solver_backend_config: ReactorIvpSolverConfig::default(),
+            hybrid_solver_settings: None,
             last_solve_snapshot: None,
             last_conservation_report: None,
             solver: IVPSolver::default(),
@@ -1202,6 +1550,10 @@ impl SimpleReactorTask {
         self.solver_backend_config = config;
     }
 
+    pub fn set_hybrid_solver_settings(&mut self, settings: Option<HybridStiffSettings>) {
+        self.hybrid_solver_settings = settings;
+    }
+
     /// Builder-style setter for the typed solver-backend contract.
     pub fn with_solver_backend_config(mut self, config: ReactorIvpSolverConfig) -> Self {
         self.set_solver_backend_config(config);
@@ -1324,19 +1676,38 @@ impl SimpleReactorTask {
 
     /// Condensed-phase setup workflow.
     pub fn setup_condensed_ivp(&mut self) -> Result<(), IvpError> {
-        self.validate_condensed_phase_contract()?;
-        self.scaling_processing().map_err(IvpError::from)?;
-        self.kinetic_processing().map_err(IvpError::from)?;
-        self.peclet_numbers().map_err(IvpError::from)?;
-        self.solver.arg_name = REACTOR_IVP_INDEPENDENT_VARIABLE.to_string();
-        self.solver.x_range = (
-            self.solver_backend_config.x0,
-            self.solver_backend_config.x_bound,
-        );
-        self.create_condensed_ivp_equations()
-            .map_err(IvpError::from)?;
-        // let _handoff = self.build_lsode2_problem_config()?;
-        self.check_condensed_before_solution()?;
+        let mut telemetry = IvpStageTelemetry::new(self.solver_backend_config.telemetry);
+        self.setup_condensed_ivp_instrumented(&mut telemetry)
+    }
+
+    fn setup_condensed_ivp_instrumented(
+        &mut self,
+        telemetry: &mut IvpStageTelemetry,
+    ) -> Result<(), IvpError> {
+        telemetry.run("contract_validation", || {
+            self.validate_condensed_phase_contract()
+        })?;
+        telemetry.run("scaling_processing", || {
+            self.scaling_processing().map_err(IvpError::from)
+        })?;
+        telemetry.run("kinetic_processing", || {
+            self.kinetic_processing().map_err(IvpError::from)
+        })?;
+        telemetry.run("peclet_numbers", || {
+            self.peclet_numbers().map_err(IvpError::from)
+        })?;
+        telemetry.run("equation_assembly", || {
+            self.solver.arg_name = REACTOR_IVP_INDEPENDENT_VARIABLE.to_string();
+            self.solver.x_range = (
+                self.solver_backend_config.x0,
+                self.solver_backend_config.x_bound,
+            );
+            self.create_condensed_ivp_equations()
+                .map_err(IvpError::from)
+        })?;
+        telemetry.run("pre_solve_validation", || {
+            self.check_condensed_before_solution()
+        })?;
         Ok(())
     }
 
@@ -1375,6 +1746,13 @@ impl SimpleReactorTask {
     /// additional reactor state.
     pub fn build_lsode2_problem_config(&self) -> Result<Lsode2ProblemConfig, IvpError> {
         self.check_condensed_before_solution()?;
+        if self.solver_backend_config.family()
+            != crate::ReactorsIVP::solver_backend::ReactorIvpSolverFamily::Lsode2
+        {
+            return Err(IvpError::InvalidConfiguration(
+                "build_lsode2_problem_config requires the LSODE2 solver family".to_string(),
+            ));
+        }
         let initial_state = self.build_initial_state_vector()?;
         self.solver_backend_config
             .to_rusted_problem_config(
@@ -1386,12 +1764,33 @@ impl SimpleReactorTask {
             .map_err(IvpError::from)
     }
 
-    /// Build an LSODE2 solver from the currently assembled condensed-phase state.
-    pub fn build_condensed_lsode2_solver(&self) -> Result<Lsode2Solver, IvpError> {
-        let config = self.build_lsode2_problem_config()?;
-        Lsode2Solver::new(config).map_err(|err| {
-            IvpError::CalculationError(format!("failed to build LSODE2 solver: {err}"))
-        })
+    /// Build the shared StiffAPI request from the assembled condensed RHS.
+    pub fn build_condensed_stiff_request(&self) -> Result<StiffSolverRequest, IvpError> {
+        self.check_condensed_before_solution()?;
+        let initial_state = self.build_initial_state_vector()?;
+        self.solver_backend_config
+            .to_stiff_request(
+                self.solver.eq_system.clone(),
+                self.solver.unknowns.clone(),
+                REACTOR_IVP_INDEPENDENT_VARIABLE.to_string(),
+                initial_state,
+            )
+            .map_err(IvpError::from)
+    }
+
+    /// Prepare the condensed request through RustedSciThe's common StiffAPI.
+    pub fn build_condensed_stiff_solver(&self) -> Result<PreparedStiffSolver, IvpError> {
+        self.check_condensed_before_solution()?;
+        let initial_state = self.build_initial_state_vector()?;
+        self.solver_backend_config
+            .prepare_stiff_solver_with_hybrid_settings(
+                self.solver.eq_system.clone(),
+                self.solver.unknowns.clone(),
+                REACTOR_IVP_INDEPENDENT_VARIABLE.to_string(),
+                initial_state,
+                self.hybrid_solver_settings.as_ref(),
+            )
+            .map_err(IvpError::from)
     }
 
     /// Assemble the condensed-phase symbolic RHS on the canonical state order.
@@ -1551,6 +1950,7 @@ impl SimpleReactorTask {
         values: &DMatrix<f64>,
         summary: &Lsode2SolveSummary,
     ) -> Result<(), IvpError> {
+        self.validate_candidate_trajectory(axis, values, &summary.status)?;
         if axis.is_empty() {
             return Err(IvpError::CalculationError(
                 "LSODE2 returned an empty axis".to_string(),
@@ -1680,6 +2080,50 @@ impl SimpleReactorTask {
         Ok(())
     }
 
+    fn validate_candidate_trajectory(
+        &self,
+        axis: &DVector<f64>,
+        values: &DMatrix<f64>,
+        status: &str,
+    ) -> Result<(), IvpError> {
+        if axis.is_empty() {
+            return Err(IvpError::CalculationError(
+                "solver returned an empty axis".to_string(),
+            ));
+        }
+        if values.nrows() != axis.len() || values.ncols() != self.solver.unknowns.len() {
+            return Err(IvpError::CalculationError(format!(
+                "trajectory shape {}x{} is incompatible with axis length {} and {} states",
+                values.nrows(),
+                values.ncols(),
+                axis.len(),
+                self.solver.unknowns.len()
+            )));
+        }
+        if !Self::is_accepted_solve_status(status) {
+            return Err(IvpError::CalculationError(format!(
+                "solver returned an unexpected termination status: {status}"
+            )));
+        }
+        if axis.iter().any(|value| !value.is_finite())
+            || values.iter().any(|value| !value.is_finite())
+        {
+            return Err(IvpError::CalculationError(
+                "solver trajectory contains a non-finite value".to_string(),
+            ));
+        }
+        if axis
+            .iter()
+            .zip(axis.iter().skip(1))
+            .any(|pair| pair.1 < pair.0)
+        {
+            return Err(IvpError::CalculationError(
+                "solver axis must be monotonic increasing".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Accept the statuses that correspond to successful or intentionally stopped solves.
     fn is_accepted_solve_status(status: &str) -> bool {
         status.starts_with("finished") || status == "stopped_by_condition"
@@ -1690,47 +2134,154 @@ impl SimpleReactorTask {
     /// The task keeps the last successful result in memory so repeated failed
     /// reruns do not destroy the previous usable output.
     pub fn solve_condensed_ivp(&mut self) -> Result<IvpSolveSnapshot, IvpError> {
-        self.setup_condensed_ivp()?;
-        let mut solver = self.build_condensed_lsode2_solver()?;
-        let summary = solver.solve_with_summary().map_err(IvpError::from)?;
-        let (axis, values) = solver.get_result();
-        let algorithm = summary.algorithm.clone();
-        let statistics = summary.statistics.clone();
-        let native_statistics = summary.native_statistics.clone();
-        let evaluation_telemetry = summary.evaluation_telemetry.clone();
+        let mut stage_telemetry = IvpStageTelemetry::new(self.solver_backend_config.telemetry);
+        let workflow_started = stage_telemetry.mode.collects_timings().then(Instant::now);
+        self.setup_condensed_ivp_instrumented(&mut stage_telemetry)?;
+        let request = stage_telemetry.run("solver_request_build", || {
+            self.build_condensed_stiff_request()
+        })?;
+        let mut solver = stage_telemetry.run("rst_solver_preparation", || {
+            self.solver_backend_config
+                .prepare_stiff_request(
+                    request,
+                    &self.solver.unknowns,
+                    self.hybrid_solver_settings.as_ref(),
+                )
+                .map_err(IvpError::from)
+        })?;
+        let outcome = stage_telemetry.run("native_integration", || {
+            solver
+                .try_solve()
+                .map_err(|error| IvpError::SolverExecution {
+                    error,
+                    telemetry: (self.solver_backend_config.telemetry != SolverTelemetryMode::Off)
+                        .then(|| failed_solve_telemetry(&solver))
+                        .flatten(),
+                })
+        })?;
+        let (axis, values, status, method_label, summary, native_telemetry) =
+            stage_telemetry.run("trajectory_materialization", || {
+                Ok::<_, IvpError>(match outcome {
+                    StiffSolveOutcome::Lsode2(summary) => {
+                        let trajectory = solver.trajectory_view().map_err(|error| {
+                            IvpError::CalculationError(format!(
+                                "StiffAPI trajectory unavailable: {error}"
+                            ))
+                        })?;
+                        (
+                            trajectory.axis.clone(),
+                            trajectory.values.clone(),
+                            summary.status.to_string(),
+                            summary.method.to_string(),
+                            Some(summary),
+                            solver.telemetry_snapshot().ok(),
+                        )
+                    }
+                    StiffSolveOutcome::Bdf => {
+                        let trajectory = solver.trajectory_view().map_err(|error| {
+                            IvpError::CalculationError(format!(
+                                "StiffAPI trajectory unavailable: {error}"
+                            ))
+                        })?;
+                        let status = solver
+                            .as_bdf()
+                            .map(|native| native.get_status().to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let telemetry = solver.telemetry_snapshot().ok();
+                        (
+                            trajectory.axis.clone(),
+                            trajectory.values.clone(),
+                            status,
+                            "BDF".to_string(),
+                            None,
+                            telemetry,
+                        )
+                    }
+                    StiffSolveOutcome::Radau(solution) => {
+                        let (axis, values) = solution.output_trajectory().map_err(|error| {
+                            IvpError::CalculationError(format!(
+                                "Radau output materialization failed: {error}"
+                            ))
+                        })?;
+                        let telemetry =
+                            Some(StiffTelemetrySnapshot::from_radau_solution(&solution));
+                        (
+                            axis,
+                            values,
+                            "finished".to_string(),
+                            "Radau5".to_string(),
+                            None,
+                            telemetry,
+                        )
+                    }
+                    StiffSolveOutcome::BackwardEuler => {
+                        return Err(IvpError::InvalidConfiguration(
+                            "Backward Euler is not an enabled KiThe solver family".to_string(),
+                        ));
+                    }
+                })
+            })?;
 
-        self.validate_condensed_solve_snapshot(&axis, &values, &summary)?;
+        stage_telemetry.run("candidate_validation", || {
+            self.validate_candidate_trajectory(&axis, &values, &status)?;
+            if let Some(summary) = summary.as_ref() {
+                self.validate_condensed_solve_snapshot(&axis, &values, summary)?;
+            }
+            Ok::<_, IvpError>(())
+        })?;
+        let algorithm = summary.as_ref().map(|summary| summary.algorithm.clone());
+        let statistics = summary.as_ref().map(|summary| summary.statistics.clone());
+        let native_statistics = summary
+            .as_ref()
+            .map(|summary| summary.native_statistics.clone());
+        let evaluation_telemetry = summary
+            .as_ref()
+            .map(|summary| summary.evaluation_telemetry.clone());
 
-        self.solver.x_mesh = Some(axis.clone());
-        self.solver.solution = Some(values.clone());
-        let snapshot = IvpSolveSnapshot {
+        stage_telemetry.run("solution_publication", || {
+            self.solver.x_mesh = Some(axis.clone());
+            self.solver.solution = Some(values.clone());
+            Ok::<_, IvpError>(())
+        })?;
+        let mut snapshot = IvpSolveSnapshot {
             axis,
             values,
             variable_names: self.solver.unknowns.clone(),
+            family: self.solver_backend_config.family(),
+            status,
+            method_label,
             summary,
             backend_plan: self.solver_backend_config,
             algorithm,
             statistics,
             native_statistics,
             evaluation_telemetry,
+            native_telemetry,
+            stage_telemetry: stage_telemetry.clone(),
         };
-        self.last_solve_snapshot = Some(snapshot.clone());
-        match self.refresh_conservation_report() {
-            Ok(()) => {
-                if let Some(report) = self.last_conservation_report.as_ref() {
-                    self.pretty_print_conservation_report(report);
+        stage_telemetry.run("conservation", || {
+            match self.refresh_conservation_report() {
+                Ok(()) => {
+                    if let Some(report) = self.last_conservation_report.as_ref() {
+                        self.pretty_print_conservation_report(report);
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        "Condensed IVP conservation check could not be completed: {}",
+                        err
+                    );
                 }
             }
-            Err(err) => {
-                warn!(
-                    "Condensed IVP conservation check could not be completed: {}",
-                    err
-                );
-            }
-        }
-        if let Err(err) = self.postprocessing() {
-            return Err(err);
-        }
+            Ok::<_, IvpError>(())
+        })?;
+        stage_telemetry.run("postprocessing", || self.postprocessing())?;
+        stage_telemetry.record(
+            "total_workflow",
+            workflow_started.map(|start| start.elapsed().as_secs_f64() * 1_000.0),
+        );
+        snapshot.stage_telemetry = stage_telemetry;
+        self.last_solve_snapshot = Some(snapshot.clone());
         Ok(snapshot)
     }
 

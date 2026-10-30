@@ -910,6 +910,7 @@ impl EquilibriumApp {
                     if matches!(
                         self.document.config.problem,
                         EquilibriumProblemDraft::FixedPh { .. }
+                            | EquilibriumProblemDraft::FixedPhRange { .. }
                     ) {
                         "Production P,H workflow"
                     } else {
@@ -1147,6 +1148,17 @@ impl EquilibriumApp {
                 reference_pressure_pa,
                 "1 target enthalpy".to_owned(),
             ),
+            EquilibriumProblemDraft::FixedPhRange {
+                pressure_pa,
+                reference_pressure_pa,
+                point_count,
+                ..
+            } => (
+                "P,H",
+                pressure_pa,
+                reference_pressure_pa,
+                format!("{point_count} enthalpy targets"),
+            ),
         };
         let (inventory_source, phase_count, component_count) = match &self.document.config.inventory
         {
@@ -1248,6 +1260,31 @@ impl EquilibriumApp {
                         }
                     });
                 });
+                if !is_pt {
+                    let is_range = matches!(
+                        self.document.config.problem,
+                        EquilibriumProblemDraft::FixedPhRange { .. }
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(!is_range, "Single target")
+                            .clicked()
+                            && is_range
+                        {
+                            set_ph_range_mode(&mut self.document.config.problem, false);
+                            self.invalidate_prepared_request();
+                        }
+                        if ui
+                            .selectable_label(is_range, "Target range")
+                            .on_hover_text(help_tooltip(self.help_language, "problem.ph_range"))
+                            .clicked()
+                            && !is_range
+                        {
+                            set_ph_range_mode(&mut self.document.config.problem, true);
+                            self.invalidate_prepared_request();
+                        }
+                    });
+                }
                 match &mut self.document.config.problem {
                     EquilibriumProblemDraft::FixedPt {
                         pressure_pa,
@@ -1296,6 +1333,50 @@ impl EquilibriumApp {
                         ui.label(
                             "The P,H solve uses the common selected thermochemistry interval; "
                                 .to_string(),
+                        );
+                    }
+                    EquilibriumProblemDraft::FixedPhRange {
+                        pressure_pa,
+                        reference_pressure_pa,
+                        start_enthalpy_j,
+                        end_enthalpy_j,
+                        point_count,
+                        temperature_bounds,
+                    } => {
+                        labeled_text_with_language(
+                            ui,
+                            "Pressure [Pa]",
+                            pressure_pa,
+                            self.help_language,
+                        );
+                        labeled_text_with_language(
+                            ui,
+                            "Reference pressure [Pa]",
+                            reference_pressure_pa,
+                            self.help_language,
+                        );
+                        labeled_text_with_language(
+                            ui,
+                            "Start total enthalpy [J]",
+                            start_enthalpy_j,
+                            self.help_language,
+                        );
+                        labeled_text_with_language(
+                            ui,
+                            "End total enthalpy [J]",
+                            end_enthalpy_j,
+                            self.help_language,
+                        );
+                        labeled_text_with_language(
+                            ui,
+                            "Solved points",
+                            point_count,
+                            self.help_language,
+                        );
+                        render_ph_temperature_bounds(ui, temperature_bounds, self.help_language);
+                        ui.label(
+                            "Targets are solved in entered order; each accepted point seeds the next."
+                                .to_owned(),
                         );
                     }
                 }
@@ -2307,6 +2388,7 @@ impl EquilibriumApp {
             if matches!(
                 self.document.config.problem,
                 EquilibriumProblemDraft::FixedPh { .. }
+                    | EquilibriumProblemDraft::FixedPhRange { .. }
             ) {
                 let previous_mode = self.document.config.solver.ph_solve_mode;
                 ui.label("P,H route")
@@ -2402,7 +2484,7 @@ impl EquilibriumApp {
                 && !matches!(selection, EquilibriumSolverDraft::CustomCascade { .. })
             {
                 *selection = EquilibriumSolverDraft::CustomCascade {
-                    backends: vec![GuiSolverBackend::LegacyNr, GuiSolverBackend::LegacyLm],
+                    backends: vec![GuiSolverBackend::NativeNr, GuiSolverBackend::NativeLm],
                 };
                 invalidate = true;
             }
@@ -2463,7 +2545,7 @@ impl EquilibriumApp {
                     .on_hover_text(help_tooltip(self.help_language, "list.add_backend"))
                     .clicked()
                 {
-                    backends.push(GuiSolverBackend::LegacyTr);
+                    backends.push(GuiSolverBackend::NativeTr);
                     invalidate = true;
                 }
                 if let Some(index) = move_up {
@@ -3805,6 +3887,49 @@ fn render_ph_temperature_bounds(
     labeled_text_with_language(ui, "Lower bound [K]", &mut bounds.lower_k, language);
     labeled_text_with_language(ui, "Upper bound [K]", &mut bounds.upper_k, language);
     labeled_text_with_language(ui, "Initial seed [K]", &mut bounds.seed_k, language);
+}
+
+fn set_ph_range_mode(problem: &mut EquilibriumProblemDraft, range: bool) {
+    match (problem.clone(), range) {
+        (
+            EquilibriumProblemDraft::FixedPh {
+                pressure_pa,
+                reference_pressure_pa,
+                target_enthalpy_j,
+                temperature_bounds,
+            },
+            true,
+        ) => {
+            let start = target_enthalpy_j.parse::<f64>().unwrap_or(0.0);
+            let step = start.abs().max(1.0) * 0.01;
+            *problem = EquilibriumProblemDraft::FixedPhRange {
+                pressure_pa,
+                reference_pressure_pa,
+                start_enthalpy_j: target_enthalpy_j,
+                end_enthalpy_j: (start + step).to_string(),
+                point_count: "5".into(),
+                temperature_bounds,
+            };
+        }
+        (
+            EquilibriumProblemDraft::FixedPhRange {
+                pressure_pa,
+                reference_pressure_pa,
+                start_enthalpy_j,
+                temperature_bounds,
+                ..
+            },
+            false,
+        ) => {
+            *problem = EquilibriumProblemDraft::FixedPh {
+                pressure_pa,
+                reference_pressure_pa,
+                target_enthalpy_j: start_enthalpy_j,
+                temperature_bounds,
+            };
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]

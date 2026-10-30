@@ -113,6 +113,45 @@ fn test_canonical_reactor_ivp_template_is_parser_ready() {
 }
 
 #[test]
+fn standalone_solver_family_survives_document_roundtrip() {
+    for method in ["BDF", "Radau5"] {
+        let input = format!(
+            "task\nsolver: IVP\nmethod: {method}\n\
+             process_conditions\nro: 1800.0\nCp: 1200.0\nLambda: 0.35\nm: 0.02\nL: 0.02\nthermal_effects: [125000.0]\n\
+             initial_conditions\nT: 900.0\nq: 0.0\nA: 1.0\n\
+             solver_options\nmax_iterations: 17\nrtol: 1e-6\natol: 1e-8\nmax_step: 1e-3\n"
+        );
+        let parsed = parse_reactor_ivp_document_from_str(&input)
+            .expect("standalone solver document should parse");
+        let serialized = parsed.document_to_string();
+        let reparsed = parse_reactor_ivp_document_from_str(&serialized)
+            .expect("serialized standalone solver document should parse");
+
+        assert_eq!(
+            format!("{:?}", reparsed.solver_settings.solver.method),
+            if method == "BDF" { "Bdf" } else { "Radau5" }
+        );
+        assert_eq!(
+            reparsed
+                .hybrid_solver_settings
+                .as_ref()
+                .expect("hybrid solver settings should be retained")
+                .solver_kind(),
+            if method == "BDF" {
+                RustedSciThe::numerical::StiffAPI::StiffSolverKind::Bdf
+            } else {
+                RustedSciThe::numerical::StiffAPI::StiffSolverKind::Radau
+            }
+        );
+        assert_eq!(
+            reparsed.solver_settings.solver_options.max_iterations,
+            Some(17)
+        );
+        assert_eq!(serialized, reparsed.document_to_string());
+    }
+}
+
+#[test]
 fn test_parse_reactor_ivp_document_delegates_integer_and_optional_solver_settings() {
     let input = r#"
 task
@@ -133,12 +172,10 @@ q: 0.0
 A: 1.0
 
 solver_options
-max_iterations: 42
 rtol: 1e-6
 atol: 1e-8
 max_step: 1e-3
 first_step: Some(1e-6)
-parallel: false
 lsode2_method_family: auto
 lsode2_symbolic_assembly: AtomView
 lsode2_symbolic_execution: LambdifyExpr
@@ -148,12 +185,12 @@ lsode2_linear_structure: sparse
     let spec =
         parse_reactor_ivp_document_from_str(input).expect("typed solver settings should parse");
 
-    assert_eq!(spec.solver_settings.solver_options.max_iterations, Some(42));
+    assert_eq!(spec.solver_settings.solver_options.max_iterations, None);
     assert_eq!(spec.solver_settings.solver_options.rtol, Some(1e-6));
     assert_eq!(spec.solver_settings.solver_options.atol, Some(1e-8));
     assert_eq!(spec.solver_settings.solver_options.max_step, Some(1e-3));
     assert_eq!(spec.solver_settings.solver_options.first_step, Some(1e-6));
-    assert_eq!(spec.solver_settings.solver_options.parallel, Some(false));
+    assert_eq!(spec.solver_settings.solver_options.parallel, None);
     assert!(spec.solver_settings.solver_options.lsode2.is_some());
 }
 
@@ -387,14 +424,10 @@ species: A
 threshold: 1e-4
 
 solver_options
-max_iterations: 42
 rtol: 1e-6
 atol: 1e-8
 max_step: 1e-3
 first_step: Some(1e-6)
-vectorized: true
-parallel: false
-neighborhood_check: 1e-3
 lsode2_method_family: auto
 lsode2_symbolic_assembly: AtomView
 lsode2_symbolic_execution: AOT

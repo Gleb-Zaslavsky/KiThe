@@ -69,6 +69,10 @@ mod tests {
     fn create_policy_test_reactor(policy: SymbolicRhsAssemblyPolicy) -> SimpleReactorTask {
         let mut reactor = create_test_reactor().with_symbolic_rhs_assembly_policy(policy);
         reactor.kindata.substances = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        reactor.kindata.groups = Some(HashMap::from([(
+            "A".to_string(),
+            HashMap::from([("H".to_string(), 2)]),
+        )]));
         reactor.kindata.stecheodata.vec_of_molmasses = Some(vec![28.0, 44.0, 20.0]);
         reactor.M = 1.0 / (0.5 / 28.0 + 0.3 / 44.0 + 0.2 / 20.0) / 1000.0;
         reactor
@@ -76,7 +80,8 @@ mod tests {
 
     /// Create a compact HMX-like reactor snapshot that survives the full `setup_bvp` pipeline.
     fn create_setup_bvp_test_reactor() -> SimpleReactorTask {
-        let eq = "HMX=>HMXprod".to_string();
+        let product = "DecompositionProduct";
+        let eq = format!("HMX=>{product}");
         let c_p = 0.35 * 4.184 * 1000.0;
         let lambda_eff = 0.07;
         let n = 0.0;
@@ -100,7 +105,7 @@ mod tests {
         ]);
         let groups = Some(HashMap::from([
             ("HMX".to_string(), hmx.clone()),
-            ("HMXprod".to_string(), hmxprod),
+            (product.to_string(), hmxprod),
         ]));
 
         let mut reactor = SimpleReactorTask::new();
@@ -115,17 +120,17 @@ mod tests {
         reactor
             .fast_react_set(reactions)
             .expect("valid elementary reaction should be accepted");
-        reactor.kindata.substances = vec!["HMX".to_string(), "HMXprod".to_string()];
+        reactor.kindata.substances = vec!["HMX".to_string(), product.to_string()];
         reactor.kindata.groups = groups;
 
         let diffusion = {
             let ro0 = 34.2e-3 * p / (R_G * t0);
             let d = lambda_eff / (c_p * ro0);
-            HashMap::from([("HMX".to_string(), d), ("HMXprod".to_string(), d)])
+            HashMap::from([("HMX".to_string(), d), (product.to_string(), d)])
         };
         let boundary_condition = HashMap::from([
             ("HMX".to_string(), 1.0 - 1e-3),
-            ("HMXprod".to_string(), 1e-3),
+            (product.to_string(), 1e-3),
             ("T".to_string(), t0),
         ]);
         let thermal_effects = vec![3000.0 * 1e3 / 100.0];
@@ -1134,7 +1139,12 @@ mod tests {
         assert_eq!(reactor.solver.BorderConditions.get("C1"), Some(&(0, 1e-3)));
         assert_eq!(reactor.solver.BorderConditions.get("J1"), Some(&(1, 1e-10)));
 
-        for key in ["HMX", "HMXprod", "HMX_flux", "HMXprod_flux"] {
+        for key in [
+            "HMX",
+            "DecompositionProduct",
+            "HMX_flux",
+            "DecompositionProduct_flux",
+        ] {
             assert!(
                 reactor.map_of_equations.contains_key(key),
                 "map_of_equations should contain {key}"
@@ -1247,6 +1257,14 @@ mod tests {
             ReactorError::CalculationError("test calc".to_string()),
             ReactorError::ParseError("test parse".to_string()),
             ReactorError::IndexOutOfBounds("test index".to_string()),
+            ReactorError::BvpBoundaryConditionViolation {
+                state: "Teta".to_string(),
+                endpoint: 0,
+                expected: 0.0,
+                actual: 0.1,
+                absolute_error: 0.1,
+                tolerance: 1e-6,
+            },
         ];
 
         for error in errors {
@@ -1261,6 +1279,8 @@ mod tests {
 
         assert_eq!(reactor.diffusion_coefficients().get("A"), Some(&1e-5));
         assert_eq!(reactor.diffusion_coefficients().get("B"), Some(&1.2e-5));
+        assert_eq!(reactor.thermal_conductivity(), reactor.Lambda);
+        assert_eq!(reactor.mean_molar_mass_kg_per_mol(), reactor.M);
         assert_eq!(reactor.boundary_conditions().get("T"), Some(&450.0));
         assert_eq!(reactor.transport_cache().get("A"), None);
         assert!(reactor.mass_peclet_numbers().is_empty());
@@ -1271,6 +1291,25 @@ mod tests {
         assert_eq!(reactor.scaling_config().dT, 100.0);
         assert_eq!(reactor.scaling_config().L, 0.1);
         assert_eq!(reactor.scaling_config().T_scale, 100.0);
+    }
+
+    #[test]
+    fn test_legacy_scientific_fields_have_idiomatic_read_accessors() {
+        let mut solver = BVPSolver::default();
+        solver.BorderConditions.insert("Teta".to_string(), (0, 1.0));
+        assert_eq!(
+            solver.state_boundary_conditions().get("Teta"),
+            Some(&(0, 1.0))
+        );
+
+        let reaction = FastElemReact {
+            eq: "A => B".to_string(),
+            A: 1.0,
+            n: 0.0,
+            E: 0.0,
+            Q: -12.5,
+        };
+        assert_eq!(reaction.heat_of_reaction(), -12.5);
     }
 
     #[test]
@@ -1449,7 +1488,7 @@ mod tests {
     fn hmx_test() {
         /////////////////// setting up kinetics
         let mut kd = KinData::new();
-        kd.substances = vec!["HMX".to_string(), "HMXprod".to_string()];
+        kd.substances = vec!["HMX".to_string(), "DecompositionProduct".to_string()];
         let hmx = HashMap::from([
             ("H".to_string(), 4),
             ("N".to_string(), 8),
@@ -1458,9 +1497,9 @@ mod tests {
         ]);
         kd.groups = Some(HashMap::from([
             ("HMX".to_string(), hmx.clone()),
-            ("HMXprod".to_string(), hmx),
+            ("DecompositionProduct".to_string(), hmx),
         ]));
-        let eq = "HMX=>HMXprod".to_string();
+        let eq = "HMX=>DecompositionProduct".to_string();
         kd.vec_of_equations = vec![eq.clone()];
         //////////// instance of problem constructor/////////////
         let mut reactor = SimpleReactorTask::new();
@@ -1472,10 +1511,13 @@ mod tests {
         let _M = 34.2 / 1000.0; //  kg/mol
         let A = 1.3 * 1e5; //
         let E = 5000.0 * 4.184; //  
-        let Diffusion = HashMap::from([("HMX".to_string(), 1e-3), ("HMXprod".to_string(), 1e-3)]);
+        let Diffusion = HashMap::from([
+            ("HMX".to_string(), 1e-3),
+            ("DecompositionProduct".to_string(), 1e-3),
+        ]);
         let boundary_condition = HashMap::from([
             ("HMX".to_string(), 1.0 - 1e-3),
-            ("HMXprod".to_string(), 1e-3),
+            ("DecompositionProduct".to_string(), 1e-3),
             ("T".to_string(), 500.0),
         ]);
         let thermal_effects = vec![Q_g];
@@ -1518,7 +1560,7 @@ mod tests {
 
     fn create_hmx(Q_g: f64, L: f64) -> SimpleReactorTask {
         /////////////////// setting up kinetics
-        let eq = "HMX=>10HMXprod".to_string();
+        let eq = "HMX=>10DecompositionProduct".to_string();
 
         let C_p = 0.35 * 4.184 * 1000.0;
         let Lambda_eff = 0.07; // W/m-K 
@@ -1545,7 +1587,7 @@ mod tests {
         ]);
         let groups = Some(HashMap::from([
             ("HMX".to_string(), hmx.clone()),
-            ("HMXprod".to_string(), hmxprod),
+            ("DecompositionProduct".to_string(), hmxprod),
         ]));
         //////////// instance of problem constructor/////////////
         let mut reactor = SimpleReactorTask::new();
@@ -1559,7 +1601,7 @@ mod tests {
         let vec_of_structs = vec![struct_with_params];
 
         let _ = reactor.fast_react_set(vec_of_structs);
-        reactor.kindata.substances = vec!["HMX".to_string(), "HMXprod".to_string()];
+        reactor.kindata.substances = vec!["HMX".to_string(), "DecompositionProduct".to_string()];
         reactor.kindata.groups = groups;
         // info!("reactor {:?}", reactor.kindata);
         ///////////// parameters //////////////////
@@ -1568,10 +1610,13 @@ mod tests {
         let D = Lambda_eff / (C_p * ro0);
         info!("D = {}", D);
         // set diffusion coeffisients
-        let Diffusion = HashMap::from([("HMX".to_string(), D), ("HMXprod".to_string(), D)]);
+        let Diffusion = HashMap::from([
+            ("HMX".to_string(), D),
+            ("DecompositionProduct".to_string(), D),
+        ]);
         let boundary_condition = HashMap::from([
             ("HMX".to_string(), 1.0 - 1e-3),
-            ("HMXprod".to_string(), 1e-3),
+            ("DecompositionProduct".to_string(), 1e-3),
             ("T".to_string(), T0),
         ]);
         let thermal_effects = vec![Q_g];
@@ -1632,7 +1677,7 @@ mod tests {
         abs_tolerance: f64,
         loglevel: Option<String>,
     ) -> Result<(), ReactorError> {
-        let substances = vec!["HMX".to_string(), "HMXprod".to_string()];
+        let substances = vec!["HMX".to_string(), "DecompositionProduct".to_string()];
         reactor.solver.solve_NRBVP_with_configs(
             initial_guess,
             n_steps,
@@ -1705,7 +1750,7 @@ mod tests {
             abs_tolerance,
             tolerance_config,
             bounds_config,
-            &vec!["HMX".to_string(), "HMXprod".to_string()],
+            &vec!["HMX".to_string(), "DecompositionProduct".to_string()],
             max_iterations,
             loglevel,
         );
@@ -1748,17 +1793,17 @@ mod tests {
         ]);
         let groups = Some(HashMap::from([
             ("HMX".to_string(), hmx.clone()),
-            ("HMXprod".to_string(), hmxprod),
+            ("DecompositionProduct".to_string(), hmxprod),
         ]));
 
-        let vec_of_formulae = vec!["HMX", "HMXprod"];
+        let vec_of_formulae = vec!["HMX", "DecompositionProduct"];
         let molar_masses = calculate_molar_mass_of_vector_of_subs(vec_of_formulae, groups).unwrap();
         info!("Test result: {:?}", molar_masses);
 
-        // Expected: HMX should be much larger than HMXprod
+        // Expected: HMX should be much larger than DecompositionProduct
         assert!(molar_masses[0] > molar_masses[1]);
         assert!((molar_masses[0] - 340.0).abs() < 1.0); // HMX: 4*1.008 + 8*14.007 + 8*12.011 + 8*15.999 = 344
-        assert!((molar_masses[1] - 34.04).abs() < 1.0); // HMXprod: 6*1.008 + 1*12.011 + 1*15.999
+        assert!((molar_masses[1] - 34.04).abs() < 1.0); // DecompositionProduct: 6*1.008 + 1*12.011 + 1*15.999
     }
 
     #[test]
@@ -1843,7 +1888,7 @@ mod tests {
         let linear_sys_method = None;
         // Using the new tolerance helper - much simpler!
         let tolerance_config = ToleranceConfig::new(1e-7, 1e-7, 1e-7, 1e-6);
-        let substances = vec!["HMX".to_string(), "HMXprod".to_string()];
+        let substances = vec!["HMX".to_string(), "DecompositionProduct".to_string()];
         // Using the new bounds helper
         let bounds_config = BoundsConfig::new(
             (-100.0, 100.1), // C bounds
@@ -1930,7 +1975,8 @@ mod tests {
     fn test_tolerance_helpers() {
         // Test ToleranceConfig struct approach
         let tolerance_config = ToleranceConfig::new(1e-4, 1e-4, 1e-5, 1e-4);
-        let substances = vec!["HMX".to_string(), "HMXprod".to_string()];
+        assert_eq!(tolerance_config.dimensionless_temperature_tolerance(), 1e-5);
+        let substances = vec!["HMX".to_string(), "DecompositionProduct".to_string()];
         let full_tolerance_map = tolerance_config.to_full_tolerance_map(&substances);
 
         assert_eq!(full_tolerance_map.get("Teta"), Some(&1e-5));
@@ -1999,9 +2045,13 @@ mod tests {
             (-10.0, 10.0), // Teta bounds
             (-1e20, 1e20), // q bounds
         );
-        let substances = vec!["HMX".to_string(), "HMXprod".to_string()];
+        let substances = vec!["HMX".to_string(), "DecompositionProduct".to_string()];
         let full_bounds_map = bounds_config.to_full_bounds_map(&substances);
 
+        assert_eq!(
+            bounds_config.dimensionless_temperature_bounds(),
+            (-10.0, 10.0)
+        );
         assert_eq!(full_bounds_map.get("Teta"), Some(&(-10.0, 10.0)));
         assert_eq!(full_bounds_map.get("q"), Some(&(-1e20, 1e20)));
         assert_eq!(full_bounds_map.get("C0"), Some(&(0.0, 1.0)));

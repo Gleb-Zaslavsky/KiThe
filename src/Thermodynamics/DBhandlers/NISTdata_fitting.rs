@@ -1,24 +1,19 @@
 //! # NIST Thermodynamic Data Fitting Module
 //!
-//! This module provides advanced fitting algorithms for NIST thermodynamic polynomial coefficients.
-//! It handles the complex mathematical relationships between heat capacity (Cp), enthalpy (dH),
-//! and entropy (dS) using symbolic mathematics and sequential optimization.
+//! This module fits NIST thermodynamic polynomial coefficients while preserving
+//! the linked heat-capacity (Cp), enthalpy (dH), and entropy (dS) model.
 //!
 //! ## Two Main Fitting Algorithms
 //!
-//! ### 1. Adjacent Range Fitting (`fitting_adjacent_weighted`)
-//! - **Use case**: Two adjacent temperature ranges that share a boundary point
-//! - **Method**: Sequential two-stage optimization to avoid conflicting constraints
-//!   - Stage 1: Fit Cp + weighted dS to determine shared coefficients (a,b,c,d,e,g)
-//!   - Stage 2: Fit dH separately to determine enthalpy-specific coefficients (f,h)
-//! - **Advantage**: Respects thermodynamic relationships, avoids optimization conflicts
+//! ### Production stitching
+//! Adjacent and non-adjacent stitching use one deterministic linear SVD fit over
+//! samples from all selected intervals. The model has seven identifiable
+//! coordinates: the eighth published coefficient is a preserved enthalpy gauge.
 //!
-//! ### 2. Non-Adjacent Range Fitting (`fitting_non_adjacent`)
-//! - **Use case**: Multiple temperature ranges with gaps between them
-//! - **Method**: Same sequential approach as adjacent fitting but handles multiple ranges
-//!   - Combines data from all overlapping ranges within target temperature bounds
-//!   - Uses identical weighting scheme for consistency
-//! - **Advantage**: Handles complex multi-range scenarios while maintaining accuracy
+//! ### Compatibility fitting
+//! The older symbolic sequential optimizers remain available through explicitly
+//! named compatibility methods; production NIST stitching does not depend on
+//! nonlinear fitting for this coefficient-linear model.
 //!
 //! ## NIST Polynomial Forms
 //! The fitting targets these standard NIST equations:
@@ -27,20 +22,25 @@
 //! - **dS(T)**: `a*ln(t) + b*t + c*t^2/2 + d*t^3/3 - e/(2*t^2) + g`
 //! ## Key Features
 //!
-//! - Symbolic mathematics for exact coefficient relationships
-//! - Weighted optimization to balance different thermodynamic properties
-//! - Comprehensive error reporting and quality metrics
-//! - Support for both simultaneous and sequential fitting approaches
+//! - Shared coefficient equations for all three properties
+//! - Deterministic sampling, interval ordering, and join-boundary ownership
+//! - Property-level validation before fitted coefficients are published
 
 use crate::Thermodynamics::DBhandlers::NISTdata::*;
-use crate::Thermodynamics::DBhandlers::fitting_reports::compare_property_series;
+use crate::Thermodynamics::DBhandlers::fitting_reports::{
+    compare_property_series, compare_property_series_with_absolute_relative_tolerance,
+};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 use prettytable::{Cell, Row, Table};
 use std::collections::HashMap;
-#[allow(dead_code)]
 const MAX_PROPERTY_RELATIVE_ERROR: f64 = 2.0e-2;
+const NIST_CP_ABSOLUTE_TOLERANCE: f64 = 0.05;
+const NIST_H_ABSOLUTE_TOLERANCE_KJ_PER_MOL: f64 = 0.05;
+const NIST_S_ABSOLUTE_TOLERANCE: f64 = 0.05;
 const MIN_LM_R_SQUARED: f64 = 0.95;
+const FIT_SAMPLE_STEP_K: f64 = 5.0;
+const MAX_FIT_SAMPLES: usize = 250_000;
 
 /// Compute global NIST-form coefficients using SVD least squares fitting.
 ///
@@ -54,13 +54,18 @@ const MIN_LM_R_SQUARED: f64 = 0.95;
 /// * `s_orig` - Entropy values [J/molВ·K]
 ///
 /// # Returns
-/// Vector of 8 NIST coefficients [a,b,c,d,e,f,g,h]
+/// Vector of 8 NIST coefficients `[A,B,C,D,E,F,G,H]`.
+///
+/// Property samples identify only `F-H`. This low-level fit uses the canonical
+/// gauge `H = 0` and returns `F = F-H`. A metadata-owning caller may select
+/// another `H` and add it to `F` without changing any fitted property.
 ///
 /// # Mathematical Approach
-/// - Cp equation: `a + b*t + c*t^2 + d*t^3 + e*t^-2 + h = Cp`
-/// - dH equation: `a*t + b*t^2/2 + c*t^3/3 + d*t^4/4 - e/t + f = dH`
+/// - Cp equation: `a + b*t + c*t^2 + d*t^3 + e*t^-2 = Cp`
+/// - dH equation: `a*t + b*t^2/2 + c*t^3/3 + d*t^4/4 - e/t + (f-h) = dH`
 /// - dS equation: `a*ln(t) + b*t + c*t^2/2 + d*t^3/3 - e/(2*t^2) + g = dS`
-/// Uses inverse standard deviation weighting to balance the different property scales.
+/// Uses inverse RMS weighting to balance the property scales without dividing
+/// by zero for a constant property series.
 pub fn fit_nist_scaled8(
     temps_K: &[f64],
     cp_orig: &[f64],
@@ -68,16 +73,17 @@ pub fn fit_nist_scaled8(
     s_orig: &[f64],
 ) -> Result<Vec<f64>, NISTError> {
     let n = temps_K.len();
-    validate_fit_inputs("NIST", temps_K, cp_orig, h_orig, s_orig)?;
+    validate_fit_inputs(temps_K, cp_orig, h_orig, s_orig)?;
 
     // Calculate inverse standard deviation weights to normalize different property scales
     // This ensures Cp [~30 J/molВ·K], dH [~-100 kJ/mol], and dS [~200 J/molВ·K] contribute equally
-    let w_cp = 1.0 / std(cp_orig);
-    let w_h = 1.0 / std(h_orig);
-    let w_s = 1.0 / std(s_orig);
+    let w_cp = 1.0 / property_scale(cp_orig);
+    let w_h = 1.0 / property_scale(h_orig);
+    let w_s = 1.0 / property_scale(s_orig);
 
     let rows = 3 * n;
-    let cols = 8; // <-- now eight coefficients
+    // Independent coordinates are A..E, Q=(F-H), and G.
+    let cols = 7;
     let mut X = DMatrix::<f64>::zeros(rows, cols);
     let mut y = DVector::<f64>::zeros(rows);
 
@@ -99,9 +105,8 @@ pub fn fit_nist_scaled8(
         X[(row_cp, 2)] = t2; // c
         X[(row_cp, 3)] = t3; // d
         X[(row_cp, 4)] = 1.0 / t2; // e term (t^-2)
-        X[(row_cp, 5)] = 0.0; // f
-        X[(row_cp, 6)] = 0.0; // g
-        X[(row_cp, 7)] = 1.0; // h (Cp-only constant)
+        X[(row_cp, 5)] = 0.0; // F-H
+        X[(row_cp, 6)] = 0.0; // G
         y[row_cp] = cp_orig[i];
 
         //--------------------------------------------------------
@@ -112,9 +117,8 @@ pub fn fit_nist_scaled8(
         X[(row_h, 2)] = t3 / 3.0;
         X[(row_h, 3)] = t4 / 4.0;
         X[(row_h, 4)] = -1.0 / t;
-        X[(row_h, 5)] = 1.0; // f constant
-        X[(row_h, 6)] = 0.0; // g
-        X[(row_h, 7)] = 0.0; // h
+        X[(row_h, 5)] = 1.0; // F-H
+        X[(row_h, 6)] = 0.0; // G
         y[row_h] = h_orig[i];
 
         //--------------------------------------------------------
@@ -125,9 +129,8 @@ pub fn fit_nist_scaled8(
         X[(row_s, 2)] = t2 / 2.0;
         X[(row_s, 3)] = t3 / 3.0;
         X[(row_s, 4)] = -0.5 / t2;
-        X[(row_s, 5)] = 0.0; // f
-        X[(row_s, 6)] = 1.0; // g constant
-        X[(row_s, 7)] = 0.0; // h
+        X[(row_s, 5)] = 0.0; // F-H
+        X[(row_s, 6)] = 1.0; // G
         y[row_s] = s_orig[i];
     }
 
@@ -140,29 +143,49 @@ pub fn fit_nist_scaled8(
 
     //--- SVD LS solve ---
     let svd = X.svd(true, true);
-    let theta = svd
-        .solve(&y, 1e-12)
-        .map_err(|e| NISTError::FittingError(format!("SVD solve failed: {}", e)))?;
+    let largest_singular_value = svd.singular_values.iter().copied().fold(0.0_f64, f64::max);
+    let rank_tolerance = largest_singular_value * 1e-12;
+    let rank = svd
+        .singular_values
+        .iter()
+        .filter(|&&value| value > rank_tolerance)
+        .count();
+    if rank < cols {
+        return Err(NISTError::Fit(NISTFitError::Numerical(
+            NISTFitNumericalError::RankDeficient {
+                rank,
+                required: cols,
+            },
+        )));
+    }
+    let theta = svd.solve(&y, rank_tolerance).map_err(|error| {
+        NISTError::Fit(NISTFitError::Numerical(
+            NISTFitNumericalError::LinearSolveFailed(error.to_string()),
+        ))
+    })?;
 
-    let coeffs = theta.data.as_vec().clone();
+    let theta = theta.data.as_vec();
+    let coeffs = vec![
+        theta[0], theta[1], theta[2], theta[3], theta[4], theta[5], theta[6], 0.0,
+    ];
     if coeffs.iter().any(|value| !value.is_finite()) {
-        return Err(NISTError::FittingError(
-            "NIST fitting produced non-finite coefficients".to_string(),
-        ));
+        return Err(NISTError::Fit(NISTFitError::Numerical(
+            NISTFitNumericalError::NonFiniteCoefficients,
+        )));
     }
 
     Ok(coeffs)
 }
 //------------------------- Helper Functions -------------------------------
 
-/// Calculate standard deviation for weighting purposes
-fn std(v: &[f64]) -> f64 {
-    if v.is_empty() {
-        return 0.0;
-    }
-    let m = v.iter().copied().sum::<f64>() / v.len() as f64;
-    let var = v.iter().map(|&x| (x - m).powi(2)).sum::<f64>() / v.len() as f64;
-    var.sqrt()
+fn property_scale(values: &[f64]) -> f64 {
+    let rms = (values.iter().map(|value| value * value).sum::<f64>() / values.len() as f64).sqrt();
+    rms.max(1.0)
+}
+
+fn reanchor_enthalpy_gauge(coeffs: &mut [f64], source_h: f64) {
+    coeffs[5] += source_h;
+    coeffs[7] = source_h;
 }
 
 #[cfg(test)]
@@ -191,11 +214,52 @@ mod offline_tests {
         let s = [4.0, 5.0, 6.0];
 
         let err = fit_nist_scaled8(&temps, &cp, &h, &s).unwrap_err();
-        assert!(matches!(err, NISTError::FittingError(_)));
+        assert!(matches!(
+            err,
+            NISTError::Fit(NISTFitError::Input(
+                NISTFitInputError::LengthMismatch { .. }
+            ))
+        ));
 
         let cp_bad = [10.0, f64::INFINITY, 12.0];
         let err = fit_nist_scaled8(&temps, &cp_bad, &h, &s).unwrap_err();
-        assert!(matches!(err, NISTError::FittingError(_)));
+        assert!(matches!(
+            err,
+            NISTError::Fit(NISTFitError::Input(
+                NISTFitInputError::NonFiniteValue { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_fit_nist_scaled8_rejects_rank_deficient_design() {
+        let temperatures = [500.0; 5];
+        let values = [1.0; 5];
+        let error = fit_nist_scaled8(&temperatures, &values, &values, &values)
+            .expect_err("repeated temperatures cannot identify seven fit coordinates");
+
+        assert!(matches!(
+            error,
+            NISTError::Fit(NISTFitError::Numerical(
+                NISTFitNumericalError::RankDeficient { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn typed_fit_error_survives_thermo_facade_conversion() {
+        let original = NISTError::Fit(NISTFitError::Input(NISTFitInputError::EmptySamples));
+        assert!(std::error::Error::source(&original).is_some());
+
+        let facade_error =
+            crate::Thermodynamics::DBhandlers::thermo_api::ThermoError::from(original);
+        assert!(matches!(
+            facade_error,
+            crate::Thermodynamics::DBhandlers::thermo_api::ThermoError::NISTFit(
+                NISTFitError::Input(NISTFitInputError::EmptySamples)
+            )
+        ));
+        assert!(std::error::Error::source(&facade_error).is_some());
     }
 
     #[test]
@@ -308,7 +372,8 @@ mod offline_tests {
         .expect_err("large property error must be rejected");
         assert!(matches!(
             err,
-            NISTError::FittingError(message) if message.contains("Cp fitting report")
+            NISTError::Fit(NISTFitError::Quality(NISTFitQualityError::Rejected { property, .. }))
+                if property.contains("Cp fitting report")
         ));
     }
 
@@ -330,13 +395,13 @@ mod offline_tests {
             .expect_err("empty vectors must be rejected explicitly");
         assert!(matches!(
             err,
-            NISTError::FittingError(message) if message.contains("must not be empty")
+            NISTError::Fit(NISTFitError::Input(NISTFitInputError::EmptySamples))
         ));
     }
 
     #[test]
     fn test_prepare_fit_data_for_non_adjacent_fitting_rejects_empty_selection() {
-        let result = NISTdata::prepare_fit_data_for_non_adjacent_fitting(
+        let error = NISTdata::prepare_fit_data_for_non_adjacent_fitting(
             vec![Coeffs {
                 T: (1000.0, 1100.0),
                 coeff: (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
@@ -344,12 +409,313 @@ mod offline_tests {
             10.0,
             20.0,
         )
-        .expect("intervals outside the requested range should yield an empty sample set");
+        .expect_err("intervals outside the requested range must fail explicitly");
 
-        assert!(result.0.is_empty());
-        assert!(result.1.is_empty());
-        assert!(result.2.is_empty());
-        assert!(result.3.is_empty());
+        assert!(matches!(
+            error,
+            NISTError::Fit(NISTFitError::Preparation(
+                NISTFitPreparationError::NoSamples { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_fit_nist_scaled8_reconstructs_one_exact_shomate_polynomial() {
+        let source = (30.0, -3.0, 0.5, -0.05, 0.005, -8.0, 180.0, 5.0);
+        let temperatures = (300..=900).step_by(25).map(f64::from).collect::<Vec<_>>();
+        let cp = temperatures
+            .iter()
+            .map(|temperature| {
+                let t = temperature / 1000.0;
+                calculate_cp(t, source.0, source.1, source.2, source.3, source.4)
+            })
+            .collect::<Vec<_>>();
+        let h = temperatures
+            .iter()
+            .map(|temperature| {
+                let t = temperature / 1000.0;
+                calculate_dh(
+                    t, source.0, source.1, source.2, source.3, source.4, source.5, source.6,
+                    source.7,
+                )
+            })
+            .collect::<Vec<_>>();
+        let s = temperatures
+            .iter()
+            .map(|temperature| {
+                let t = temperature / 1000.0;
+                calculate_s(
+                    t, source.0, source.1, source.2, source.3, source.4, source.5, source.6,
+                    source.7,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let fitted = fit_nist_scaled8(&temperatures, &cp, &h, &s)
+            .expect("an exact Shomate polynomial must have an exact linear fit");
+
+        assert_eq!(fitted.len(), 8);
+        assert_eq!(fitted[7], 0.0, "the low-level fit uses the H=0 gauge");
+        for (index, temperature) in temperatures.iter().copied().enumerate() {
+            let t = temperature / 1000.0;
+            let fitted_cp = calculate_cp(t, fitted[0], fitted[1], fitted[2], fitted[3], fitted[4]);
+            let fitted_h = calculate_dh(
+                t, fitted[0], fitted[1], fitted[2], fitted[3], fitted[4], fitted[5], fitted[6],
+                fitted[7],
+            );
+            let fitted_s = calculate_s(
+                t, fitted[0], fitted[1], fitted[2], fitted[3], fitted[4], fitted[5], fitted[6],
+                fitted[7],
+            );
+            assert!((fitted_cp - cp[index]).abs() <= 1e-9);
+            assert!((fitted_h - h[index]).abs() <= 1e-9);
+            assert!((fitted_s - s[index]).abs() <= 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_adjacent_svd_preserves_enthalpy_gauge_and_publishes_atomically() {
+        let source = (30.0, -3.0, 0.5, -0.05, 0.005, -8.0, 180.0, 5.0);
+        let mut nist = NISTdata::new();
+        nist.fit_cp_dh_ds(
+            Coeffs {
+                T: (300.0, 600.0),
+                coeff: source,
+            },
+            Coeffs {
+                T: (600.0, 900.0),
+                coeff: source,
+            },
+            350.0,
+            850.0,
+        )
+        .expect("identical adjacent polynomials must fit exactly");
+
+        let fitted = nist.coeffs.expect("accepted fit must be published");
+        assert!((fitted.7 - source.7).abs() <= 1e-12);
+        assert!((fitted.5 - fitted.7 - (source.5 - source.7)).abs() <= 1e-9);
+    }
+
+    #[test]
+    fn adjacent_svd_two_range_fixture_reproduces_cp_h_s_across_join() {
+        let lower = Coeffs {
+            T: (300.0, 600.0),
+            coeff: (30.0, -3.0, 0.5, -0.05, 0.005, -8.0, 180.0, 5.0),
+        };
+        let upper = Coeffs {
+            T: (600.0, 900.0),
+            coeff: (
+                30.02, -3.002, 0.5002, -0.05002, 0.005002, -3.98, 180.02, 9.0,
+            ),
+        };
+        let mut nist = NISTdata::new();
+        nist.fit_cp_dh_ds(lower.clone(), upper.clone(), 350.0, 850.0)
+            .expect("nearby Shomate intervals should be accepted by the SVD stitcher");
+        let fitted = nist
+            .coeffs
+            .expect("accepted coefficients must be published");
+
+        let mut maximum_absolute_error = [0.0_f64; 3];
+        for temperature in (350..=850).map(f64::from) {
+            let source = if temperature <= 600.0 {
+                lower.coeff
+            } else {
+                upper.coeff
+            };
+            let t = temperature / 1000.0;
+            let reference = [
+                calculate_cp(t, source.0, source.1, source.2, source.3, source.4),
+                calculate_dh(
+                    t, source.0, source.1, source.2, source.3, source.4, source.5, source.6,
+                    source.7,
+                ),
+                calculate_s(
+                    t, source.0, source.1, source.2, source.3, source.4, source.5, source.6,
+                    source.7,
+                ),
+            ];
+            let actual = [
+                calculate_cp(t, fitted.0, fitted.1, fitted.2, fitted.3, fitted.4),
+                calculate_dh(
+                    t, fitted.0, fitted.1, fitted.2, fitted.3, fitted.4, fitted.5, fitted.6,
+                    fitted.7,
+                ),
+                calculate_s(
+                    t, fitted.0, fitted.1, fitted.2, fitted.3, fitted.4, fitted.5, fitted.6,
+                    fitted.7,
+                ),
+            ];
+            let absolute_tolerances = [0.05, 0.05, 0.05];
+            for property in 0..3 {
+                let error = (actual[property] - reference[property]).abs();
+                maximum_absolute_error[property] = maximum_absolute_error[property].max(error);
+                let allowed = absolute_tolerances[property] + 2.0e-3 * reference[property].abs();
+                assert!(
+                    error <= allowed,
+                    "property {property} at {temperature} K: fitted={}, source={}, abs_error={}, allowed={}",
+                    actual[property],
+                    reference[property],
+                    error,
+                    allowed
+                );
+            }
+        }
+
+        assert!(maximum_absolute_error.iter().all(|error| *error > 0.0));
+    }
+
+    #[test]
+    fn shomate_svd_and_rst_lm_use_the_same_weighted_three_property_problem() {
+        use RustedSciThe::numerical::optimization::sym_fitting::Fitting;
+
+        let lower = Coeffs {
+            T: (300.0, 600.0),
+            coeff: (30.0, -3.0, 0.5, -0.05, 0.005, -8.0, 180.0, 5.0),
+        };
+        let upper = Coeffs {
+            T: (600.0, 900.0),
+            coeff: (
+                30.02, -3.002, 0.5002, -0.05002, 0.005002, -3.98, 180.02, 9.0,
+            ),
+        };
+        let (temperatures, cp, h, s) = NISTdata::prepare_fit_data_for_2_range_fitting(
+            lower.clone(),
+            upper.clone(),
+            350.0,
+            850.0,
+        )
+        .unwrap();
+        let weights = [
+            property_scale(&cp).recip(),
+            property_scale(&h).recip(),
+            property_scale(&s).recip(),
+        ];
+
+        let svd = fit_nist_scaled8(&temperatures, &cp, &h, &s).unwrap();
+
+        let t = Expr::Var("T".to_string()) / Expr::Const(1000.0);
+        let equations = [
+            Expr::parse_expression("a + b*t + c*t^2 + d*t^3 + e/t^2"),
+            Expr::parse_expression("a*t + b*t^2/2 + c*t^3/3 + d*t^4/4 - e/t + q"),
+            Expr::parse_expression("a*ln(t) + b*t + c*t^2/2 + d*t^3/3 - e/(2*t^2) + g"),
+        ]
+        .into_iter()
+        .map(|equation| equation.substitute_variable("t", &t))
+        .zip(weights)
+        .map(|(equation, weight)| Expr::Const(weight) * equation)
+        .collect::<Vec<_>>();
+        let mut targets = Vec::with_capacity(temperatures.len() * 3);
+        targets.extend(cp.iter().map(|value| weights[0] * value));
+        targets.extend(h.iter().map(|value| weights[1] * value));
+        targets.extend(s.iter().map(|value| weights[2] * value));
+
+        let initial = vec![
+            0.5 * (lower.coeff.0 + upper.coeff.0),
+            0.5 * (lower.coeff.1 + upper.coeff.1),
+            0.5 * (lower.coeff.2 + upper.coeff.2),
+            0.5 * (lower.coeff.3 + upper.coeff.3),
+            0.5 * (lower.coeff.4 + upper.coeff.4),
+            0.5 * ((lower.coeff.5 - lower.coeff.7) + (upper.coeff.5 - upper.coeff.7)),
+            0.5 * (lower.coeff.6 + upper.coeff.6),
+        ];
+        let mut rst = Fitting::new()
+            .with_data(temperatures.clone(), targets)
+            .with_equations(equations)
+            .with_unknowns(
+                ["a", "b", "c", "d", "e", "q", "g"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            )
+            .with_arg("T".to_string())
+            .with_initial_guess(initial)
+            .with_tolerance(1e-10)
+            .with_f_tolerance(1e-12)
+            .with_g_tolerance(1e-12)
+            .with_max_iterations(1000);
+        rst.solve()
+            .expect("RST LM should solve the same weighted Shomate least-squares problem");
+        let rst = rst
+            .get_map_of_solutions()
+            .expect("RST LM should publish fitted parameters");
+        let rst = ["a", "b", "c", "d", "e", "q", "g"]
+            .map(|name| rst[name])
+            .to_vec();
+
+        let mut max_prediction_delta = [0.0_f64; 3];
+        let mut svd_objective = 0.0;
+        let mut rst_objective = 0.0;
+        for (index, temperature) in temperatures.iter().copied().enumerate() {
+            let x = temperature / 1000.0;
+            let svd_values = [
+                calculate_cp(x, svd[0], svd[1], svd[2], svd[3], svd[4]),
+                calculate_dh(
+                    x, svd[0], svd[1], svd[2], svd[3], svd[4], svd[5], svd[6], 0.0,
+                ),
+                calculate_s(
+                    x, svd[0], svd[1], svd[2], svd[3], svd[4], svd[5], svd[6], 0.0,
+                ),
+            ];
+            let rst_values = [
+                calculate_cp(x, rst[0], rst[1], rst[2], rst[3], rst[4]),
+                calculate_dh(x, rst[0], rst[1], rst[2], rst[3], rst[4], rst[5], 0.0, 0.0),
+                calculate_s(x, rst[0], rst[1], rst[2], rst[3], rst[4], 0.0, rst[6], 0.0),
+            ];
+            let source_values = [cp[index], h[index], s[index]];
+            for property in 0..3 {
+                let allowed = 0.05 + 0.02 * source_values[property].abs();
+                assert!(
+                    (svd_values[property] - source_values[property]).abs() <= allowed,
+                    "SVD property {property} at {temperature} K exceeds shared acceptance"
+                );
+                assert!(
+                    (rst_values[property] - source_values[property]).abs() <= allowed,
+                    "RST property {property} at {temperature} K exceeds shared acceptance"
+                );
+                max_prediction_delta[property] = max_prediction_delta[property]
+                    .max((svd_values[property] - rst_values[property]).abs());
+                svd_objective +=
+                    (weights[property] * (svd_values[property] - source_values[property])).powi(2);
+                rst_objective +=
+                    (weights[property] * (rst_values[property] - source_values[property])).powi(2);
+            }
+        }
+
+        assert!(
+            rst_objective <= svd_objective * (1.0 + 1e-5) + 1e-16,
+            "same weighted objective: SVD={svd_objective:e}, RST LM={rst_objective:e}"
+        );
+        assert!(
+            max_prediction_delta.iter().all(|delta| *delta < 1e-3),
+            "componentwise property deltas (Cp,H,S) = {max_prediction_delta:?}"
+        );
+    }
+
+    #[test]
+    fn test_adjacent_svd_quality_rejection_preserves_previous_coefficients() {
+        let previous = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0);
+        let mut nist = NISTdata::new();
+        nist.coeffs = Some(previous);
+
+        let error = nist
+            .fit_cp_dh_ds(
+                Coeffs {
+                    T: (300.0, 600.0),
+                    coeff: (10.0, 0.0, 0.0, 0.0, 0.0, -10.0, 50.0, 0.0),
+                },
+                Coeffs {
+                    T: (600.0, 900.0),
+                    coeff: (1000.0, 0.0, 0.0, 0.0, 0.0, 500.0, 500.0, 0.0),
+                },
+                350.0,
+                850.0,
+            )
+            .expect_err("a discontinuous synthetic pair must fail the common quality gate");
+
+        assert!(matches!(
+            error,
+            NISTError::Fit(NISTFitError::Quality(NISTFitQualityError::Rejected { .. }))
+        ));
+        assert_eq!(nist.coeffs, Some(previous));
     }
 
     #[test]
@@ -411,67 +777,130 @@ fn scale_row(X: &mut DMatrix<f64>, y: &mut DVector<f64>, row: usize, w: f64) {
 }
 
 fn validate_fit_inputs(
-    label: &str,
     temps_K: &[f64],
     cp_orig: &[f64],
     h_orig: &[f64],
     s_orig: &[f64],
 ) -> Result<(), NISTError> {
     if temps_K.is_empty() {
-        return Err(NISTError::FittingError(format!(
-            "{} fitting input vectors must not be empty",
-            label
+        return Err(NISTError::Fit(NISTFitError::Input(
+            NISTFitInputError::EmptySamples,
         )));
     }
     if temps_K.len() != cp_orig.len()
         || temps_K.len() != h_orig.len()
         || temps_K.len() != s_orig.len()
     {
-        return Err(NISTError::FittingError(format!(
-            "{} fitting input lengths must match: temps={}, cp={}, h={}, s={}",
-            label,
-            temps_K.len(),
-            cp_orig.len(),
-            h_orig.len(),
-            s_orig.len()
+        return Err(NISTError::Fit(NISTFitError::Input(
+            NISTFitInputError::LengthMismatch {
+                temperatures: temps_K.len(),
+                cp: cp_orig.len(),
+                h: h_orig.len(),
+                s: s_orig.len(),
+            },
         )));
     }
 
-    let validate_slice = |name: &str, values: &[f64]| -> Result<(), NISTError> {
+    let validate_slice = |name: &'static str, values: &[f64]| -> Result<(), NISTError> {
         if let Some((idx, value)) = values
             .iter()
             .enumerate()
             .find(|(_, value)| !value.is_finite())
         {
-            return Err(NISTError::FittingError(format!(
-                "{} fitting input contains non-finite {} at index {}: {}",
-                label, name, idx, value
+            return Err(NISTError::Fit(NISTFitError::Input(
+                NISTFitInputError::NonFiniteValue {
+                    field: name,
+                    index: idx,
+                    value: *value,
+                },
             )));
         }
         Ok(())
     };
 
     validate_slice("temperature", temps_K)?;
+    if let Some((idx, value)) = temps_K.iter().enumerate().find(|(_, value)| **value <= 0.0) {
+        return Err(NISTError::Fit(NISTFitError::Input(
+            NISTFitInputError::NonPositiveTemperature {
+                index: idx,
+                value: *value,
+            },
+        )));
+    }
     validate_slice("Cp", cp_orig)?;
     validate_slice("H", h_orig)?;
     validate_slice("S", s_orig)?;
     Ok(())
 }
 
-fn validate_temperature_bounds(label: &str, T_min: f64, T_max: f64) -> Result<(), NISTError> {
-    if !T_min.is_finite() || !T_max.is_finite() {
-        return Err(NISTError::FittingError(format!(
-            "{} fitting bounds must be finite, got T_min={}, T_max={}",
-            label, T_min, T_max
+fn validate_temperature_bounds(T_min: f64, T_max: f64) -> Result<(), NISTError> {
+    if !T_min.is_finite() || !T_max.is_finite() || T_min <= 0.0 || T_max <= 0.0 {
+        return Err(NISTError::Fit(NISTFitError::Preparation(
+            NISTFitPreparationError::InvalidRange {
+                minimum: T_min,
+                maximum: T_max,
+            },
         )));
     }
     if T_min >= T_max {
-        return Err(NISTError::FittingError(format!(
-            "{} fitting bounds must satisfy T_min < T_max, got T_min={}, T_max={}",
-            label, T_min, T_max
+        return Err(NISTError::Fit(NISTFitError::Preparation(
+            NISTFitPreparationError::InvalidRange {
+                minimum: T_min,
+                maximum: T_max,
+            },
         )));
     }
     Ok(())
+}
+
+fn temperature_samples(start: f64, end: f64, include_start: bool) -> Result<Vec<f64>, NISTError> {
+    if !start.is_finite() || !end.is_finite() || start <= 0.0 || end <= 0.0 || start > end {
+        return Err(NISTError::Fit(NISTFitError::Preparation(
+            NISTFitPreparationError::InvalidRange {
+                minimum: start,
+                maximum: end,
+            },
+        )));
+    }
+
+    let span = end - start;
+    let estimated_samples = (span / FIT_SAMPLE_STEP_K).ceil() + 2.0;
+    if !estimated_samples.is_finite() || estimated_samples > MAX_FIT_SAMPLES as f64 {
+        return Err(NISTError::Fit(NISTFitError::Preparation(
+            NISTFitPreparationError::SampleLimitExceeded {
+                requested: estimated_samples,
+                maximum: MAX_FIT_SAMPLES,
+            },
+        )));
+    }
+    let estimated_samples = estimated_samples as usize;
+
+    if start == end {
+        return Ok(if include_start {
+            vec![start]
+        } else {
+            Vec::new()
+        });
+    }
+
+    let mut samples = Vec::with_capacity(estimated_samples);
+    if include_start {
+        samples.push(start);
+    }
+
+    let tolerance = 8.0 * f64::EPSILON * start.abs().max(end.abs()).max(1.0);
+    let mut offset = FIT_SAMPLE_STEP_K;
+    while start + offset < end - tolerance {
+        samples.push(start + offset);
+        offset += FIT_SAMPLE_STEP_K;
+    }
+
+    if samples.last().is_some_and(|last| end - *last <= tolerance) {
+        *samples.last_mut().expect("last sample was checked") = end;
+    } else {
+        samples.push(end);
+    }
+    Ok(samples)
 }
 
 fn validate_coeffs_finite(label: &str, coeffs: &[f64]) -> Result<(), NISTError> {
@@ -480,9 +909,16 @@ fn validate_coeffs_finite(label: &str, coeffs: &[f64]) -> Result<(), NISTError> 
         .enumerate()
         .find(|(_, value)| !value.is_finite())
     {
-        return Err(NISTError::FittingError(format!(
-            "{} coefficients must be finite, coefficient {} = {}",
-            label, idx, value
+        return Err(NISTError::Fit(NISTFitError::Input(
+            NISTFitInputError::NonFiniteValue {
+                field: if label.contains("interval") {
+                    "source coefficient"
+                } else {
+                    "coefficient"
+                },
+                index: idx,
+                value: *value,
+            },
         )));
     }
     Ok(())
@@ -507,16 +943,46 @@ impl NISTdata {
         T_min: f64,
         T_max: f64,
     ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>), NISTError> {
-        validate_temperature_bounds("NIST adjacent", T_min, T_max)?;
+        validate_temperature_bounds(T_min, T_max)?;
         let (_, T_center) = (coeffs_min.T.0, coeffs_min.T.1);
         let (T_center_check, _) = (coeffs_max.T.0, coeffs_max.T.1);
         if T_center != T_center_check {
-            return Err(NISTError::InvalidTemperatureRange);
+            return Err(NISTError::Fit(NISTFitError::Preparation(
+                NISTFitPreparationError::InvalidRange {
+                    minimum: T_center,
+                    maximum: T_center_check,
+                },
+            )));
         }
-        if coeffs_min.T.0 >= coeffs_min.T.1 || coeffs_max.T.0 >= coeffs_max.T.1 {
-            return Err(NISTError::FittingError(
-                "NIST interval bounds must be strictly ordered".to_string(),
-            ));
+        if !coeffs_min.T.0.is_finite()
+            || !coeffs_min.T.1.is_finite()
+            || !coeffs_max.T.0.is_finite()
+            || !coeffs_max.T.1.is_finite()
+            || coeffs_min.T.0 <= 0.0
+            || coeffs_max.T.0 <= 0.0
+            || coeffs_min.T.0 >= coeffs_min.T.1
+            || coeffs_max.T.0 >= coeffs_max.T.1
+        {
+            return Err(NISTError::Fit(NISTFitError::Preparation(
+                NISTFitPreparationError::InvalidRange {
+                    minimum: coeffs_min.T.0,
+                    maximum: coeffs_max.T.1,
+                },
+            )));
+        }
+        if coeffs_min.T.0 <= 0.0
+            || coeffs_max.T.0 <= 0.0
+            || T_min < coeffs_min.T.0
+            || T_max > coeffs_max.T.1
+            || T_min > T_center
+            || T_max < T_center
+        {
+            return Err(NISTError::Fit(NISTFitError::Preparation(
+                NISTFitPreparationError::InvalidRange {
+                    minimum: T_min,
+                    maximum: T_max,
+                },
+            )));
         }
         validate_coeffs_finite(
             "NIST lower interval",
@@ -554,10 +1020,7 @@ impl NISTdata {
         let g = coeffs_min.coeff.6;
         let h = coeffs_min.coeff.7;
 
-        let mut temps = (T_min as usize..=T_center as usize)
-            .step_by(5 as usize)
-            .map(|t| t as f64)
-            .collect::<Vec<_>>();
+        let mut temps = temperature_samples(T_min, T_center, true)?;
         let mut cp_vals = temps
             .iter()
             .map(|&T| calculate_cp(T / 1000.0, a, b, c, d, e))
@@ -579,33 +1042,23 @@ impl NISTdata {
         let g = coeffs_max.coeff.6;
         let h = coeffs_max.coeff.7;
 
-        let temps2 = (T_center as usize + 5..=T_max as usize)
-            .step_by(5 as usize)
-            .map(|t| t as f64)
-            .collect::<Vec<_>>();
-
-        temps.extend(temps2.clone());
-        let cp_vals2 = temps2
-            .clone()
+        let upper_temps = temperature_samples(T_center, T_max, false)?;
+        let cp_upper = upper_temps
             .iter()
-            .map(|&T| calculate_cp(T / 1000.0, a, b, c, d, e))
+            .map(|&temperature| calculate_cp(temperature / 1000.0, a, b, c, d, e))
             .collect::<Vec<_>>();
-        let h_vals2 = temps2
-            .clone()
+        let h_upper = upper_temps
             .iter()
-            .map(|&T| calculate_dh(T / 1000.0, a, b, c, d, e, f, g, h))
+            .map(|&temperature| calculate_dh(temperature / 1000.0, a, b, c, d, e, f, g, h))
             .collect::<Vec<_>>();
-        let s_vals2 = temps2
+        let s_upper = upper_temps
             .iter()
-            .map(|&T| calculate_s(T / 1000.0, a, b, c, d, e, f, g, h))
+            .map(|&temperature| calculate_s(temperature / 1000.0, a, b, c, d, e, f, g, h))
             .collect::<Vec<_>>();
-        cp_vals.extend(cp_vals2);
-        h_vals.extend(h_vals2);
-        s_vals.extend(s_vals2);
-        // println!("temps = {:?}", temps);
-        // println!("cp_vals = {:?}", cp_vals);
-        // println!("h_vals = {:?}", h_vals);
-        // println!("s_vals = {:?}", s_vals);
+        temps.extend(upper_temps);
+        cp_vals.extend(cp_upper);
+        h_vals.extend(h_upper);
+        s_vals.extend(s_upper);
 
         if temps.len() != cp_vals.len()
             || temps.len() != h_vals.len()
@@ -625,10 +1078,12 @@ impl NISTdata {
         T_max: f64,
     ) -> Result<(), NISTError> {
         let mut report_map: HashMap<String, FittingReport> = HashMap::new();
+        let source_h = coeffs_min.coeff.7;
         let (temps, cp_vals, h_vals, s_vals) =
             Self::prepare_fit_data_for_2_range_fitting(coeffs_min, coeffs_max, T_min, T_max)?;
 
-        let coeffs = fit_nist_scaled8(&temps, &cp_vals, &h_vals, &s_vals)?;
+        let mut coeffs = fit_nist_scaled8(&temps, &cp_vals, &h_vals, &s_vals)?;
+        reanchor_enthalpy_gauge(&mut coeffs, source_h);
         if coeffs.len() != 8 {
             return Err(NISTError::FittingError(format!(
                 "NIST solver returned {} coefficients instead of 8",
@@ -644,18 +1099,32 @@ impl NISTdata {
         let g = coeffs[6];
         let h = coeffs[7];
         let Cp_sym = calculate_cp_sym(a, b, c, d, e);
-        let dh_sym = calculate_dh_sym(a, b, c, d, e, f, g, h) / Expr::Const(1000.0);
+        let dh_sym = calculate_dh_sym(a, b, c, d, e, f, g, h);
         let ds_sym = calculate_s_sym(a, b, c, d, e, f, g, h);
-        let c_fitting_report = self.direct_compare2(&cp_vals, &temps, Cp_sym)?;
+        let c_fitting_report =
+            Self::compare_nist_property(&cp_vals, &temps, Cp_sym, NIST_CP_ABSOLUTE_TOLERANCE)?;
         report_map.insert("Cp fitting report".to_string(), c_fitting_report);
-        let dh_fitting_report = self.direct_compare2(&h_vals, &temps, dh_sym)?;
+        let dh_fitting_report = Self::compare_nist_property(
+            &h_vals,
+            &temps,
+            dh_sym,
+            NIST_H_ABSOLUTE_TOLERANCE_KJ_PER_MOL,
+        )?;
         report_map.insert("dh fitting report".to_string(), dh_fitting_report);
-        let ds_fitting_report = self.direct_compare2(&s_vals, &temps, ds_sym)?;
+        let ds_fitting_report =
+            Self::compare_nist_property(&s_vals, &temps, ds_sym, NIST_S_ABSOLUTE_TOLERANCE)?;
         report_map.insert("ds fitting report".to_string(), ds_fitting_report);
 
-        let coeffs = (a, b, c, d, e, f, g, h);
-        self.coeffs = Some(coeffs);
-        Self::print_quality_table(&report_map);
+        Self::validate_property_reports(
+            "NIST adjacent SVD",
+            &report_map,
+            &[
+                "Cp fitting report",
+                "dh fitting report",
+                "ds fitting report",
+            ],
+        )?;
+        self.coeffs = Some((a, b, c, d, e, f, g, h));
         Ok(())
     }
 
@@ -666,75 +1135,25 @@ impl NISTdata {
         T_max: f64,
     ) -> Result<HashMap<String, FittingReport>, NISTError> {
         let mut report_map: HashMap<String, FittingReport> = HashMap::new();
-        let mut Tvec: Vec<f64> = Vec::new();
-        let mut cp_vec: Vec<f64> = Vec::new();
-        let mut h_vec: Vec<f64> = Vec::new();
-        let mut s_vec: Vec<f64> = Vec::new();
+        validate_temperature_bounds(T_min, T_max)?;
+        let (Tvec, cp_vec, h_vec, s_vec) =
+            Self::prepare_fit_data_for_non_adjacent_fitting(coeffs.clone(), T_min, T_max)?;
+        let source_h = coeffs
+            .iter()
+            .filter(|coefficients| coefficients.T.1 >= T_min && coefficients.T.0 <= T_max)
+            .min_by(|left, right| left.T.0.total_cmp(&right.T.0))
+            .map(|coefficients| coefficients.coeff.7)
+            .ok_or_else(|| {
+                NISTError::Fit(NISTFitError::Preparation(
+                    NISTFitPreparationError::NoSamples {
+                        minimum: T_min,
+                        maximum: T_max,
+                    },
+                ))
+            })?;
 
-        for coeffs in coeffs.iter() {
-            let (T_min_r, T_max_r) = (coeffs.T.0, coeffs.T.1);
-            let mut Tleft = T_min_r;
-            let mut Tright = T_max_r;
-
-            // Skip if range is completely outside T_min..T_max
-            if T_min_r < T_min && T_max_r <= T_min {
-                continue;
-            }
-            if T_min_r >= T_max && T_max_r > T_max {
-                continue;
-            }
-
-            // Adjust range boundaries to fit within T_min..T_max
-            if T_min_r <= T_min && T_min <= T_max_r {
-                Tleft = T_min;
-                Tright = T_max_r;
-            }
-            if T_min_r <= T_max && T_max <= T_max_r {
-                Tright = T_max;
-                Tleft = T_min_r;
-            }
-            if T_min_r >= T_min && T_max >= T_max_r {
-                Tleft = T_min_r;
-                Tright = T_max_r;
-            }
-
-            let a = coeffs.coeff.0;
-            let b = coeffs.coeff.1;
-            let c = coeffs.coeff.2;
-            let d = coeffs.coeff.3;
-            let e = coeffs.coeff.4;
-            let f = coeffs.coeff.5;
-            let g = coeffs.coeff.6;
-            let h = coeffs.coeff.7;
-
-            let temps = (Tleft as usize + 5..=Tright as usize)
-                .step_by(5 as usize)
-                .map(|t| t as f64)
-                .collect::<Vec<_>>();
-            let cp_vals = temps
-                .iter()
-                .map(|&T| calculate_cp(T / 1000.0, a, b, c, d, e))
-                .collect::<Vec<_>>();
-            let h_vals = temps
-                .iter()
-                .map(|&T| calculate_dh(T / 1000.0, a, b, c, d, e, f, g, h))
-                .collect::<Vec<_>>();
-            let s_vals = temps
-                .iter()
-                .map(|&T| calculate_s(T / 1000.0, a, b, c, d, e, f, g, h))
-                .collect::<Vec<_>>();
-            Tvec.extend(temps);
-            cp_vec.extend(cp_vals);
-            h_vec.extend(h_vals);
-            s_vec.extend(s_vals);
-        }
-        if Tvec.len() != cp_vec.len() || Tvec.len() != h_vec.len() || Tvec.len() != s_vec.len() {
-            return Err(NISTError::FittingError(
-                "NIST non-adjacent fitting assembled inconsistent sample lengths".to_string(),
-            ));
-        }
-
-        let coeffs = fit_nist_scaled8(&Tvec, &cp_vec, &h_vec, &s_vec)?;
+        let mut coeffs = fit_nist_scaled8(&Tvec, &cp_vec, &h_vec, &s_vec)?;
+        reanchor_enthalpy_gauge(&mut coeffs, source_h);
         if coeffs.len() != 8 {
             return Err(NISTError::FittingError(format!(
                 "NIST solver returned {} coefficients instead of 8",
@@ -750,19 +1169,32 @@ impl NISTdata {
         let g = coeffs[6];
         let h = coeffs[7];
         let Cp_sym = calculate_cp_sym(a, b, c, d, e);
-        let dh_sym = calculate_dh_sym(a, b, c, d, e, f, g, h) / Expr::Const(1000.0);
+        let dh_sym = calculate_dh_sym(a, b, c, d, e, f, g, h);
         let ds_sym = calculate_s_sym(a, b, c, d, e, f, g, h);
-        let c_fitting_report = self.direct_compare2(&cp_vec, &Tvec, Cp_sym)?;
+        let c_fitting_report =
+            Self::compare_nist_property(&cp_vec, &Tvec, Cp_sym, NIST_CP_ABSOLUTE_TOLERANCE)?;
         report_map.insert("Cp fitting report".to_string(), c_fitting_report);
-        let dh_fitting_report = self.direct_compare2(&h_vec, &Tvec, dh_sym)?;
+        let dh_fitting_report = Self::compare_nist_property(
+            &h_vec,
+            &Tvec,
+            dh_sym,
+            NIST_H_ABSOLUTE_TOLERANCE_KJ_PER_MOL,
+        )?;
         report_map.insert("dh fitting report".to_string(), dh_fitting_report);
-        let ds_fitting_report = self.direct_compare2(&s_vec, &Tvec, ds_sym)?;
+        let ds_fitting_report =
+            Self::compare_nist_property(&s_vec, &Tvec, ds_sym, NIST_S_ABSOLUTE_TOLERANCE)?;
         report_map.insert("ds fitting report".to_string(), ds_fitting_report);
 
-        let coeffs = (a, b, c, d, e, f, g, h);
-        self.coeffs = Some(coeffs);
-        Self::print_quality_table(&report_map);
-
+        Self::validate_property_reports(
+            "NIST non-adjacent SVD",
+            &report_map,
+            &[
+                "Cp fitting report",
+                "dh fitting report",
+                "ds fitting report",
+            ],
+        )?;
+        self.coeffs = Some((a, b, c, d, e, f, g, h));
         Ok(report_map)
     }
 
@@ -785,6 +1217,8 @@ impl NISTdata {
     /// # Mathematical Approach
     /// Uses symbolic expressions and weighted optimization to respect the
     /// thermodynamic relationships while avoiding optimization conflicts.
+    /// Compatibility-only symbolic fit. Production stitching uses
+    /// [`Self::fit_cp_dh_ds`], because the Shomate model is coefficient-linear.
     pub fn fitting_adjacent_weighted(
         &mut self,
         coeffs_min: Coeffs,
@@ -865,7 +1299,11 @@ impl NISTdata {
             Some(1e-6),
             None,
             Some(50),
-        );
+        )
+        .map_err(|source| NISTError::FittingBackend {
+            stage: "adjacent Cp/S",
+            source,
+        })?;
 
         let coeffs = Self::validate_lm_fit_result(
             "combined fitting",
@@ -918,7 +1356,11 @@ impl NISTdata {
             Some(1e-6),
             None,
             Some(50),
-        );
+        )
+        .map_err(|source| NISTError::FittingBackend {
+            stage: "adjacent enthalpy",
+            source,
+        })?;
         let coeffs = Self::validate_lm_fit_result(
             "enthalpy stage",
             sew2.get_result(),
@@ -945,11 +1387,12 @@ impl NISTdata {
 
         self.coeffs = Some((a, b, c, d, e, f, g, h));
 
-        Self::print_quality_table(&report_map);
         Ok(())
     }
 
     /// Non-adjacent fitting method for multiple temperature intervals
+    /// Compatibility-only symbolic fit. Production stitching uses
+    /// [`Self::fitting_cp_dh_ds_non_adjacent`].
     pub fn fitting_non_adjacent(
         &mut self,
         coeffs: Vec<Coeffs>,
@@ -1025,7 +1468,11 @@ impl NISTdata {
             None,
             None,
             None,
-        );
+        )
+        .map_err(|source| NISTError::FittingBackend {
+            stage: "non-adjacent Cp/S",
+            source,
+        })?;
 
         let coeffs_step1 = Self::validate_lm_fit_result(
             "NIST LM stage",
@@ -1084,7 +1531,11 @@ impl NISTdata {
             None,
             None,
             None,
-        );
+        )
+        .map_err(|source| NISTError::FittingBackend {
+            stage: "non-adjacent enthalpy",
+            source,
+        })?;
 
         let coeffs_step2 = Self::validate_lm_fit_result(
             "NIST enthalpy stage",
@@ -1107,7 +1558,6 @@ impl NISTdata {
         report_map.insert("ds fitting report".to_string(), ds_fitting_report);
 
         self.coeffs = Some((a, b, c, d, e, f, g, h));
-        Self::print_quality_table(&report_map);
         Ok(report_map)
     }
 
@@ -1116,17 +1566,19 @@ impl NISTdata {
         T_min: f64,
         T_max: f64,
     ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>), NISTError> {
-        validate_temperature_bounds("NIST non-adjacent", T_min, T_max)?;
-        let mut Tvec: Vec<f64> = Vec::new();
-        let mut cp_vec: Vec<f64> = Vec::new();
-        let mut h_vec: Vec<f64> = Vec::new();
-        let mut s_vec: Vec<f64> = Vec::new();
-
-        for coeff in coeffs.iter() {
-            if coeff.T.0 >= coeff.T.1 {
-                return Err(NISTError::FittingError(format!(
-                    "NIST interval bounds must be strictly ordered, got {:?}",
-                    coeff.T
+        validate_temperature_bounds(T_min, T_max)?;
+        let mut coeffs = coeffs;
+        for coeff in &coeffs {
+            if !coeff.T.0.is_finite()
+                || !coeff.T.1.is_finite()
+                || coeff.T.0 <= 0.0
+                || coeff.T.0 >= coeff.T.1
+            {
+                return Err(NISTError::Fit(NISTFitError::Preparation(
+                    NISTFitPreparationError::InvalidRange {
+                        minimum: coeff.T.0,
+                        maximum: coeff.T.1,
+                    },
                 )));
             }
             validate_coeffs_finite(
@@ -1142,63 +1594,71 @@ impl NISTdata {
                     coeff.coeff.7,
                 ],
             )?;
-            let (T_min_r, T_max_r) = (coeff.T.0, coeff.T.1);
-            let mut Tleft = T_min_r;
-            let mut Tright = T_max_r;
+        }
+        coeffs.sort_by(|left, right| left.T.0.total_cmp(&right.T.0));
 
-            // Skip if range is completely outside T_min..T_max
-            if T_min_r < T_min && T_max_r <= T_min {
+        let range_tolerance = 8.0 * f64::EPSILON * T_max.abs().max(1.0);
+        for pair in coeffs.windows(2) {
+            if pair[1].T.0 < pair[0].T.1 - range_tolerance {
+                return Err(NISTError::Fit(NISTFitError::Preparation(
+                    NISTFitPreparationError::OverlappingIntervals {
+                        left: pair[0].T,
+                        right: pair[1].T,
+                    },
+                )));
+            }
+        }
+
+        let mut Tvec: Vec<f64> = Vec::new();
+        let mut cp_vec: Vec<f64> = Vec::new();
+        let mut h_vec: Vec<f64> = Vec::new();
+        let mut s_vec: Vec<f64> = Vec::new();
+        let mut previous_overlap_end = None;
+
+        for coeff in &coeffs {
+            let sample_start = coeff.T.0.max(T_min);
+            let sample_end = coeff.T.1.min(T_max);
+            if sample_start > sample_end {
                 continue;
             }
-            if T_min_r >= T_max && T_max_r > T_max {
-                continue;
-            }
 
-            // Adjust range boundaries to fit within T_min..T_max
-            if T_min_r <= T_min && T_min <= T_max_r {
-                Tleft = T_min;
-                Tright = T_max_r;
-            }
-            if T_min_r <= T_max && T_max <= T_max_r {
-                Tright = T_max;
-                Tleft = T_min_r;
-            }
-            if T_min_r >= T_min && T_max >= T_max_r {
-                Tleft = T_min_r;
-                Tright = T_max_r;
-            }
+            let owns_start = previous_overlap_end.is_none_or(|previous_end: f64| {
+                (sample_start - previous_end).abs() > range_tolerance
+            });
+            let temps = temperature_samples(sample_start, sample_end, owns_start)?;
+            previous_overlap_end = Some(sample_end);
 
             let (a, b, c, d, e, f, g, h) = coeff.coeff;
-            let temps = (Tleft as usize + 5..=Tright as usize)
-                .step_by(5)
-                .map(|t| t as f64)
-                .collect::<Vec<_>>();
-            let cp_vals = temps
-                .iter()
-                .map(|&T| calculate_cp(T / 1000.0, a, b, c, d, e))
-                .collect::<Vec<_>>();
-            let h_vals = temps
-                .iter()
-                .map(|&T| calculate_dh(T / 1000.0, a, b, c, d, e, f, g, h))
-                .collect::<Vec<_>>();
-            let s_vals = temps
-                .iter()
-                .map(|&T| calculate_s(T / 1000.0, a, b, c, d, e, f, g, h))
-                .collect::<Vec<_>>();
-
-            Tvec.extend(temps);
-            cp_vec.extend(cp_vals);
-            h_vec.extend(h_vals);
-            s_vec.extend(s_vals);
+            Tvec.extend(temps.iter().copied());
+            cp_vec.extend(
+                temps
+                    .iter()
+                    .map(|&temperature| calculate_cp(temperature / 1000.0, a, b, c, d, e)),
+            );
+            h_vec.extend(
+                temps
+                    .iter()
+                    .map(|&temperature| calculate_dh(temperature / 1000.0, a, b, c, d, e, f, g, h)),
+            );
+            s_vec.extend(
+                temps
+                    .iter()
+                    .map(|&temperature| calculate_s(temperature / 1000.0, a, b, c, d, e, f, g, h)),
+            );
         }
 
         if Tvec.is_empty() {
-            return Ok((Tvec, cp_vec, h_vec, s_vec));
+            return Err(NISTError::Fit(NISTFitError::Preparation(
+                NISTFitPreparationError::NoSamples {
+                    minimum: T_min,
+                    maximum: T_max,
+                },
+            )));
         }
         if Tvec.len() != cp_vec.len() || Tvec.len() != h_vec.len() || Tvec.len() != s_vec.len() {
-            return Err(NISTError::FittingError(
-                "non-adjacent fit data generation produced mismatched vector lengths".to_string(),
-            ));
+            return Err(NISTError::Fit(NISTFitError::Preparation(
+                NISTFitPreparationError::InconsistentSampleLengths,
+            )));
         }
 
         Ok((Tvec, cp_vec, h_vec, s_vec))
@@ -1240,6 +1700,32 @@ impl NISTdata {
     ) -> Result<FittingReport, NISTError> {
         let report = compare_property_series(y_data, T_vec, fit_function)
             .map_err(|err| NISTError::FittingError(err.to_string()))?;
+        Ok(FittingReport {
+            l2_norm: report.l2_norm,
+            max_norm: report.max_norm,
+            number_of_significant_points: report.number_of_significant_points,
+            T_range: report.t_range,
+        })
+    }
+
+    fn compare_nist_property(
+        y_data: &[f64],
+        T_vec: &[f64],
+        fit_function: Expr,
+        absolute_tolerance: f64,
+    ) -> Result<FittingReport, NISTError> {
+        let report = compare_property_series_with_absolute_relative_tolerance(
+            y_data,
+            T_vec,
+            fit_function,
+            absolute_tolerance,
+            MAX_PROPERTY_RELATIVE_ERROR,
+        )
+        .map_err(|err| {
+            NISTError::Fit(NISTFitError::Input(NISTFitInputError::ComparisonFailed(
+                err.to_string(),
+            )))
+        })?;
         Ok(FittingReport {
             l2_norm: report.l2_norm,
             max_norm: report.max_norm,
@@ -1296,7 +1782,6 @@ impl NISTdata {
 
         Ok(coeffs.to_vec())
     }
-    #[allow(dead_code)]
     fn validate_property_reports(
         context: &str,
         report_map: &HashMap<String, FittingReport>,
@@ -1304,28 +1789,35 @@ impl NISTdata {
     ) -> Result<(), NISTError> {
         for report_name in required_reports {
             let report = report_map.get(*report_name).ok_or_else(|| {
-                NISTError::FittingError(format!(
-                    "{context} did not publish required report '{report_name}'"
-                ))
+                NISTError::Fit(NISTFitError::Quality(NISTFitQualityError::MissingReport {
+                    property: (*report_name).to_string(),
+                }))
             })?;
 
             if !report.l2_norm.is_finite() || !report.max_norm.is_finite() {
-                return Err(NISTError::FittingError(format!(
-                    "{context} produced non-finite metrics for '{report_name}'"
+                return Err(NISTError::Fit(NISTFitError::Quality(
+                    NISTFitQualityError::NonFiniteMetrics {
+                        property: (*report_name).to_string(),
+                    },
                 )));
             }
 
             if report.max_norm > MAX_PROPERTY_RELATIVE_ERROR {
-                return Err(NISTError::FittingError(format!(
-                    "{context} rejected '{report_name}': max relative error {:.6} exceeds {:.6}",
-                    report.max_norm, MAX_PROPERTY_RELATIVE_ERROR
+                return Err(NISTError::Fit(NISTFitError::Quality(
+                    NISTFitQualityError::Rejected {
+                        property: format!("{context} {report_name}"),
+                        max_error: report.max_norm,
+                        tolerance: MAX_PROPERTY_RELATIVE_ERROR,
+                    },
                 )));
             }
 
             if report.number_of_significant_points != 0 {
-                return Err(NISTError::FittingError(format!(
-                    "{context} rejected '{report_name}': {} significant residual points",
-                    report.number_of_significant_points
+                return Err(NISTError::Fit(NISTFitError::Quality(
+                    NISTFitQualityError::SignificantResiduals {
+                        property: format!("{context} {report_name}"),
+                        significant_points: report.number_of_significant_points,
+                    },
                 )));
             }
         }
@@ -1503,7 +1995,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_fitting_cp_dh_ds_non_adjacent_overlapping_ranges() {
         let mut nist = NISTdata::new();
         let coeffs_vec = vec![
@@ -1517,64 +2008,75 @@ mod tests {
             },
         ];
         nist.set_T_interval(400.0, 800.0);
-        let result = nist.fitting_cp_dh_ds_non_adjacent(coeffs_vec, 400.0, 800.0);
-        assert!(result.is_ok());
-        assert!(nist.coeffs.is_some());
-        sleep(smtime);
+        let error = nist
+            .fitting_cp_dh_ds_non_adjacent(coeffs_vec, 400.0, 800.0)
+            .expect_err("overlapping source intervals are ambiguous");
+        assert!(matches!(
+            error,
+            NISTError::Fit(NISTFitError::Preparation(
+                NISTFitPreparationError::OverlappingIntervals { .. }
+            ))
+        ));
     }
 
     #[test]
-    #[ignore]
     fn test_fitting_cp_dh_ds_non_adjacent_partial_overlap() {
         let mut nist = NISTdata::new();
+        let source = (30.0, -3.0, 0.5, -0.05, 0.005, -800.0, 180.0, 0.0);
         let coeffs_vec = vec![
             Coeffs {
                 T: (200.0, 500.0),
-                coeff: (30.0, -3.0, 0.5, -0.05, 0.005, -800.0, 180.0, 0.0),
+                coeff: source,
             },
             Coeffs {
                 T: (700.0, 1200.0),
-                coeff: (40.0, -6.0, 1.5, -0.15, 0.015, -1500.0, 250.0, 0.0),
+                coeff: source,
             },
         ];
 
-        let result = nist.fitting_cp_dh_ds_non_adjacent(coeffs_vec, 400.0, 1000.0);
-        assert!(result.is_ok());
+        let reports = nist
+            .fitting_cp_dh_ds_non_adjacent(coeffs_vec, 400.0, 1000.0)
+            .expect("compatible disjoint intervals clipped by the requested range should fit");
         assert!(nist.coeffs.is_some());
-        sleep(smtime);
+        assert!(reports.values().all(|report| report.max_norm <= 1e-9));
     }
 
     #[test]
-    #[ignore]
     fn test_fitting_cp_dh_ds_non_adjacent_uses_both_intervals() {
-        let mut nist1 = NISTdata::new();
-        let mut nist2 = NISTdata::new();
-
+        let source = (30.0, -3.0, 0.5, -0.05, 0.005, -800.0, 180.0, 0.0);
         let coeffs1 = Coeffs {
             T: (300.0, 600.0),
-            coeff: (30.0, -3.0, 0.5, -0.05, 0.005, -800.0, 180.0, 0.0),
+            coeff: source,
         };
         let coeffs2 = Coeffs {
             T: (700.0, 1000.0),
-            coeff: (40.0, -6.0, 1.5, -0.15, 0.015, -1500.0, 250.0, 0.0),
+            coeff: source,
         };
 
-        let result1 = nist1.fitting_cp_dh_ds_non_adjacent(vec![coeffs1.clone()], 400.0, 900.0);
-        assert!(result1.is_ok());
-        let coeffs_single = nist1.coeffs.unwrap();
+        let mut nist = NISTdata::new();
+        let reports = nist
+            .fitting_cp_dh_ds_non_adjacent(vec![coeffs1, coeffs2], 400.0, 900.0)
+            .expect("both disjoint intervals share one exact source polynomial");
+        assert!(nist.coeffs.is_some());
+        assert!(reports.values().all(|report| report.max_norm <= 1e-9));
 
-        let result2 = nist2.fitting_cp_dh_ds_non_adjacent(vec![coeffs1, coeffs2], 400.0, 900.0);
-        assert!(result2.is_ok());
-        let coeffs_both = nist2.coeffs.unwrap();
-
-        let diff_a = (coeffs_single.0 - coeffs_both.0).abs();
-        let diff_b = (coeffs_single.1 - coeffs_both.1).abs();
-
-        assert!(
-            diff_a > 1e-6 || diff_b > 1e-6,
-            "Coefficients should differ when using both intervals"
-        );
-        sleep(smtime);
+        let (temps, _, _, _) = NISTdata::prepare_fit_data_for_non_adjacent_fitting(
+            vec![
+                Coeffs {
+                    T: (300.0, 600.0),
+                    coeff: source,
+                },
+                Coeffs {
+                    T: (700.0, 1000.0),
+                    coeff: source,
+                },
+            ],
+            400.0,
+            900.0,
+        )
+        .expect("each interval contributes samples in the requested range");
+        assert!(temps.iter().any(|&temperature| temperature <= 600.0));
+        assert!(temps.iter().any(|&temperature| temperature >= 700.0));
     }
 
     #[test]
@@ -1604,23 +2106,25 @@ mod tests {
         sleep(smtime);
     }
     #[test]
-    #[ignore]
     fn test_fitting_cp_dh_ds_non_adjacent_debug_data_points() {
         let mut nist = NISTdata::new();
 
+        let source = (25.0, -2.0, 0.3, -0.03, 0.003, -500.0, 150.0, 0.0);
         let coeffs_vec = vec![
             Coeffs {
                 T: (300.0, 500.0),
-                coeff: (25.0, -2.0, 0.3, -0.03, 0.003, -500.0, 150.0, 0.0),
+                coeff: source,
             },
             Coeffs {
                 T: (600.0, 900.0),
-                coeff: (35.0, -4.0, 0.8, -0.08, 0.008, -1000.0, 200.0, 0.0),
+                coeff: source,
             },
         ];
 
-        let result = nist.fitting_cp_dh_ds_non_adjacent(coeffs_vec, 400.0, 800.0);
-        assert!(result.is_ok());
+        let reports = nist
+            .fitting_cp_dh_ds_non_adjacent(coeffs_vec, 400.0, 800.0)
+            .expect("compatible disjoint intervals should produce an accepted fit");
+        assert!(reports.values().all(|report| report.max_norm <= 1e-9));
 
         let _ = nist.calculate_cp_dh_ds(450.0);
         let cp1 = nist.Cp;
@@ -1633,7 +2137,6 @@ mod tests {
             cp1, cp2,
             "Cp values should differ at different temperatures"
         );
-        sleep(smtime);
     }
     ////////////////////////////////////////////////////////////////////////
     #[test]
@@ -1829,35 +2332,37 @@ mod tests {
     #[test]
     #[ignore]
     fn test_fitting_non_adjacent_sequential_vs_simultaneous() {
-        let mut nist1 = NISTdata::new();
-        let mut nist2 = NISTdata::new();
-
+        // Keep the historical test name so existing filtered commands continue
+        // to work. The production contract is now the deterministic linear
+        // route; algorithm disagreement is not a scientific acceptance metric.
+        let mut nist = NISTdata::new();
+        let source = (30.0, -3.0, 0.5, -0.05, 0.005, -8.0, 180.0, 5.0);
         let coeffs_vec = vec![
             Coeffs {
                 T: (300.0, 600.0),
-                coeff: (30.0, -3.0, 0.5, -0.05, 0.005, -800.0, 180.0, 0.0),
+                coeff: source,
             },
             Coeffs {
                 T: (700.0, 1000.0),
-                coeff: (40.0, -6.0, 1.5, -0.15, 0.015, -1500.0, 250.0, 0.0),
+                coeff: source,
             },
         ];
 
-        let result1 = nist1.fitting_non_adjacent(coeffs_vec.clone(), 400.0, 900.0);
-        assert!(result1.is_ok());
-        let coeffs_sequential = nist1.coeffs.unwrap();
+        let reports = nist
+            .fitting_cp_dh_ds_non_adjacent(coeffs_vec, 400.0, 900.0)
+            .expect("one exact polynomial over disjoint ranges must fit linearly");
+        for property in [
+            "Cp fitting report",
+            "dh fitting report",
+            "ds fitting report",
+        ] {
+            let report = reports.get(property).expect("missing property report");
+            assert!(report.max_norm <= 1e-9, "{property}: {report:?}");
+            assert_eq!(report.number_of_significant_points, 0);
+        }
 
-        let result2 = nist2.fitting_cp_dh_ds_non_adjacent(coeffs_vec, 400.0, 900.0);
-        assert!(result2.is_ok());
-        let coeffs_simultaneous = nist2.coeffs.unwrap();
-
-        // Sequential fitting should give different results than simultaneous
-        let diff_a = (coeffs_sequential.0 - coeffs_simultaneous.0).abs();
-        assert!(
-            diff_a > 1e-6,
-            "Sequential and simultaneous fitting should differ"
-        );
-        sleep(smtime);
+        let fitted = nist.coeffs.expect("accepted fit must publish coefficients");
+        assert!((fitted.5 - fitted.7 - (source.5 - source.7)).abs() <= 1e-9);
     }
 
     #[test]
@@ -1917,7 +2422,82 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    fn non_adjacent_sampling_is_ordered_deduplicated_and_keeps_fractional_bounds() {
+        let lower = Coeffs {
+            T: (300.0, 700.0),
+            coeff: (30.0, 0.0, 0.0, 0.0, 0.0, -800.0, 180.0, 0.0),
+        };
+        let upper = Coeffs {
+            T: (700.0, 900.0),
+            coeff: (40.0, 0.0, 0.0, 0.0, 0.0, -1500.0, 250.0, 0.0),
+        };
+
+        let (temps, cp, h, s) = NISTdata::prepare_fit_data_for_non_adjacent_fitting(
+            vec![upper, lower.clone()],
+            450.25,
+            750.5,
+        )
+        .expect("valid disjoint intervals should produce fit samples");
+
+        assert_eq!(temps.first(), Some(&450.25));
+        assert_eq!(temps.last(), Some(&750.5));
+        assert!(temps.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            temps
+                .iter()
+                .filter(|&&temperature| temperature == 700.0)
+                .count(),
+            1
+        );
+        assert_eq!(cp.len(), temps.len());
+        assert_eq!(h.len(), temps.len());
+        assert_eq!(s.len(), temps.len());
+        let boundary_index = temps
+            .iter()
+            .position(|&temperature| temperature == 700.0)
+            .unwrap();
+        assert_eq!(
+            cp[boundary_index],
+            calculate_cp(0.7, 30.0, 0.0, 0.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn non_adjacent_sampling_rejects_overlapping_source_intervals() {
+        let intervals = vec![
+            Coeffs {
+                T: (300.0, 710.0),
+                coeff: (30.0, 0.0, 0.0, 0.0, 0.0, -800.0, 180.0, 0.0),
+            },
+            Coeffs {
+                T: (700.0, 900.0),
+                coeff: (40.0, 0.0, 0.0, 0.0, 0.0, -1500.0, 250.0, 0.0),
+            },
+        ];
+
+        let error = NISTdata::prepare_fit_data_for_non_adjacent_fitting(intervals, 400.0, 800.0)
+            .expect_err("ambiguous overlapping source intervals must be rejected");
+        assert!(matches!(
+            error,
+            NISTError::Fit(NISTFitError::Preparation(
+                NISTFitPreparationError::OverlappingIntervals { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn nist_fit_rejects_non_positive_sample_temperature() {
+        let error = fit_nist_scaled8(&[-1.0, 300.0], &[1.0, 1.0], &[1.0, 1.0], &[1.0, 1.0])
+            .expect_err("Shomate fitting cannot use non-positive temperatures");
+        assert!(matches!(
+            error,
+            NISTError::Fit(NISTFitError::Input(
+                NISTFitInputError::NonPositiveTemperature { .. }
+            ))
+        ));
+    }
+
+    #[test]
     fn test_prepare_fit_data_for_non_adjacent_fitting_no_overlap() {
         let coeffs_vec = vec![
             Coeffs {
@@ -1930,16 +2510,14 @@ mod tests {
             },
         ];
 
-        let result = NISTdata::prepare_fit_data_for_non_adjacent_fitting(coeffs_vec, 400.0, 800.0);
-        assert!(result.is_ok());
-
-        let (temps, cp_vals, h_vals, s_vals) = result.unwrap();
-        // Should be empty since no ranges overlap with 400-800K
-        assert!(temps.is_empty());
-        assert!(cp_vals.is_empty());
-        assert!(h_vals.is_empty());
-        assert!(s_vals.is_empty());
-        sleep(smtime);
+        let error = NISTdata::prepare_fit_data_for_non_adjacent_fitting(coeffs_vec, 400.0, 800.0)
+            .expect_err("an empty selected range is not a valid fit input");
+        assert!(matches!(
+            error,
+            NISTError::Fit(NISTFitError::Preparation(
+                NISTFitPreparationError::NoSamples { .. }
+            ))
+        ));
     }
 
     #[test]
@@ -1981,7 +2559,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_fit_nist_scaled8_rejects_bad_inputs() {
         let temps = [300.0, 400.0, 500.0];
         let cp = [10.0, 11.0];
@@ -1989,11 +2566,21 @@ mod tests {
         let s = [4.0, 5.0, 6.0];
 
         let err = fit_nist_scaled8(&temps, &cp, &h, &s).unwrap_err();
-        assert!(matches!(err, NISTError::FittingError(_)));
+        assert!(matches!(
+            err,
+            NISTError::Fit(NISTFitError::Input(
+                NISTFitInputError::LengthMismatch { .. }
+            ))
+        ));
 
         let cp_bad = [10.0, f64::INFINITY, 12.0];
         let err = fit_nist_scaled8(&temps, &cp_bad, &h, &s).unwrap_err();
-        assert!(matches!(err, NISTError::FittingError(_)));
+        assert!(matches!(
+            err,
+            NISTError::Fit(NISTFitError::Input(
+                NISTFitInputError::NonFiniteValue { .. }
+            ))
+        ));
     }
 
     #[test]
@@ -2110,7 +2697,8 @@ mod tests {
         .expect_err("large property error must be rejected");
         assert!(matches!(
             err,
-            NISTError::FittingError(message) if message.contains("Cp fitting report")
+            NISTError::Fit(NISTFitError::Quality(NISTFitQualityError::Rejected { property, .. }))
+                if property.contains("Cp fitting report")
         ));
     }
 
@@ -2134,7 +2722,7 @@ mod tests {
             .expect_err("empty vectors must be rejected explicitly");
         assert!(matches!(
             err,
-            NISTError::FittingError(message) if message.contains("must not be empty")
+            NISTError::Fit(NISTFitError::Input(NISTFitInputError::EmptySamples))
         ));
     }
 
@@ -2152,7 +2740,9 @@ mod tests {
         .expect_err("intervals outside the requested range must fail explicitly");
         assert!(matches!(
             err,
-            NISTError::FittingError(message) if message.contains("no samples")
+            NISTError::Fit(NISTFitError::Preparation(
+                NISTFitPreparationError::NoSamples { .. }
+            ))
         ));
     }
 
