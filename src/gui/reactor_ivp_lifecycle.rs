@@ -21,7 +21,7 @@ use crate::ReactorsIVP::solver_backend::{
     ReactorIvpSolverFamily, ReactorIvpSymbolicBackend,
 };
 use crate::ReactorsIVP::task_parser_reactor_IVP::{
-    ReactorIvpDocumentSpec, ReactorIvpStopConditionSpec,
+    ReactorIvpDocumentSpec, ReactorIvpMechanismSpec, ReactorIvpStopConditionSpec,
 };
 
 impl ReactorIvpApp {
@@ -67,6 +67,10 @@ impl ReactorIvpApp {
             x_bound: preview_task.solver_backend_config.x_bound,
             initial_conditions: preview_task.initial_conditions.clone(),
             thermal_effects: preview_task.thermal_effects.clone(),
+            mechanism: Some(ReactorIvpMechanismSpec {
+                substances: self.config.substances.clone(),
+                reactions: self.config.reactions.clone(),
+            }),
             stop_condition,
             solver_settings: reactor_solver_config_to_parser_settings(
                 &preview_task.solver_backend_config,

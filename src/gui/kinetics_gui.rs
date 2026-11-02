@@ -569,6 +569,7 @@ impl KineticsApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Kinetics::error::KineticsError;
 
     #[test]
     fn test_kinetics_app_new() {
@@ -644,23 +645,28 @@ mod tests {
     }
 
     #[test]
-    fn test_add_all_reactions_from_mechanism() {
-        let mut app = KineticsApp::new();
+    fn test_add_all_reactions_from_mechanism_rejects_malformed_record_atomically() {
+        let app = KineticsApp::new();
 
         let reaction_values: Vec<serde_json::Value> =
             app.kinetic_data.LibKineticData.values().cloned().collect();
-        let parsed_reactions = parse_kinetic_data_vec(reaction_values)
-            .map(|(parsed_reactions, _)| parsed_reactions)
-            .unwrap_or_default();
-
-        let initial_count = app.added_reactions.len();
-        app.added_reactions.extend(parsed_reactions.clone());
-
-        assert_eq!(
-            app.added_reactions.len(),
-            initial_count + parsed_reactions.len()
+        let error = parse_kinetic_data_vec(reaction_values)
+            .expect_err("malformed mechanism records must reject the whole transaction");
+        let KineticsError::Context { context, source } = error else {
+            panic!("expected contextual mechanism parse error");
+        };
+        assert!(
+            context.contains("invalid reaction") && context.contains(" at index "),
+            "unexpected context: {context}"
         );
-        assert!(!app.added_reactions.is_empty());
+        assert!(matches!(
+            *source,
+            KineticsError::InvalidReactionPayload { ref field, .. } if field == "troe"
+        ));
+        assert!(
+            app.added_reactions.is_empty(),
+            "partial mechanism was published"
+        );
     }
 
     #[test]

@@ -636,8 +636,8 @@ impl KineticMethods {
                     }
 
                     ui.horizontal(|ui| {
-                        ui.label("Experiment:");
-                        egui::ComboBox::from_id_salt("fit_model_experiment")
+                        let label = ui.label("Experiment:");
+                        let combo = egui::ComboBox::from_id_salt("fit_model_experiment")
                             .selected_text(if state.fit_model_experiment_id.is_empty() {
                                 "-"
                             } else {
@@ -652,6 +652,7 @@ impl KineticMethods {
                                     );
                                 }
                             });
+                        let _ = combo.response.labelled_by(label.id);
                     });
 
                     let columns = if state.fit_model_experiment_id.is_empty() {
@@ -690,8 +691,8 @@ impl KineticMethods {
                             }
 
                             ui.horizontal(|ui| {
-                                ui.label("X:");
-                                egui::ComboBox::from_id_salt("fit_model_x")
+                                let label = ui.label("X:");
+                                let combo = egui::ComboBox::from_id_salt("fit_model_x")
                                     .selected_text(if state.fit_model_x_col.is_empty() {
                                         "-"
                                     } else {
@@ -706,9 +707,10 @@ impl KineticMethods {
                                             );
                                         }
                                     });
+                                let _ = combo.response.labelled_by(label.id);
 
-                                ui.label("Y:");
-                                egui::ComboBox::from_id_salt("fit_model_y")
+                                let label = ui.label("Y:");
+                                let combo = egui::ComboBox::from_id_salt("fit_model_y")
                                     .selected_text(if state.fit_model_y_col.is_empty() {
                                         "-"
                                     } else {
@@ -723,11 +725,12 @@ impl KineticMethods {
                                             );
                                         }
                                     });
+                                let _ = combo.response.labelled_by(label.id);
                             });
 
                             ui.horizontal(|ui| {
-                                ui.label("Model:");
-                                egui::ComboBox::from_id_salt("fit_model_kind")
+                                let label = ui.label("Model:");
+                                let combo = egui::ComboBox::from_id_salt("fit_model_kind")
                                     .selected_text(state.fit_model_model.display_name())
                                     .show_ui(ui, |ui| {
                                         for fit_model in FittingModelName::all_for_gui() {
@@ -745,20 +748,21 @@ impl KineticMethods {
                                             }
                                         }
                                     });
+                                let _ = combo.response.labelled_by(label.id);
                             });
 
                             if state.fit_model_model.polynomial_degree().is_some() {
                                 ui.horizontal(|ui| {
-                                    ui.label("Polynomial degree:");
-                                    let changed = ui
-                                        .add(
-                                            egui::DragValue::new(
-                                                &mut state.fit_model_polynomial_degree,
-                                            )
-                                            .speed(1.0)
-                                            .range(1..=12),
+                                    let label = ui.label("Polynomial degree:");
+                                    let response = ui.add(
+                                        egui::DragValue::new(
+                                            &mut state.fit_model_polynomial_degree,
                                         )
-                                        .changed();
+                                        .speed(1.0)
+                                        .range(1..=12),
+                                    );
+                                    let changed = response.changed();
+                                    let _ = response.labelled_by(label.id);
                                     if changed
                                         || state.fit_model_model.polynomial_degree()
                                             != Some(state.fit_model_polynomial_degree)
@@ -799,28 +803,34 @@ impl KineticMethods {
                                 });
 
                             ui.horizontal(|ui| {
-                                ui.label("Output column:");
-                                ui.text_edit_singleline(&mut state.fit_model_output_col);
+                                let label = ui.label("Output column:");
+                                let input =
+                                    ui.text_edit_singleline(&mut state.fit_model_output_col);
+                                let _ = input.labelled_by(label.id);
                             });
 
                             ui.horizontal(|ui| {
-                                ui.label("Tolerance:");
-                                ui.add(
+                                let label = ui.label("Tolerance:");
+                                let input = ui.add(
                                     egui::DragValue::new(&mut state.fit_model_tolerance)
                                         .speed(1e-7)
                                         .range(1e-12..=1e-1),
                                 );
-                                ui.label("Max iter:");
-                                ui.add(
+                                let _ = input.labelled_by(label.id);
+                                let label = ui.label("Max iter:");
+                                let input = ui.add(
                                     egui::DragValue::new(&mut state.fit_model_max_iter)
                                         .speed(10.0)
                                         .range(1..=100_000),
                                 );
+                                let _ = input.labelled_by(label.id);
                             });
 
                             ui.horizontal(|ui| {
-                                ui.label("Initial guess:");
-                                ui.text_edit_singleline(&mut state.fit_model_initial_guess);
+                                let label = ui.label("Initial guess:");
+                                let input =
+                                    ui.text_edit_singleline(&mut state.fit_model_initial_guess);
+                                let _ = input.labelled_by(label.id);
                             });
 
                             ui.horizontal(|ui| {

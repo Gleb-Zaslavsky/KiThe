@@ -5,6 +5,7 @@
 //! file only parses the physical reactor contract, the typed initial state, and
 //! then bundles the solver settings as a typed RustedSciThe spec.
 
+use crate::Kinetics::mechfinder_api::{ReactionData, ReactionKinetics};
 use crate::ReactorsBVP::reactor_BVP_utils::ScalingConfig;
 use crate::ReactorsIVP::SimpleReactorIVP::{IvpError, ReactorIvpPhysicalConfig};
 use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
@@ -19,6 +20,7 @@ use RustedSciThe::numerical::LSODE2::config::{
     Lsode2AotProfile, Lsode2AotToolchain, Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy,
     Lsode2LinearSystemStructure, Lsode2NativeExecutionConfig,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 type GenericSectionMap = HashMap<String, Option<Vec<Value>>>;
@@ -37,10 +39,18 @@ pub struct ReactorIvpDocumentSpec {
     pub x_bound: f64,
     pub initial_conditions: HashMap<String, f64>,
     pub thermal_effects: Vec<f64>,
+    pub mechanism: Option<ReactorIvpMechanismSpec>,
     pub stop_condition: ReactorIvpStopConditionSpec,
     pub solver_settings: IvpSolverSettingsSpec,
     pub hybrid_solver_settings: Option<HybridStiffSettings>,
     pub hybrid_solver_fragment: Option<String>,
+}
+
+/// Optional editable reaction mechanism payload stored with an IVP task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReactorIvpMechanismSpec {
+    pub substances: Vec<String>,
+    pub reactions: Vec<ReactionData>,
 }
 
 /// Local stop-condition contract for the condensed-phase IVP task document.
@@ -106,7 +116,37 @@ impl ReactorIvpDocumentSpec {
 
     /// Validate the initial-state entries against a known substance order.
     pub fn validate_against_species(&self, species_order: &[String]) -> Result<(), IvpError> {
-        for required in species_order {
+        let effective_species = self
+            .mechanism
+            .as_ref()
+            .map(|mechanism| mechanism.substances.as_slice())
+            .unwrap_or(species_order);
+        if let Some(mechanism) = &self.mechanism {
+            let mut unique = std::collections::HashSet::new();
+            for substance in &mechanism.substances {
+                if substance.trim().is_empty() || !unique.insert(substance) {
+                    return Err(IvpError::InvalidConfiguration(format!(
+                        "mechanism contains an empty or duplicate substance `{substance}`"
+                    )));
+                }
+            }
+            if mechanism.reactions.len() != self.thermal_effects.len() {
+                return Err(IvpError::InvalidConfiguration(format!(
+                    "mechanism reaction count ({}) must match thermal_effects count ({})",
+                    mechanism.reactions.len(),
+                    self.thermal_effects.len()
+                )));
+            }
+            for reaction in &mechanism.reactions {
+                reaction.validate().map_err(|error| {
+                    IvpError::InvalidConfiguration(format!(
+                        "invalid reaction `{}`: {error}",
+                        reaction.eq
+                    ))
+                })?;
+            }
+        }
+        for required in effective_species {
             if !self.initial_conditions.contains_key(required) {
                 return Err(IvpError::MissingData(format!(
                     "Missing initial condition for substance `{required}`"
@@ -124,7 +164,7 @@ impl ReactorIvpDocumentSpec {
             ));
         }
         self.stop_condition
-            .validate_against_species(species_order)?;
+            .validate_against_species(effective_species)?;
         Ok(())
     }
 
@@ -136,6 +176,27 @@ impl ReactorIvpDocumentSpec {
         &self,
         task: &mut crate::ReactorsIVP::SimpleReactorIVP::SimpleReactorTask,
     ) -> Result<(), IvpError> {
+        if let Some(mechanism) = &self.mechanism {
+            let groups = task.kindata.groups().cloned();
+            task.kindata
+                .set_reaction_data_directly(mechanism.reactions.clone(), groups)
+                .map_err(|error| {
+                    IvpError::InvalidConfiguration(format!(
+                        "failed to install IVP reaction mechanism: {error}"
+                    ))
+                })?;
+            task.kindata.substances = mechanism.substances.clone();
+            task.kindata
+                .stecheodata
+                .set_substances(mechanism.substances.clone());
+            if !mechanism.reactions.is_empty() {
+                task.kindata.analyze_reactions().map_err(|error| {
+                    IvpError::InvalidConfiguration(format!(
+                        "failed to analyze IVP reaction mechanism: {error}"
+                    ))
+                })?;
+            }
+        }
         if let Some(name) = &self.problem_name {
             task.set_problem_name(name);
         }
@@ -174,6 +235,25 @@ impl ReactorIvpDocumentSpec {
         process_conditions.push(("L", self.physical.L.to_string()));
         process_conditions.push(("thermal_effects", format_vector_f64(&self.thermal_effects)));
         push_section(&mut out, "process_conditions", &process_conditions);
+
+        if let Some(mechanism) = &self.mechanism {
+            let mut kinetics = vec![("substances".to_string(), mechanism.substances.join(", "))];
+            for (index, reaction) in mechanism.reactions.iter().enumerate() {
+                let ReactionKinetics::Elementary(data) = &reaction.data else {
+                    continue;
+                };
+                kinetics.push((format!("reaction_{index:03}_equation"), reaction.eq.clone()));
+                kinetics.push((
+                    format!("reaction_{index:03}_arrhenius"),
+                    format_vector_f64(&data.Arrenius),
+                ));
+            }
+            let kinetics = kinetics
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.clone()))
+                .collect::<Vec<_>>();
+            push_section(&mut out, "kinetics", &kinetics);
+        }
 
         push_section(
             &mut out,
@@ -438,6 +518,7 @@ pub fn parse_reactor_ivp_document(
     let initial_conditions = parse_initial_conditions(document)?;
     let thermal_effects =
         required_vector_f64(process_conditions, "process_conditions", "thermal_effects")?;
+    let mechanism = parse_mechanism(document)?;
     let stop_condition = parse_stop_condition(document)?;
     let solver_settings = parse_ivp_solver_settings_from_document(document)
         .map_err(|error| IvpError::InvalidConfiguration(error.to_string()))?;
@@ -463,6 +544,7 @@ pub fn parse_reactor_ivp_document(
         x_bound,
         initial_conditions,
         thermal_effects,
+        mechanism,
         stop_condition,
         solver_settings,
         hybrid_solver_settings: Some(hybrid_solver_settings),
@@ -648,6 +730,106 @@ fn parse_stop_condition(document: &DocumentMap) -> Result<ReactorIvpStopConditio
     })
 }
 
+fn parse_mechanism(document: &DocumentMap) -> Result<Option<ReactorIvpMechanismSpec>, IvpError> {
+    let Some(section) = document.get("kinetics") else {
+        return Ok(None);
+    };
+
+    if section.contains_key("mechanism_json") {
+        let encoded = required_string(section, "kinetics", "mechanism_json")?;
+        let json = encoded
+            .trim()
+            .strip_prefix('(')
+            .and_then(|value| value.strip_suffix(')'))
+            .ok_or_else(|| {
+                IvpError::InvalidConfiguration(
+                    "kinetics.mechanism_json must be wrapped in parentheses".to_string(),
+                )
+            })?;
+        let mechanism = serde_json::from_str(json).map_err(|error| {
+            IvpError::InvalidConfiguration(format!(
+                "invalid kinetics.mechanism_json payload: {error}"
+            ))
+        })?;
+        return Ok(Some(mechanism));
+    }
+
+    let Some(substance_values) = section.get("substances") else {
+        return Ok(None);
+    };
+    let substance_values = substance_values
+        .as_ref()
+        .ok_or_else(|| missing_field("kinetics", "substances"))?;
+    let substances = substance_values
+        .iter()
+        .map(|value| {
+            value
+                .as_string()
+                .cloned()
+                .ok_or_else(|| missing_field("kinetics", "substances"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut reaction_indices = section
+        .keys()
+        .filter_map(|key| {
+            key.strip_prefix("reaction_")?
+                .strip_suffix("_equation")?
+                .parse::<usize>()
+                .ok()
+        })
+        .collect::<Vec<_>>();
+    reaction_indices.sort_unstable();
+    reaction_indices.dedup();
+
+    let mut reactions = Vec::with_capacity(reaction_indices.len());
+    for (expected_index, index) in reaction_indices.into_iter().enumerate() {
+        if index != expected_index {
+            return Err(IvpError::InvalidConfiguration(format!(
+                "kinetics reaction indices must be contiguous from 000; found {index:03} at position {expected_index}"
+            )));
+        }
+        let equation = required_string(
+            section,
+            "kinetics",
+            &format!("reaction_{index:03}_equation"),
+        )?;
+        let arrhenius = required_vector_f64(
+            section,
+            "kinetics",
+            &format!("reaction_{index:03}_arrhenius"),
+        )?;
+        if arrhenius.len() != 3 {
+            return Err(IvpError::InvalidConfiguration(format!(
+                "kinetics reaction {index:03} requires exactly A, n, and E Arrhenius values"
+            )));
+        }
+        reactions.push(
+            ReactionData::try_new_elementary(equation.clone(), arrhenius, None).map_err(
+                |error| {
+                    IvpError::InvalidConfiguration(format!(
+                        "invalid kinetics reaction {index:03} `{equation}`: {error}"
+                    ))
+                },
+            )?,
+        );
+    }
+
+    if substances.is_empty() && reactions.is_empty() {
+        return Ok(None);
+    }
+    if substances.is_empty() || reactions.is_empty() {
+        return Err(IvpError::InvalidConfiguration(
+            "readable kinetics requires both substances and at least one reaction".to_string(),
+        ));
+    }
+
+    Ok(Some(ReactorIvpMechanismSpec {
+        substances,
+        reactions,
+    }))
+}
+
 fn required_section<'a>(
     document: &'a DocumentMap,
     section: &str,
@@ -668,6 +850,17 @@ fn required_f64(
         return Err(invalid_numeric(section_name, field, scalar));
     }
     Ok(scalar)
+}
+
+fn required_string(
+    section: &GenericSectionMap,
+    section_name: &str,
+    field: &str,
+) -> Result<String, IvpError> {
+    required_value(section, section_name, field)?
+        .as_string()
+        .cloned()
+        .ok_or_else(|| missing_field(section_name, field))
 }
 
 fn optional_f64(

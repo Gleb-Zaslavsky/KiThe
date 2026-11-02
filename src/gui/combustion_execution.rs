@@ -30,6 +30,7 @@ impl CombustionApp {
     /// This method focuses on dispatch logic rather than error propagation.
     #[allow(dead_code)]
     pub(crate) fn run_calculation(&mut self) {
+        self.plot_window = None;
         let document = match self.validated_document_for_run() {
             Ok(document) => document,
             Err(message) => {
@@ -39,7 +40,6 @@ impl CombustionApp {
                 return;
             }
         };
-        self.plot_window = None;
         self.calculation_state = CalculationState::Running { run_id: 0 };
         self.last_run_message = Some("Running calculation...".to_string());
         self.last_run_is_error = false;
@@ -85,6 +85,7 @@ impl CombustionApp {
 
     /// Start one owned calculation worker while keeping egui responsive.
     fn start_calculation_worker(&mut self) {
+        self.plot_window = None;
         let document = match self.validated_document_for_run() {
             Ok(document) => document,
             Err(message) => {
@@ -268,6 +269,7 @@ impl CombustionApp {
     /// is parked in `pending_aot_confirmation` and executed only after the user
     /// confirms the exact toolchain summary shown by the GUI.
     pub(crate) fn request_calculation(&mut self) {
+        self.plot_window = None;
         if let Err(message) = validate_aot_toolchain_fields(&self.document) {
             warn!("Rejected unsafe AOT GUI configuration: {}", message);
             self.pending_aot_confirmation = None;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::Kinetics::mechfinder_api::ReactionData;
 use crate::ReactorsIVP::SimpleReactorIVP::SimpleReactorTask;
 use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser};
 use RustedSciThe::command_interpreter::task_parser_ivp::{IvpMethodSpec, Lsode2TaskExecutionSpec};
@@ -110,6 +111,38 @@ fn test_canonical_reactor_ivp_template_is_parser_ready() {
     assert_eq!(spec.thermal_effects, vec![125000.0]);
     assert_eq!(spec.solver_settings.solver.method, IvpMethodSpec::Lsode2);
     assert!(spec.solver_settings.solver_options.lsode2.is_some());
+}
+
+#[test]
+fn ivp_document_roundtrips_user_mechanism_and_species_order() {
+    let input = build_canonical_condensed_reactor_ivp_task_template();
+    let mut spec = parse_reactor_ivp_document_from_str(&input).unwrap();
+    spec.initial_conditions.insert("H2".to_string(), 0.7);
+    spec.initial_conditions.insert("H".to_string(), 0.3);
+    spec.mechanism = Some(ReactorIvpMechanismSpec {
+        substances: vec!["H2".to_string(), "H".to_string()],
+        reactions: vec![
+            ReactionData::try_new_elementary(
+                "H2=>2H".to_string(),
+                vec![1200.0, 0.25, 18000.0],
+                None,
+            )
+            .unwrap(),
+        ],
+    });
+
+    let serialized = spec.document_to_string();
+    assert!(serialized.contains("substances: H2, H"));
+    assert!(serialized.contains("reaction_000_equation: H2=>2H"));
+    assert!(serialized.contains("reaction_000_arrhenius: [1200, 0.25, 18000]"));
+    assert!(!serialized.contains("mechanism_json"));
+    let restored = parse_reactor_ivp_document_from_str(&serialized).unwrap();
+    let mechanism = restored.mechanism.as_ref().unwrap();
+    assert_eq!(mechanism.substances, vec!["H2", "H"]);
+    assert_eq!(mechanism.reactions.len(), 1);
+    assert_eq!(mechanism.reactions[0].eq, "H2=>2H");
+    assert_eq!(restored.thermal_effects, vec![125000.0]);
+    assert_eq!(serialized, restored.document_to_string());
 }
 
 #[test]

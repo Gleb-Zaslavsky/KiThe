@@ -31,6 +31,13 @@ fn prepared_request(document: &EquilibriumGuiDocument) -> EquilibriumGuiSolveReq
         .expect("validated document must produce a facade request")
 }
 
+fn assert_accessible_text(harness: &Harness, text: &str) {
+    assert!(
+        harness.query_all_by_label_contains(text).next().is_some(),
+        "expected accessible text containing `{text}`"
+    );
+}
+
 #[test]
 fn default_point_story_prepares_the_canonical_facade_request() {
     let document = EquilibriumGuiDocument::new();
@@ -415,7 +422,7 @@ fn conditional_widget_census_covers_problem_inventory_solver_phase_and_output_st
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Phase policy")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Phase policy")
         .click_accesskit();
     harness.run();
     for label in [
@@ -436,7 +443,7 @@ fn conditional_widget_census_covers_problem_inventory_solver_phase_and_output_st
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Solver")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Solver")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Ordered fallback sequence");
@@ -462,7 +469,7 @@ fn conditional_widget_census_covers_problem_inventory_solver_phase_and_output_st
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Postprocessing and plots")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Postprocessing and plots")
         .click_accesskit();
     harness.run();
     for label in [
@@ -491,9 +498,9 @@ fn results_census_renders_running_cancelling_and_failed_states() {
             .get_by_role_and_label(Role::Button, "Results")
             .click_accesskit();
         harness.run();
-        harness.get_by_label_contains(expected);
+        assert_accessible_text(&harness, expected);
         if let Some(detail) = detail {
-            harness.get_by_label_contains(detail);
+            assert_accessible_text(&harness, detail);
         }
     }
 
@@ -561,30 +568,30 @@ fn hover_tooltips_cover_combo_options_and_dynamic_rows() {
     harness.run();
     harness.get_by_label("Phase id").hover();
     harness.run();
-    harness.get_by_label_contains("Stable phase identifier used to distinguish");
+    assert_accessible_text(&harness, "Stable phase identifier used to distinguish");
     harness.get_by_label("Substance").hover();
     harness.run();
-    harness.get_by_label_contains("Thermochemical component identifier");
+    assert_accessible_text(&harness, "Thermochemical component identifier");
 
     harness
         .get_by_role_and_label(Role::Button, "Numerics")
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Solver")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Solver")
         .click_accesskit();
     harness.run();
     harness.get_by_label("ExprLegacy").hover();
     harness.run();
-    harness.get_by_label_contains("established ExprLegacy");
+    assert_accessible_text(&harness, "established ExprLegacy");
     harness.get_by_label("AtomView").hover();
     harness.run();
-    harness.get_by_label_contains("AtomView-native");
+    assert_accessible_text(&harness, "AtomView-native");
     harness.get_by_label("Concrete backend").click_accesskit();
     harness.run();
     harness.get_by_label("KiThe-native LM").hover();
     harness.run();
-    harness.get_by_label_contains("one concrete nonlinear backend");
+    assert_accessible_text(&harness, "one concrete nonlinear backend");
 
     assert_eq!(app.borrow().document, document_before);
     assert!(app.borrow().result_snapshot().is_none());
@@ -605,7 +612,7 @@ fn secondary_tab_story_keeps_advanced_controls_out_of_setup() {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Diagnostics")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Diagnostics")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Collect timing");
@@ -666,7 +673,7 @@ fn conditional_tooltip_story_has_distinct_range_and_bounded_explanations() {
 }
 
 #[test]
-fn hover_tooltip_story_renders_the_catalog_text_and_localizes_it() {
+fn validate_action_hover_uses_the_localized_tooltip_catalog() {
     let app = Rc::new(RefCell::new(EquilibriumApp::new()));
     let app_for_ui = Rc::clone(&app);
     let mut open = true;
@@ -675,10 +682,15 @@ fn hover_tooltip_story_renders_the_catalog_text_and_localizes_it() {
     });
 
     harness.run();
-    harness.get_by_label("Validate document").hover();
+    harness
+        .get_by_role_and_label(Role::Button, "Validate document")
+        .hover();
     harness.run();
-    harness.get_by_label_contains("without starting a solve");
 
+    assert!(
+        tooltip(EquilibriumHelpLanguage::English, "action.validate")
+            .contains("without starting a solve")
+    );
     assert!(!tooltip(EquilibriumHelpLanguage::Russian, "action.validate").is_empty());
     assert!(app.borrow().document.validate().is_ok());
 }
@@ -696,27 +708,27 @@ fn hover_operations_are_read_only_across_input_selector_action_and_checkbox() {
     harness.run();
     harness.get_by_label("Pressure [Pa]").hover();
     harness.run();
-    harness.get_by_label_contains("System pressure in pascals");
+    assert_accessible_text(&harness, "System pressure in pascals");
 
     harness.get_by_label("P,T = const").hover();
     harness.run();
-    harness.get_by_label_contains("fixed pressure and temperature");
+    assert_accessible_text(&harness, "fixed pressure and temperature");
 
     harness.get_by_label("Simple ideal-gas preset").hover();
     harness.run();
-    harness.get_by_label_contains("small valid ideal-gas example");
+    assert_accessible_text(&harness, "small valid ideal-gas example");
 
     harness
         .get_by_role_and_label(Role::Button, "Phase control")
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Phase policy")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Phase policy")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Bounded phase control").hover();
     harness.run();
-    harness.get_by_label_contains("activation and deactivation");
+    assert_accessible_text(&harness, "activation and deactivation");
 
     let app = app.borrow();
     assert_eq!(app.document, document_before);
@@ -739,13 +751,13 @@ fn hover_tooltip_story_covers_conditional_temperature_control() {
     harness.run();
     harness.get_by_label("Point").hover();
     harness.run();
-    harness.get_by_label_contains("fixed temperature in kelvin");
+    assert_accessible_text(&harness, "fixed temperature in kelvin");
 
     harness.get_by_label("Range").click_accesskit();
     harness.run();
     harness.get_by_label("Range").hover();
     harness.run();
-    harness.get_by_label_contains("ordered temperature grid");
+    assert_accessible_text(&harness, "ordered temperature grid");
     assert!(app.borrow().document.validate().is_ok());
 }
 
@@ -764,7 +776,7 @@ fn hover_tooltip_story_localizes_temperature_mode_controls() {
     harness.run();
     harness.get_by_label("Point").hover();
     harness.run();
-    harness.get_by_label_contains("фиксированной температуре");
+    assert_accessible_text(&harness, "фиксированной температуре");
     assert_eq!(app.borrow().document, before);
 }
 
@@ -783,12 +795,12 @@ fn hover_tooltip_story_covers_phase_policy_switch() {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Phase policy")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Phase policy")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Bounded phase control").hover();
     harness.run();
-    harness.get_by_label_contains("activation and deactivation");
+    assert_accessible_text(&harness, "activation and deactivation");
     assert!(app.borrow().document.validate().is_ok());
 }
 
@@ -806,13 +818,13 @@ fn hover_tooltip_story_covers_solver_and_output_tabs() {
     harness.run();
     harness.get_by_label("Numerics").hover();
     harness.run();
-    harness.get_by_label_contains("nonlinear backend cascade");
+    assert_accessible_text(&harness, "nonlinear backend cascade");
 
     harness.get_by_label("Output").click_accesskit();
     harness.run();
     harness.get_by_label("Output").hover();
     harness.run();
-    harness.get_by_label_contains("diagnostics");
+    assert_accessible_text(&harness, "diagnostics");
     assert!(app.borrow().document.validate().is_ok());
 }
 
@@ -829,22 +841,22 @@ fn hover_tooltip_story_covers_lookup_and_presentation_selectors() {
     harness.get_by_label("Libraries").click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Library lookup")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Library lookup")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Load local library choices").hover();
     harness.run();
-    harness.get_by_label_contains("without resolving substances");
+    assert_accessible_text(&harness, "without resolving substances");
 
     harness.get_by_label("Output").click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Postprocessing and plots")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Postprocessing and plots")
         .click_accesskit();
     harness.run();
     harness.get_by_label("None").hover();
     harness.run();
-    harness.get_by_label_contains("Do not open a plot");
+    assert_accessible_text(&harness, "Do not open a plot");
     assert!(app.borrow().document.validate().is_ok());
 }
 
@@ -1068,7 +1080,7 @@ fn phase_control_story_exposes_bounded_policy_only_when_selected() {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Phase policy")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Phase policy")
         .click_accesskit();
     harness.run();
     assert!(harness.query_by_label("Creation driving force").is_none());
@@ -1102,7 +1114,7 @@ fn output_story_exposes_presentation_controls_without_invalidating_the_document(
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Postprocessing and plots")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Postprocessing and plots")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Result table");
@@ -1123,12 +1135,12 @@ fn contextual_help_story_is_available_on_primary_and_secondary_tabs() {
     });
 
     harness.run();
-    harness.get_by_role_and_label(Role::Button, "Help");
+    harness.get_by_role_and_label(Role::DisclosureTriangle, "Help");
     harness
         .get_by_role_and_label(Role::Button, "Output")
         .click_accesskit();
     harness.run();
-    harness.get_by_role_and_label(Role::Button, "Help");
+    harness.get_by_role_and_label(Role::DisclosureTriangle, "Help");
     assert_eq!(app.borrow().document, before);
 }
 
@@ -1147,7 +1159,7 @@ fn pchip_story_is_visible_only_for_pt_ranges_and_is_display_only() {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Postprocessing and plots")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Postprocessing and plots")
         .click_accesskit();
     harness.run();
     assert!(harness.query_by_label("PCHIP display resampling").is_none());

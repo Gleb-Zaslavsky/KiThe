@@ -1,8 +1,10 @@
 #[cfg(test)]
 mod tests {
+    use super::super::bvp_gui_config::{BvpSolverFamily, set_bvp_solver_family};
     use super::super::combustion::{
-        CombustionApp, GuiFileOperationKind, GuiFileOperationResult, ProblemsEnum,
-        insert_field_if_absent, insert_section_if_absent, normalize_bvp_usize_fields,
+        BvpEditorTab, CombustionApp, DocumentDeleteRequest, GuiFileOperationKind,
+        GuiFileOperationResult, ProblemsEnum, add_bvp_reaction, add_bvp_species,
+        apply_document_deletion, insert_field_if_absent, normalize_bvp_usize_fields,
         sorted_document_section_names, sorted_section_field_names,
     };
     use crate::ReactorsBVP::task_parser_reactor_BVP::normalize_reactor_physics_task_map;
@@ -37,13 +39,6 @@ mod tests {
         }
     }
 
-    fn as_bool(value: &Value) -> bool {
-        match value {
-            Value::Boolean(value) => *value,
-            other => panic!("expected Value::Boolean, got {other:?}"),
-        }
-    }
-
     fn as_usize(value: &Value) -> usize {
         match value {
             Value::Usize(value) => *value,
@@ -56,6 +51,10 @@ mod tests {
             Value::Vector(value) => value,
             other => panic!("expected Value::Vector, got {other:?}"),
         }
+    }
+
+    fn prepare_solver_tab(app: &Rc<RefCell<CombustionApp>>) {
+        app.borrow_mut().active_bvp_tab = BvpEditorTab::Solver;
     }
 
     fn load_problem_test_document() -> DocumentMap {
@@ -123,14 +122,19 @@ mod tests {
             "off"
         );
         assert!(matches!(
+            first_value(&app.document, "solver_settings", "loglevel"),
+            Value::Optional(Some(value))
+                if matches!(value.as_ref(), Value::String(level) if level == "off")
+        ));
+        assert!(matches!(
             first_value(&app.document, "solver_settings", "linear_sys_method"),
             Value::Optional(None)
         ));
-        assert!(as_bool(first_value(
-            &app.document,
-            "solver_settings",
-            "dont_save_log"
-        )));
+        assert!(
+            !app.document
+                .get("solver_settings")
+                .is_some_and(|section| section.contains_key("dont_save_log"))
+        );
         assert_eq!(
             as_string(first_value(
                 &app.document,
@@ -147,6 +151,7 @@ mod tests {
     #[test]
     fn bvp_solver_backend_panel_renders_new_controls() {
         let mut app = CombustionApp::new_with_problem(ProblemsEnum::BVPSimple);
+        app.active_bvp_tab = BvpEditorTab::Solver;
         let mut open = true;
         let mut harness = Harness::new_ui(move |ui| {
             app.show(ui.ctx(), &mut open);
@@ -176,12 +181,17 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         let mut open = true;
         let app_for_ui = Rc::clone(&app);
         let mut harness = Harness::new_ui(move |ui| {
             app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
         });
 
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver telemetry")
+            .scroll_to_me();
         harness.run();
         harness
             .get_by_role_and_label(Role::ComboBox, "Solver telemetry")
@@ -201,11 +211,12 @@ mod tests {
             )),
             "counters"
         );
-        assert!(as_bool(first_value(
-            &app_ref.document,
-            "solver_settings",
-            "dont_save_log"
-        )));
+        assert!(
+            !app_ref
+                .document
+                .get("solver_settings")
+                .is_some_and(|section| section.contains_key("dont_save_log"))
+        );
 
         let mut normalized_document = normalize_reactor_physics_task_map(&app_ref.document);
         let mut solver_document = DocumentMap::new();
@@ -221,10 +232,6 @@ mod tests {
                 solver_document.insert(section_name.to_string(), section);
             }
         }
-        solver_document
-            .get_mut("solver_settings")
-            .expect("GUI task has solver settings")
-            .remove("dont_save_log");
         let settings = parse_hybrid_bvp_solver_settings_from_document(&solver_document)
             .expect("GUI-produced solver settings should satisfy the RST hybrid contract");
         let BvpSolverSettings::Damped(options) = settings else {
@@ -241,6 +248,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         {
             let mut app_ref = app.borrow_mut();
             let settings = app_ref
@@ -274,9 +282,21 @@ mod tests {
             ("AOT build profile", "AOT build profile."),
             ("AOT compile preset", "AOT compile preset."),
             ("AOT execution policy", "Runtime execution policy"),
+            (
+                "Residual target chunks",
+                "Optional positive target chunk count for Damped AOT residual generation.",
+            ),
+            (
+                "Jacobian target chunks",
+                "Optional positive target chunk count for Damped AOT Jacobian generation.",
+            ),
             ("Symbolic backend", "Symbolic assembly backend."),
             ("Banded linear solver", "Banded linear solver policy."),
             ("refinement_steps", "Iterative refinement steps"),
+            (
+                "Assembly parallelism",
+                "Auto selects sequential or parallel assembly by system size.",
+            ),
         ] {
             app.borrow_mut().current_help_info.clear();
             harness.get_by_label(label).scroll_to_me();
@@ -311,10 +331,6 @@ mod tests {
                 solver_document.insert(section_name.to_string(), section.clone());
             }
         }
-        solver_document
-            .get_mut("solver_settings")
-            .expect("GUI task has solver settings")
-            .remove("dont_save_log");
         assert!(parse_hybrid_bvp_solver_settings_from_document(&solver_document).is_err());
     }
 
@@ -323,6 +339,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         let mut open = true;
         let app_for_ui = Rc::clone(&app);
         let mut harness = Harness::new_ui(move |ui| {
@@ -342,8 +359,7 @@ mod tests {
             ("abs_tolerance", "Absolute convergence tolerance."),
             ("max_iterations", "Maximum solver iterations."),
             ("Solver telemetry", "Internal solver telemetry."),
-            ("loglevel", "Logging verbosity level."),
-            ("dont_save_log", "Disable log file saving."),
+            ("loglevel", "Common BVP text-logging level."),
             ("Residuals and Jacobian Backend", "High-level solver preset"),
             ("Symbolic backend", "Symbolic assembly backend."),
             ("Banded linear solver", "Banded linear solver policy."),
@@ -360,6 +376,10 @@ mod tests {
             );
         }
 
+        harness
+            .get_by_role_and_label(Role::Button, "Physics")
+            .click();
+        harness.run();
         for (label, expected_help) in [
             (
                 "process_conditions",
@@ -368,29 +388,10 @@ mod tests {
             ("boundary_condition", "Initial values for all variables"),
             ("diffusion_coefficients", "Molecular diffusion coefficients"),
             (
-                "reactions",
+                "Reactions",
                 "Chemical reactions with Arrhenius kinetic parameters",
             ),
             ("bounds", "Variable bounds for solver convergence"),
-            ("rel_tolerance", "Relative convergence tolerances"),
-            ("strategy_params", "Advanced solver strategy parameters"),
-            (
-                "initial_guess",
-                "Initial guess values for the numerical solver",
-            ),
-            ("postprocessing", "Output and visualization options"),
-            (
-                "Adaptive grid refinement",
-                "Adaptive grid refinement settings for automatic mesh improvement.",
-            ),
-            (
-                "Maximum grid refinements",
-                "Maximum number of refinement iterations.",
-            ),
-            (
-                "Grid refinement strategy",
-                "Grid refinement method and parameters",
-            ),
         ] {
             app.borrow_mut().current_help_info.clear();
             harness.get_by_label(label).scroll_to_me();
@@ -404,10 +405,6 @@ mod tests {
             );
         }
 
-        harness.get_by_label("process_conditions").scroll_to_me();
-        harness.run();
-        harness.get_by_label("process_conditions").click();
-        harness.run();
         harness.get_by_label("P").scroll_to_me();
         harness.run();
         harness.get_by_label("P").hover();
@@ -416,13 +413,10 @@ mod tests {
             app.borrow()
                 .current_help_info
                 .contains("System pressure [Pa]."),
-            "hovering the physical pressure field should show its units and meaning"
+            "hovering the physical pressure field should show its units and meaning; got `{}`",
+            app.borrow().current_help_info
         );
 
-        harness.get_by_label("boundary_condition").scroll_to_me();
-        harness.run();
-        harness.get_by_label("boundary_condition").click();
-        harness.run();
         harness.get_by_label("T").scroll_to_me();
         harness.run();
         harness.get_by_label("T").hover();
@@ -434,6 +428,14 @@ mod tests {
             "hovering the temperature boundary field should show its units and meaning"
         );
 
+        harness
+            .get_by_role_and_label(Role::Button, "Solver")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .scroll_to_me();
+        harness.run();
         harness
             .get_by_role_and_label(Role::ComboBox, "Solver family")
             .scroll_to_me();
@@ -452,8 +454,7 @@ mod tests {
             ("tolerance", "Route-specific convergence tolerance."),
             ("max_iterations", "Maximum solver iterations."),
             ("Solver telemetry", "Internal solver telemetry."),
-            ("loglevel", "Logging verbosity level."),
-            ("dont_save_log", "Disable log file saving."),
+            ("loglevel", "Common BVP text-logging level."),
             ("Residuals and Jacobian Backend", "High-level solver preset"),
             ("Symbolic backend", "Symbolic assembly backend."),
             ("Banded linear solver", "Banded linear solver policy."),
@@ -476,6 +477,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         let mut open = true;
         let app_for_ui = Rc::clone(&app);
         let mut harness = Harness::new_ui(move |ui| {
@@ -515,7 +517,7 @@ mod tests {
             ),
             ("Maximum backtracking steps", "Maximum backtracking steps"),
             ("Solver telemetry", "Internal solver telemetry."),
-            ("Logging level", "Logging verbosity level."),
+            ("Logging level", "Common BVP text-logging level."),
         ] {
             app.borrow_mut().current_help_info.clear();
             harness.get_by_label(label).scroll_to_me();
@@ -571,10 +573,6 @@ mod tests {
                     solver_document.insert(section_name.to_string(), section.clone());
                 }
             }
-            solver_document
-                .get_mut("solver_settings")
-                .expect("GUI task has solver settings")
-                .remove("dont_save_log");
             parse_hybrid_bvp_solver_settings_from_document(&solver_document)
         };
 
@@ -685,6 +683,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         {
             let mut app_ref = app.borrow_mut();
             let solver_settings = app_ref
@@ -723,18 +722,84 @@ mod tests {
 
         harness.run();
 
+        harness.get_by_role_and_label(Role::Button, "Physics");
         for label in [
-            "Physics",
-            "Initial guess",
-            "Postprocessing",
             "Legacy raw document",
             "process_conditions",
             "boundary_condition",
+        ] {
+            harness.get_by_label(label);
+        }
+        harness
+            .get_by_role_and_label(Role::Button, "Solver")
+            .click();
+        harness.run();
+        for label in [
+            "Solver backend",
+            "Initial guess",
             "initial_guess",
+            "Postprocessing",
             "postprocessing",
         ] {
             harness.get_by_label(label);
         }
+    }
+
+    #[test]
+    fn solver_tab_persists_kithe_symbolic_assembly_policy() {
+        let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
+            ProblemsEnum::BVPSimple,
+        )));
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::new_ui(move |ui| {
+            app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+        });
+
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Solver")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Assembly parallelism")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Assembly parallelism")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Parallel")
+            .click();
+        harness.run();
+
+        assert_eq!(
+            as_string(first_value(
+                &app.borrow().document,
+                "kithe_settings",
+                "symbolic_rhs_assembly_policy"
+            )),
+            "parallel"
+        );
+        assert!(
+            app.borrow()
+                .document_to_string()
+                .contains("symbolic_rhs_assembly_policy: parallel")
+        );
+        let serialized = app.borrow().document_to_string();
+        let mut parser = DocumentParser::new(serialized);
+        parser
+            .parse_document()
+            .expect("GUI settings document should round-trip through the task parser");
+        assert_eq!(
+            as_string(first_value(
+                parser.get_result().expect("parsed map should exist"),
+                "kithe_settings",
+                "symbolic_rhs_assembly_policy"
+            )),
+            "parallel"
+        );
     }
 
     #[test]
@@ -745,6 +810,10 @@ mod tests {
             app.show(ui.ctx(), &mut open);
         });
 
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Solver")
+            .click();
         harness.run();
 
         for label in [
@@ -771,6 +840,10 @@ mod tests {
             app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
         });
 
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Solver")
+            .click();
         harness.run();
         harness.get_by_label("Solver backend");
         harness.get_by_label("Adaptive grid refinement");
@@ -815,6 +888,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         app.borrow_mut().document = load_problem_test_document();
 
         let mut open = true;
@@ -875,6 +949,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         {
             let mut app_ref = app.borrow_mut();
             let solver_settings = app_ref
@@ -927,6 +1002,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         {
             let mut app_ref = app.borrow_mut();
             let solver_settings = app_ref
@@ -1073,6 +1149,7 @@ mod tests {
             let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
                 ProblemsEnum::BVPSimple,
             )));
+            prepare_solver_tab(&app);
             {
                 let mut app_ref = app.borrow_mut();
                 let solver_settings = app_ref
@@ -1227,6 +1304,7 @@ mod tests {
         }
 
         fn render_bvp_frame(app: Rc<RefCell<CombustionApp>>) {
+            prepare_solver_tab(&app);
             let mut open = true;
             let app_for_ui = Rc::clone(&app);
             let mut harness = Harness::new_ui(move |ui| {
@@ -1453,6 +1531,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         {
             let mut app_ref = app.borrow_mut();
             app_ref.document.remove("initial_guess");
@@ -1479,6 +1558,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         {
             let mut app_ref = app.borrow_mut();
             let grid_refinement = app_ref
@@ -1539,6 +1619,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         let mut open = true;
         let app_for_ui = Rc::clone(&app);
         let mut harness = Harness::new_ui(move |ui| {
@@ -1572,8 +1653,128 @@ mod tests {
 
         harness.run();
         harness.get_by_label("Atomic composition");
-        harness.get_by_label("HMX");
-        harness.get_by_label("DecompositionProduct");
+        assert!(
+            harness.query_all_by_label("HMX").count() >= 2,
+            "HMX should be visible in both the physics and atomic-composition frames"
+        );
+        assert!(
+            harness.query_all_by_label("DecompositionProduct").count() >= 2,
+            "the species should appear in both the physics and atomic-composition frames"
+        );
+    }
+
+    #[test]
+    fn bvp_species_editor_adds_and_cascades_species_data() {
+        let mut document = load_problem_test_document();
+        add_bvp_species(&mut document, "NewSpecies").expect("species should be addable");
+        assert!(
+            document["process_conditions"]["substances"]
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|value| value.as_string().is_some_and(|name| name == "NewSpecies"))
+        );
+        assert!(document["boundary_condition"].contains_key("NewSpecies"));
+        assert!(document["diffusion_coefficients"].contains_key("NewSpecies"));
+        assert!(document.contains_key("NewSpecies"));
+        assert!(add_bvp_species(&mut document, "NewSpecies").is_err());
+
+        document
+            .get_mut("reactions")
+            .unwrap()
+            .insert("NewSpecies=>HMX".to_string(), Some(vec![Value::Float(1.0)]));
+        assert!(apply_document_deletion(
+            &mut document,
+            &DocumentDeleteRequest::Species {
+                species: "NewSpecies".to_string()
+            }
+        ));
+        assert!(!document.contains_key("NewSpecies"));
+        assert!(!document["boundary_condition"].contains_key("NewSpecies"));
+        assert!(!document["diffusion_coefficients"].contains_key("NewSpecies"));
+        assert!(!document["reactions"].contains_key("NewSpecies=>HMX"));
+    }
+
+    #[test]
+    fn bvp_reaction_editor_keeps_distinct_reactions_and_typed_parameters() {
+        let mut document = load_problem_test_document();
+        add_bvp_reaction(&mut document, "A=>B").expect("first reaction should be addable");
+        add_bvp_reaction(&mut document, "B=>C").expect("second reaction should be addable");
+        assert!(add_bvp_reaction(&mut document, "A=>B").is_err());
+
+        let reactions = &document["reactions"];
+        assert_eq!(reactions.len(), 3);
+        assert!(matches!(
+            reactions["A=>B"].as_ref().unwrap().as_slice(),
+            [Value::Vector(parameters)] if parameters == &[1.0, 0.0, 0.0, 0.0]
+        ));
+    }
+
+    #[test]
+    fn bvp_physics_uses_collection_editors_instead_of_generic_add_field() {
+        let mut app = CombustionApp::new_with_problem(ProblemsEnum::BVPSimple);
+        app.document = load_problem_test_document();
+        let mut open = true;
+        let mut harness = Harness::builder()
+            .with_accessibility_check(false)
+            .build_ui(move |ui| app.show(ui.ctx(), &mut open));
+        harness.run();
+
+        harness.get_by_label("Substances");
+        harness.get_by_label("Add substance");
+        harness.get_by_label("Reactions");
+        harness.get_by_label("Add reaction");
+        assert!(harness.query_all_by_label("Add element").count() >= 2);
+        assert!(
+            harness.query_all_by_label("Add Field").next().is_none(),
+            "structured physics collections must not use the obsolete generic field editor"
+        );
+    }
+
+    #[test]
+    fn bvp_window_has_no_problem_type_selector_and_physics_sections_are_visible_frames() {
+        let mut app = CombustionApp::new();
+        assert_eq!(app.selected_problem, ProblemsEnum::BVPSimple);
+        let mut open = true;
+        let mut harness = Harness::new_ui(move |ui| {
+            app.show(ui.ctx(), &mut open);
+        });
+
+        harness.run();
+
+        assert!(
+            harness.query_all_by_label("Problem Type").next().is_none(),
+            "the dedicated BVP window must not offer a BVP/None problem selector"
+        );
+        assert!(
+            harness
+                .query_all_by_label("Create Section")
+                .next()
+                .is_none(),
+            "the structured BVP editor must not expose generic section creation"
+        );
+        assert!(
+            harness
+                .query_all_by_label("New section name:")
+                .next()
+                .is_none(),
+            "the structured BVP editor must not expose a raw section-name field"
+        );
+        harness.get_by_role_and_label(Role::Button, "Physics");
+        assert!(
+            harness
+                .query_all_by_label("process_conditions")
+                .next()
+                .is_some()
+        );
+        harness.get_by_role_and_label(Role::SpinButton, "P");
+        assert!(
+            harness
+                .query_all_by_role_and_label(Role::Button, "process_conditions")
+                .next()
+                .is_none(),
+            "physics sections should render as framed content, not collapsed menus"
+        );
     }
 
     #[test]
@@ -1596,6 +1797,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         {
             let mut app_ref = app.borrow_mut();
             let solver_settings = app_ref
@@ -1629,6 +1831,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         {
             let mut app_ref = app.borrow_mut();
             let solver_settings = app_ref
@@ -1659,6 +1862,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         {
             let mut app_ref = app.borrow_mut();
             let solver_settings = app_ref
@@ -1836,6 +2040,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         app.borrow_mut()
             .document
             .get_mut("solver_settings")
@@ -1864,6 +2069,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         app.borrow_mut()
             .document
             .get_mut("solver_settings")
@@ -1891,6 +2097,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         app.borrow_mut()
             .document
             .get_mut("solver_settings")
@@ -1902,6 +2109,10 @@ mod tests {
         let mut harness = Harness::new_ui(move |ui| {
             app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
         });
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "loglevel")
+            .scroll_to_me();
         harness.run();
         harness
             .get_by_role_and_label(Role::ComboBox, "loglevel")
@@ -1923,6 +2134,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        prepare_solver_tab(&app);
         {
             let mut app_ref = app.borrow_mut();
             let grid_refinement = app_ref
@@ -2178,18 +2390,16 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_sections_and_fields_preserve_existing_document_data() {
-        let mut document = DocumentMap::new();
-        insert_section_if_absent(&mut document, "physics".to_string())
-            .expect("first section insertion should succeed");
-        let section = document
-            .get_mut("physics")
-            .expect("new section should exist");
-        insert_field_if_absent(section, "temperature".to_string(), Value::Float(900.0))
+    fn duplicate_fields_preserve_existing_document_data() {
+        let mut section = HashMap::new();
+        insert_field_if_absent(&mut section, "temperature".to_string(), Value::Float(900.0))
             .expect("first field insertion should succeed");
 
-        let duplicate_field =
-            insert_field_if_absent(section, "temperature".to_string(), Value::Float(1200.0));
+        let duplicate_field = insert_field_if_absent(
+            &mut section,
+            "temperature".to_string(),
+            Value::Float(1200.0),
+        );
         assert!(duplicate_field.is_err());
         assert_eq!(
             section
@@ -2199,13 +2409,7 @@ mod tests {
             Some(&Value::Float(900.0))
         );
 
-        let duplicate_section = insert_section_if_absent(&mut document, "physics".to_string());
-        assert!(duplicate_section.is_err());
-        assert!(
-            document
-                .get("physics")
-                .is_some_and(|section| section.contains_key("temperature"))
-        );
+        assert!(section.contains_key("temperature"));
     }
 
     #[test]
@@ -2216,7 +2420,6 @@ mod tests {
 
         let mut app = CombustionApp::new_with_problem(ProblemsEnum::BVPSimple);
         app.current_file_path = Some(path.clone());
-        app.new_section_name = "pending section".to_string();
         app.new_field_names
             .insert("physics".to_string(), "pending field".to_string());
         app.last_run_message = Some("stale result".to_string());
@@ -2227,7 +2430,6 @@ mod tests {
         assert_eq!(app.selected_problem, ProblemsEnum::None);
         assert!(app.document.is_empty());
         assert!(app.current_file_path.is_none());
-        assert!(app.new_section_name.is_empty());
         assert!(app.new_field_names.is_empty());
         assert!(app.last_run_message.is_none());
         assert!(!app.last_run_is_error);
@@ -2297,5 +2499,519 @@ mod tests {
         assert!(app.document.is_empty());
         assert!(app.current_file_path.is_none());
         assert!(!app.document_lifecycle.dirty);
+    }
+
+    #[test]
+    fn solver_route_specific_controls_roundtrip_into_the_hybrid_api() {
+        let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
+            ProblemsEnum::BVPSimple,
+        )));
+        prepare_solver_tab(&app);
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 760.0))
+            .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
+        harness.run();
+
+        macro_rules! choose {
+            ($label:literal, $choice:literal) => {{
+                harness
+                    .get_by_role_and_label(Role::ComboBox, $label)
+                    .scroll_to_me();
+                harness.run();
+                harness
+                    .get_by_role_and_label(Role::ComboBox, $label)
+                    .click();
+                harness.run();
+                harness
+                    .get_by_role_and_label(Role::Button, $choice)
+                    .click_accesskit();
+                harness.run();
+            }};
+        }
+
+        choose!("Solver family", "sci");
+        {
+            let mut app = app.borrow_mut();
+            let settings = app
+                .document
+                .get_mut("solver_settings")
+                .expect("solver settings");
+            settings.insert(
+                "matrix_layout".into(),
+                Some(vec![Value::String("sparse".into())]),
+            );
+            settings.insert(
+                "execution_policy".into(),
+                Some(vec![Value::String("parallel".into())]),
+            );
+            settings.insert("execution_min_work".into(), Some(vec![Value::Usize(128)]));
+            settings.insert(
+                "output_policy".into(),
+                Some(vec![Value::String("final_only".into())]),
+            );
+            settings.insert(
+                "sparse_factorization".into(),
+                Some(vec![Value::String("superlu".into())]),
+            );
+        }
+        harness.run();
+
+        let document = app.borrow().document.clone();
+        let settings = document.get("solver_settings").expect("solver settings");
+        assert_eq!(
+            settings
+                .get("execution_min_work")
+                .and_then(Option::as_ref)
+                .and_then(|values| values.first()),
+            Some(&Value::Usize(128))
+        );
+
+        let normalized = normalize_reactor_physics_task_map(&document);
+        let solver_document = normalized
+            .into_iter()
+            .filter(|(section, _)| {
+                [
+                    "solver_settings",
+                    "strategy_params",
+                    "adaptive_strategy",
+                    "grid_refinement",
+                    "bounds",
+                    "rel_tolerance",
+                ]
+                .contains(&section.as_str())
+            })
+            .collect::<DocumentMap>();
+        let parsed = parse_hybrid_bvp_solver_settings_from_document(&solver_document)
+            .expect("GUI-selected BVP_sci settings should parse through the production contract");
+        let BvpSolverSettings::Sci {
+            options,
+            sparse_factorization,
+            ..
+        } = parsed
+        else {
+            panic!("GUI selected the BVP_sci route");
+        };
+        assert_eq!(
+            options.execution_policy,
+            RustedSciThe::numerical::BVP_sci::new::BvpSciExecutionPolicy::Parallel {
+                min_work: 128
+            }
+        );
+        assert_eq!(
+            options.output_policy,
+            RustedSciThe::numerical::BVP_sci::new::BvpSciOutputPolicy::FinalOnly
+        );
+        assert_eq!(
+            sparse_factorization,
+            RustedSciThe::numerical::BVP_api::BvpSciSparseFactorization::SuperLu
+        );
+    }
+
+    #[test]
+    fn bvp_sci_aot_artifact_and_chunk_controls_roundtrip_into_hybrid_api() {
+        let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
+            ProblemsEnum::BVPSimple,
+        )));
+        prepare_solver_tab(&app);
+        {
+            let mut app = app.borrow_mut();
+            set_bvp_solver_family(&mut app.document, BvpSolverFamily::Sci);
+            let settings = app
+                .document
+                .get_mut("solver_settings")
+                .expect("solver settings");
+            for (field, value) in [
+                ("execution", "aot"),
+                ("matrix_layout", "banded_auto"),
+                ("assembly", "atom_view_native"),
+                ("aot_build_policy", "build_if_missing"),
+                ("aot_build_profile", "release"),
+                ("aot_codegen_backend", "rust"),
+                ("aot_output_dir", "artifacts/bvp-sci"),
+                ("aot_handoff_path", "reports/bvp-handoff.json"),
+                ("aot_crate_name", "bvp_generated"),
+                ("aot_module_name", "generated_bvp"),
+                ("aot_residual_chunking", "target_chunks"),
+                ("aot_sparse_jacobian_chunking", "rows"),
+                ("aot_banded_jacobian_chunking", "diagonals"),
+            ] {
+                settings.insert(
+                    field.to_string(),
+                    Some(vec![Value::String(value.to_string())]),
+                );
+            }
+            for (field, value) in [
+                ("aot_residual_chunk_size", 3),
+                ("aot_sparse_jacobian_chunk_size", 5),
+                ("aot_banded_jacobian_chunk_size", 2),
+            ] {
+                settings.insert(field.to_string(), Some(vec![Value::Integer(value)]));
+            }
+        }
+
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 760.0))
+            .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
+        harness.run();
+
+        for label in [
+            "AOT build policy",
+            "AOT build profile",
+            "AOT codegen backend",
+            "AOT output directory",
+            "AOT handoff path",
+            "Generated crate name",
+            "Generated module name",
+            "Residual chunking",
+            "Residual chunk size",
+            "Sparse Jacobian chunking",
+            "Sparse Jacobian chunk size",
+            "Banded Jacobian chunking",
+            "Banded Jacobian chunk size",
+        ] {
+            harness.get_by_label(label);
+        }
+
+        let document = app.borrow().document.clone();
+        let normalized = normalize_reactor_physics_task_map(&document);
+        let solver_document = normalized
+            .into_iter()
+            .filter(|(section, _)| {
+                [
+                    "solver_settings",
+                    "strategy_params",
+                    "adaptive_strategy",
+                    "grid_refinement",
+                    "bounds",
+                    "rel_tolerance",
+                ]
+                .contains(&section.as_str())
+            })
+            .collect::<DocumentMap>();
+        let BvpSolverSettings::Sci { aot_config, .. } =
+            parse_hybrid_bvp_solver_settings_from_document(&solver_document)
+                .expect("AOT GUI settings should satisfy the production hybrid parser")
+        else {
+            panic!("the GUI selected the BVP_sci route");
+        };
+        let aot = aot_config.expect("AOT execution should produce a generated config");
+        assert_eq!(
+            aot.output_parent_dir,
+            Some(std::path::PathBuf::from("artifacts/bvp-sci"))
+        );
+        assert_eq!(
+            aot.handoff_path,
+            Some(std::path::PathBuf::from("reports/bvp-handoff.json"))
+        );
+        assert_eq!(aot.crate_name_override.as_deref(), Some("bvp_generated"));
+        assert_eq!(aot.module_name_override.as_deref(), Some("generated_bvp"));
+        assert_eq!(
+            aot.residual_chunking_strategy,
+            RustedSciThe::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy::ByTargetChunkCount {
+                target_chunks: 3,
+            }
+        );
+        assert_eq!(
+            aot.sparse_jacobian_chunking_strategy,
+            RustedSciThe::symbolic::codegen::codegen_tasks::SparseChunkingStrategy::ByRowCount {
+                rows_per_chunk: 5,
+            }
+        );
+        assert_eq!(
+            aot.banded_jacobian_chunking_strategy,
+            RustedSciThe::symbolic::codegen::codegen_tasks::BandedChunkingStrategy::ByDiagonalCount {
+                diagonals_per_chunk: 2,
+            }
+        );
+
+        {
+            let mut app = app.borrow_mut();
+            let settings = app
+                .document
+                .get_mut("solver_settings")
+                .expect("solver settings");
+            settings.insert(
+                "aot_build_policy".to_string(),
+                Some(vec![Value::String("require_prebuilt".to_string())]),
+            );
+            settings.remove("aot_build_profile");
+        }
+        harness.run();
+        assert!(
+            !app.borrow()
+                .document
+                .get("solver_settings")
+                .expect("solver settings")
+                .contains_key("aot_build_profile"),
+            "profile should be omitted for policies that do not compile"
+        );
+        let document = app.borrow().document.clone();
+        let normalized = normalize_reactor_physics_task_map(&document);
+        let solver_document = normalized
+            .into_iter()
+            .filter(|(section, _)| {
+                [
+                    "solver_settings",
+                    "strategy_params",
+                    "adaptive_strategy",
+                    "grid_refinement",
+                    "bounds",
+                    "rel_tolerance",
+                ]
+                .contains(&section.as_str())
+            })
+            .collect::<DocumentMap>();
+        assert!(parse_hybrid_bvp_solver_settings_from_document(&solver_document).is_ok());
+    }
+
+    #[test]
+    fn bvp_damped_aot_chunk_targets_roundtrip_into_hybrid_api() {
+        let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
+            ProblemsEnum::BVPSimple,
+        )));
+        prepare_solver_tab(&app);
+        {
+            let mut app = app.borrow_mut();
+            let settings = app
+                .document
+                .get_mut("solver_settings")
+                .expect("solver settings");
+            settings.insert(
+                "generated_backend".into(),
+                Some(vec![Value::String("banded_aot_tcc".into())]),
+            );
+            settings.insert(
+                "backend_policy".into(),
+                Some(vec![Value::String("aot_only".into())]),
+            );
+        }
+
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 760.0))
+            .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
+        harness.run();
+
+        let normalized = normalize_reactor_physics_task_map(&app.borrow().document);
+        let solver_document = normalized
+            .into_iter()
+            .filter(|(section, _)| {
+                [
+                    "solver_settings",
+                    "strategy_params",
+                    "adaptive_strategy",
+                    "grid_refinement",
+                    "bounds",
+                    "rel_tolerance",
+                ]
+                .contains(&section.as_str())
+            })
+            .collect::<DocumentMap>();
+        let settings = parse_hybrid_bvp_solver_settings_from_document(&solver_document)
+            .expect("unset chunk targets should preserve RST defaults");
+        let BvpSolverSettings::Damped(options) = settings else {
+            panic!("the GUI selected the Damped family");
+        };
+        assert_eq!(
+            options
+                .generated_backend_config
+                .aot_chunking_policy
+                .residual,
+            None
+        );
+        assert_eq!(
+            options
+                .generated_backend_config
+                .aot_chunking_policy
+                .sparse_jacobian,
+            None
+        );
+
+        {
+            let mut app = app.borrow_mut();
+            let settings = app
+                .document
+                .get_mut("solver_settings")
+                .expect("solver settings");
+            settings.insert(
+                "aot_residual_target_chunks".into(),
+                Some(vec![Value::Usize(5)]),
+            );
+            settings.insert(
+                "aot_jacobian_target_chunks".into(),
+                Some(vec![Value::Usize(3)]),
+            );
+        }
+        harness.run();
+        harness.get_by_role_and_label(Role::SpinButton, "Residual target chunks");
+        harness.get_by_role_and_label(Role::SpinButton, "Jacobian target chunks");
+
+        let normalized = normalize_reactor_physics_task_map(&app.borrow().document);
+        let solver_document = normalized
+            .into_iter()
+            .filter(|(section, _)| {
+                [
+                    "solver_settings",
+                    "strategy_params",
+                    "adaptive_strategy",
+                    "grid_refinement",
+                    "bounds",
+                    "rel_tolerance",
+                ]
+                .contains(&section.as_str())
+            })
+            .collect::<DocumentMap>();
+        let settings = parse_hybrid_bvp_solver_settings_from_document(&solver_document)
+            .expect("Damped AOT chunk targets should satisfy the RST parser");
+        let BvpSolverSettings::Damped(options) = settings else {
+            panic!("the GUI selected the Damped family");
+        };
+        assert_eq!(
+            options.generated_backend_config.aot_chunking_policy.residual,
+            Some(
+                RustedSciThe::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy::ByTargetChunkCount {
+                    target_chunks: 5,
+                }
+            )
+        );
+        assert_eq!(
+            options
+                .generated_backend_config
+                .aot_chunking_policy
+                .sparse_jacobian,
+            Some(
+                RustedSciThe::symbolic::codegen::codegen_tasks::SparseChunkingStrategy::ByTargetChunkCount {
+                    target_chunks: 3,
+                }
+            )
+        );
+
+        {
+            let mut app = app.borrow_mut();
+            let settings = app
+                .document
+                .get_mut("solver_settings")
+                .expect("solver settings");
+            settings.insert(
+                "generated_backend".into(),
+                Some(vec![Value::String("banded_lambdify".into())]),
+            );
+            settings.insert(
+                "backend_policy".into(),
+                Some(vec![Value::String("lambdify_only".into())]),
+            );
+        }
+        harness.run();
+        {
+            let app = app.borrow();
+            let settings = app
+                .document
+                .get("solver_settings")
+                .expect("solver settings");
+            assert!(!settings.contains_key("aot_residual_target_chunks"));
+            assert!(!settings.contains_key("aot_jacobian_target_chunks"));
+        }
+        assert!(
+            harness
+                .query_all_by_role_and_label(Role::SpinButton, "Residual target chunks")
+                .next()
+                .is_none()
+        );
+        assert!(
+            harness
+                .query_all_by_role_and_label(Role::SpinButton, "Jacobian target chunks")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn bvp_aot_chunk_target_counts_must_be_positive() {
+        for field in ["aot_residual_target_chunks", "aot_jacobian_target_chunks"] {
+            let mut document = DocumentMap::new();
+            let mut settings = HashMap::new();
+            settings.insert(field.to_string(), Some(vec![Value::Usize(0)]));
+            document.insert("solver_settings".to_string(), settings);
+
+            let error = normalize_bvp_usize_fields(&mut document)
+                .expect_err("zero is not a valid target chunk count");
+            assert!(error.contains(field), "{error}");
+            assert!(error.contains("positive chunk count"), "{error}");
+        }
+    }
+
+    #[test]
+    fn damped_lambdify_scheduling_and_event_logging_are_editable() {
+        let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
+            ProblemsEnum::BVPSimple,
+        )));
+        prepare_solver_tab(&app);
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::new_ui(move |ui| {
+            app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+        });
+        harness.run();
+
+        for (label, value) in [
+            ("Lambdify callback policy", "auto"),
+            ("Backend event logging", "detailed"),
+        ] {
+            harness
+                .get_by_role_and_label(Role::ComboBox, label)
+                .scroll_to_me();
+            harness.run();
+            harness.get_by_role_and_label(Role::ComboBox, label).click();
+            harness.run();
+            harness
+                .get_by_role_and_label(Role::Button, value)
+                .click_accesskit();
+            harness.run();
+        }
+
+        let document = app.borrow().document.clone();
+        let solver_settings = document.get("solver_settings").expect("solver settings");
+        assert_eq!(
+            solver_settings
+                .get("lambdify_execution_policy")
+                .and_then(Option::as_ref)
+                .and_then(|values| values.first()),
+            Some(&Value::String("auto".into()))
+        );
+        assert_eq!(
+            solver_settings
+                .get("lambdify_min_work")
+                .and_then(Option::as_ref)
+                .and_then(|values| values.first()),
+            Some(&Value::Usize(128))
+        );
+        assert_eq!(
+            solver_settings
+                .get("bvp_logging_mode")
+                .and_then(Option::as_ref)
+                .and_then(|values| values.first()),
+            Some(&Value::String("detailed".into()))
+        );
+        let normalized = normalize_reactor_physics_task_map(&document);
+        let solver_document = normalized
+            .into_iter()
+            .filter(|(section, _)| {
+                [
+                    "solver_settings",
+                    "strategy_params",
+                    "adaptive_strategy",
+                    "grid_refinement",
+                    "bounds",
+                    "rel_tolerance",
+                ]
+                .contains(&section.as_str())
+            })
+            .collect::<DocumentMap>();
+        assert!(parse_hybrid_bvp_solver_settings_from_document(&solver_document).is_ok());
     }
 }

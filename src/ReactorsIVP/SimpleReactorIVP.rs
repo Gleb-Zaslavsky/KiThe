@@ -1203,31 +1203,6 @@ impl SimpleReactorTask {
             })
     }
 
-    /// Extract the concentration columns from the full solver matrix.
-    ///
-    /// The condensed reactor keeps one state per species and stores them with
-    /// canonical `C*` names.
-    fn get_only_concentrations(&self) -> Result<DMatrix<f64>, IvpError> {
-        let solution = self.solution_ref()?;
-        let mut concentration_indices = Vec::new();
-        for (index, unknown) in self.solver.unknowns.iter().enumerate() {
-            if unknown.starts_with('C') {
-                concentration_indices.push(index);
-            }
-        }
-        if concentration_indices.is_empty() {
-            return Err(IvpError::MissingData(
-                "No concentration variables were found in the solved state".to_string(),
-            ));
-        }
-
-        let mut only_concentrations = DMatrix::zeros(solution.nrows(), concentration_indices.len());
-        for (column_index, &solution_index) in concentration_indices.iter().enumerate() {
-            only_concentrations.set_column(column_index, &solution.column(solution_index));
-        }
-        Ok(only_concentrations)
-    }
-
     /// Convert mass-fraction-like state columns to molar fractions.
     ///
     /// The helper mirrors the BVP postprocessing logic so the same conservation
@@ -1304,8 +1279,32 @@ impl SimpleReactorTask {
         self.from_mass_fractions_to_molar_concentration(matrix_of_mass_fractions)
     }
 
-    /// Build the condensed-phase conservation report from the current solve.
+    /// Build the condensed-phase conservation report from the current published solve.
     pub fn conservation_report(&self) -> Result<IvpConservationReport, IvpError> {
+        let mut canonical_solution = self.solution_ref()?.clone();
+        for (column_index, variable) in self.solver.unknowns.iter().enumerate() {
+            match variable.as_str() {
+                "Teta" => canonical_solution
+                    .column_mut(column_index)
+                    .iter_mut()
+                    .for_each(|value| {
+                        *value = (*value - self.scaling.dT) / self.scaling.T_scale;
+                    }),
+                "q" => canonical_solution
+                    .column_mut(column_index)
+                    .iter_mut()
+                    .for_each(|value| *value = *value * self.L / self.scaling.T_scale),
+                _ => {}
+            }
+        }
+        self.conservation_report_for_trajectory(self.x_mesh_ref()?.as_slice(), &canonical_solution)
+    }
+
+    fn conservation_report_for_trajectory(
+        &self,
+        axis: &[f64],
+        solution: &DMatrix<f64>,
+    ) -> Result<IvpConservationReport, IvpError> {
         let matrix_of_elements = self
             .kindata
             .stecheodata
@@ -1318,7 +1317,23 @@ impl SimpleReactorTask {
             })?
             .transpose();
 
-        let concentrations = self.get_only_concentrations()?;
+        let concentration_indices = self
+            .solver
+            .unknowns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, unknown)| unknown.starts_with('C').then_some(index))
+            .collect::<Vec<_>>();
+        if concentration_indices.is_empty() {
+            return Err(IvpError::MissingData(
+                "No concentration variables were found in the solved state".to_string(),
+            ));
+        }
+        let mut concentrations = DMatrix::zeros(solution.nrows(), concentration_indices.len());
+        for (column_index, &solution_index) in concentration_indices.iter().enumerate() {
+            let column = solution.column(solution_index).into_owned();
+            concentrations.set_column(column_index, &column);
+        }
         if concentrations.ncols() != self.kindata.substances.len() {
             return Err(IvpError::CalculationError(format!(
                 "Concentration matrix has {} columns but {} substances are tracked",
@@ -1358,13 +1373,12 @@ impl SimpleReactorTask {
             }
         }
 
-        let solution = self.solution_ref()?;
         let q_index = self.unknown_index("q")?;
         let t_index = self.unknown_index("Teta")?;
         let q_profile: Vec<f64> = solution.column(q_index).iter().copied().collect();
         let t_profile: Vec<f64> = solution.column(t_index).iter().copied().collect();
-        let x_mesh: Vec<f64> = self.x_mesh_ref()?.iter().map(|x| x * self.L).collect();
-        let heat_release_values = self.heat_release_profile_values()?;
+        let x_mesh = axis.to_vec();
+        let heat_release_values = self.heat_release_profile_values_for_solution(solution)?;
 
         let (total_heat_release, _) =
             estimate_error_simpsons_richardson(&x_mesh, &heat_release_values)
@@ -1434,13 +1448,6 @@ impl SimpleReactorTask {
         })
     }
 
-    /// Refresh and store the current conservation report.
-    fn refresh_conservation_report(&mut self) -> Result<(), IvpError> {
-        let report = self.conservation_report()?;
-        self.last_conservation_report = Some(report);
-        Ok(())
-    }
-
     /// Print the latest conservation summary as a compact table.
     fn pretty_print_conservation_report(&self, report: &IvpConservationReport) {
         let mut table = PrettyTable::new();
@@ -1451,9 +1458,10 @@ impl SimpleReactorTask {
         info!("{}", table);
     }
 
-    /// Return the heat-release profile evaluated on the solved state.
-    fn heat_release_profile_values(&self) -> Result<Vec<f64>, IvpError> {
-        let solution = self.solution_ref()?;
+    fn heat_release_profile_values_for_solution(
+        &self,
+        solution: &DMatrix<f64>,
+    ) -> Result<Vec<f64>, IvpError> {
         let unknowns = self
             .solver
             .unknowns
@@ -1469,6 +1477,31 @@ impl SimpleReactorTask {
             values.push(value);
         }
         Ok(values)
+    }
+
+    fn prepare_result_publication(
+        &self,
+        axis: &[f64],
+        values: &DMatrix<f64>,
+        stage_telemetry: &mut IvpStageTelemetry,
+    ) -> Result<(IvpPostprocessingReport, Option<IvpConservationReport>), IvpError> {
+        let conservation_report = stage_telemetry.run("conservation", || {
+            let physical_axis = axis.iter().map(|x| x * self.L).collect::<Vec<_>>();
+            match self.conservation_report_for_trajectory(&physical_axis, values) {
+                Ok(report) => Ok::<_, IvpError>(Some(report)),
+                Err(err) => {
+                    warn!(
+                        "Condensed IVP conservation check could not be completed: {}",
+                        err
+                    );
+                    Ok(None)
+                }
+            }
+        })?;
+        let postprocessed = stage_telemetry.run("postprocessing", || {
+            self.postprocessing_report_for_trajectory(axis, values)
+        })?;
+        Ok((postprocessed, conservation_report))
     }
 
     /// Create tolerance map from simplified config for this reactor's substances
@@ -2238,11 +2271,8 @@ impl SimpleReactorTask {
             .as_ref()
             .map(|summary| summary.evaluation_telemetry.clone());
 
-        stage_telemetry.run("solution_publication", || {
-            self.solver.x_mesh = Some(axis.clone());
-            self.solver.solution = Some(values.clone());
-            Ok::<_, IvpError>(())
-        })?;
+        let (postprocessed, conservation_report) =
+            self.prepare_result_publication(axis.as_slice(), &values, &mut stage_telemetry)?;
         let mut snapshot = IvpSolveSnapshot {
             axis,
             values,
@@ -2259,27 +2289,19 @@ impl SimpleReactorTask {
             native_telemetry,
             stage_telemetry: stage_telemetry.clone(),
         };
-        stage_telemetry.run("conservation", || {
-            match self.refresh_conservation_report() {
-                Ok(()) => {
-                    if let Some(report) = self.last_conservation_report.as_ref() {
-                        self.pretty_print_conservation_report(report);
-                    }
-                }
-                Err(err) => {
-                    warn!(
-                        "Condensed IVP conservation check could not be completed: {}",
-                        err
-                    );
-                }
-            }
-            Ok::<_, IvpError>(())
-        })?;
-        stage_telemetry.run("postprocessing", || self.postprocessing())?;
         stage_telemetry.record(
             "total_workflow",
             workflow_started.map(|start| start.elapsed().as_secs_f64() * 1_000.0),
         );
+        stage_telemetry.run("solution_publication", || {
+            self.solver.x_mesh = Some(postprocessed.x_mesh);
+            self.solver.solution = Some(postprocessed.solution);
+            self.last_conservation_report = conservation_report.clone();
+            Ok::<_, IvpError>(())
+        })?;
+        if let Some(report) = conservation_report.as_ref() {
+            self.pretty_print_conservation_report(report);
+        }
         snapshot.stage_telemetry = stage_telemetry;
         self.last_solve_snapshot = Some(snapshot.clone());
         Ok(snapshot)
@@ -2337,6 +2359,18 @@ impl SimpleReactorTask {
         Ok(snapshot.result_view())
     }
 
+    /// Discard published solution data before the GUI starts a solve for edited inputs.
+    ///
+    /// The GUI runs on a task clone and only commits successful outcomes. Clearing the prior
+    /// publication first prevents a later failed attempt from leaving results that appear to
+    /// describe the edited configuration.
+    pub(crate) fn clear_published_solution(&mut self) {
+        self.solver.solution = None;
+        self.solver.x_mesh = None;
+        self.last_solve_snapshot = None;
+        self.last_conservation_report = None;
+    }
+
     /// Build an owned render snapshot from the current solver state.
     ///
     /// The render snapshot is expected to be called after postprocessing so the
@@ -2348,7 +2382,7 @@ impl SimpleReactorTask {
             .unknowns
             .iter()
             .map(|name| match name.as_str() {
-                "Teta" => "T".to_string(),
+                "Teta" => "Temperature (K)".to_string(),
                 other => other.to_string(),
             })
             .collect::<Vec<_>>();
@@ -2365,8 +2399,19 @@ impl SimpleReactorTask {
     /// The raw LSODE2 solve works in the canonical IVP coordinates, but the
     /// GUI and export paths should show dimensional values after the solve.
     pub fn postprocessing_report(&self) -> Result<IvpPostprocessingReport, IvpError> {
-        let mut x_mesh = self.x_mesh_ref()?.clone();
-        let mut solution = self.solution_ref()?.clone();
+        self.postprocessing_report_for_trajectory(
+            self.x_mesh_ref()?.as_slice(),
+            self.solution_ref()?,
+        )
+    }
+
+    fn postprocessing_report_for_trajectory(
+        &self,
+        axis: &[f64],
+        values: &DMatrix<f64>,
+    ) -> Result<IvpPostprocessingReport, IvpError> {
+        let mut x_mesh = axis.to_vec();
+        let mut solution = values.clone();
 
         if self.solver.unknowns.len() != solution.ncols() {
             return Err(IvpError::CalculationError(format!(
@@ -2399,7 +2444,18 @@ impl SimpleReactorTask {
             }
         }
 
-        Ok(IvpPostprocessingReport { x_mesh, solution })
+        if x_mesh.iter().any(|value| !value.is_finite())
+            || solution.iter().any(|value| !value.is_finite())
+        {
+            return Err(IvpError::InvalidNumericValue(
+                "Dimensional IVP postprocessing produced a non-finite value".to_string(),
+            ));
+        }
+
+        Ok(IvpPostprocessingReport {
+            x_mesh: DVector::from_vec(x_mesh),
+            solution,
+        })
     }
 
     /// Convert the solved IVP state to dimensional output in place.
@@ -2575,8 +2631,8 @@ fn trapezoidal(y: &Vec<f64>, x: &Vec<f64>) -> Result<f64, String> {
 
 /// Integrate sampled values with Simpson's rule when the spacing is uniform.
 ///
-/// If the local spacing is not uniform, the helper falls back to a trapezoid
-/// step for the current segment.
+/// If the next pair of intervals is not uniform, the helper integrates only
+/// the first interval with a trapezoid and retries from the next point.
 fn simpsons(y: &Vec<f64>, x: &Vec<f64>) -> Result<f64, String> {
     if x.len() != y.len() {
         return Err("x and y must have the same length".to_string());
@@ -2596,13 +2652,11 @@ fn simpsons(y: &Vec<f64>, x: &Vec<f64>) -> Result<f64, String> {
         if (h1 - h2).abs() < 1e-10 {
             let h = h1 + h2;
             integral += h / 6.0 * (y[i] + 4.0 * y[i + 1] + y[i + 2]);
+            i += 2;
         } else {
             integral += 0.5 * (y[i] + y[i + 1]) * h1;
-            if i + 2 == x.len() - 1 {
-                integral += 0.5 * (y[i + 1] + y[i + 2]) * h2;
-            }
+            i += 1;
         }
-        i += 2;
     }
 
     if i + 1 < x.len() {
@@ -2610,6 +2664,32 @@ fn simpsons(y: &Vec<f64>, x: &Vec<f64>) -> Result<f64, String> {
     }
 
     Ok(integral)
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::simpsons;
+
+    #[test]
+    fn simpsons_covers_every_interval_on_nonuniform_mesh() {
+        let x = vec![0.0, 0.2, 0.7, 1.0];
+        let y = x.iter().map(|value| 2.0 * value + 3.0).collect();
+
+        let integral = simpsons(&y, &x).expect("integration should succeed");
+
+        assert!((integral - 4.0).abs() < 1e-12, "integral={integral}");
+    }
+
+    #[test]
+    fn simpsons_mixes_trapezoid_and_uniform_simpson_without_gaps() {
+        let x = vec![0.0, 0.2, 0.6, 1.0];
+        let y = x.iter().map(|value| value * value).collect();
+        let expected = 0.2 * (0.0 + 0.04) / 2.0 + (0.8 / 6.0) * (0.04 + 4.0 * 0.36 + 1.0);
+
+        let integral = simpsons(&y, &x).expect("integration should succeed");
+
+        assert!((integral - expected).abs() < 1e-12, "integral={integral}");
+    }
 }
 
 /// Estimate the trapezoidal integration error with Richardson extrapolation.
@@ -2625,6 +2705,63 @@ fn estimate_error_richardson(x: &Vec<f64>, y: &Vec<f64>) -> Result<(f64, f64), S
 
     let i_coarse = trapezoidal(&y_coarse, &x_coarse)?;
     Ok((i_fine, (i_coarse - i_fine) / 3.0))
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::{IvpConservationReport, IvpSolveSnapshot, IvpStageTelemetry, SimpleReactorTask};
+    use crate::ReactorsIVP::solver_backend::ReactorIvpSolverConfig;
+    use RustedSciThe::numerical::SolverTelemetryMode;
+    use nalgebra::{DMatrix, DVector};
+
+    #[test]
+    fn failed_candidate_postprocessing_leaves_published_state_unchanged() {
+        let mut task = SimpleReactorTask::new();
+        task.solver.unknowns = vec!["Teta".into(), "q".into()];
+        task.solver.x_mesh = Some(DVector::from_vec(vec![0.0, 0.25]));
+        task.solver.solution = Some(DMatrix::from_row_slice(2, 2, &[1.0, 2.0, 3.0, 4.0]));
+        let config = ReactorIvpSolverConfig::default();
+        task.last_solve_snapshot = Some(IvpSolveSnapshot {
+            axis: DVector::from_vec(vec![0.0, 0.25]),
+            values: DMatrix::from_row_slice(2, 2, &[1.0, 2.0, 3.0, 4.0]),
+            variable_names: task.solver.unknowns.clone(),
+            family: config.family(),
+            status: "finished".into(),
+            method_label: "test".into(),
+            summary: None,
+            backend_plan: config,
+            algorithm: None,
+            statistics: None,
+            native_statistics: None,
+            evaluation_telemetry: None,
+            native_telemetry: None,
+            stage_telemetry: IvpStageTelemetry::new(SolverTelemetryMode::Off),
+        });
+        task.last_conservation_report = Some(IvpConservationReport {
+            energy_balance_error_abs: 1.0,
+            energy_balance_error_rel: 2.0,
+            sum_of_mass_fractions: vec![(0, 1.0)],
+            atomic_mass_balance_error: vec![(0, 3.0)],
+        });
+        task.scaling.T_scale = f64::MAX;
+        let old_mesh = task.solver.x_mesh.clone();
+        let old_solution = task.solver.solution.clone();
+        let old_status = task.last_solve_snapshot.as_ref().unwrap().status.clone();
+        let old_conservation = task.last_conservation_report.clone();
+        let candidate = DMatrix::from_row_slice(2, 2, &[2.0, 0.0, 3.0, 0.0]);
+        let mut telemetry = IvpStageTelemetry::new(SolverTelemetryMode::Off);
+
+        let result = task.prepare_result_publication(&[0.0, 0.25], &candidate, &mut telemetry);
+
+        assert!(result.is_err(), "overflowing physical conversion must fail");
+        assert_eq!(task.solver.x_mesh, old_mesh);
+        assert_eq!(task.solver.solution, old_solution);
+        assert_eq!(
+            task.last_solve_snapshot.as_ref().unwrap().status,
+            old_status
+        );
+        assert_eq!(task.last_conservation_report, old_conservation);
+    }
 }
 
 /// Estimate the Simpson integration error with Richardson extrapolation.

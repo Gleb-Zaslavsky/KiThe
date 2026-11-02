@@ -16,6 +16,8 @@
 //! rather than free-form strings wherever possible.
 
 pub mod SimpleReactorIVP;
+#[cfg(test)]
+pub mod combustion_validation;
 pub mod reactor_ivp_aot_story_tests;
 pub mod reactor_ivp_contract_tests;
 pub mod reactor_ivp_quality_tests;
@@ -24,6 +26,8 @@ pub mod reactor_ivp_solver_backend_tests;
 pub mod reactor_ivp_story_tests;
 #[cfg(test)]
 pub mod reactor_ivp_symbolic_diagnostics;
+#[cfg(test)]
+pub mod reactor_ivp_task_doc_tests;
 #[cfg(test)]
 pub(crate) mod reactor_ivp_test_support;
 pub mod solver_backend;

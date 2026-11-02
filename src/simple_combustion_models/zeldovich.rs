@@ -333,8 +333,6 @@ impl Zeldovich {
 
         nr.eq_generate();
 
-        nr.dont_save_log(true);
-
         let result = nr.solve();
         match result {
             Some(sol) => {

@@ -55,7 +55,6 @@ mod tests {
                     .to_full_bounds_map(&["HMX".to_string(), "HMXprod".to_string()]),
             ),
             Some("warn".to_string()),
-            false,
         )
         .with_solver_backend_config(solver_backend_config)
     }

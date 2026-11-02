@@ -378,11 +378,13 @@ impl ThermochemistryApp {
                 ui.separator();
 
                 ui.horizontal(|ui| {
-                    ui.label("T0 (K):");
-                    ui.text_edit_singleline(&mut self.t0);
+                    let label = ui.label("T0 (K):");
+                    let input = ui.text_edit_singleline(&mut self.t0);
+                    let _ = input.labelled_by(label.id);
 
-                    ui.label("Tend (K):");
-                    ui.text_edit_singleline(&mut self.tend);
+                    let label = ui.label("Tend (K):");
+                    let input = ui.text_edit_singleline(&mut self.tend);
+                    let _ = input.labelled_by(label.id);
 
                     if ui.button("Calculate Range").clicked() {
                         self.calculate_range_data();
@@ -531,8 +533,9 @@ impl ThermochemistryApp {
                             ui.set_min_height(600.0);
                             ui.heading("List of Substances");
                             ui.horizontal(|ui| {
-                                ui.label("Search:");
-                                ui.text_edit_singleline(&mut self.substance_input);
+                                let label = ui.label("Search:");
+                                let input = ui.text_edit_singleline(&mut self.substance_input);
+                                let _ = input.labelled_by(label.id);
                             });
                             ui.separator();
                             egui::ScrollArea::vertical()
@@ -595,8 +598,10 @@ impl ThermochemistryApp {
                             ui.group(|ui| {
                                 ui.label("Calculation Parameters:");
                                 ui.horizontal(|ui| {
-                                    ui.label("Temperature (K):");
-                                    if ui.text_edit_singleline(&mut self.temperature).changed() {
+                                    let label = ui.label("Temperature (K):");
+                                    let input = ui.text_edit_singleline(&mut self.temperature);
+                                    let _ = input.clone().labelled_by(label.id);
+                                    if input.changed() {
                                         self.invalidate_calculation_snapshot();
                                     }
 

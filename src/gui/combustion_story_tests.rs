@@ -13,6 +13,7 @@
 //! - Legacy documents should still render when older spellings are present.
 //! - A solved BVP should still hand postprocessing state through to the GUI.
 //! - The plot window should appear only when `gui_plot` is enabled.
+//! - A checked-in physical BVP document should survive GUI edit/save/reopen and run.
 //!
 //! Expected result:
 //! the BVP screen should behave like a structured form with a compatibility
@@ -21,8 +22,8 @@
 #[cfg(test)]
 mod tests {
     use super::super::combustion::{
-        CalculationState, CombustionApp, DocumentDeleteRequest, GuiFileOperationResult,
-        ProblemsEnum, apply_document_deletion,
+        BvpEditorTab, CalculationState, CombustionApp, DocumentDeleteRequest,
+        GuiFileOperationResult, ProblemsEnum, apply_document_deletion,
     };
     use RustedSciThe::command_interpreter::task_parser::{DocumentMap, Value};
     use egui::accesskit::Role;
@@ -47,6 +48,29 @@ mod tests {
             Value::String(value) => value,
             other => panic!("expected Value::String, got {other:?}"),
         }
+    }
+
+    fn assert_control_reachable(harness: &mut Harness<'_>, label: &str, screen_rect: egui::Rect) {
+        harness.get_by_label(label).scroll_to_me();
+        harness.run();
+        harness.run();
+        let rect = harness.get_by_label(label).rect();
+        assert!(
+            rect.intersects(screen_rect),
+            "control `{label}` did not scroll into the compact viewport: {rect:?} outside {screen_rect:?}"
+        );
+    }
+
+    fn set_solver_setting(app: &Rc<RefCell<CombustionApp>>, field: &str, value: &str) {
+        let mut app = app.borrow_mut();
+        let section = app
+            .document
+            .get_mut("solver_settings")
+            .expect("solver_settings section must exist in the BVP template");
+        section.insert(
+            field.to_string(),
+            Some(vec![Value::String(value.to_string())]),
+        );
     }
 
     fn configure_aot(app: &mut CombustionApp, compiler: &str) {
@@ -115,6 +139,376 @@ mod tests {
     }
 
     #[test]
+    fn physical_bvp_task_doc_gui_load_edit_save_reload_and_run() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("task_docs/reactors/bvp/hmx_compact_two_percent_product.task");
+        let source_before = std::fs::read_to_string(&source).expect("source task should exist");
+        let mut editor = CombustionApp::new_with_problem(ProblemsEnum::BVPSimple);
+        assert!(matches!(
+            editor.load_document_from_path(source.clone()),
+            GuiFileOperationResult::Loaded { .. }
+        ));
+        assert_eq!(
+            as_string(first_value(
+                &editor.document,
+                "process_conditions",
+                "problem_name"
+            )),
+            "Compact HMX decomposition - alternate inlet"
+        );
+
+        let editor = Rc::new(RefCell::new(editor));
+        let mut open = true;
+        let editor_for_ui = Rc::clone(&editor);
+        let mut harness = Harness::new_ui(move |ui| {
+            editor_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+        });
+        harness.run();
+        harness.get_by_label("A").scroll_to_me();
+        harness.run();
+        harness.get_by_label("A").click();
+        harness.run();
+        harness.key_combination_modifiers(egui::Modifiers::CTRL, &[egui::Key::A]);
+        harness.get_by_label("A").type_text("140000");
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert_eq!(
+            first_value(
+                &editor.borrow().document,
+                "reactions",
+                "HMX=>DecompositionProduct"
+            )
+            .as_vector()
+            .expect("reaction parameters should remain a vector")[0],
+            140000.0
+        );
+        set_gui_plot(&mut editor.borrow_mut(), true);
+        editor.borrow_mut().sync_document_state_after_edit();
+        let gui_config_before_save = editor.borrow().bvp_gui_config.clone();
+
+        let tempdir = tempfile::tempdir().expect("temporary directory should be created");
+        let edited_path = tempdir.path().join("hmx_edited.task");
+        assert!(matches!(
+            editor.borrow_mut().save_document(edited_path.clone()),
+            GuiFileOperationResult::Saved { .. }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&source).expect("source task should remain readable"),
+            source_before,
+            "Save As must not overwrite the checked-in source task"
+        );
+
+        let mut reopened = CombustionApp::new_with_problem(ProblemsEnum::BVPSimple);
+        assert!(matches!(
+            reopened.load_document_from_path(edited_path.clone()),
+            GuiFileOperationResult::Loaded { .. }
+        ));
+        assert!(matches!(
+            first_value(&reopened.document, "process_conditions", "Tm"),
+            Value::Float(1500.0)
+        ));
+        assert!(matches!(
+            first_value(&reopened.document, "process_conditions", "t0"),
+            Value::Float(0.0)
+        ));
+        assert!(matches!(
+            first_value(&reopened.document, "bounds", "Teta"),
+            Value::Float(-100.0)
+        ));
+        let reopened_species = reopened.document["process_conditions"]["substances"]
+            .as_ref()
+            .expect("species field should remain populated")
+            .iter()
+            .map(as_string)
+            .collect::<Vec<_>>();
+        assert_eq!(reopened_species, ["HMX", "DecompositionProduct"]);
+        for (field, expected) in [
+            ("L", 9.0e-4),
+            ("dT", 600.0),
+            ("T_scale", 600.0),
+            ("P", 1.0e6),
+            ("Cp", 1464.4),
+            ("Lambda", 0.07),
+            ("m", 0.00431),
+            ("M", 0.0342),
+        ] {
+            assert_eq!(
+                first_value(&reopened.document, "process_conditions", field),
+                &Value::Float(expected),
+                "physical task field {field} changed during Save As/reopen"
+            );
+        }
+        assert_eq!(
+            first_value(&reopened.document, "process_conditions", "thermal_effects")
+                .as_vector()
+                .expect("thermal effects should remain a vector"),
+            &[30000.0]
+        );
+        for (field, expected) in [("HMX", 0.98), ("DecompositionProduct", 0.02), ("T", 600.0)] {
+            assert_eq!(
+                first_value(&reopened.document, "boundary_condition", field),
+                &Value::Float(expected),
+                "boundary input {field} changed during Save As/reopen"
+            );
+        }
+        for species in ["HMX", "DecompositionProduct"] {
+            assert_eq!(
+                first_value(&reopened.document, "diffusion_coefficients", species),
+                &Value::Float(6.97e-6),
+                "diffusion coefficient for {species} changed during Save As/reopen"
+            );
+        }
+        assert_eq!(reopened.bvp_gui_config, gui_config_before_save);
+        assert_eq!(
+            first_value(&reopened.document, "reactions", "HMX=>DecompositionProduct")
+                .as_vector()
+                .expect("reaction parameters should remain a vector")[0],
+            140000.0
+        );
+
+        let mut direct = crate::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask::new();
+        direct
+            .solve_from_file(edited_path.clone())
+            .expect("the saved BVP task should solve through the direct file route");
+        let direct_render = direct
+            .postprocessing_report()
+            .expect("direct file solve should publish postprocessed data");
+
+        reopened.request_calculation();
+        wait_for_calculation(&mut reopened);
+        assert_eq!(
+            reopened.calculation_state,
+            CalculationState::Completed,
+            "reopened physical BVP task failed: {:?}",
+            reopened.last_run_message
+        );
+        assert!(
+            !reopened.last_run_is_error,
+            "reopened physical BVP task failed: {:?}",
+            reopened.last_run_message
+        );
+        let plot = reopened
+            .plot_window
+            .as_ref()
+            .expect("gui_plot=true should hand the completed solution to the plot window");
+        assert_eq!(plot.t_result.len(), direct_render.x_mesh.len());
+        assert_eq!(plot.y_result.shape(), direct_render.solution.shape());
+        assert_eq!(plot.values.len(), direct.solver.unknowns.len());
+        for (row, (&gui_x, &direct_x)) in plot
+            .t_result
+            .iter()
+            .zip(direct_render.x_mesh.iter())
+            .enumerate()
+        {
+            assert!(
+                (gui_x - direct_x).abs() <= 1e-12,
+                "GUI/direct mesh differs at row {row}: {gui_x} vs {direct_x}"
+            );
+            for column in 0..plot.y_result.ncols() {
+                let gui_value = plot.y_result[(row, column)];
+                let direct_value = direct_render.solution[(row, column)];
+                let tolerance = 1e-8 * direct_value.abs().max(1.0);
+                assert!(
+                    (gui_value - direct_value).abs() <= tolerance,
+                    "GUI/direct solution differs at ({row}, {column}): {gui_value} vs {direct_value}"
+                );
+            }
+        }
+        let expected_plot_values = direct
+            .solver
+            .unknowns
+            .iter()
+            .map(|name| {
+                if name == "Teta" {
+                    "Temperature (K)".to_string()
+                } else {
+                    name.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(plot.values, expected_plot_values);
+    }
+
+    #[test]
+    fn malformed_bvp_replacement_preserves_dirty_active_document_transactionally() {
+        let tempdir = tempfile::tempdir().expect("temporary directory should be created");
+        let active_path = tempdir.path().join("active.task");
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("task_docs/reactors/bvp/hmx_compact.task");
+        let mut template = CombustionApp::new_with_problem(ProblemsEnum::BVPSimple);
+        assert!(matches!(
+            template.load_document_from_path(fixture_path),
+            GuiFileOperationResult::Loaded { .. }
+        ));
+        set_gui_plot(&mut template, true);
+        template.sync_document_state_after_edit();
+        std::fs::write(&active_path, template.document_to_string())
+            .expect("valid task should be written");
+
+        let mut app = CombustionApp::new_with_problem(ProblemsEnum::BVPSimple);
+        assert!(matches!(
+            app.load_document_from_path(active_path.clone()),
+            GuiFileOperationResult::Loaded { .. }
+        ));
+        app.request_calculation();
+        wait_for_calculation(&mut app);
+        assert_eq!(app.calculation_state, CalculationState::Completed);
+        let successful_plot = app
+            .plot_window
+            .as_ref()
+            .expect("active physical task should publish its successful plot");
+        let successful_plot_data = (
+            successful_plot.arg.clone(),
+            successful_plot.values.clone(),
+            successful_plot.t_result.clone(),
+            successful_plot.y_result.clone(),
+        );
+        app.document
+            .entry("user_notes".to_string())
+            .or_default()
+            .insert(
+                "draft".to_string(),
+                Some(vec![Value::String("unsaved work".to_string())]),
+            );
+        app.sync_document_state_after_edit();
+        assert!(app.document_lifecycle.dirty);
+
+        let document_before = app.document_to_string();
+        let gui_config_before = app.bvp_gui_config.clone();
+        let path_before = app.current_file_path.clone();
+        let malformed_path = tempdir.path().join("malformed.task");
+        std::fs::write(
+            &malformed_path,
+            "process_conditions\nmalformed line without colon\n",
+        )
+        .expect("malformed task should be written");
+
+        assert!(!app.request_document_load(malformed_path.clone()));
+        assert!(!app.confirm_pending_document_load());
+        assert_eq!(app.document_to_string(), document_before);
+        assert_eq!(app.bvp_gui_config, gui_config_before);
+        assert_eq!(app.current_file_path, path_before);
+        assert!(app.document_lifecycle.dirty);
+        let preserved_plot = app
+            .plot_window
+            .as_ref()
+            .expect("failed replacement must preserve the prior successful result");
+        assert_eq!(preserved_plot.arg, successful_plot_data.0);
+        assert_eq!(preserved_plot.values, successful_plot_data.1);
+        assert_eq!(preserved_plot.t_result, successful_plot_data.2);
+        assert_eq!(preserved_plot.y_result, successful_plot_data.3);
+        match app.document_lifecycle.last_file_operation.as_ref() {
+            Some(GuiFileOperationResult::Failed {
+                kind: super::super::combustion::GuiFileOperationKind::Load,
+                message,
+                ..
+            }) => assert!(
+                !message.is_empty(),
+                "load failure should explain the parse error"
+            ),
+            other => panic!("expected a typed load failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejected_bvp_rerun_clears_previous_plot_result() {
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("task_docs/reactors/bvp/hmx_compact.task");
+        let mut app = CombustionApp::new_with_problem(ProblemsEnum::BVPSimple);
+        assert!(matches!(
+            app.load_document_from_path(fixture_path),
+            GuiFileOperationResult::Loaded { .. }
+        ));
+        set_gui_plot(&mut app, true);
+        app.sync_document_state_after_edit();
+        app.request_calculation();
+        wait_for_calculation(&mut app);
+        assert_eq!(app.calculation_state, CalculationState::Completed);
+        assert!(app.plot_window.is_some());
+
+        app.document
+            .get_mut("solver_settings")
+            .expect("solver settings should exist")
+            .insert(
+                "generated_backend".to_string(),
+                Some(vec![Value::String("not_a_backend".to_string())]),
+            );
+        app.sync_document_state_after_edit();
+        app.request_calculation();
+
+        assert_eq!(app.calculation_state, CalculationState::Failed);
+        assert!(app.plot_window.is_none());
+        assert!(app.last_run_is_error);
+        assert!(
+            app.last_run_message
+                .as_deref()
+                .is_some_and(|message| message.contains("solver settings"))
+        );
+    }
+
+    #[test]
+    fn bvp_numerical_failure_can_be_repaired_and_rerun() {
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("task_docs/reactors/bvp/hmx_compact.task");
+        let mut app = CombustionApp::new_with_problem(ProblemsEnum::BVPSimple);
+        assert!(matches!(
+            app.load_document_from_path(fixture_path),
+            GuiFileOperationResult::Loaded { .. }
+        ));
+        set_gui_plot(&mut app, true);
+        app.document
+            .get_mut("solver_settings")
+            .expect("solver settings should exist")
+            .insert("max_iterations".to_string(), Some(vec![Value::Integer(1)]));
+        app.sync_document_state_after_edit();
+
+        app.request_calculation();
+        wait_for_calculation(&mut app);
+        assert_eq!(
+            app.calculation_state,
+            CalculationState::Failed,
+            "one nonlinear iteration should not satisfy the HMX BVP: {:?}",
+            app.last_run_message
+        );
+        assert!(app.plot_window.is_none());
+
+        app.document
+            .get_mut("solver_settings")
+            .expect("solver settings should exist")
+            .insert(
+                "max_iterations".to_string(),
+                Some(vec![Value::Integer(100)]),
+            );
+        app.sync_document_state_after_edit();
+        app.request_calculation();
+        wait_for_calculation(&mut app);
+        assert_eq!(
+            app.calculation_state,
+            CalculationState::Completed,
+            "corrected BVP task did not recover: {:?}",
+            app.last_run_message
+        );
+        assert!(!app.last_run_is_error);
+        let plot = app
+            .plot_window
+            .as_ref()
+            .expect("successful recovery should publish a new plot");
+        assert!(!plot.t_result.is_empty());
+        assert!(plot.y_result.iter().all(|value| value.is_finite()));
+        let temperature_index = plot
+            .values
+            .iter()
+            .position(|name| name == "Temperature (K)")
+            .expect("recovered result should include physical temperature");
+        assert!(
+            plot.y_result
+                .column(temperature_index)
+                .iter()
+                .all(|temperature| (200.0..5000.0).contains(temperature))
+        );
+    }
+
+    #[test]
     fn default_bvp_preset_exposes_structured_screen_and_canonical_solver_defaults() {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
@@ -127,12 +521,20 @@ mod tests {
 
         harness.run();
 
+        harness.get_by_role_and_label(Role::Button, "Physics");
+        for label in ["Legacy raw document"] {
+            harness.get_by_label(label);
+        }
+        harness
+            .get_by_role_and_label(Role::Button, "Solver")
+            .click();
+        harness.run();
         for label in [
-            "Physics",
             "Solver backend",
             "Initial guess",
             "Postprocessing",
-            "Legacy raw document",
+            "Equation assembly",
+            "Assembly parallelism",
             "Execution and assembly",
             "Residuals and Jacobian Backend",
         ] {
@@ -171,6 +573,7 @@ mod tests {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
         )));
+        app.borrow_mut().active_bvp_tab = BvpEditorTab::Solver;
         {
             let mut app_ref = app.borrow_mut();
             app_ref.document.remove("initial_guess");
@@ -231,6 +634,10 @@ mod tests {
         let mut harness = Harness::new_ui(move |ui| {
             app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
         });
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Solver")
+            .click();
         harness.run();
         harness.get_by_label("Residuals and Jacobian Backend");
         harness.get_by_label("AOT codegen backend");
@@ -303,6 +710,10 @@ mod tests {
             app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
         });
         harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Solver")
+            .click();
+        harness.run();
         harness.get_by_label("Residuals and Jacobian Backend");
         harness.get_by_label("Linear algebra backend");
 
@@ -354,9 +765,8 @@ mod tests {
                 .document
                 .get_mut("solver_settings")
                 .expect("solver_settings section must exist in the BVP template");
-            solver_settings.remove("dont_save_log");
             solver_settings.insert(
-                "dont_save_logs".to_string(),
+                "legacy_custom_field".to_string(),
                 Some(vec![Value::Boolean(true)]),
             );
             solver_settings.remove("generated_backend");
@@ -369,7 +779,15 @@ mod tests {
             app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
         });
         harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Solver")
+            .click();
+        harness.run();
         harness.get_by_label("Solver backend");
+        harness
+            .get_by_role_and_label(Role::Button, "Physics")
+            .click();
+        harness.run();
         harness.get_by_label("Legacy raw document");
 
         let app_ref = app.borrow();
@@ -377,7 +795,7 @@ mod tests {
             app_ref
                 .document
                 .get("solver_settings")
-                .and_then(|section| section.get("dont_save_logs"))
+                .and_then(|section| section.get("legacy_custom_field"))
                 .is_some(),
             "legacy alias should stay available in the raw compatibility layer"
         );
@@ -669,7 +1087,15 @@ mod tests {
             .with_size(egui::Vec2::new(820.0, 620.0))
             .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
         harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Solver")
+            .click();
+        harness.run();
 
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Residuals and Jacobian Backend")
+            .scroll_to_me();
+        harness.run();
         harness
             .get_by_role_and_label(Role::ComboBox, "Residuals and Jacobian Backend")
             .click();
@@ -795,6 +1221,11 @@ mod tests {
 
         harness.run();
         harness
+            .get_by_role_and_label(Role::Button, "Solver")
+            .click();
+        harness.run();
+        harness.get_by_label("Compact HMX physical acceptance: passed for Damped.");
+        harness
             .get_by_role_and_label(Role::ComboBox, "Solver family")
             .scroll_to_me();
         harness.run();
@@ -815,6 +1246,7 @@ mod tests {
             )),
             "sci"
         );
+        harness.get_by_label("Compact HMX physical acceptance: passed for BVP_sci.");
         for label in ["Execution", "Symbolic assembly", "Matrix layout"] {
             harness.get_by_label(label);
         }
@@ -874,8 +1306,133 @@ mod tests {
             )),
             "frozen"
         );
+        harness.get_by_label(
+            "Compact HMX physical acceptance is open: Frozen/Naive do not currently meet the boundary contract.",
+        );
         harness.get_by_label("Core solve");
         harness.get_by_label("Linear algebra backend");
+    }
+
+    #[test]
+    fn bvp_conditional_solver_controls_are_reachable_in_compact_viewport() {
+        let size = egui::Vec2::new(820.0, 620.0);
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
+            ProblemsEnum::BVPSimple,
+        )));
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::builder()
+            .with_size(size)
+            .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
+
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Solver")
+            .click();
+        harness.run();
+
+        for label in [
+            "Solver family",
+            "scheme",
+            "Linear algebra backend",
+            "Nonlinear strategy",
+            "Linear system method override",
+            "abs_tolerance",
+            "max_iterations",
+            "Solver telemetry",
+            "loglevel",
+            "Residuals and Jacobian Backend",
+            "Symbolic backend",
+            "Lambdify callback policy",
+            "Banded linear solver",
+            "refinement_steps",
+            "Assembly parallelism",
+        ] {
+            assert_control_reachable(&mut harness, label, screen_rect);
+        }
+
+        set_solver_setting(&app, "lambdify_execution_policy", "parallel");
+        harness.run();
+        assert_control_reachable(&mut harness, "Minimum callback work", screen_rect);
+
+        set_solver_setting(&app, "generated_backend", "banded_aot_tcc");
+        set_solver_setting(&app, "backend_policy", "aot_only");
+        harness.run();
+        for label in [
+            "AOT codegen backend",
+            "C compiler",
+            "AOT build policy",
+            "AOT build profile",
+            "AOT compile preset",
+            "AOT execution policy",
+            "Residual target chunks",
+            "Jacobian target chunks",
+        ] {
+            assert_control_reachable(&mut harness, label, screen_rect);
+        }
+
+        set_solver_setting(&app, "solver_family", "sci");
+        set_solver_setting(&app, "execution", "lambdify");
+        set_solver_setting(&app, "matrix_layout", "sparse");
+        set_solver_setting(&app, "execution_policy", "parallel");
+        harness.run();
+        for label in [
+            "Execution",
+            "Symbolic assembly",
+            "Matrix layout",
+            "Tolerance",
+            "Boundary tolerance",
+            "Maximum mesh nodes",
+            "Maximum Newton iterations",
+            "Maximum Jacobian refreshes",
+            "Maximum mesh refinements",
+            "Maximum backtracking steps",
+            "Solver telemetry",
+            "Logging level",
+            "Solution output",
+        ] {
+            assert_control_reachable(&mut harness, label, screen_rect);
+        }
+
+        assert_control_reachable(&mut harness, "Sparse factorization", screen_rect);
+        assert_control_reachable(&mut harness, "Minimum callback work", screen_rect);
+
+        set_solver_setting(&app, "matrix_layout", "banded");
+        harness.run();
+        for label in ["Lower bandwidth", "Upper bandwidth"] {
+            assert_control_reachable(&mut harness, label, screen_rect);
+        }
+
+        set_solver_setting(&app, "matrix_layout", "sparse");
+        set_solver_setting(&app, "execution", "aot");
+        set_solver_setting(&app, "aot_residual_chunking", "output_count");
+        set_solver_setting(&app, "aot_sparse_jacobian_chunking", "rows");
+        set_solver_setting(&app, "aot_sparse_jacobian_chunk_size", "4");
+        harness.run();
+        for label in [
+            "AOT codegen backend",
+            "AOT build policy",
+            "AOT build profile",
+            "AOT output directory",
+            "AOT handoff path",
+            "Generated crate name",
+            "Generated module name",
+            "Residual chunking",
+            "Residual chunk size",
+            "Sparse Jacobian chunking",
+            "Sparse Jacobian chunk size",
+        ] {
+            assert_control_reachable(&mut harness, label, screen_rect);
+        }
+
+        set_solver_setting(&app, "matrix_layout", "banded");
+        set_solver_setting(&app, "aot_banded_jacobian_chunking", "diagonals");
+        set_solver_setting(&app, "aot_banded_jacobian_chunk_size", "4");
+        harness.run();
+        for label in ["Banded Jacobian chunking", "Banded Jacobian chunk size"] {
+            assert_control_reachable(&mut harness, label, screen_rect);
+        }
     }
 
     #[test]
@@ -1002,6 +1559,17 @@ mod tests {
             .as_ref()
             .expect("successful BVP run should create a plot window when gui_plot is enabled");
         assert!(plot_window.visible);
+        let temperature_column = plot_window
+            .values
+            .iter()
+            .position(|name| name == "Temperature (K)")
+            .expect("the GUI plot should label the dimensional temperature in kelvins");
+        let temperatures = plot_window.y_result.column(temperature_column);
+        assert!(
+            temperatures.iter().all(|temperature| temperature.is_finite()
+                && (200.0..5000.0).contains(temperature)),
+            "plotted temperature must be a physical Kelvin profile, got {temperatures:?}"
+        );
     }
 
     #[test]

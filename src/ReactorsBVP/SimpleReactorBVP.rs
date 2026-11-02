@@ -39,13 +39,14 @@ use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP;
 use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{DampedSolverOptions, SolverParams};
 use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
 use RustedSciThe::numerical::BVP_api::{
-    BvpApiError, BvpApiTelemetryMode, BvpBoundaryCondition, BvpBoundarySide, BvpNativeSolver,
-    BvpProblem, BvpSciSparseFactorization as ApiBvpSciSparseFactorization, BvpSettingsError,
+    BvpApiError, BvpApiTelemetryMode, BvpBoundaryCondition, BvpBoundarySide, BvpProblem,
+    BvpSciSparseFactorization as ApiBvpSciSparseFactorization, BvpSettingsError,
     BvpSolver as RstBvpSolver, BvpSolverConfig, BvpSolverSettings, BvpSolverTelemetrySnapshot,
 };
 use RustedSciThe::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciExecution, BvpSciMatrixLayout, BvpSciOptions, BvpSciTelemetryMode,
 };
+use RustedSciThe::numerical::logging::SolverLogLevel;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use log::info;
 
@@ -368,7 +369,6 @@ pub(crate) struct NrbvpHandoffConfig {
     pub max_iterations: usize,
     pub bounds: Option<HashMap<String, (f64, f64)>>,
     pub loglevel: Option<String>,
-    pub dont_save_log: bool,
 }
 
 impl NrbvpHandoffConfig {
@@ -388,7 +388,6 @@ impl NrbvpHandoffConfig {
         max_iterations: usize,
         bounds: Option<HashMap<String, (f64, f64)>>,
         loglevel: Option<String>,
-        dont_save_log: bool,
     ) -> Self {
         Self {
             initial_guess,
@@ -406,7 +405,6 @@ impl NrbvpHandoffConfig {
             max_iterations,
             bounds,
             loglevel,
-            dont_save_log,
         }
     }
 
@@ -436,8 +434,10 @@ fn build_damped_options(config: &NrbvpHandoffConfig) -> Result<DampedSolverOptio
         .with_scheme_name(config.scheme.clone())
         .with_strategy_params(config.strategy_params.clone())
         .with_abs_tolerance(config.abs_tolerance)
-        .with_max_iterations(config.max_iterations)
-        .with_loglevel(config.loglevel.clone());
+        .with_max_iterations(config.max_iterations);
+    if let Some(level) = config.loglevel.as_deref() {
+        options = options.with_logging_level(parse_solver_log_level(level)?);
+    }
     options.strategy = config.strategy.clone();
     options.linear_sys_method = config.linear_sys_method.clone();
     options.method = config.method.clone();
@@ -448,6 +448,19 @@ fn build_damped_options(config: &NrbvpHandoffConfig) -> Result<DampedSolverOptio
         options = options.with_bounds(bounds);
     }
     Ok(options)
+}
+
+fn parse_solver_log_level(level: &str) -> Result<SolverLogLevel, ReactorError> {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" => Ok(SolverLogLevel::Off),
+        "error" => Ok(SolverLogLevel::Error),
+        "warn" | "warning" => Ok(SolverLogLevel::Warn),
+        "info" => Ok(SolverLogLevel::Info),
+        "debug" => Ok(SolverLogLevel::Debug),
+        other => Err(ReactorError::InvalidConfiguration(format!(
+            "unsupported BVP logging level `{other}`; expected off, error, warn, info, or debug"
+        ))),
+    }
 }
 
 fn apply_bvp_telemetry_mode(
@@ -565,7 +578,6 @@ impl BVPSolver {
                 options,
                 initial_guess: internal_initial_guess,
             },
-            false,
         )
     }
 
@@ -627,7 +639,7 @@ impl BVPSolver {
         config: NrbvpHandoffConfig,
     ) -> Result<NRBVP, ReactorError> {
         let options = build_damped_options(&config)?;
-        let mut backend = NRBVP::new_with_options(
+        let backend = NRBVP::new_with_options(
             self.eq_system.clone(),
             config.initial_guess,
             self.unknowns.clone(),
@@ -638,7 +650,6 @@ impl BVPSolver {
             config.n_steps,
             options,
         );
-        backend.dont_save_log(config.dont_save_log);
         Ok(backend)
     }
 
@@ -716,14 +727,8 @@ impl BVPSolver {
         &mut self,
         problem: BvpProblem,
         config: BvpSolverConfig,
-        dont_save_log: bool,
     ) -> Result<(), ReactorError> {
         self.last_telemetry = None;
-        if dont_save_log && matches!(config, BvpSolverConfig::Sci { .. }) {
-            return Err(ReactorError::InvalidConfiguration(
-                "`dont_save_log` is not supported by the BVP_sci lifecycle".into(),
-            ));
-        }
         let config = match self.telemetry_mode_override {
             Some(mode) => apply_bvp_telemetry_mode(config, mode)?,
             None => config,
@@ -741,13 +746,6 @@ impl BVPSolver {
             })
             .collect::<Vec<_>>();
         let mut solver = RstBvpSolver::new(problem, config).map_err(ReactorError::BvpApi)?;
-        if dont_save_log {
-            match solver.native_mut() {
-                BvpNativeSolver::Damped(native) => native.dont_save_log(true),
-                BvpNativeSolver::Frozen(native) => native.dont_save_log(true),
-                BvpNativeSolver::Sci(_) => unreachable!("Sci was rejected above"),
-            }
-        }
 
         if let Err(error) = solver.solve() {
             self.last_telemetry = Some(solver.telemetry_snapshot());
@@ -826,7 +824,6 @@ impl BVPSolver {
         t0: f64,
         t_end: f64,
         n_steps: usize,
-        dont_save_log: bool,
     ) -> Result<(), ReactorError> {
         self.last_telemetry = None;
         if n_steps < 2 {
@@ -857,7 +854,7 @@ impl BVPSolver {
         }
         let problem = self.build_bvp_problem(t0, t_end, n_steps)?;
         let config = settings.with_initial_guess(initial_guess);
-        self.solve_config_with_bvp_api(problem, config, dont_save_log)
+        self.solve_config_with_bvp_api(problem, config)
     }
 
     /// Solve through the shared typed BVP API and publish only a validated result.
@@ -886,7 +883,6 @@ impl BVPSolver {
                 options,
                 initial_guess: config.initial_guess,
             },
-            config.dont_save_log,
         )
     }
 
@@ -1032,7 +1028,6 @@ impl BVPSolver {
             max_iterations,
             Bounds,
             loglevel,
-            false,
         );
         self.solve_with_bvp_api(config)
     }
@@ -1080,7 +1075,6 @@ impl BVPSolver {
                 aot_config: None,
                 initial_guess,
             },
-            false,
         )
     }
     /// Get reference to solution matrix

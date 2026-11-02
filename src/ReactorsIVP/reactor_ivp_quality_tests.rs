@@ -169,7 +169,7 @@ mod tests {
             .expect("render data should exist after solve");
         assert_eq!(
             rendered.unknowns.first().map(String::as_str),
-            Some("T"),
+            Some("Temperature (K)"),
             "temperature should be exported with a dimensional label"
         );
         assert!(

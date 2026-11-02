@@ -312,7 +312,7 @@ fn validate_custom_groups(
 ) -> KineticsResult<()> {
     let mut names: Vec<_> = groups.keys().collect();
     names.sort();
-    for (index, name) in names.iter().enumerate() {
+    for name in names.iter() {
         if name.is_empty()
             || !name.is_ascii()
             || !name.chars().all(char::is_alphabetic)
@@ -321,15 +321,6 @@ fn validate_custom_groups(
             return Err(KineticsError::InvalidCustomGroup {
                 group: (*name).clone(),
                 reason: "group name must be ASCII alphabetic and must not shadow an element".into(),
-            });
-        }
-        if names[index + 1..]
-            .iter()
-            .any(|other| name.starts_with(other.as_str()) || other.starts_with(name.as_str()))
-        {
-            return Err(KineticsError::InvalidCustomGroup {
-                group: (*name).clone(),
-                reason: "group name has an ambiguous prefix overlap".into(),
             });
         }
         let composition = &groups[*name];
@@ -358,6 +349,41 @@ fn validate_custom_groups(
                     reason: format!("atom count for `{element}` must be positive"),
                 });
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_exact_group_composition(
+    group: &str,
+    composition: &HashMap<String, usize>,
+    groups: &HashMap<String, HashMap<String, usize>>,
+    formula: &str,
+) -> KineticsResult<()> {
+    if composition.is_empty() {
+        return Err(KineticsError::InvalidCustomGroup {
+            group: group.to_string(),
+            reason: "composition must contain at least one element".into(),
+        });
+    }
+    for (element, count) in composition {
+        if *count == 0 {
+            return Err(KineticsError::InvalidCustomGroup {
+                group: group.to_string(),
+                reason: format!("atom count for `{element}` must be positive"),
+            });
+        }
+        if !is_known_element(element) {
+            if groups.contains_key(element) {
+                return Err(KineticsError::InvalidCustomGroup {
+                    group: group.to_string(),
+                    reason: format!("nested or cyclic group `{element}` is unsupported"),
+                });
+            }
+            return Err(KineticsError::UnknownElement {
+                formula: formula.to_string(),
+                symbol: element.clone(),
+            });
         }
     }
     Ok(())
@@ -552,9 +578,9 @@ fn parse_formula_segment(
     Ok((counts, i))
 }
 
-// Function to parse a chemical formula and return a HashMap of elements and their counts. Argument groups are optional. It is
-// needed if formula contains shecial names for chemical groups like Me, Ph, etc In that case this argument should contain the names of these groups
-// and there atomic composition { "Me":{"C":1, "H":3}}
+/// Parse a formula or an exact species key with an explicitly supplied composition. Exact keys
+/// are resolved before tokenization; otherwise `groups` supplies abbreviation tokens such as
+/// Me/Ph, matched longest-first when names share a prefix.
 pub fn parse_formula(
     formula: String,
     groups: Option<HashMap<String, HashMap<String, usize>>>,
@@ -578,6 +604,10 @@ pub fn parse_formula(
         ));
     }
     if let Some(groups) = groups.as_ref() {
+        if let Some(composition) = groups.get(&formula) {
+            validate_exact_group_composition(&formula, composition, groups, &initial_formula)?;
+            return Ok(composition.clone());
+        }
         validate_custom_groups(groups, &initial_formula)?;
     }
 
@@ -590,8 +620,8 @@ pub fn parse_formula(
         })
         .unwrap_or_default();
 
-    // Element symbols remain available for the parser through plain uppercase/lowercase matching,
-    // while custom groups are matched first so longer symbolic names do not get split apart.
+    // Element symbols remain available through uppercase/lowercase matching. Custom groups are
+    // matched longest-first so prefix-related aliases have deterministic tokenization.
     if group_names.is_empty() {
         group_names = Vec::new();
     }
@@ -1017,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_group_expansions_reject_unknown_nested_and_ambiguous_definitions() {
+    fn custom_group_expansions_validate_definitions_and_use_longest_prefix_match() {
         let unknown = HashMap::from([("Me".into(), HashMap::from([("Xx".into(), 1)]))]);
         assert!(matches!(
             parse_formula("Me".into(), Some(unknown)),
@@ -1033,14 +1063,83 @@ mod tests {
             Err(KineticsError::InvalidCustomGroup { reason, .. }) if reason.contains("nested")
         ));
 
-        let ambiguous = HashMap::from([
+        let prefix_related = HashMap::from([
             ("Me".into(), HashMap::from([("C".into(), 1)])),
-            ("Methyl".into(), HashMap::from([("C".into(), 1)])),
+            ("Methyl".into(), HashMap::from([("H".into(), 2)])),
         ]);
-        assert!(matches!(
-            parse_formula("Me".into(), Some(ambiguous)),
-            Err(KineticsError::InvalidCustomGroup { reason, .. }) if reason.contains("prefix")
-        ));
+        assert_eq!(
+            parse_formula("Me".into(), Some(prefix_related.clone())).unwrap(),
+            HashMap::from([("C".into(), 1)])
+        );
+        assert_eq!(
+            parse_formula("Methyl2".into(), Some(prefix_related)).unwrap(),
+            HashMap::from([("H".into(), 4)])
+        );
+    }
+
+    #[test]
+    fn explicit_species_compositions_accept_chemical_identifiers_verbatim() {
+        let groups = HashMap::from([
+            (
+                "C2H5-COOH".into(),
+                HashMap::from([("C".into(), 3), ("H".into(), 6), ("O".into(), 2)]),
+            ),
+            (
+                "C2H5-CH2-CH2-CH3".into(),
+                HashMap::from([("C".into(), 5), ("H".into(), 12)]),
+            ),
+        ]);
+
+        assert_eq!(
+            parse_formula("C2H5-COOH".into(), Some(groups.clone())).unwrap(),
+            HashMap::from([("C".into(), 3), ("H".into(), 6), ("O".into(), 2)])
+        );
+        assert_eq!(
+            parse_formula("C2H5-CH2-CH2-CH3".into(), Some(groups)).unwrap(),
+            HashMap::from([("C".into(), 5), ("H".into(), 12)])
+        );
+
+        let prefix_named_species = HashMap::from([
+            (
+                "HMX".into(),
+                HashMap::from([
+                    ("H".into(), 4),
+                    ("N".into(), 8),
+                    ("C".into(), 8),
+                    ("O".into(), 8),
+                ]),
+            ),
+            (
+                "HMXprod".into(),
+                HashMap::from([("H".into(), 6), ("C".into(), 1), ("O".into(), 1)]),
+            ),
+        ]);
+        assert_eq!(
+            parse_formula("HMX".into(), Some(prefix_named_species.clone())).unwrap(),
+            prefix_named_species["HMX"]
+        );
+        assert_eq!(
+            parse_formula("HMXprod".into(), Some(prefix_named_species)).unwrap(),
+            HashMap::from([("H".into(), 6), ("C".into(), 1), ("O".into(), 1)])
+        );
+
+        let formulas = ["C2H5-COOH", "C2H5-CH2-CH2-CH3"];
+        let molar_masses = calculate_molar_mass_of_vector_of_subs(
+            formulas.to_vec(),
+            Some(HashMap::from([
+                (
+                    formulas[0].to_string(),
+                    HashMap::from([("C".into(), 3), ("H".into(), 6), ("O".into(), 2)]),
+                ),
+                (
+                    formulas[1].to_string(),
+                    HashMap::from([("C".into(), 5), ("H".into(), 12)]),
+                ),
+            ])),
+        )
+        .unwrap();
+        assert!((molar_masses[0] - 74.08).abs() < 0.1);
+        assert!((molar_masses[1] - 72.15).abs() < 0.1);
     }
     #[test]
     fn test_hmx() {

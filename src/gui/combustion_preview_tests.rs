@@ -13,7 +13,7 @@
 mod tests {
     use super::super::combustion::{
         CombustionApp, ProblemsEnum, build_bvp_task_preview_snapshot,
-        collect_bvp_preview_equation_rows,
+        collect_bvp_preview_equation_rows, format_bvp_task_preview,
     };
     use crate::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
     use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser};
@@ -99,6 +99,19 @@ mod tests {
     }
 
     #[test]
+    fn preview_report_contains_console_ready_validation_and_equation_tables() {
+        let document = load_problem_test_document();
+        let snapshot = build_bvp_task_preview_snapshot(&document, &ProblemsEnum::BVPSimple);
+        let report = format_bvp_task_preview(&snapshot);
+
+        assert!(report.contains("=== BVP TASK PREVIEW ==="));
+        assert!(report.contains("Validation: ok"));
+        assert!(report.contains("--- Normalized document ---"));
+        assert!(report.contains("--- Assembled equations ---"));
+        assert!(report.contains(&snapshot.equation_rows[0].unknown));
+    }
+
+    #[test]
     fn preview_button_updates_status_without_mutating_document() {
         let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
             ProblemsEnum::BVPSimple,
@@ -106,9 +119,9 @@ mod tests {
         app.borrow_mut().document = load_problem_test_document();
         let mut open = true;
         let app_for_ui = Rc::clone(&app);
-        let mut harness = Harness::new_ui(move |ui| {
-            app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
-        });
+        let mut harness = Harness::builder()
+            .with_accessibility_check(false)
+            .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
 
         harness.run();
         let baseline_document = app.borrow().document.clone();

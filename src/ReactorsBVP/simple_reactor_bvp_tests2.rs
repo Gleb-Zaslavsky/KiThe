@@ -11,6 +11,7 @@ mod tests {
         AdaptiveGridConfig, SolverParams,
     };
     use RustedSciThe::numerical::BVP_Damp::grid_api::GridRefinementMethod;
+    use RustedSciThe::numerical::logging::SolverLogLevel;
     use log::info;
     use std::{collections::HashMap, vec};
 
@@ -31,12 +32,20 @@ mod tests {
         let mut options = ReactorBvpSolverConfig::default_lambdify()
             .to_rusted_options()
             .expect("default reactor BVP options should build");
+        let logging_level = match loglevel.as_deref() {
+            None | Some("off") | Some("none") => SolverLogLevel::Off,
+            Some("error") => SolverLogLevel::Error,
+            Some("warn" | "warning") => SolverLogLevel::Warn,
+            Some("info") => SolverLogLevel::Info,
+            Some("debug") => SolverLogLevel::Debug,
+            Some(other) => panic!("unsupported test log level `{other}`"),
+        };
         options = options
             .with_scheme_name(scheme.to_string())
             .with_strategy_params(strategy_params)
             .with_abs_tolerance(abs_tolerance)
             .with_max_iterations(max_iterations)
-            .with_loglevel(loglevel);
+            .with_logging_level(logging_level);
         options.strategy = strategy.to_string();
         options.linear_sys_method = linear_sys_method;
         options.method = method.to_string();
@@ -384,7 +393,6 @@ mod tests {
             n_steps,
             options,
         );
-        bvp.dont_save_log(false);
         bvp.solve();
         bvp.gnuplot_result();
         let eq_and_unknowns = unknowns.clone().into_iter().zip(eqs.clone());
@@ -571,7 +579,6 @@ mod tests {
             n_steps,
             options,
         );
-        bvp.dont_save_log(false);
         bvp.solve();
         bvp.gnuplot_result();
         let eq_and_unknowns = unknowns.clone().into_iter().zip(eqs.clone());

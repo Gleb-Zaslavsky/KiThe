@@ -333,7 +333,6 @@ pub(crate) struct BvpCoreSolverConfig {
     pub abs_tolerance: f64,
     pub max_iterations: usize,
     pub loglevel: Option<String>,
-    pub dont_save_log: bool,
     pub banded_linear_solver: BvpBandedLinearSolver,
     pub refinement_steps: usize,
 }
@@ -348,8 +347,7 @@ impl Default for BvpCoreSolverConfig {
             linear_sys_method: None,
             abs_tolerance: 1e-7,
             max_iterations: 100,
-            loglevel: Some("info".to_string()),
-            dont_save_log: true,
+            loglevel: Some("off".to_string()),
             banded_linear_solver: BvpBandedLinearSolver::Auto,
             refinement_steps: 5,
         }
@@ -499,6 +497,8 @@ fn normalize_bvp_solver_family_document(
         "aot_jacobian_target_chunks",
         "lambdify_execution_policy",
         "lambdify_min_work",
+        "bvp_logging_mode",
+        "bvp_logging_max_events",
         "expr_indexed_lambdify",
         "expr_dependency_columns",
     ];
@@ -559,7 +559,6 @@ fn normalize_bvp_solver_family_document(
                 set_string_field(section, "strategy", "Damped");
                 set_float_field(section, "abs_tolerance", 1e-7);
                 set_usize_field(section, "max_iterations", 100);
-                set_bool_field(section, "dont_save_log", true);
                 set_string_field(section, "banded_linear_solver", "auto");
                 set_usize_field(section, "refinement_steps", 5);
                 set_bounds_and_relative_tolerances(document);
@@ -584,7 +583,6 @@ fn normalize_bvp_solver_family_document(
                     set_string_field(section, "strategy", "Frozen");
                     set_float_field(section, "tolerance", 1e-6);
                     set_usize_field(section, "max_iterations", 50);
-                    set_bool_field(section, "dont_save_log", true);
                 } else if !section.contains_key("tolerance") {
                     set_float_field(section, "tolerance", 1e-6);
                 }
@@ -607,7 +605,6 @@ fn normalize_bvp_solver_family_document(
                 for field in ["scheme", "strategy", "linear_sys_method", "max_iterations"] {
                     section.remove(field);
                 }
-                section.remove("dont_save_log");
                 if reset_family_defaults {
                     set_string_field(section, "execution", "lambdify");
                     set_string_field(section, "assembly", "atom_view_native");
@@ -770,7 +767,6 @@ impl BvpCoreSolverConfig {
                 );
                 set_float_field(section, "abs_tolerance", self.abs_tolerance);
                 set_usize_field(section, "max_iterations", self.max_iterations);
-                set_bool_field(section, "dont_save_log", self.dont_save_log);
                 set_string_field(
                     section,
                     "banded_linear_solver",
@@ -789,7 +785,6 @@ impl BvpCoreSolverConfig {
                 );
                 set_float_field(section, "tolerance", self.abs_tolerance);
                 set_usize_field(section, "max_iterations", self.max_iterations);
-                set_bool_field(section, "dont_save_log", self.dont_save_log);
                 section.remove("abs_tolerance");
                 section.remove("banded_linear_solver");
                 section.remove("refinement_steps");
@@ -800,7 +795,6 @@ impl BvpCoreSolverConfig {
                 section.remove("linear_sys_method");
                 section.remove("abs_tolerance");
                 section.remove("max_iterations");
-                section.remove("dont_save_log");
                 section.remove("banded_linear_solver");
                 section.remove("refinement_steps");
             }
@@ -967,9 +961,6 @@ fn parse_core_solver_config(
         core.max_iterations = value;
     }
     core.loglevel = optional_string_field(section, "loglevel");
-    if let Some(value) = bool_field(section, "dont_save_log") {
-        core.dont_save_log = value;
-    }
     if let Some(banded_solver) = string_field(section, "banded_linear_solver") {
         if let Some(parsed) = BvpBandedLinearSolver::parse(&banded_solver) {
             core.banded_linear_solver = parsed;

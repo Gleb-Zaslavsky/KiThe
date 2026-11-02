@@ -227,8 +227,9 @@ impl WrightPanelControllers {
         // Controls row: Input value + X/Y selector + new column entry
         ui.horizontal_wrapped(|ui| {
             // Input value
-            ui.label("Input value:");
-            ui.add(egui::DragValue::new(&mut state.input_value).speed(0.1));
+            let input_value_label = ui.label("Input value:");
+            let input_value = ui.add(egui::DragValue::new(&mut state.input_value).speed(0.1));
+            let _ = input_value.labelled_by(input_value_label.id);
 
             ui.separator();
 
@@ -244,8 +245,10 @@ impl WrightPanelControllers {
 
             // Optional output column name for transforms that materialize a derived column.
             let mut tmp = state.input_string.clone().unwrap_or_default();
-            ui.label("output column:");
-            if ui.text_edit_singleline(&mut tmp).changed() {
+            let output_column_label = ui.label("output column:");
+            let output_column = ui.text_edit_singleline(&mut tmp);
+            let _ = output_column.clone().labelled_by(output_column_label.id);
+            if output_column.changed() {
                 if tmp.trim().is_empty() {
                     state.input_string = None;
                 } else {
@@ -258,21 +261,23 @@ impl WrightPanelControllers {
         if let Ok(id) = model.get_experiment_by_selected_curve() {
             if let Ok(columns) = model.list_of_columns(&id) {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Mass source:");
+                    let mass_source_label = ui.label("Mass source:");
                     let mut mass_source = model
                         .active_mass_source_for_experiment(&id)
                         .unwrap_or_else(|_| String::new());
-                    egui::ComboBox::from_id_salt("exp_kinetics_mass_source")
-                        .selected_text(if mass_source.is_empty() {
-                            "choose".to_string()
-                        } else {
-                            mass_source.clone()
-                        })
-                        .show_ui(ui, |ui| {
-                            for col in &columns {
-                                ui.selectable_value(&mut mass_source, col.clone(), col);
-                            }
-                        });
+                    let mass_source_combo =
+                        egui::ComboBox::from_id_salt("exp_kinetics_mass_source")
+                            .selected_text(if mass_source.is_empty() {
+                                "choose".to_string()
+                            } else {
+                                mass_source.clone()
+                            })
+                            .show_ui(ui, |ui| {
+                                for col in &columns {
+                                    ui.selectable_value(&mut mass_source, col.clone(), col);
+                                }
+                            });
+                    let _ = mass_source_combo.response.labelled_by(mass_source_label.id);
                     if !mass_source.is_empty()
                         && model
                             .active_mass_sources
@@ -286,21 +291,25 @@ impl WrightPanelControllers {
 
                     ui.separator();
 
-                    ui.label("Temperature source:");
+                    let temperature_source_label = ui.label("Temperature source:");
                     let mut temperature_source = model
                         .active_temperature_source_for_experiment(&id)
                         .unwrap_or_else(|_| String::new());
-                    egui::ComboBox::from_id_salt("exp_kinetics_temperature_source")
-                        .selected_text(if temperature_source.is_empty() {
-                            "choose".to_string()
-                        } else {
-                            temperature_source.clone()
-                        })
-                        .show_ui(ui, |ui| {
-                            for col in &columns {
-                                ui.selectable_value(&mut temperature_source, col.clone(), col);
-                            }
-                        });
+                    let temperature_source_combo =
+                        egui::ComboBox::from_id_salt("exp_kinetics_temperature_source")
+                            .selected_text(if temperature_source.is_empty() {
+                                "choose".to_string()
+                            } else {
+                                temperature_source.clone()
+                            })
+                            .show_ui(ui, |ui| {
+                                for col in &columns {
+                                    ui.selectable_value(&mut temperature_source, col.clone(), col);
+                                }
+                            });
+                    let _ = temperature_source_combo
+                        .response
+                        .labelled_by(temperature_source_label.id);
                     if !temperature_source.is_empty()
                         && model
                             .active_temperature_sources
@@ -697,15 +706,18 @@ impl NewExperimentDialogState {
         options: &[Unit],
     ) {
         ui.vertical(|ui| {
-            ui.label(label);
-            ui.text_edit_singleline(input);
-            egui::ComboBox::from_id_salt(combo_id)
+            let input_label = ui.label(label);
+            let input = ui.text_edit_singleline(input);
+            let _ = input.labelled_by(input_label.id);
+            let unit_label = ui.label(format!("{label} unit"));
+            let combo = egui::ComboBox::from_id_salt(combo_id)
                 .selected_text(unit.to_string())
                 .show_ui(ui, |ui| {
                     for option in options {
                         ui.selectable_value(unit, *option, option.to_string());
                     }
                 });
+            let _ = combo.response.labelled_by(unit_label.id);
         });
     }
 
@@ -933,29 +945,34 @@ impl NewExperimentDialogState {
                             ui.heading("📝 Metadata");
                             ui.separator();
 
-                            ui.label("File path:");
-                            ui.text_edit_singleline(&mut self.file_path_input);
+                            let label = ui.label("File path:");
+                            let input = ui.text_edit_singleline(&mut self.file_path_input);
+                            let _ = input.labelled_by(label.id);
 
                             ui.add_space(5.0);
 
-                            ui.label("Experiment ID:");
-                            ui.text_edit_singleline(&mut self.meta.id);
+                            let label = ui.label("Experiment ID:");
+                            let input = ui.text_edit_singleline(&mut self.meta.id);
+                            let _ = input.labelled_by(label.id);
 
                             ui.add_space(5.0);
 
-                            ui.label("Heating Rate (K/min):");
-                            ui.text_edit_singleline(&mut self.heating_rate_input);
+                            let label = ui.label("Heating Rate (K/min):");
+                            let input = ui.text_edit_singleline(&mut self.heating_rate_input);
+                            let _ = input.labelled_by(label.id);
 
                             ui.add_space(5.0);
 
-                            ui.label("Isothermal Temperature (K):");
-                            ui.text_edit_singleline(&mut self.isothermal_temp_input);
+                            let label = ui.label("Isothermal Temperature (K):");
+                            let input = ui.text_edit_singleline(&mut self.isothermal_temp_input);
+                            let _ = input.labelled_by(label.id);
 
                             ui.add_space(5.0);
 
-                            ui.label("Comment:");
+                            let label = ui.label("Comment:");
                             let comment = self.meta.comment.get_or_insert_with(String::new);
-                            ui.text_edit_multiline(comment);
+                            let input = ui.text_edit_multiline(comment);
+                            let _ = input.labelled_by(label.id);
 
                             ui.add_space(8.0);
                             self.show_bindings_row(ui);
@@ -1228,8 +1245,9 @@ impl NewExperimentDialogState {
                         ui.label(self.current_dir.to_string_lossy().as_ref());
                         ui.add_space(8.0);
 
-                        ui.label("File name:");
-                        ui.text_edit_singleline(&mut self.save_series_filename_input);
+                        let label = ui.label("File name:");
+                        let input = ui.text_edit_singleline(&mut self.save_series_filename_input);
+                        let _ = input.labelled_by(label.id);
                         ui.label(format!(
                             "Extension will be: .{}",
                             self.save_series_format.extension()
@@ -1317,8 +1335,8 @@ impl NewExperimentDialogState {
                                 }
                             });
 
-                            ui.label("Experiment:");
-                            egui::ComboBox::from_id_salt(format!("exp_{}", idx))
+                            let label = ui.label("Experiment:");
+                            let combo = egui::ComboBox::from_id_salt(format!("exp_{}", idx))
                                 .selected_text(config.experiment.as_deref().unwrap_or("Select..."))
                                 .show_ui(ui, |ui| {
                                     for exp_id in &experiments {
@@ -1329,39 +1347,44 @@ impl NewExperimentDialogState {
                                         );
                                     }
                                 });
+                            let _ = combo.response.labelled_by(label.id);
 
                             if let Some(exp_id) = &config.experiment {
                                 match model.list_of_columns(exp_id) {
                                     Ok(columns) => {
-                                        ui.label("X column:");
-                                        egui::ComboBox::from_id_salt(format!("x_{}", idx))
-                                            .selected_text(
-                                                config.x_column.as_deref().unwrap_or("None"),
-                                            )
-                                            .show_ui(ui, |ui| {
-                                                for col in &columns {
-                                                    ui.selectable_value(
-                                                        &mut config.x_column,
-                                                        Some(col.clone()),
-                                                        col,
-                                                    );
-                                                }
-                                            });
+                                        let label = ui.label("X column:");
+                                        let combo =
+                                            egui::ComboBox::from_id_salt(format!("x_{}", idx))
+                                                .selected_text(
+                                                    config.x_column.as_deref().unwrap_or("None"),
+                                                )
+                                                .show_ui(ui, |ui| {
+                                                    for col in &columns {
+                                                        ui.selectable_value(
+                                                            &mut config.x_column,
+                                                            Some(col.clone()),
+                                                            col,
+                                                        );
+                                                    }
+                                                });
+                                        let _ = combo.response.labelled_by(label.id);
 
-                                        ui.label("Y column:");
-                                        egui::ComboBox::from_id_salt(format!("y_{}", idx))
-                                            .selected_text(
-                                                config.y_column.as_deref().unwrap_or("None"),
-                                            )
-                                            .show_ui(ui, |ui| {
-                                                for col in &columns {
-                                                    ui.selectable_value(
-                                                        &mut config.y_column,
-                                                        Some(col.clone()),
-                                                        col,
-                                                    );
-                                                }
-                                            });
+                                        let label = ui.label("Y column:");
+                                        let combo =
+                                            egui::ComboBox::from_id_salt(format!("y_{}", idx))
+                                                .selected_text(
+                                                    config.y_column.as_deref().unwrap_or("None"),
+                                                )
+                                                .show_ui(ui, |ui| {
+                                                    for col in &columns {
+                                                        ui.selectable_value(
+                                                            &mut config.y_column,
+                                                            Some(col.clone()),
+                                                            col,
+                                                        );
+                                                    }
+                                                });
+                                        let _ = combo.response.labelled_by(label.id);
                                     }
                                     Err(e) => {
                                         ui.colored_label(

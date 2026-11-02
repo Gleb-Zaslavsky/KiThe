@@ -1,0 +1,12 @@
+scenario = "TW-02"
+kind = "synthetic analytical numerical control"
+reference = "14x14 constant-coefficient matrix exponential, Padé-13 scaling and squaring"
+profile_file = "tw_02_profiles.csv"
+profile_grid = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+gamma_values = [1.0, 10.0, -1.0]
+species_enthalpies_j_per_mol = [0.0, -40.0, -25.0, -65.0, -15.0, -80.0, -35.0, -100.0, -50.0, -90.0, -60.0, -115.0]
+reaction_heat_convention = "Q_j = h_reactant - h_product; KiThe heat RHS subtracts sum(Q_j * rate_j)"
+reaction_heats_j_per_mol = [40.0, -15.0, 40.0, -50.0, 65.0, -45.0, 65.0, -50.0, 40.0, -30.0, 55.0, -115.0, 15.0, 40.0, 10.0, 35.0, 35.0, 10.0, 25.0, 15.0]
+reference_generator = "Computed from the frozen TW-01 reaction table, the above enthalpies, and the documented KiThe IVP RHS algebra; not generated from a KiThe solve."
+comparison_tolerance_abs = 2e-13
+physical_validation_status = "not established: TW-02 checks algebraic agreement with current KiThe equations only; see STORY_TESTS.md for unresolved dimensional-contract findings"

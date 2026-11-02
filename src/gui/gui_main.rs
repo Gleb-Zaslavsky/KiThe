@@ -257,14 +257,14 @@ impl MainApp {
                     ui.vertical(|ui| {
                         // First row of buttons
                         ui.horizontal(|ui| {
-                            if ui.add_sized([200.0, 80.0], egui::Button::new("🧪 Kinetics!")).clicked() {
+                            if ui.add_sized([200.0, 80.0], egui::Button::new("Kinetics")).clicked() {
                                 self.kinetics_open = true;
                                 if self.kinetics_app.is_none() {
                                     self.kinetics_app = Some(kinetics_gui::KineticsApp::new());
                                 }
                             }
                             ui.add_space(20.0);
-                            if ui.add_sized([200.0, 80.0], egui::Button::new("🌡️ Thermodynamical properties!")).clicked() {
+                            if ui.add_sized([200.0, 80.0], egui::Button::new("Thermodynamical properties")).clicked() {
                                 self.thermochemistry_open = true;
                                 if self.thermochemistry_app.is_none() {
                                     self.thermochemistry_app = Some(thermochemistry_gui::ThermochemistryApp::new());
@@ -288,7 +288,7 @@ impl MainApp {
                                 }
                             }
                             ui.add_space(20.0);
-                            if ui.add_sized([200.0, 80.0], egui::Button::new("🔥 Gas-phase combustuion/steady state plug flow")).clicked() {
+                            if ui.add_sized([200.0, 80.0], egui::Button::new("Gas-phase combustion BVP")).clicked() {
                                 self.combustion_open = true;
                                 if self.combustion_app.is_none() {
                                     self.combustion_app = Some(combustion::CombustionApp::new());
@@ -298,14 +298,14 @@ impl MainApp {
                         ui.add_space(20.0);
                         // Third row of buttons
                         ui.horizontal(|ui| {
-                            if ui.add_sized([200.0, 80.0], egui::Button::new("📚 Library Review")).clicked() {
+                            if ui.add_sized([200.0, 80.0], egui::Button::new("Library review")).clicked() {
                                 self.all_libs_open = true;
                                 if self.all_libs_app.is_none() {
                                     self.all_libs_app = Some(all_libs_gui::AllLibsGui::new());
                                 }
                             }
                             ui.add_space(20.0);
-                            if ui.add_sized([200.0, 80.0], egui::Button::new("⚙️ Settings")).clicked() {
+                            if ui.add_sized([200.0, 80.0], egui::Button::new("Settings")).clicked() {
                                 self.settings_open = true;
                                 if self.settings_app.is_none() {
                                     self.settings_app = Some(settings_gui::SettingsGui::new());
@@ -330,7 +330,7 @@ impl MainApp {
                                 }
                             }
                             ui.add_space(20.0);
-                            if ui.add_sized([200.0, 80.0], egui::Button::new("📊 Experimental Kinetics")).clicked() {
+                            if ui.add_sized([200.0, 80.0], egui::Button::new("Experimental kinetics")).clicked() {
                                 self.experimental_kinetics_open = true;
                                 if self.experimental_kinetics_app.is_none() {
                                     self.experimental_kinetics_app = Some(experimental_kinetics_gui_main::PlotApp::new());

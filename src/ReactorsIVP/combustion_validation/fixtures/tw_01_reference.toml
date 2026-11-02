@@ -1,0 +1,131 @@
+scenario = "TW-01"
+specification_version = 1
+kind = "synthetic analytical numerical control; not an experimental kinetic validation"
+coordinate = "the solver API variable is named x but its values are dimensionless z in [0,1]; reported physical coordinate x_physical = L*z"
+species_order = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8", "X9", "X10", "X11"]
+profile_file = "tw_01_profiles.csv"
+reference_method = "independent matrix exponential action using scaling-and-squaring with Pade-13; thermal subsystem from closed form"
+reference_grid = "z = 0.0, 0.1, ..., 1.0"
+profile_relative_tolerance = 1e-7
+species_absolute_tolerance = 1e-9
+thermal_absolute_tolerance = 1e-9
+solver_rtol = 1e-9
+solver_atol = 1e-11
+rho = 1000.0
+cp = 1000.0
+lambda = 1.0
+length_m = 0.01
+mass_flow_kg_s = 0.0001
+dT_K = 300.0
+T_scale_K = 100.0
+initial_temperature_K = 400.0
+initial_internal_q = 0.05
+heat_release_per_reaction = 0.0
+rate_equation = "omega_r = A_r * rho * C_reactant / M; n=0 and Ea=0 imply k_r(T)=A_r"
+reaction_direction = "Xfrom -> Xto"
+arrhenius_exponent = 0.0
+activation_energy = 0.0
+equal_molar_mass_g_mol = 60.052
+initial_mass_fractions = [0.12, 0.08, 0.07, 0.09, 0.10, 0.06, 0.11, 0.05, 0.07, 0.08, 0.09, 0.08]
+thermal_equations = ["Teta' = q/lambda", "q' = Pe_q*q; Pe_q = L*m*Cp/lambda"]
+species_equation = "C' = K*C; with S reaction-by-species, reactants=-1, products=+1: K = -rho*L^2*S^T*D_A*P; P selects first-order reactants"
+
+[[reactions]]
+from = "X0"
+to = "X1"
+A = 0.70
+
+[[reactions]]
+from = "X1"
+to = "X2"
+A = 1.10
+
+[[reactions]]
+from = "X2"
+to = "X3"
+A = 0.50
+
+[[reactions]]
+from = "X3"
+to = "X4"
+A = 1.60
+
+[[reactions]]
+from = "X4"
+to = "X5"
+A = 0.80
+
+[[reactions]]
+from = "X5"
+to = "X6"
+A = 1.30
+
+[[reactions]]
+from = "X6"
+to = "X7"
+A = 0.60
+
+[[reactions]]
+from = "X7"
+to = "X8"
+A = 1.90
+
+[[reactions]]
+from = "X8"
+to = "X9"
+A = 0.90
+
+[[reactions]]
+from = "X9"
+to = "X10"
+A = 1.40
+
+[[reactions]]
+from = "X10"
+to = "X11"
+A = 0.75
+
+[[reactions]]
+from = "X11"
+to = "X0"
+A = 1.20
+
+[[reactions]]
+from = "X0"
+to = "X4"
+A = 0.45
+
+[[reactions]]
+from = "X1"
+to = "X5"
+A = 0.95
+
+[[reactions]]
+from = "X2"
+to = "X6"
+A = 1.70
+
+[[reactions]]
+from = "X3"
+to = "X7"
+A = 0.55
+
+[[reactions]]
+from = "X4"
+to = "X8"
+A = 1.05
+
+[[reactions]]
+from = "X5"
+to = "X9"
+A = 1.80
+
+[[reactions]]
+from = "X6"
+to = "X10"
+A = 0.65
+
+[[reactions]]
+from = "X7"
+to = "X11"
+A = 1.50

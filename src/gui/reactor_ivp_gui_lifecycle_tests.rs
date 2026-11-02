@@ -29,6 +29,63 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
 
+    fn assert_ivp_config_equal(expected: &IvpGuiConfig, actual: &IvpGuiConfig) {
+        macro_rules! assert_fields {
+            ($($field:ident),+ $(,)?) => {
+                $(
+                    assert_eq!(
+                        expected.$field,
+                        actual.$field,
+                        "IVP config field `{}` changed during document roundtrip",
+                        stringify!($field)
+                    );
+                )+
+            };
+        }
+
+        assert_fields!(
+            problem_name,
+            problem_description,
+            physical,
+            initial_state,
+            substances,
+            thermal_effects,
+            stop_condition_enabled,
+            stop_condition_species_index,
+            stop_condition_threshold,
+            solver_family,
+            method,
+            symbolic_backend,
+            matrix_backend,
+            execution_mode,
+            callback_policy,
+            callback_min_work,
+            aot_toolchain,
+            aot_profile,
+            bdf_max_steps,
+            radau_max_steps,
+            radau_max_newton_iterations,
+            x0,
+            x_bound,
+            first_step,
+            max_step,
+            rtol,
+            atol,
+            telemetry,
+            logging,
+            postprocessing,
+            native_execution,
+        );
+        assert_eq!(expected.scaling.dT, actual.scaling.dT);
+        assert_eq!(expected.scaling.L, actual.scaling.L);
+        assert_eq!(expected.scaling.T_scale, actual.scaling.T_scale);
+        assert_eq!(
+            serde_json::to_value(&expected.reactions).unwrap(),
+            serde_json::to_value(&actual.reactions).unwrap(),
+            "IVP reaction payload changed during document roundtrip"
+        );
+    }
+
     #[test]
     fn preview_does_not_mutate_source_task_and_reports_configured_route() {
         let app = Rc::new(RefCell::new(ReactorIvpApp::new()));
@@ -316,6 +373,315 @@ mod tests {
     }
 
     #[test]
+    fn physical_task_doc_gui_edit_save_reload_preview_and_solve() {
+        let source_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("task_docs/reactors/ivp/h2_dissociation_with_heat_release.task");
+        let source_before =
+            std::fs::read_to_string(&source_path).expect("source task should exist");
+        let mut editor = ReactorIvpApp::new();
+        assert!(matches!(
+            editor.load_document_from_path(source_path.clone()),
+            crate::gui::document_lifecycle::GuiFileOperationResult::Loaded { .. }
+        ));
+        assert_eq!(editor.config.substances, vec!["H2", "H"]);
+        assert_eq!(editor.config.reactions[0].eq, "H2=>2H");
+
+        let editor = Rc::new(RefCell::new(editor));
+        let mut open = true;
+        let editor_for_ui = Rc::clone(&editor);
+        let mut edit_harness = Harness::new_ui(move |ui| {
+            editor_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+        });
+        edit_harness.run();
+        edit_harness.get_by_label("Temperature").scroll_to_me();
+        edit_harness.run();
+        edit_harness.get_by_label("Temperature").click();
+        edit_harness.run();
+        edit_harness.key_combination_modifiers(egui::Modifiers::CTRL, &[egui::Key::A]);
+        edit_harness.get_by_label("Temperature").type_text("530");
+        edit_harness.key_press(egui::Key::Enter);
+        edit_harness.run();
+        assert_eq!(editor.borrow().config.initial_state.temperature, 530.0);
+        assert!(editor.borrow().document_lifecycle.dirty);
+        let config_before_save = editor.borrow().config.clone();
+
+        let tempdir = tempdir().expect("temporary directory should be created");
+        let edited_path = tempdir.path().join("h2_dissociation_edited.task");
+        let failed_save_path = tempdir.path().join("missing-parent").join("failed.task");
+        let dirty_fingerprint = editor.borrow().current_document_fingerprint().unwrap();
+        assert!(matches!(
+            editor.borrow_mut().save_document(failed_save_path),
+            crate::gui::document_lifecycle::GuiFileOperationResult::Failed { .. }
+        ));
+        assert_eq!(
+            editor.borrow().current_file_path.as_ref(),
+            Some(&source_path)
+        );
+        assert!(editor.borrow().document_lifecycle.dirty);
+        assert_eq!(
+            editor.borrow().current_document_fingerprint().unwrap(),
+            dirty_fingerprint,
+            "failed Save As must not mutate the active task"
+        );
+        assert!(matches!(
+            editor.borrow_mut().save_document(edited_path.clone()),
+            crate::gui::document_lifecycle::GuiFileOperationResult::Saved { .. }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&source_path).expect("source task should remain readable"),
+            source_before,
+            "Save As must not overwrite the checked-in source task"
+        );
+
+        let mut reloaded = ReactorIvpApp::new();
+        assert!(matches!(
+            reloaded.load_document_from_path(edited_path.clone()),
+            crate::gui::document_lifecycle::GuiFileOperationResult::Loaded { .. }
+        ));
+        assert_eq!(reloaded.config.initial_state.temperature, 530.0);
+        assert_eq!(reloaded.config.substances, vec!["H2", "H"]);
+        assert_eq!(reloaded.config.reactions[0].eq, "H2=>2H");
+        assert_ivp_config_equal(&config_before_save, &reloaded.config);
+        let mut direct_task = reloaded.task().clone();
+        reloaded
+            .config
+            .apply_to_task(&mut direct_task)
+            .expect("reopened document should apply to the direct production task");
+        let direct_snapshot = direct_task
+            .solve()
+            .expect("reopened document should solve through the direct production API");
+        let direct_balance = direct_task
+            .latest_conservation_report()
+            .expect("direct API solve should publish conservation diagnostics")
+            .clone();
+
+        let invalid_path = tempdir.path().join("invalid.task");
+        let edited_document = std::fs::read_to_string(&edited_path)
+            .expect("saved edited task should remain readable");
+        let malformed_mechanism = edited_document.replace(
+            "reaction_000_arrhenius: [0.01, 0, 8000]",
+            "reaction_000_arrhenius: [1e-3, 0.0]",
+        );
+        assert_ne!(malformed_mechanism, edited_document);
+        std::fs::write(&invalid_path, malformed_mechanism)
+            .expect("malformed mechanism task should be written");
+        let before_failed_load = reloaded.current_document_fingerprint().unwrap();
+        let load_result = reloaded.load_document_from_path(invalid_path.clone());
+        match load_result {
+            crate::gui::document_lifecycle::GuiFileOperationResult::Failed { message, .. } => {
+                assert!(
+                    message.contains("kinetics reaction 000"),
+                    "mechanism parse error should identify the reaction: {message}"
+                );
+            }
+            other => panic!("malformed mechanism should be rejected, got {other:?}"),
+        }
+        assert_eq!(
+            reloaded.current_document_fingerprint().unwrap(),
+            before_failed_load,
+            "a rejected file must not partially replace the active editor state"
+        );
+
+        let repaired_path = tempdir.path().join("repaired.task");
+        let repaired_document = std::fs::read_to_string(&invalid_path)
+            .expect("malformed task should remain readable")
+            .replace(
+                "reaction_000_arrhenius: [1e-3, 0.0]",
+                "reaction_000_arrhenius: [0.01, 0, 8000]",
+            );
+        assert_ne!(
+            repaired_document,
+            std::fs::read_to_string(&invalid_path).unwrap()
+        );
+        std::fs::write(&repaired_path, repaired_document).expect("repaired task should be written");
+        assert!(matches!(
+            reloaded.load_document_from_path(repaired_path),
+            crate::gui::document_lifecycle::GuiFileOperationResult::Loaded { .. }
+        ));
+        assert_eq!(reloaded.config.initial_state.temperature, 530.0);
+        assert_eq!(reloaded.config.reactions[0].eq, "H2=>2H");
+        let recovered_path = tempdir.path().join("recovered.task");
+        assert!(matches!(
+            reloaded.save_document(recovered_path.clone()),
+            crate::gui::document_lifecycle::GuiFileOperationResult::Saved { .. }
+        ));
+        let mut reloaded = ReactorIvpApp::new();
+        assert!(matches!(
+            reloaded.load_document_from_path(recovered_path),
+            crate::gui::document_lifecycle::GuiFileOperationResult::Loaded { .. }
+        ));
+        assert_eq!(reloaded.config.initial_state.temperature, 530.0);
+
+        let app = Rc::new(RefCell::new(reloaded));
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::new_ui(move |ui| {
+            app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+        });
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Preview Task")
+            .click_accesskit();
+        harness.run();
+        assert!(app.borrow().last_preview().is_some());
+        harness
+            .get_by_role_and_label(Role::Button, "Run Calculation")
+            .click_accesskit();
+        for _ in 0..250 {
+            harness.step();
+            if matches!(
+                app.borrow().calculation_state(),
+                ReactorIvpCalculationState::Completed | ReactorIvpCalculationState::Failed
+            ) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            matches!(
+                app.borrow().calculation_state(),
+                ReactorIvpCalculationState::Completed
+            ),
+            "reloaded physical document did not solve: {:?}",
+            app.borrow().last_error()
+        );
+        let app_ref = app.borrow();
+        let render = app_ref
+            .task()
+            .solution_render_data()
+            .expect("reloaded task should publish physical solution data");
+        assert!(render.solution.iter().all(|value| value.is_finite()));
+        assert_eq!(
+            render.unknowns.first().map(String::as_str),
+            Some("Temperature (K)")
+        );
+        let gui_final = render.solution.row(render.solution.nrows() - 1);
+        let direct_final = direct_snapshot
+            .values
+            .row(direct_snapshot.values.nrows() - 1);
+        let direct_temperature_index = direct_snapshot
+            .variable_names
+            .iter()
+            .position(|name| name == "Teta")
+            .expect("direct output should include temperature");
+        let direct_temperature = direct_final[direct_temperature_index]
+            * direct_task.scaling.T_scale
+            + direct_task.scaling.dT;
+        assert!(
+            (gui_final[0] - direct_temperature).abs() <= 1e-8,
+            "GUI/direct final temperatures differ: {} vs {direct_temperature}",
+            gui_final[0]
+        );
+        for species_index in 0..2 {
+            let state_name = format!("C{species_index}");
+            let gui_index = render
+                .unknowns
+                .iter()
+                .position(|name| name == &state_name)
+                .expect("GUI output should include each species fraction");
+            let direct_index = direct_snapshot
+                .variable_names
+                .iter()
+                .position(|name| name == &state_name)
+                .expect("direct output should include each species");
+            assert!(
+                (gui_final[gui_index] - direct_final[direct_index]).abs() <= 1e-8,
+                "GUI/direct final {state_name} fractions differ"
+            );
+        }
+        let gui_balance = app_ref
+            .task()
+            .latest_conservation_report()
+            .expect("GUI solve should publish conservation diagnostics");
+        assert!(
+            (gui_balance.energy_balance_error_abs - direct_balance.energy_balance_error_abs).abs()
+                <= 1e-8
+        );
+        assert!(
+            (gui_balance.energy_balance_error_rel - direct_balance.energy_balance_error_rel).abs()
+                <= 1e-8
+        );
+        assert_eq!(
+            gui_balance.sum_of_mass_fractions,
+            direct_balance.sum_of_mass_fractions
+        );
+        assert_eq!(
+            gui_balance.atomic_mass_balance_error,
+            direct_balance.atomic_mass_balance_error
+        );
+    }
+
+    #[test]
+    fn malformed_indexed_mechanisms_fail_with_context_without_replacing_active_task() {
+        let source_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("task_docs/reactors/ivp/h2_dissociation_with_heat_release.task");
+        let source = std::fs::read_to_string(&source_path).expect("fixture should be readable");
+        let cases = [
+            (
+                "bad equation",
+                source.replace(
+                    "reaction_000_equation: H2=>2H",
+                    "reaction_000_equation: H2=>2H+",
+                ),
+                "reaction",
+            ),
+            (
+                "missing reaction index",
+                source
+                    .replace("reaction_000_equation", "reaction_001_equation")
+                    .replace("reaction_000_arrhenius", "reaction_001_arrhenius"),
+                "contiguous",
+            ),
+            (
+                "unknown species",
+                source.replace(
+                    "reaction_000_equation: H2=>2H",
+                    "reaction_000_equation: H2=>2X",
+                ),
+                "species",
+            ),
+            (
+                "reaction/thermal-effect count mismatch",
+                source.replace(
+                    "thermal_effects: [-150000.0]",
+                    "thermal_effects: [-150000.0, -1.0]",
+                ),
+                "reaction count",
+            ),
+        ];
+
+        let mut app = ReactorIvpApp::new();
+        assert!(matches!(
+            app.load_document_from_path(source_path.clone()),
+            crate::gui::document_lifecycle::GuiFileOperationResult::Loaded { .. }
+        ));
+        let original_fingerprint = app.current_document_fingerprint().unwrap();
+        let original_path = app.current_file_path.clone();
+        let tempdir = tempdir().expect("temporary directory should be created");
+
+        for (index, (label, malformed, expected_context)) in cases.into_iter().enumerate() {
+            assert_ne!(malformed, source, "case {label} must alter the fixture");
+            let path = tempdir.path().join(format!("malformed_{index}.task"));
+            std::fs::write(&path, malformed).expect("malformed task should be written");
+            match app.load_document_from_path(path) {
+                crate::gui::document_lifecycle::GuiFileOperationResult::Failed {
+                    message, ..
+                } => assert!(
+                    message.to_lowercase().contains(expected_context),
+                    "{label} error lacks expected context `{expected_context}`: {message}"
+                ),
+                other => panic!("{label} should be rejected without replacing the task: {other:?}"),
+            }
+            assert_eq!(
+                app.current_document_fingerprint().unwrap(),
+                original_fingerprint,
+                "{label} failure partially replaced the active task"
+            );
+            assert_eq!(app.current_file_path, original_path, "{label}");
+        }
+    }
+
+    #[test]
     fn document_lifecycle_queues_confirmation_when_replacing_dirty_work() {
         let mut app = ReactorIvpApp::new();
         let tempdir = tempdir().expect("temporary directory should be created");
@@ -520,6 +886,62 @@ mod tests {
                 .len(),
             prior_preview_rows
         );
+    }
+
+    #[test]
+    fn failed_ivp_rerun_discards_previous_solution_and_plot() {
+        let app = Rc::new(RefCell::new(ReactorIvpApp::new()));
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::new_ui(move |ui| {
+            app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+        });
+
+        harness.run();
+        app.borrow_mut()
+            .start_test_calculation_worker(Duration::from_millis(10), true);
+        for _ in 0..40 {
+            harness.step();
+            if matches!(
+                app.borrow().calculation_state(),
+                ReactorIvpCalculationState::Completed | ReactorIvpCalculationState::Failed
+            ) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(
+            app.borrow().calculation_state(),
+            ReactorIvpCalculationState::Completed
+        ));
+        assert!(app.borrow().task().last_solve_snapshot.is_some());
+        assert!(app.borrow().has_plot_window());
+
+        app.borrow_mut().config.atol = -1.0;
+        app.borrow_mut().request_calculation();
+        assert!(app.borrow().task().last_solve_snapshot.is_none());
+        assert!(!app.borrow().has_plot_window());
+        for _ in 0..40 {
+            harness.step();
+            if matches!(
+                app.borrow().calculation_state(),
+                ReactorIvpCalculationState::Completed | ReactorIvpCalculationState::Failed
+            ) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let app_ref = app.borrow();
+        assert!(matches!(
+            app_ref.calculation_state(),
+            ReactorIvpCalculationState::Failed
+        ));
+        assert!(app_ref.task().last_solve_snapshot.is_none());
+        assert!(app_ref.task().last_conservation_report.is_none());
+        assert!(app_ref.task().solution_render_data().is_err());
+        assert!(!app_ref.has_plot_window());
+        assert!(app_ref.last_error().is_some());
     }
 
     #[test]

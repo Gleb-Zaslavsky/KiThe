@@ -444,8 +444,9 @@ impl TransportApp {
                             ui.set_min_height(600.0);
                             ui.heading("List of Substances");
                             ui.horizontal(|ui| {
-                                ui.label("Search:");
-                                ui.text_edit_singleline(&mut self.substance_input);
+                                let label = ui.label("Search:");
+                                let input = ui.text_edit_singleline(&mut self.substance_input);
+                                let _ = input.labelled_by(label.id);
                             });
                             ui.separator();
                             egui::ScrollArea::vertical()
@@ -509,13 +510,17 @@ impl TransportApp {
                             ui.group(|ui| {
                                 ui.label("Calculation Parameters:");
                                 ui.horizontal(|ui| {
-                                    ui.label("Temperature (K):");
-                                    if ui.text_edit_singleline(&mut self.temperature).changed() {
+                                    let label = ui.label("Temperature (K):");
+                                    let input = ui.text_edit_singleline(&mut self.temperature);
+                                    let _ = input.clone().labelled_by(label.id);
+                                    if input.changed() {
                                         self.invalidate_calculation_snapshot();
                                     }
 
-                                    ui.label("Pressure (Pa):");
-                                    if ui.text_edit_singleline(&mut self.pressure).changed() {
+                                    let label = ui.label("Pressure (Pa):");
+                                    let input = ui.text_edit_singleline(&mut self.pressure);
+                                    let _ = input.clone().labelled_by(label.id);
+                                    if input.changed() {
                                         self.invalidate_calculation_snapshot();
                                     }
 

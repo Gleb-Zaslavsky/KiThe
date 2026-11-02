@@ -402,11 +402,11 @@ fn assert_result_diagnostics_are_rendered(app: EquilibriumApp, first_point_label
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, first_point_label)
+        .get_by_role_and_label(Role::DisclosureTriangle, first_point_label)
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Solve diagnostics")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Solve diagnostics")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Conservation");
@@ -430,11 +430,11 @@ fn assert_phase_lifecycle_trace_is_rendered(app: EquilibriumApp, first_point_lab
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, first_point_label)
+        .get_by_role_and_label(Role::DisclosureTriangle, first_point_label)
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Phase lifecycle")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Phase lifecycle")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Decision");
@@ -455,7 +455,7 @@ fn assert_ph_result_diagnostics_are_rendered(app: EquilibriumApp) {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "P,H solve diagnostics")
+        .get_by_role_and_label(Role::DisclosureTriangle, "P,H solve diagnostics")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Inner backend attempts");
@@ -480,35 +480,35 @@ fn editor_exposes_canonical_request_and_validation_controls() {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Library lookup")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Library lookup")
         .click_accesskit();
     harness
         .get_by_role_and_label(Role::Button, "Output")
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Diagnostics")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Diagnostics")
         .click_accesskit();
     harness
         .get_by_role_and_label(Role::Button, "Phase control")
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Phase policy")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Phase policy")
         .click_accesskit();
     harness
         .get_by_role_and_label(Role::Button, "Numerics")
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Solver")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Solver")
         .click_accesskit();
     harness
         .get_by_role_and_label(Role::Button, "Output")
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Postprocessing and plots")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Postprocessing and plots")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Equilibrium-constant validation");
@@ -529,13 +529,13 @@ fn lookup_and_diagnostics_controls_render_typed_policies() {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Library lookup")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Library lookup")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Engine default");
     harness.get_by_label("Local catalog: not loaded");
     harness
-        .get_by_role_and_label(Role::Button, "Declared component lookup")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Declared component lookup")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Lookup instruction");
@@ -555,7 +555,7 @@ fn lookup_and_diagnostics_controls_render_typed_policies() {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Diagnostics")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Diagnostics")
         .click_accesskit();
     harness.run();
     harness.get_by_role_and_label(Role::CheckBox, "Collect timing");
@@ -722,7 +722,7 @@ fn solver_exposes_ph_route_only_for_a_ph_problem() {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Solver")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Solver")
         .click_accesskit();
     harness.run();
     harness.get_by_label("P,H route");
@@ -819,7 +819,7 @@ fn solver_panel_exposes_trace_seed_override_without_changing_defaults() {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Solver")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Solver")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Override trace-species seed policy");
@@ -853,7 +853,7 @@ fn solver_editor_exposes_optional_cascade_budget_without_changing_defaults() {
             .is_none()
     );
     harness
-        .get_by_role_and_label(Role::Button, "Solver")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Solver")
         .click_accesskit();
     harness.run();
     harness
@@ -916,7 +916,7 @@ fn solver_editor_exposes_custom_cascade_controls() {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Solver")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Solver")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Use custom cascade").click_accesskit();
@@ -1030,7 +1030,7 @@ fn phase_policy_exposes_bounded_hysteresis_controls() {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Phase policy")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Phase policy")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Fixed declared phases");
@@ -1191,7 +1191,7 @@ fn output_shows_resampling_only_for_a_pt_temperature_range() {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Postprocessing and plots")
+        .get_by_role_and_label(Role::DisclosureTriangle, "Postprocessing and plots")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Result table");
@@ -1440,21 +1440,21 @@ fn offline_local_h2o_ph_story_publishes_energy_contract() {
         .click_accesskit();
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "P,H solve diagnostics")
+        .get_by_role_and_label(Role::DisclosureTriangle, "P,H solve diagnostics")
         .click_accesskit();
     harness.run();
     harness.get_by_label("Solved temperature [K]");
     harness.get_by_label("Outer solve path");
     if ph_diagnostics.monolithic().is_some() {
         harness
-            .get_by_role_and_label(Role::Button, "P,H monolithic evidence")
+            .get_by_role_and_label(Role::DisclosureTriangle, "P,H monolithic evidence")
             .click_accesskit();
         harness.run();
         harness.get_by_label("Accepted backend");
-        harness.get_by_role_and_label(Role::Button, "Backend attempts");
+        harness.get_by_role_and_label(Role::DisclosureTriangle, "Backend attempts");
     } else {
         harness
-            .get_by_role_and_label(Role::Button, "P,H temperature trials")
+            .get_by_role_and_label(Role::DisclosureTriangle, "P,H temperature trials")
             .click_accesskit();
         harness.run();
         harness.get_by_label("Step");

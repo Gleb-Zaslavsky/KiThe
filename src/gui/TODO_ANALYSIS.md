@@ -129,6 +129,85 @@ solver backend has grown into a much richer typed configuration surface.
 - [ ] Remove dead wording that talks about the old backend model once the new controls exist.
 - [x] Normalize `max_iterations` to `usize` before handing the document to the solver.
 
+### Remaining BVP GUI workflow and task-file cleanup
+
+This is a safe, high-value GUI polish track. Keep it separate from numerical
+solver changes: preserve current defaults, equations, route selection semantics,
+and physical acceptance behavior. Prefer incremental UI/help/test changes with
+typed round-trip assertions.
+
+- [x] Show route readiness without hiding solver choices or implying equal
+  physical validation. The family panel now reports compact-HMX acceptance for
+  Damped/Sci and clearly identifies the open Frozen/Naive boundary contract;
+  the compact-window story verifies all three labels. The physical solver gap
+  remains open in `src/ReactorsBVP/TODO_ANALYSIS.md`.
+- [ ] Reduce raw-document editing for common BVP workflows while retaining the
+  compatibility editor for advanced fields. Promote only frequent fields whose
+  parser and typed facade contracts are already stable.
+- [ ] Synchronize BVP template comments, helper text, and GUI labels with the
+  current RST backend contract; remove obsolete backend terminology.
+- [x] Remove the obsolete `dont_save_log` toggle after the RST 0.4.31 API
+  removal. The BVP GUI and sample task now use the common `loglevel` setting,
+  defaulting to `off`; telemetry and bounded solver-event diagnostics remain
+  independent.
+- [x] Expose RST 0.4.31 Damped AOT residual/Jacobian target chunk counts in the
+  structured GUI. They appear only on the compatible Damped AOT route, are
+  optional overrides (unset preserves the RST default), require positive
+  counts, and round-trip through the production hybrid parser. Rendered hover
+  and compact-viewport stories cover both controls.
+
+### BVP editor navigation and solver coverage
+
+- [x] Keep the BVP window dedicated to BVP; do not add an IVP/BVP selector.
+  Condensed-phase IVP remains a separate application entry point.
+- [x] Remove the obsolete `Problem Type: None/BVP` selector from the dedicated
+  BVP window and label the launcher/window explicitly as `Gas-phase combustion
+  BVP`.
+- [x] Make `CombustionApp::new()` open the canonical BVP task by default; the
+  dedicated BVP launcher must never start in the empty internal `None` state.
+- [x] Remove generic `Create Section` controls and their unused form state from
+  the structured BVP GUI. Physics, solver, and species sections are defined by
+  the typed editor; existing unstructured document content remains available in
+  the collapsed compatibility editor.
+- [x] Split the BVP editor into `Physics` and `Solver` tabs, with Physics as
+  the first/default tab. Keep reactor inputs and composition on Physics; place
+  solver family, route options, numerical controls, and initial guess on Solver.
+- [x] Render Physics sections and species composition as visible framed groups,
+  not collapsed accordions. Keep the compatibility raw-document editor
+  collapsible.
+- [x] Keep `Cancel calculation` in the top toolbar so expanded, scrollable
+  Physics content cannot push the active cancellation action out of reach.
+- [x] Give postprocessing its own visibly framed group on the Solver tab,
+  separate from numerical route settings and initial-guess configuration.
+- [x] Expose KiThe's symbolic RHS assembly policy (`Auto`, `Sequential`,
+  `Parallel`) separately from RST solver settings, persist it in
+  `kithe_settings`, and apply it before BVP equation construction.
+- [x] Cover the conditional backend settings supported by the production hybrid
+  parser: BVP_sci callback scheduling/threshold, output policy, sparse backend
+  (including SuperLU), and Damped Lambdify scheduling/event logging. The GUI
+  round-trip stories assert the parsed typed settings.
+- [x] Recheck compact-viewport reachability for conditional BVP controls.
+  A compact 820x620 story scrolls to and bounds-checks Damped Lambdify/AOT
+  controls and BVP_sci dense/sparse/banded/AOT controls, including conditional
+  callback thresholds, sparse factorization, bandwidths, and AOT build options.
+  Route selection itself remains covered by the existing interaction stories.
+- [x] Expose BVP_sci execution policy/threshold, solution output policy, and
+  sparse factorization (including SuperLU) through the production hybrid task
+  parser; keep the policy controls conditional on the selected execution/layout.
+- [x] Expose Damped Lambdify callback scheduling and backend event logging
+  separately from AOT scheduling, generic log level, and telemetry.
+- [x] Reconcile the direct typed BVP facade's AOT `residual_target_chunks` and
+  `jacobian_target_chunks` with the document-driven GUI route. RST 0.4.31's
+  hybrid parser now accepts these optional positive target counts; the GUI
+  forwards them as typed integer values and omits them for Lambdify routes.
+- [x] Audit and expose BVP_sci AOT artifact-lifecycle controls supported by the
+  hybrid parser: output directory, handoff path, generated crate/module names,
+  and residual/sparse/banded chunking. Controls are AOT-only and matrix-aware;
+  the GUI omits chunk sizes for `whole` and omits build profile unless the
+  policy actually compiles. A story verifies the GUI document against the RST
+  0.4.30 production parser. Damped target-chunk overrides are covered by the
+  separate RST 0.4.31 round-trip story above.
+
 ## Reactor IVP GUI: expanded solver controls and accessibility
 
 - [x] Expose solver-family-specific controls instead of presenting one misleading universal backend.
@@ -145,15 +224,54 @@ solver backend has grown into a much richer typed configuration surface.
   and logging controls, keeping telemetry and logging semantics distinct.
 - [x] Group the solver route, execution settings, diagnostics, and conditional AOT
   build settings into separate visual bands with a top-to-bottom control order.
+- [x] Expose callback scheduling policy and threshold plus standalone BDF/Radau
+  iteration limits; verify the values survive GUI-to-solver-config conversion.
 - [x] Verify that AOT confirmation can be requested and safely cancelled with Enter;
   cancellation must not start the worker.
-- [ ] Make solver `ComboBox` selectors keyboard-focusable and operable. In the current
-  egui version these widgets do not accept the AccessKit focus action/Enter sequence;
-  do not simulate keyboard support with a parallel hidden focus state. Revisit with a
-  keyboard-native selector or an upstream widget capability.
+- [x] Make solver `ComboBox` selectors keyboard-focusable and operable. The IVP
+  adapter uses egui's existing focused response and popup state: Up/Down cycles
+  the selected option, Enter/Space opens or closes the menu, and focused widgets
+  receive the normal egui highlight. It does not keep a parallel focus model.
+- [x] Record and exercise keyboard selector behavior in an IVP story. The
+  regression focuses and changes family, symbolic frontend, LSODE2 method/matrix,
+  execution, callback policy, telemetry, logging, and conditional AOT selectors.
+  AccessKit names and mouse interaction remain independently tested.
+
+## Reactor task-document lifecycle parity
+
+- [x] Convert both physical-task lifecycle stories to widget-driven edits. IVP edits the initial
+  temperature; BVP edits a reaction parameter. Both use Save As, reopen, and run through the GUI.
+- [x] Add BVP transactional-load coverage matching IVP for malformed syntax through the dirty-file
+  confirmation path. The active document, typed snapshot, path, and dirty state remain unchanged.
+- [x] Extend failed BVP-load lifecycle coverage to preserve and explicitly identify the prior
+  successful result only alongside its unchanged active document; a rejected rerun clears the old
+  plot before validation returns an error.
+- [x] Assert semantic equality of task-owned fields after save/reopen. IVP compares its complete
+  typed config and reaction payload; BVP checks species order, physical/boundary inputs, solver and
+  backend snapshot, initial guess, and postprocessing. Integral-valued float contracts are checked.
+- [x] Cover the IVP recoverable failure flow: malformed Arrhenius -> contextual error -> repair
+  -> save/reopen -> successful preview/solve; rejected BVP reruns clear old plots, and failed IVP
+  reruns clear old solution snapshots/reports/plots. BVP numerical failure -> correction ->
+  successful rerun is also covered.
+- [x] Compare GUI and direct production solve routes for checked-in IVP/BVP physical tasks. IVP
+  compares physical outputs and conservation diagnostics; BVP compares the full postprocessed
+  mesh and solution matrix. These are correctness checks, not timing gates.
+- [x] Add one reactive IVP acceptance fixture with measurable composition and temperature change;
+  existing zero/near-zero evolution smoke documents remain useful parse and lifecycle controls.
+- [x] Keep task-document lifecycle stories correctness-only; no file-I/O performance gates were
+  added.
 
 ## GUI regression status (2026-10-30)
 
+- BVP editor navigation and route-settings refresh (2026-10-31): Physics/Solver
+  tab interaction, dedicated BVP naming/no problem selector, framed always-visible
+  Physics/species groups, KiThe RHS assembly-policy roundtrip, Damped logging and
+  scheduling, plus BVP_sci scheduling/output/sparse-factorization parser
+  roundtrips are covered. Current focused filters: BVP GUI core 49 passed,
+  BVP GUI stories 22 passed, BVP task parser 30 passed. The AOT/backend-switch
+  story explicitly scrolls to the control before interaction. Solver-only
+  controls are not expected on the initial Physics tab; postprocessing has a
+  separate visible group on Solver.
 - BVP/combustion GUI filter: 105 passed, including preview, real backend switching,
   compact-window capability controls, and successful solve/plot handoff with plot
   enabled and disabled. The suite now uses `fixtures/bvp_problem.fixture` tracked in
@@ -162,8 +280,29 @@ solver backend has grown into a much richer typed configuration surface.
 - Reactor IVP GUI filter: 28 passed, including accessible labels and end-to-end
   selection of symbolic frontend, LSODE2 controller, matrix layout, telemetry,
   logging, execution mode, AOT toolchain, and profile.
+- Current IVP solver GUI filter: 17 passed; IVP story filter: 17 passed. These
+  include callback scheduling policy/threshold and standalone BDF/Radau
+  iteration-budget conversion to typed solver configuration.
 - IVP keyboard cancellation story passes; keyboard operation of `ComboBox` selectors
   remains an explicit limitation rather than a claimed capability.
+- Historical egui/egui_kittest 0.37 full GUI snapshot (2026-10-30): `gui::`
+  reported 402 passed, 15 failed, 15 ignored. The affected kinetics GUI groups
+  were subsequently rechecked: unnamed controls received explicit AccessKit
+  labels, and the all-reactions mechanism test now asserts the contextual typed
+  rejection and atomic behavior for malformed Troe data instead of swallowing
+  the parser error. The complete `gui::` suite has not been rerun after these
+  fixes, so the historical aggregate is not a current full-suite result.
+- Focused GUI recheck after those fixes: offline equilibrium GUI stories 12/12,
+  experimental kinetics GUI tests 39/39, and kinetics GUI tests 20/20 passed.
+- The 0.37 migration restored the other previously failing GUI groups: equilibrium
+  stories 42/42, equilibrium GUI 30 passed/12 ignored, BVP stories 22/22, IVP GUI
+  16/16, Thermochemistry GUI 19/19, and Transport GUI 14/14 plus its story 1/1.
+- egui/egui_kittest 0.37 migration recheck (2026-10-30): added explicit default and
+  monochrome emoji font features required by existing UI glyphs, and restored
+  AccessKit names on previously unlabelled BVP/IVP inputs instead of disabling the
+  stricter egui_kittest accessibility check. Current focused runs: BVP combustion
+  stories 22/22; Reactor IVP GUI stories 16/16. These counts are for the named
+  filtered modules, not the broader historical GUI totals above.
 - `cargo check --lib --no-default-features -j 1`: passed. Existing unrelated
   compiler warnings remain.
 

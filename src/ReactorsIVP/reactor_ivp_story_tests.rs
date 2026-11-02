@@ -245,26 +245,40 @@ mod tests {
                 };
                 let parallel = read_counter("native_counter::parallel_dispatches");
                 let sequential = read_counter("native_counter::sequential_dispatches");
-                if family != ReactorIvpSolverFamily::Bdf {
+                let residual_callbacks = read_counter("native_counter::residual_callbacks");
+                let jacobian_callbacks = read_counter("native_counter::jacobian_callbacks");
+                let native_residual_calls = read_counter("native_counter::residual_calls");
+                let native_jacobian_calls = read_counter("native_counter::jacobian_calls");
+                assert!(
+                    parallel + sequential > 0,
+                    "{family:?}/{label} did not report callback dispatches"
+                );
+                if family != ReactorIvpSolverFamily::Radau {
                     assert!(
-                        parallel + sequential > 0,
-                        "{family:?}/{label} did not report callback dispatches"
+                        residual_callbacks > 0 && jacobian_callbacks > 0,
+                        "{family:?}/{label} omitted residual/Jacobian callback counts: residual={residual_callbacks}, jacobian={jacobian_callbacks}"
                     );
                 }
-                if label == "sequential" && family != ReactorIvpSolverFamily::Bdf {
+                if family == ReactorIvpSolverFamily::Bdf {
+                    assert!(
+                        native_residual_calls > 0 && native_jacobian_calls > 0,
+                        "BDF native solver counters are missing: residual={native_residual_calls}, jacobian={native_jacobian_calls}"
+                    );
+                }
+                if label == "sequential" {
                     assert_eq!(
                         parallel, 0,
                         "{family:?} sequential policy dispatched parallel work"
                     );
                 }
-                if label == "forced_parallel" && family != ReactorIvpSolverFamily::Bdf {
+                if label == "forced_parallel" {
                     assert!(
                         parallel > 0,
                         "{family:?} forced-parallel policy was not honored"
                     );
                 }
                 eprintln!(
-                    "IVP callback policy family={family:?} policy={label} parallel={parallel} sequential={sequential} telemetry={} ",
+                    "IVP callback policy family={family:?} policy={label} parallel={parallel} sequential={sequential} residual_callbacks={residual_callbacks} jacobian_callbacks={jacobian_callbacks} native_residual_calls={native_residual_calls} native_jacobian_calls={native_jacobian_calls} telemetry={} ",
                     if parallel + sequential == 0 {
                         "unavailable"
                     } else {
@@ -453,6 +467,9 @@ mod tests {
             let snapshot = task
                 .solve()
                 .unwrap_or_else(|error| panic!("{name} physical smoke solve failed: {error}"));
+            if name == "two_step_oxidation" {
+                assert_oxidation_element_balances(&snapshot);
+            }
             let temperature_index = snapshot
                 .variable_names
                 .iter()
@@ -496,6 +513,140 @@ mod tests {
                 snapshot.variable_count(),
                 snapshot.time_points()
             );
+        }
+    }
+
+    fn assert_oxidation_element_balances(snapshot: &IvpSolveSnapshot) {
+        let species = [
+            ("CH4", 16.043, [1.0, 4.0, 0.0]),
+            ("O2", 31.998, [0.0, 0.0, 2.0]),
+            ("CO", 28.010, [1.0, 0.0, 1.0]),
+            ("H2O", 18.015, [0.0, 2.0, 1.0]),
+            ("CO2", 44.009, [1.0, 0.0, 2.0]),
+        ];
+        let columns = species
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _, _))| {
+                snapshot
+                    .variable_names
+                    .iter()
+                    .position(|variable| variable == &format!("C{index}"))
+                    .unwrap_or_else(|| panic!("missing mass-fraction state for {name}"))
+            })
+            .collect::<Vec<_>>();
+        let elemental_mass_contributions = |row: usize| -> [f64; 3] {
+            std::array::from_fn(|element| {
+                species
+                    .iter()
+                    .zip(&columns)
+                    .map(|((_, molar_mass, counts), column)| {
+                        snapshot.values[(row, *column)]
+                            * counts[element]
+                            * [12.011, 1.008, 15.999][element]
+                            / molar_mass
+                    })
+                    .sum::<f64>()
+            })
+        };
+        let initial = elemental_mass_contributions(0);
+        for row in 0..snapshot.values.nrows() {
+            let actual = elemental_mass_contributions(row);
+            for (element, (expected, actual)) in initial.iter().zip(actual).enumerate() {
+                let tolerance = 2.0e-7_f64.max(expected.abs() * 2.0e-7);
+                assert!(
+                    (expected - actual).abs() <= tolerance,
+                    "oxidation row {row} elemental mass fraction[{element}] drifted: {expected:e} vs {actual:e} (tol {tolerance:e})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multistep_oxidation_preserves_elemental_inventory_across_solver_families_and_frontends() {
+        let mut reference_task = multistep_oxidation_coverage_task();
+        reference_task
+            .kindata
+            .set_reaction_data_directly(
+                vec![
+                    ReactionData::new_elementary(
+                        "2CH4+3O2=>2CO+4H2O".to_string(),
+                        vec![1.0e-25, 0.0, 8.0e3],
+                        None,
+                    ),
+                    ReactionData::new_elementary(
+                        "2CO+O2=>2CO2".to_string(),
+                        vec![1.0e-25, 0.0, 5.0e3],
+                        None,
+                    ),
+                ],
+                None,
+            )
+            .expect("bounded oxidation reactions should parse");
+        reference_task.thermal_effects = vec![-2.0e5, -2.83e5];
+        reference_task.initial_conditions = HashMap::from([
+            ("T".into(), 520.0),
+            ("q".into(), 0.0),
+            ("CH4".into(), 0.2),
+            ("O2".into(), 0.4),
+            ("CO".into(), 0.1),
+            ("H2O".into(), 0.1),
+            ("CO2".into(), 0.2),
+        ]);
+
+        for family in [
+            ReactorIvpSolverFamily::Lsode2,
+            ReactorIvpSolverFamily::Bdf,
+            ReactorIvpSolverFamily::Radau,
+        ] {
+            for frontend in [
+                ReactorIvpSymbolicBackend::ExprLegacy,
+                ReactorIvpSymbolicBackend::AtomView,
+            ] {
+                let mut task = reference_task.clone();
+                task.set_solver_backend_config(
+                    ReactorIvpSolverConfig::default()
+                        .with_family(family)
+                        .with_symbolic_backend(frontend)
+                        .with_matrix_backend(ReactorIvpMatrixBackend::Dense)
+                        .with_integration_domain(0.0, 1.0e-4)
+                        .with_max_step(1.0e-5)
+                        .with_rtol(1.0e-6)
+                        .with_atol(1.0e-9),
+                );
+                let snapshot = task.solve().unwrap_or_else(|error| {
+                    panic!("multistep oxidation {family:?}/{frontend:?} failed: {error}")
+                });
+                assert!(snapshot.status().starts_with("finished"));
+                assert_oxidation_element_balances(&snapshot);
+
+                let temperature_index = snapshot
+                    .variable_names
+                    .iter()
+                    .position(|variable| variable == "Teta")
+                    .expect("temperature state should be present");
+                for value in snapshot.values.column(temperature_index).iter() {
+                    let physical_temperature = value * task.scaling.T_scale + task.scaling.dT;
+                    assert!((0.0..=3000.0).contains(&physical_temperature));
+                }
+                for (column, variable) in snapshot.variable_names.iter().enumerate() {
+                    if variable == "Teta" || variable == "q" {
+                        continue;
+                    }
+                    assert!(snapshot.values.column(column).iter().all(|fraction| {
+                        fraction.is_finite() && (0.0..=1.0).contains(fraction)
+                    }));
+                }
+                println!(
+                    "multistep oxidation family={family:?} frontend={frontend:?} points={} T0={:.6} K Tf={:.6} K",
+                    snapshot.time_points(),
+                    snapshot.values[(0, temperature_index)] * task.scaling.T_scale
+                        + task.scaling.dT,
+                    snapshot.values[(snapshot.values.nrows() - 1, temperature_index)]
+                        * task.scaling.T_scale
+                        + task.scaling.dT,
+                );
+            }
         }
     }
 

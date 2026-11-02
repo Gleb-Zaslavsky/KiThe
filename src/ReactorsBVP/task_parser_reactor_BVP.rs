@@ -75,7 +75,7 @@
 //! Uses `.expect()` for required parameters and `if let Some()` for optional ones,
 //! providing clear error messages for missing required configuration.
 
-use super::SimpleReactorBVP::{FastElemReact, SimpleReactorTask};
+use super::SimpleReactorBVP::{FastElemReact, SimpleReactorTask, SymbolicRhsAssemblyPolicy};
 use crate::ReactorsBVP::reactor_BVP_utils::InitialConfig;
 use crate::ReactorsBVP::reactor_BVP_utils::{BoundsConfig, ScalingConfig, ToleranceConfig};
 use crate::ReactorsBVP::task_value_conversion::try_value_as_usize;
@@ -161,6 +161,37 @@ fn required_usize(
             "invalid integer field `{section_name}.{field}`: {error}"
         ))
     })
+}
+
+fn parse_symbolic_rhs_assembly_policy(
+    task_map: &DocumentMap,
+) -> Result<SymbolicRhsAssemblyPolicy, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+    let Some(section) = task_map.get("kithe_settings") else {
+        return Ok(SymbolicRhsAssemblyPolicy::Auto);
+    };
+    let Some(field) = section.get("symbolic_rhs_assembly_policy") else {
+        return Ok(SymbolicRhsAssemblyPolicy::Auto);
+    };
+    let value = field
+        .as_ref()
+        .and_then(|values| values.first())
+        .and_then(Value::as_string)
+        .map(String::as_str)
+        .ok_or_else(|| {
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
+                "`kithe_settings.symbolic_rhs_assembly_policy` must be a string".into(),
+            )
+        })?;
+    match value.to_ascii_lowercase().as_str() {
+        "auto" => Ok(SymbolicRhsAssemblyPolicy::Auto),
+        "sequential" => Ok(SymbolicRhsAssemblyPolicy::Sequential),
+        "parallel" => Ok(SymbolicRhsAssemblyPolicy::Parallel),
+        _ => Err(
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(format!(
+                "invalid `kithe_settings.symbolic_rhs_assembly_policy` value `{value}`; expected auto, sequential, or parallel"
+            )),
+        ),
+    }
 }
 
 fn optional_string(
@@ -315,6 +346,16 @@ pub(crate) fn normalize_reactor_physics_task_map(task_map: &DocumentMap) -> Docu
     }
     normalize_solver_counter_field(&mut normalized, "solver_settings", "max_iterations");
     normalize_solver_counter_field(&mut normalized, "solver_settings", "refinement_steps");
+    normalize_solver_counter_field(
+        &mut normalized,
+        "solver_settings",
+        "aot_residual_target_chunks",
+    );
+    normalize_solver_counter_field(
+        &mut normalized,
+        "solver_settings",
+        "aot_jacobian_target_chunks",
+    );
     normalize_solver_counter_field(&mut normalized, "strategy_params", "max_jac");
     normalize_solver_counter_field(&mut normalized, "strategy_params", "max_damp_iter");
     normalize_solver_counter_field(&mut normalized, "adaptive_strategy", "version");
@@ -393,25 +434,9 @@ fn normalize_solver_counter_field(
 fn hybrid_bvp_settings_from_map(
     task_map: &DocumentMap,
     substances: &[String],
-) -> Result<(BvpSolverSettings, bool), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+) -> Result<BvpSolverSettings, crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
     let mut normalized = normalize_reactor_physics_task_map(task_map);
-    let mut dont_save_log = false;
     if let Some(settings) = normalized.get_mut("solver_settings") {
-        if let Some(values) = settings.remove("dont_save_log") {
-            match values.as_deref() {
-                Some([Value::Boolean(value)]) => dont_save_log = *value,
-                _ => {
-                    return Err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::BvpSettings(
-                        RustedSciThe::command_interpreter::task_parser_bvp_hybrid::
-                            HybridBvpSettingsError::InvalidField {
-                                path: "solver_settings.dont_save_log".into(),
-                                message: "expected one boolean value".into(),
-                            },
-                    ));
-                }
-            }
-        }
-
         if !settings.contains_key("solver_family") {
             let legacy_strategy = settings
                 .get("strategy")
@@ -442,7 +467,7 @@ fn hybrid_bvp_settings_from_map(
     let parsed = parse_hybrid_bvp_solver_settings_from_document(&normalized)
         .map_err(crate::ReactorsBVP::SimpleReactorBVP::ReactorError::BvpSettings)?;
     let parsed = expand_damped_settings_for_reactor(parsed, substances)?;
-    Ok((parsed, dont_save_log))
+    Ok(parsed)
 }
 
 fn expand_damped_settings_for_reactor(
@@ -603,8 +628,7 @@ fn solve_and_store_nrbvp(
     n_steps: usize,
     arg: String,
 ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
-    let (settings, dont_save_log) =
-        hybrid_bvp_settings_from_map(task_map, &reactor.kindata.substances)?;
+    let settings = hybrid_bvp_settings_from_map(task_map, &reactor.kindata.substances)?;
     let columns = hybrid_initial_guess_columns(&settings, n_steps).ok_or_else(|| {
         crate::ReactorsBVP::SimpleReactorBVP::ReactorError::InvalidConfiguration(
             "BVP initial-guess column count overflows usize".into(),
@@ -612,14 +636,9 @@ fn solve_and_store_nrbvp(
     })?;
     let initial_guess =
         set_initial_guess_from_map_data(task_map, columns, reactor.solver.unknowns.len())?;
-    reactor.solver.solve_with_hybrid_settings(
-        settings,
-        initial_guess,
-        t0,
-        t_end,
-        n_steps,
-        dont_save_log,
-    )?;
+    reactor
+        .solver
+        .solve_with_hybrid_settings(settings, initial_guess, t0, t_end, n_steps)?;
     reactor.solver.arg_name = arg;
     set_postprocessing_from_map(reactor, task_map)?;
     Ok(())
@@ -687,9 +706,13 @@ pub(crate) fn validate_reactor_bvp_task_map(task_map: &DocumentMap) -> BvpTaskVa
         report.push_error("postprocessing", error);
     }
 
+    if let Err(error) = parse_symbolic_rhs_assembly_policy(task_map) {
+        report.push_error("equation assembly", error);
+    }
+
     let solver_settings = match hybrid_bvp_settings_from_map(task_map, &reactor.kindata.substances)
     {
-        Ok((settings, _)) => Some(settings),
+        Ok(settings) => Some(settings),
         Err(error) => {
             report.push_error("solver settings", error);
             None
@@ -1110,6 +1133,7 @@ impl SimpleReactorTask {
                 "document must be parsed before solver setup".to_string(),
             )
         })?;
+        self.set_symbolic_rhs_assembly_policy(parse_symbolic_rhs_assembly_policy(task_map)?);
         let (t0, t_end, n_steps, arg) = parse_physics_run_settings_from_map(task_map)?;
         self.setup_bvp()?;
         if self.solver.unknowns.is_empty() {
@@ -1206,6 +1230,7 @@ impl SimpleReactorTask {
     ) -> Result<(), crate::ReactorsBVP::SimpleReactorBVP::ReactorError> {
         let task_map = map;
         self.set_reactor_params_from_hashmap(&task_map)?;
+        self.set_symbolic_rhs_assembly_policy(parse_symbolic_rhs_assembly_policy(&task_map)?);
         let (t0, t_end, n_steps, arg) = parse_physics_run_settings_from_map(&task_map)?;
         self.setup_bvp()?;
         if self.solver.unknowns.is_empty() {
@@ -1232,6 +1257,9 @@ impl SimpleReactorTask {
 /// The template includes all required sections with example values and explanatory comments.
 ///
 pub const SIMPLE_BVP_TEMPLATE: &'static str = r#"
+        kithe_settings
+        # Symbolic RHS equation assembly: auto, sequential, or parallel
+        symbolic_rhs_assembly_policy: auto
         initial_guess
         universal:1e-2
         process_conditions
@@ -1283,10 +1311,12 @@ pub const SIMPLE_BVP_TEMPLATE: &'static str = r#"
         symbolic_backend: AtomView
         banded_linear_solver: auto
         refinement_steps: 5
+        lambdify_execution_policy: sequential
+        bvp_logging_mode: off
+        bvp_logging_max_events: 256
         abs_tolerance: 1e-7
         max_iterations: 100
-        loglevel: Some(info)
-        dont_save_log: true
+        loglevel: off
         bounds
         C: -10.0, 10.0
         J:  -1e20, 1e20
@@ -1452,10 +1482,8 @@ refinement_steps: 5
 abs_tolerance: 1e-5
 # Maximum iterations
 max_iterations: 100
-# Logging level
-loglevel: Some(info)
-# Disable log saving
-dont_save_log: true
+# Logging level (disabled by default)
+loglevel: off
 
 # Variable bounds for solver
 bounds
@@ -1540,6 +1568,47 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn symbolic_rhs_assembly_policy_is_typed_and_defaults_to_auto() {
+        let mut document = DocumentMap::new();
+        assert_eq!(
+            parse_symbolic_rhs_assembly_policy(&document).unwrap(),
+            SymbolicRhsAssemblyPolicy::Auto
+        );
+
+        for (value, expected) in [
+            ("auto", SymbolicRhsAssemblyPolicy::Auto),
+            ("Sequential", SymbolicRhsAssemblyPolicy::Sequential),
+            ("parallel", SymbolicRhsAssemblyPolicy::Parallel),
+        ] {
+            document.insert(
+                "kithe_settings".into(),
+                HashMap::from([(
+                    "symbolic_rhs_assembly_policy".into(),
+                    Some(vec![Value::String(value.into())]),
+                )]),
+            );
+            assert_eq!(
+                parse_symbolic_rhs_assembly_policy(&document).unwrap(),
+                expected
+            );
+        }
+
+        document.insert(
+            "kithe_settings".into(),
+            HashMap::from([(
+                "symbolic_rhs_assembly_policy".into(),
+                Some(vec![Value::String("turbo".into())]),
+            )]),
+        );
+        let error = parse_symbolic_rhs_assembly_policy(&document).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("kithe_settings.symbolic_rhs_assembly_policy")
+        );
+    }
+
+    #[test]
     fn hybrid_bvp_parser_routes_damped_frozen_and_sci_settings() {
         let mut parser = DocumentParser::new(task_content.to_string());
         let mut damped_document = parser.parse_document().unwrap().clone();
@@ -1551,11 +1620,26 @@ mod tests {
             Some(vec![Value::String("damped".into())]),
         );
         let substances = vec!["HMX".into(), "DecompositionProduct".into()];
-        let (damped, dont_save_log) = hybrid_bvp_settings_from_map(&damped_document, &substances)
+        let damped = hybrid_bvp_settings_from_map(&damped_document, &substances)
             .expect("Damped family should be parsed by RST hybrid parser");
         assert!(matches!(damped, BvpSolverSettings::Damped(_)));
-        assert!(dont_save_log);
         assert_eq!(hybrid_initial_guess_columns(&damped, 25), Some(25));
+
+        let mut obsolete_logging_document = damped_document.clone();
+        obsolete_logging_document
+            .get_mut("solver_settings")
+            .expect("solver settings exist")
+            .insert("dont_save_log".into(), Some(vec![Value::Boolean(true)]));
+        let obsolete_logging_error =
+            match hybrid_bvp_settings_from_map(&obsolete_logging_document, &substances) {
+                Ok(_) => panic!("removed RST logging flag must not be silently accepted"),
+                Err(error) => error,
+            };
+        assert!(matches!(
+            &obsolete_logging_error,
+            crate::ReactorsBVP::SimpleReactorBVP::ReactorError::BvpSettings(_)
+        ));
+        assert!(obsolete_logging_error.to_string().contains("dont_save_log"));
 
         let frozen_document = DocumentMap::from([(
             "solver_settings".into(),
@@ -1570,7 +1654,7 @@ mod tests {
                 ),
             ]),
         )]);
-        let (frozen, _) = hybrid_bvp_settings_from_map(&frozen_document, &substances)
+        let frozen = hybrid_bvp_settings_from_map(&frozen_document, &substances)
             .expect("Frozen family should be parsed by RST hybrid parser");
         assert!(matches!(frozen, BvpSolverSettings::Frozen(_)));
         assert_eq!(hybrid_initial_guess_columns(&frozen, 25), Some(26));
@@ -1602,7 +1686,7 @@ mod tests {
                 ),
             ]),
         )]);
-        let (sci, _) = hybrid_bvp_settings_from_map(&sci_document, &substances)
+        let sci = hybrid_bvp_settings_from_map(&sci_document, &substances)
             .expect("Sci family should be parsed without reactor-owned task sections");
         assert!(matches!(sci, BvpSolverSettings::Sci { .. }));
         assert_eq!(hybrid_initial_guess_columns(&sci, 25), Some(26));
@@ -1612,7 +1696,7 @@ mod tests {
             .get_mut("solver_settings")
             .expect("task fixture includes solver settings")
             .remove("solver_family");
-        let (legacy_damped, _) = hybrid_bvp_settings_from_map(&legacy_document, &substances)
+        let legacy_damped = hybrid_bvp_settings_from_map(&legacy_document, &substances)
             .expect("legacy strategy-only task should infer Damped family");
         assert!(matches!(legacy_damped, BvpSolverSettings::Damped(_)));
     }
@@ -1671,8 +1755,7 @@ mod tests {
         refinement_steps: 5
         abs_tolerance: 1e-7
         max_iterations: 100
-        loglevel: Some(info)
-        dont_save_log: true
+        loglevel: off
         bounds
         C: -10.0, 10.0
         J:  -1e20, 1e20
@@ -2316,10 +2399,6 @@ mod tests {
                     Some(vec![Value::Optional(Some(Box::new(Value::String(
                         "info".to_string(),
                     ))))]),
-                ),
-                (
-                    "dont_save_log".to_string(),
-                    Some(vec![Value::Boolean(true)]),
                 ),
             ]),
         );

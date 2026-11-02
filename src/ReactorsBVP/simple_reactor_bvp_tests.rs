@@ -451,7 +451,6 @@ mod tests {
                 100,
                 bounds.clone(),
                 Some("info".to_string()),
-                false,
             ))
             .expect("default lambdify backend should build NRBVP options");
 

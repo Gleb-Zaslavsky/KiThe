@@ -25,8 +25,10 @@
 //! |--------------|--------------|-------------|
 //! | "Substance Base" | "substance_base" | substance_base_v2.json |
 //! | "All Keys Substance" | "all_keys_substance" | all_keys_substance.json |
+//! | "Elements" | "elements" | elements.json |
 //! | "Reactbase" | "reactbase" | Reactbase.json |
 //! | "Dict Reaction" | "dict_reaction" | dict_reaction.json |
+//! | "Problems Folder" | "problems_folder" | problems/ |
 
 use crate::library_manager::{with_library_manager, with_library_manager_mut};
 use std::collections::HashMap;
@@ -55,7 +57,7 @@ impl Settings {
     /// # Example
     /// ```rust
     /// let settings = Settings::new();
-    /// assert_eq!(settings.library_versions.len(), 4);
+    /// assert_eq!(settings.library_versions.len(), 6);
     /// ```
     pub fn new() -> Self {
         let config = with_library_manager(|manager| manager.get_config().clone());
@@ -306,9 +308,10 @@ mod tests {
     fn test_settings_new() {
         crate::library_manager::set_test_manager(create_test_manager());
         let settings = Settings::new();
-        assert_eq!(settings.library_versions.len(), 5);
+        assert_eq!(settings.library_versions.len(), 6);
         assert!(settings.library_versions.contains_key("Substance Base"));
         assert!(settings.library_versions.contains_key("All Keys Substance"));
+        assert!(settings.library_versions.contains_key("Elements"));
         assert!(settings.library_versions.contains_key("Reactbase"));
         assert!(settings.library_versions.contains_key("Dict Reaction"));
         assert!(settings.library_versions.contains_key("Problems Folder"));

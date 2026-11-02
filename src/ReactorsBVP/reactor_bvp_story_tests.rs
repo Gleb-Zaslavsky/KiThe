@@ -16,6 +16,63 @@ mod tests {
     use nalgebra::DMatrix;
     use std::collections::HashMap;
     use std::error::Error;
+    use std::path::PathBuf;
+
+    #[test]
+    fn checked_in_physical_bvp_documents_load_and_solve() {
+        for file in ["hmx_compact.task", "hmx_compact_two_percent_product.task"] {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("task_docs/reactors/bvp")
+                .join(file);
+            let mut reactor = super::super::SimpleReactorBVP::SimpleReactorTask::new();
+            reactor
+                .solve_from_file(path)
+                .unwrap_or_else(|error| panic!("{file}: file-to-solution story failed: {error}"));
+
+            let data = reactor
+                .solution_render_data()
+                .unwrap_or_else(|error| panic!("{file}: missing solution data: {error}"));
+            assert!(data.x_mesh.iter().all(|value| value.is_finite()), "{file}");
+            assert!(
+                data.solution.iter().all(|value| value.is_finite()),
+                "{file}"
+            );
+            let temperature_index = data
+                .unknowns
+                .iter()
+                .position(|name| name == "Teta")
+                .expect("BVP state should include temperature");
+            let temperatures = data.solution.column(temperature_index);
+            assert!(
+                temperatures
+                    .iter()
+                    .all(|temperature| (0.0..=3000.0).contains(temperature)),
+                "{file}: physical temperature outside [0, 3000] K: {temperatures:?}"
+            );
+            for (index, name) in data.unknowns.iter().enumerate() {
+                if name.starts_with('C') {
+                    assert!(
+                        data.solution
+                            .column(index)
+                            .iter()
+                            .all(|fraction| (0.0..=1.0).contains(fraction)),
+                        "{file}: invalid mass fraction in {name}"
+                    );
+                }
+            }
+            println!(
+                "BVP task-doc {file}: solved {} species / {} reactions, T={:.2}..{:.2} K, points={}",
+                reactor.kindata.substances.len(),
+                reactor.kindata.equations().len(),
+                temperatures.iter().copied().fold(f64::INFINITY, f64::min),
+                temperatures
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max),
+                data.x_mesh.len()
+            );
+        }
+    }
 
     /// End-to-end story test for the modern default reactor BVP setup.
     #[test]
@@ -40,7 +97,6 @@ mod tests {
             50,
             None,
             Some("info".to_string()),
-            false,
         )
         .with_solver_backend_config(ReactorBvpSolverConfig::default_lambdify());
         let backend = reactor
@@ -86,7 +142,6 @@ mod tests {
             50,
             None,
             Some("info".to_string()),
-            false,
         )
         .with_solver_backend_config(ReactorBvpSolverConfig::default_lambdify());
 
@@ -133,7 +188,6 @@ mod tests {
                     .to_full_bounds_map(&substances),
             ),
             Some("off".to_string()),
-            true,
         );
 
         reactor
@@ -196,7 +250,6 @@ mod tests {
                     .to_full_bounds_map(&substances),
             ),
             Some("off".to_string()),
-            true,
         );
         reactor
             .solver
@@ -389,7 +442,6 @@ mod tests {
                     .to_full_bounds_map(&substances),
             ),
             Some("off".to_string()),
-            true,
         );
 
         reactor
@@ -492,7 +544,6 @@ mod tests {
             80,
             Some(HashMap::from([("y".to_string(), (-10.0, 10.0))])),
             Some("off".to_string()),
-            true,
         );
 
         solver
@@ -537,7 +588,6 @@ mod tests {
             20,
             None,
             None,
-            true,
         );
         assert!(solver.solve_with_bvp_api(invalid_retry).is_err());
         assert_eq!(solver.get_solution(), Some(&previous_solution));
@@ -764,7 +814,6 @@ mod tests {
             20,
             None,
             None,
-            true,
         );
 
         let error = solver

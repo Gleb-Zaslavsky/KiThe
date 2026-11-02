@@ -68,20 +68,19 @@ telemetry exposes the configured policy, it must match the request; otherwise di
 checked directly. Where callback dispatch counters are available, Sequential must report no
 parallel dispatch, and forced Parallel must report at least one.
 
-**Observed result:** The targeted story passed on RustedSciThe 0.4.30. LSODE2 reported
-Sequential/Auto/forced-Parallel dispatches as `0/64`, `0/64`, and `64/0` (parallel/sequential).
-Radau reported `0/143`, `0/143`, and `143/0`. Endpoint parity passed for all nine routes. BDF
-preserved each requested policy and passed endpoint parity, but its symbolic callback telemetry
-reported zero dispatches and zero callback evaluations for all three policies; these zeros are
-unavailable attribution, not evidence of zero callback work. BDF's native solver does perform
-residual evaluations, so its callback-level telemetry needs upstream investigation.
+**Observed result:** Refreshed focused run on RustedSciThe 0.4.31 passed. LSODE2 reported
+Sequential/Auto/forced-Parallel dispatches as `0/64`, `0/64`, and `64/0` (parallel/sequential),
+with `64` residual and `40` Jacobian callbacks. Standalone BDF reported `0/43`, `0/43`, and
+`43/0`, with `42` residual and `1` Jacobian callback for each policy; BDF native solver counters
+also report `42` residual calls and `1` Jacobian call. Radau reported `0/143`, `0/143`, and
+`143/0`, with native counters of `142` residual calls and `1` Jacobian call. Radau exposes its own
+native solver counters rather than the symbolic residual/Jacobian callback fields. Endpoint parity
+passed for all nine routes.
 
-**Conclusion:** StiffAPI already exposes and applies all three callback policies, so no missing
-RST configuration API blocks this comparison. LSODE2 and Radau demonstrate that the policies
-change actual callback dispatch. The Criterion axis is now present, but release timings must be
-collected by the campaign before drawing a performance conclusion. BDF remains in correctness and
-wall-time comparison, with callback attribution explicitly marked unavailable until telemetry is
-repaired.
+**Conclusion:** The 0.4.31 post-solve telemetry snapshot reaches the KiThe facade for standalone
+BDF: its callback counters are nonzero and reflect the selected dispatch policy. Radau's distinct
+telemetry schema is not treated as missing BDF-style callback attribution. This is correctness and
+telemetry evidence only; release performance timings remain for the scheduled benchmark campaign.
 
 ### Historical Sparse Radau Jacobian Shape Diagnostic (Superseded)
 
@@ -336,6 +335,65 @@ for each run. The two-step trajectory published seven state variables and five o
 **Conclusion and limits:** These assertions reject obvious nonphysical blow-up before benchmarking.
 They do not prove kinetic accuracy or elemental-conservation quality for the synthetic network.
 
+## Story: Multistep Elemental Balance Across IVP Families
+
+**Question / hypothesis:** Does the balanced two-step oxidation network preserve its independently
+computed C/H/O elemental mass inventory over the full trajectory when run with LSODE2, standalone
+BDF, or Radau and either ExprLegacy or AtomView?
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features -j 1 multistep_oxidation_preserves_elemental_inventory_across_solver_families_and_frontends -- --nocapture --test-threads=1
+```
+
+**Fixture and route:** Synthetic atom-balanced reactions `2CH4 + 3O2 -> 2CO + 4H2O` and
+`2CO + O2 -> 2CO2`, with the same initial mixture, thermal inputs, short interval, Dense layout,
+and tolerances for all six family/frontend combinations. Deliberately low rates keep this a bounded
+conservation/adapter fixture, not a validated combustion mechanism.
+
+**Acceptance checks:** Each run finishes; dimensional temperature stays in `[0,3000] K`; species
+mass fractions remain finite and in `[0,1]`; and C/H/O elemental mass fractions are recomputed
+from the published species states and molecular weights and remain within `2e-7` absolute/relative
+scale of their initial values at every native trajectory point.
+
+**Observed result:** All six combinations passed. LSODE2 returned 5 points, BDF 12, and Radau 11
+for each frontend; temperature remained at 520 K to six printed decimals. The elemental check is
+performed per route, so this also checks conservation despite each family using its own adaptive
+mesh.
+
+**Conclusion and limits:** The multistep physical-consistency matrix is broader and now checks an
+independent elemental invariant, not only finiteness and bounds. Kinetic rates remain synthetic and
+near-quiescent; an independently validated medium multi-step kinetic oracle is still required for
+claims about reaction accuracy or thermal feedback.
+
+## Story: Atomic IVP Result Publication
+
+**Question / hypothesis:** If conversion of a validated solver trajectory into dimensional output
+fails, are the previously published mesh, solution, and solve metadata left untouched?
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features -j 1 failed_candidate_postprocessing_leaves_published_state_unchanged -- --nocapture --test-threads=1
+```
+
+**Fixture and route:** A previously published two-point state is retained while a candidate
+temperature conversion intentionally overflows during the fallible postprocessing preparation
+step. The test exercises the same pure candidate-postprocessing helper used before the production
+commit boundary, including the solve's conservation/postprocessing preparation stage.
+
+**Acceptance checks:** Postprocessing returns an error and leaves the stored mesh, solution, latest
+solve snapshot, and conservation report unchanged. Production solve now computes conservation and
+dimensional output from local candidate values and only mutates published result fields after
+postprocessing succeeds.
+
+**Observed result:** The regression passed. No solver or benchmark path was changed by this story.
+
+**Conclusion and limits:** The result publication boundary is atomic with respect to fallible
+trajectory postprocessing. GUI callers still deliberately clear old results when edited inputs are
+submitted, as documented by the GUI lifecycle contract.
+
 ## Story: PERF-IVP-01 Release Baseline and Lifecycle Matrix
 
 **Question / hypothesis:** Across two bounded inlet conditions, how do LSODE2, standalone BDF, and
@@ -454,3 +512,236 @@ frontend selection should be generalized from this four-state control. Larger in
 validated workloads are still needed before prioritizing performance work. A previous exploratory run using
 the older high-rate/default-domain fixture was discarded: it produced enormous finite states and
 was not a valid performance/correctness baseline.
+
+## Story: Checked-In Physical IVP Task Documents
+
+**Name:** Physical IVP task files parse and produce bounded reactor solutions.
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features checked_in_physical_ivp_documents_load_and_solve -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** Can a user keep a readable physical IVP task as a normal file, load it
+through the application document path, and solve it without constructing the mechanism in code?
+
+**What is checked:** The H2 dissociation, two-step oxidation, and heat-releasing H2 documents are
+loaded by `ReactorIvpApp`, parsed into the normal task configuration, and run through the production
+IVP solve path. The test verifies finite states, temperature in `0..3000 K`, and species fractions
+in `0..1`. The heat-releasing case must show measurable temperature and species evolution; its
+elemental and mass-fraction balances must remain within `5%`, and its energy residual must close
+within `1 J` and `0.01%`. An independent trapezoidal integration of the published profiles must
+also close within `1 J`. Mechanisms use named species and indexed reaction fields rather than an
+opaque JSON blob.
+
+**Observed result:** Debug story passes for all three checked-in documents. The bounded smoke cases
+retain their `520 K` inlet profiles; the coupled heat-release case publishes `520..522 K` and
+asserts nonzero hydrogen conversion. The postprocessor energy residual is `-4.14e-2 J`
+(`-3.85e-4%`); an independent trapezoidal integration gives `+5.90e-1 J`. Investigation found
+that `simpsons()` skipped the second interval whenever it fell back on a trapezoid for nonuniform
+mesh spacing. The corrected iterator and irregular-grid unit tests are the regression gate. No
+solver or physics tolerance was relaxed, and no performance claim is made; file I/O is intentionally
+outside performance measurement.
+
+## Story: IVP GUI File Lifecycle
+
+**Name:** Editing a physical IVP file preserves the task and remains runnable after reload.
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features physical_task_doc_gui_edit_save_reload_preview_and_solve -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** Can the GUI open a checked-in physical task, edit and save it as a new
+file, reopen it, Preview and solve it, while rejecting an invalid replacement without partially
+overwriting the active task?
+
+**What is checked:** The test edits the heat-releasing H2 inlet temperature through the GUI numeric widget,
+performs Save As/reopen and compares every typed config field, including the edited value, complete
+reaction payload, all solver-route options, telemetry, logging, and postprocessing. It exercises
+Preview and Run Calculation, then rejects a malformed indexed Arrhenius payload with
+reaction context, verifies the active task remains unchanged, repairs the file, and completes a
+second Save As/reopen/solve cycle. The checked-in source file must remain unchanged.
+
+The reopened task is separately solved through the direct production API; final temperature and
+species fractions and conservation diagnostics from the GUI worker must agree within `1e-8`.
+Before the successful Save As, an intentionally unavailable destination is rejected; the active
+source path, dirty state, and document fingerprint remain unchanged.
+
+**Observed result:** Debug GUI lifecycle story passes. The widget edit survives Save As and reload;
+the reopened task completes with finite solution data and a Kelvin temperature result. The
+invalid-load attempt preserves the active document. Preview output is informational; there are no
+file-I/O performance assertions.
+
+## Story: Malformed IVP Mechanism Diagnostics
+
+**Name:** Invalid indexed reactions fail with field context and do not replace the active task.
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features malformed_indexed_mechanisms_fail_with_context_without_replacing_active_task -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** Do malformed readable mechanisms report the relevant reaction/field and
+leave the currently loaded physical task intact?
+
+**What is checked:** Four malformed documents cover an invalid reaction equation, a non-contiguous
+reaction index, a product species absent from the declared mechanism, and a reaction/thermal-effect
+count mismatch. Each failed load must expose diagnostic context while preserving the active
+document fingerprint and path. The separate GUI lifecycle story covers a malformed Arrhenius
+vector, repair, Save As/reopen, and successful solve.
+
+**Observed result:** All four malformed variants are rejected transactionally in Debug. No partial
+task replacement is observed; repair-and-run is covered by the physical GUI lifecycle story.
+
+## Story: Failed IVP Rerun Result Invalidation
+
+**Name:** A failed rerun cannot leave the previous solution presented as the result for edited inputs.
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features failed_ivp_rerun_discards_previous_solution_and_plot -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** If a successful IVP result exists and a subsequent run uses invalid
+solver settings, does the GUI discard the earlier published result rather than showing it as current?
+
+**What is checked:** The story first completes a physical solve and confirms the solution snapshot
+and plot exist. It then sets an invalid absolute tolerance and requests another run. Before the
+worker result arrives, the prior publication must already be cleared. After failure, no solution
+snapshot, conservation report, renderable solver state, or plot may remain.
+
+**Observed result:** Debug story passes. The failed rerun reports the configuration error without
+retaining the previous solution as current output.
+
+## Story: IVP Solver Selection by Keyboard
+
+**Name:** Keyboard focus and arrow navigation operate every solver settings selector.
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features solver_family_combo_opens_and_selects_with_keyboard -- --nocapture --test-threads=1
+cargo test --lib --no-default-features all_solver_combos_support_keyboard_arrow_selection -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** Can a keyboard user focus the IVP solver selectors, change their values
+with arrow keys, and use Enter/Space to open or close the option menu without relying on pointer
+input?
+
+**What is checked:** The story navigates the solver family, symbolic frontend, LSODE2 method and
+matrix, execution backend, callback policy, telemetry, logging, and conditional AOT toolchain/profile
+controls using AccessKit focus followed by keyboard input. It asserts the resulting typed GUI config.
+The focused control uses egui's visible widget highlight; no separate hidden focus state is maintained.
+
+**Observed result:** Debug story passes. Arrow navigation updates the typed selections across all
+tested route states, including controls that appear only after selecting AOT. Existing mouse-driven
+stories continue to cover opening menus and selecting individual entries.
+
+## Story: TW-01 Analytical Multistep IVP Control
+
+**Name:** The production IVP routes reproduce an independently constructed analytical profile for a
+12-species, 20-reaction linear network.
+
+**Commands:**
+
+```powershell
+cargo test --lib --no-default-features tw01_ -- --nocapture --test-threads=1
+cargo test --lib --no-default-features expm_action_passes_independent_closed_form_checks -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** Does the current KiThe mechanism parser, stoichiometry assembly, symbolic
+RHS construction, scaling, and production StiffAPI route agree with a separate matrix-exponential
+solution, rather than only agreeing across solver backends?
+
+**What is checked:** TW-01 defines twelve pseudo-species with the same C2H4O2 composition and twenty
+first-order reaction rows with distinct rates. The input substance ordering is reversed before
+production setup, so comparisons map concentration states back by species name rather than relying
+on accidental index agreement. The test independently constructs the linear generator from the
+reaction table and checks its two hand-derived rows, column-sum invariant, positive profile, and
+thermal closed form. KiThe's parsed stoichiometry, elemental matrix, Arrhenius constants, and zero
+heat release are checked against the fixed input. The frozen CSV contains the analytical profile at
+`z = 0.0, 0.1, ..., 1.0`; its ordinary test only reads it. LSODE2, standalone BDF, and Radau are each
+compared to the analytical solution at every point on their own native adaptive mesh. Dimensional
+publication is checked separately (`x=L*z`, `T=300+100*Teta`, published `q=T_scale*q_internal/L`),
+without comparing different solver meshes by row index. A second LSODE2 run verifies that tighter
+requested tolerances reduce profile error. The independent Padé-13 implementation has separate
+zero, diagonal, nilpotent, 2x2 rotation, semigroup, and conserved-invariant checks.
+
+**Observed result:** All five TW-01 tests and the standalone matrix-exponential test pass in Debug.
+Maximum absolute species errors on the tested native meshes were `7.62e-10` (LSODE2), `5.15e-10`
+(BDF), and `1.39e-16` (Radau); maximum total mass-fraction drift was below `1.0e-15`, and the
+maximum C/H/O elemental mass-fraction drift was `4.45e-16`. Temperature errors were `1.10e-7 K`,
+`9.45e-11 K`, and `1.71e-13 K`, respectively. Tightening LSODE2 tolerances
+from `rtol=1e-5, atol=1e-7` to `rtol=1e-9, atol=1e-11` reduced the maximum absolute state error from
+`2.63e-5` to `1.10e-9`.
+
+**Scope:** This is a synthetic analytical numerical control, not an experimental or externally
+validated kinetic mechanism and not evidence of general physical accuracy. KiThe's independent
+variable is named `x` in the solver API, but the configured `[0,1]` values are the dimensionless
+coordinate `z`; postprocessing reports physical `x=L*z`. The unusual species-equation sign is kept
+as implemented in KiThe and independently checked against its documented two-row algebra. No
+production code or performance threshold was changed.
+
+## Story: TW-02 Coupled Thermochemical Analytical IVP Control
+
+**Name:** All supported stiff solver families reproduce the analytical coupled 14-state TW-02
+profile while preserving the TW-01 chemistry trajectory.
+
+**Commands:**
+
+```powershell
+cargo test --lib --no-default-features tw02_ -- --nocapture --test-threads=1
+cargo test --lib --no-default-features tw01_ -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** When nonzero reaction heats are derived consistently from species
+enthalpies and coupled into the heat equation, do the existing KiThe reaction-rate and thermal
+source assembly paths agree with a separately assembled constant-coefficient 14x14 system and
+its matrix-exponential solution?
+
+**What is checked:** TW-02 reuses the exact TW-01 species, 20 reactions, kinetic constants, initial
+composition, and physical parameter values. It assigns synthetic molar enthalpies
+`[0,-40,-25,-65,-15,-80,-35,-100,-50,-90,-60,-115] J/mol` and derives each reaction heat as
+`Q_j = h_reactant - h_product`. The test asserts all twenty resulting heats, two independent
+stoichiometric cycle sums (Hess-law consistency), and invariance to a common enthalpy offset.
+At five points, it checks each production reaction rate and its individual `Q_j * rate_j`
+contribution against the independently assembled rate map, the total heat source, and the heat RHS
+against a separately built 14x14 matrix.
+
+The matrix exponential supplies the reference at every point of each solver's own adaptive mesh.
+The frozen CSV stores an 11-point analytical profile: the common species profile and `Teta,q` for
+`gamma = +1,+10,-1`. Assertions cover componentwise species/thermal profile error, dimensional
+temperature, finite positive species values, total mass fraction, C/H/O elemental mass fractions,
+the algebraic energy invariant, and local heat-source agreement. Metamorphic checks require
+`gamma=0` to recover TW-01, chemistry to remain invariant under gamma, and thermal changes to scale
+linearly with gamma. The reference metadata and fixture are read-only during normal tests.
+
+**Observed result:** All five TW-02 tests pass in Debug. LSODE2, standalone BDF, and Radau pass for
+each of the three gamma values. Across the nine solver/gamma combinations, maximum absolute mass
+fraction error is `6.91e-10`, maximum `Teta` error is `5.51e-9`, maximum q error is `3.24e-9`,
+maximum dimensional temperature error is `5.51e-7 K`, and maximum algebraic energy-invariant
+drift is `3.22e-13`. The largest C/H/O mass-fraction balance drift is `1.78e-15`. For `gamma=+1`,
+temperature ranges from `400.000` to `402.329 K`; for `gamma=+10`, `378.266` to `400.203 K`; for
+`gamma=-1`, `400.000` to `407.676 K`.
+
+**Thermochemical contract audit and scope:** KiThe's rate expression for a first-order reaction
+uses `rho*C_i/(M_i/1000)` multiplied by the pre-exponential factor. The IVP heat RHS multiplies
+the stored `thermal_effects` directly by these rates and applies no unit conversion. The IVP
+`FastElemReact::Q` and `SimpleReactorTask::thermal_effects` comments say `J/kg`, while the GUI and
+the BVP APIs/documentation describe reaction heat as `J/mol`; the GUI also describes positive Q as
+exothermic, whereas the TW-02 values follow the current subtractive RHS convention
+`Q = h_reactant - h_product`. In addition, the documented mass-flow input is `kg/s`, while the
+dimensionless heat Peclet expression has no explicit cross-sectional area. The species RHS scaling
+also has no evident conversion from the constructed volumetric mass source to the mass-fraction
+derivative. These are unresolved model/API dimensional-contract questions, not altered or hidden by
+this test.
+
+Accordingly TW-02 is **algebraic solver-validation evidence only**. It intentionally checks the
+current KiThe equation faithfully and does not assert that the artificial enthalpies or the
+dimensional heat/species equations define a physically valid combustion model. No production
+equations, API contracts, or performance thresholds were changed.

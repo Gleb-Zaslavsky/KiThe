@@ -13,10 +13,15 @@
 #[cfg(test)]
 mod tests {
     use super::super::reactor_ivp_gui::{
-        IvpGuiConfig, ReactorIvpApp, ReactorIvpGuiExecutionMode,
+        IvpGuiConfig, ReactorIvpApp, ReactorIvpGuiCallbackPolicy, ReactorIvpGuiExecutionMode,
         build_reactor_ivp_task_preview_snapshot,
     };
-    use crate::ReactorsIVP::solver_backend::ReactorIvpExecutionBackend;
+    use crate::Kinetics::mechfinder_api::{ReactionData, ReactionKinetics};
+    use crate::ReactorsIVP::solver_backend::{
+        ReactorIvpCallbackPolicy, ReactorIvpExecutionBackend, ReactorIvpFamilyOptions,
+    };
+    use RustedSciThe::numerical::SolverTelemetryMode;
+    use RustedSciThe::numerical::logging::SolverLogLevel;
     use egui::accesskit::Role;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
@@ -37,6 +42,10 @@ mod tests {
 
         for label in [
             "Physics",
+            "Substances",
+            "Reactions",
+            "Add substance",
+            "Add reaction",
             "Stop condition",
             "Initial state",
             "Solver backend",
@@ -174,6 +183,194 @@ mod tests {
     }
 
     #[test]
+    fn solver_family_combo_opens_and_selects_with_keyboard() {
+        let app = Rc::new(RefCell::new(ReactorIvpApp::new()));
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(820.0, 620.0))
+            .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
+
+        harness.run();
+        let family = harness.get_by_role_and_label(Role::ComboBox, "Solver family");
+        family.focus();
+        harness.run();
+        assert!(
+            harness
+                .get_by_role_and_label(Role::ComboBox, "Solver family")
+                .is_focused(),
+            "AccessKit focus should be reflected by egui's widget response"
+        );
+
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        harness.get_by_label("Radau");
+
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .focus();
+        harness.run();
+        harness.key_press(egui::Key::Space);
+        harness.run();
+        harness.get_by_label("Radau");
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .focus();
+        harness.run();
+        harness.key_press(egui::Key::ArrowDown);
+        harness.run();
+        assert_eq!(
+            app.borrow().config.solver_family,
+            crate::ReactorsIVP::solver_backend::ReactorIvpSolverFamily::Bdf
+        );
+    }
+
+    #[test]
+    fn all_solver_combos_support_keyboard_arrow_selection() {
+        let app = Rc::new(RefCell::new(ReactorIvpApp::new()));
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(820.0, 620.0))
+            .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
+        harness.run();
+
+        macro_rules! press_on {
+            ($label:literal, $key:expr) => {{
+                harness
+                    .get_by_role_and_label(Role::ComboBox, $label)
+                    .scroll_to_me();
+                harness.run();
+                harness
+                    .get_by_role_and_label(Role::ComboBox, $label)
+                    .focus();
+                harness.run();
+                harness.key_press($key);
+                harness.run();
+            }};
+        }
+
+        press_on!("Solver family", egui::Key::ArrowDown);
+        assert_eq!(
+            app.borrow().config.solver_family,
+            crate::ReactorsIVP::solver_backend::ReactorIvpSolverFamily::Bdf
+        );
+        press_on!("Solver family", egui::Key::ArrowUp);
+        press_on!("Symbolic frontend", egui::Key::ArrowDown);
+        assert_eq!(
+            app.borrow().config.symbolic_backend,
+            crate::ReactorsIVP::solver_backend::ReactorIvpSymbolicBackend::ExprLegacy
+        );
+        press_on!("LSODE2 controller", egui::Key::ArrowDown);
+        press_on!("Matrix backend", egui::Key::ArrowDown);
+        press_on!("Execution backend", egui::Key::ArrowDown);
+        harness.run();
+        press_on!("AOT toolchain", egui::Key::ArrowDown);
+        press_on!("AOT profile", egui::Key::ArrowDown);
+        assert_eq!(
+            app.borrow().config.method,
+            crate::ReactorsIVP::solver_backend::ReactorIvpMethod::Bdf
+        );
+        assert_eq!(
+            app.borrow().config.matrix_backend,
+            crate::ReactorsIVP::solver_backend::ReactorIvpMatrixBackend::Banded
+        );
+        assert_eq!(
+            app.borrow().config.execution_mode,
+            ReactorIvpGuiExecutionMode::Aot
+        );
+        assert_eq!(
+            app.borrow().config.symbolic_backend,
+            crate::ReactorsIVP::solver_backend::ReactorIvpSymbolicBackend::ExprLegacy
+        );
+        assert_eq!(format!("{:?}", app.borrow().config.aot_toolchain), "Zig");
+        assert_eq!(format!("{:?}", app.borrow().config.aot_profile), "Debug");
+
+        press_on!("Execution backend", egui::Key::ArrowUp);
+        press_on!("Callback policy", egui::Key::ArrowDown);
+        press_on!("Telemetry", egui::Key::ArrowDown);
+        press_on!("Solver logging", egui::Key::ArrowDown);
+        let config = app.borrow().config.clone();
+        assert_eq!(
+            config.callback_policy,
+            ReactorIvpGuiCallbackPolicy::Parallel
+        );
+        assert_eq!(config.telemetry, SolverTelemetryMode::Counters);
+        assert_eq!(config.logging, SolverLogLevel::Error);
+    }
+
+    #[test]
+    fn callback_policy_and_standalone_iteration_budgets_reach_solver_config() {
+        let app = Rc::new(RefCell::new(ReactorIvpApp::new()));
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(820.0, 620.0))
+            .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
+        harness.run();
+
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Callback policy")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Callback policy")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Parallel")
+            .click_accesskit();
+        harness.run();
+        harness.get_by_label("Minimum callback work");
+
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "BDF (standalone)")
+            .click_accesskit();
+        harness.run();
+        harness.get_by_label("BDF maximum steps");
+
+        let mut config = app.borrow().config.clone();
+        config.bdf_max_steps = 12_345;
+        config.callback_min_work = 64;
+        let solver = config.to_solver_config();
+        assert_eq!(
+            solver.callback_policy,
+            Some(ReactorIvpCallbackPolicy::Parallel { min_work: 64 })
+        );
+        assert!(matches!(
+            solver.family_options,
+            ReactorIvpFamilyOptions::Bdf { max_steps: 12_345 }
+        ));
+
+        config.solver_family = crate::ReactorsIVP::solver_backend::ReactorIvpSolverFamily::Radau;
+        config.radau_max_steps = 23_456;
+        config.radau_max_newton_iterations = 9;
+        assert!(matches!(
+            config.to_solver_config().family_options,
+            ReactorIvpFamilyOptions::Radau {
+                max_steps: 23_456,
+                max_newton_iterations: 9
+            }
+        ));
+        assert_eq!(
+            config.callback_policy,
+            ReactorIvpGuiCallbackPolicy::Parallel
+        );
+    }
+
+    #[test]
     fn preview_task_updates_status_and_snapshot() {
         let app = Rc::new(RefCell::new(ReactorIvpApp::new()));
         let mut open = true;
@@ -197,6 +394,91 @@ mod tests {
         assert!(app_ref.last_preview().is_some_and(
             |snapshot| !snapshot.summary_rows.is_empty() && !snapshot.equation_rows.is_empty()
         ));
+    }
+
+    #[test]
+    fn ivp_mechanism_edits_apply_with_aligned_thermal_effects_and_species_state() {
+        let app = ReactorIvpApp::new();
+        let mut config = app.config.clone();
+        config.substances.push("He".to_string());
+        config.initial_state.species.insert("He".to_string(), 0.0);
+        config.reactions.push(
+            ReactionData::try_new_elementary("H=>H2".to_string(), vec![250.0, 0.0, 0.0], None)
+                .unwrap(),
+        );
+        config.thermal_effects.push(-150_000.0);
+
+        let mut task = app.task().clone();
+        config
+            .apply_to_task(&mut task)
+            .expect("edited mechanism should apply transactionally");
+        assert_eq!(task.kindata.substances(), &["H2", "H", "He"]);
+        assert_eq!(task.kindata.equations().len(), 2);
+        assert_eq!(task.thermal_effects, vec![-2.0e5, -150_000.0]);
+        assert_eq!(
+            task.kindata.stoichiometric_analyzer().stecheo_matrx[0].len(),
+            3
+        );
+
+        config.reactions.pop();
+        config.thermal_effects.pop();
+        config.substances.pop();
+        config.initial_state.species.remove("He");
+        config
+            .apply_to_task(&mut task)
+            .expect("removing a reaction and unused substance should keep state aligned");
+        assert_eq!(task.kindata.substances(), &["H2", "H"]);
+        assert_eq!(task.kindata.equations().len(), 1);
+        assert_eq!(task.thermal_effects.len(), 1);
+    }
+
+    #[test]
+    fn ivp_preview_report_has_console_ready_chemistry_and_equations() {
+        let app = ReactorIvpApp::new();
+        let snapshot = build_reactor_ivp_task_preview_snapshot(&app.task, &app.config)
+            .expect("demo IVP task should preview");
+        let report = snapshot.format_console_report();
+        assert!(report.contains("Reactor IVP preview:"));
+        assert!(report.contains("chemistry"));
+        assert!(report.contains("H2=>2H"));
+        assert!(report.contains("Reactor IVP equations:"));
+    }
+
+    #[test]
+    fn ivp_reaction_parameters_accept_scientific_notation() {
+        let app = Rc::new(RefCell::new(ReactorIvpApp::new()));
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::new_ui(move |ui| {
+            app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+        });
+        harness.run();
+
+        for (label, value, expected) in [("A", "1e12", 1.0e12), ("E (J/mol)", "2.5e6", 2.5e6)] {
+            harness
+                .query_all_by_label(label)
+                .next()
+                .unwrap_or_else(|| panic!("missing reaction parameter input `{label}`"))
+                .scroll_to_me();
+            harness.run();
+            harness.query_all_by_label(label).next().unwrap().click();
+            harness.run();
+            harness.key_combination_modifiers(egui::Modifiers::CTRL, &[egui::Key::A]);
+            harness
+                .query_all_by_label(label)
+                .next()
+                .unwrap()
+                .type_text(value);
+            harness.key_press(egui::Key::Enter);
+            harness.run();
+
+            let parameter_index = if label == "A" { 0 } else { 2 };
+            let app_ref = app.borrow();
+            let ReactionKinetics::Elementary(data) = &app_ref.config.reactions[0].data else {
+                panic!("demo reaction should use elementary kinetics");
+            };
+            assert_eq!(data.Arrenius[parameter_index], expected, "input `{value}`");
+        }
     }
 
     #[test]

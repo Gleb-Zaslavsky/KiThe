@@ -467,9 +467,10 @@ mod tests {
 
         let ctx = egui::Context::default();
         let mut open = true;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             app.show(ui.ctx(), &mut open);
         });
+        output.textures_delta.clear();
 
         assert!(app.plot_window.is_none());
     }

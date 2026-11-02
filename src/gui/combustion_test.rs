@@ -41,11 +41,10 @@ mod tests {
     #[test]
     fn test_combustion_app_creation() {
         let app = CombustionApp::new();
-        assert!(app.document.is_empty());
-        assert!(app.new_section_name.is_empty());
+        assert!(!app.document.is_empty());
         assert!(app.new_field_names.is_empty());
         assert!(app.new_field_values.is_empty());
-        assert!(matches!(app.selected_problem, ProblemsEnum::None));
+        assert!(matches!(app.selected_problem, ProblemsEnum::BVPSimple));
     }
 
     #[test]
@@ -329,10 +328,9 @@ mod tests2 {
     #[test]
     fn test_combustion_app_creation() {
         let app = CombustionApp::new();
-        assert!(app.new_section_name.is_empty());
         assert!(app.new_field_names.is_empty());
         assert!(app.new_field_values.is_empty());
-        assert!(matches!(app.selected_problem, ProblemsEnum::None));
+        assert!(matches!(app.selected_problem, ProblemsEnum::BVPSimple));
     }
 
     #[test]
@@ -617,8 +615,7 @@ mod file_reading_tests {
         linear_sys_method: None
         abs_tolerance: 1e-7
         max_iterations: 100
-        loglevel: Some(info)
-        dont_save_logs: true
+        loglevel: off
         bounds
         C: -10.0, 10.0
         J:  -1e20, 1e20
@@ -824,7 +821,7 @@ mod file_reading_tests {
 #[cfg(test)]
 mod deletion_tests {
 
-    use crate::gui::combustion::CombustionApp;
+    use crate::gui::combustion::{CombustionApp, ProblemsEnum};
     use RustedSciThe::command_interpreter::task_parser::Value;
     use std::collections::HashMap;
 
@@ -866,7 +863,7 @@ mod deletion_tests {
 
     #[test]
     fn test_section_deletion_simulation() {
-        let mut app = CombustionApp::new();
+        let mut app = CombustionApp::new_with_problem(ProblemsEnum::None);
 
         // Create multiple sections
         app.document.insert("section1".to_string(), HashMap::new());

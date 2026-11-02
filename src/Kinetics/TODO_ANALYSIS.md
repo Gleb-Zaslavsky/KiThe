@@ -398,6 +398,15 @@ retains its last parsed revision per catalog for process lifetime.
 
 ### KIN-09: mechanism and input fidelity
 
+- [ ] Audit and repair or quarantine malformed Troe payload(s) in the default
+  GUI mechanism. Bulk parsing reports a contextual reaction index, but that
+  index is the iteration position of an unordered map and is not a stable
+  source-record identifier. The payload is correctly rejected by
+  `ReactionData::validate` for invalid Troe characteristic temperatures.
+  The GUI bulk-add path must remain all-or-nothing; restore the success story
+  after the source catalog record is corrected or explicitly excluded by the
+  catalog's supported-mechanism policy.
+
 Owners: [mechfinder](mechfinder_api/mechfinder.rs),
 [public parsing](mechfinder_api.rs), [shortcuts](parsetask.rs), and `KinData`.
 

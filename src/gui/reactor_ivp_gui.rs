@@ -8,7 +8,7 @@
 //! - postprocessing controls choose how solved results are exported;
 //! - preview prints a tabulated snapshot plus the pretty-printed symbolic RHS.
 
-use crate::Kinetics::mechfinder_api::ReactionData;
+use crate::Kinetics::mechfinder_api::{ReactionData, ReactionKinetics};
 
 use crate::ReactorsBVP::reactor_BVP_utils::ScalingConfig;
 use crate::ReactorsIVP::SimpleReactorIVP::{
@@ -23,7 +23,7 @@ use crate::ReactorsIVP::solver_backend::{
 use crate::gui::document_lifecycle::DocumentLifecycleState;
 use crate::gui::gui_plot::PlotWindow;
 use RustedSciThe::Utils::postprocessing::{PostprocessDataset, PostprocessPlan, PostprocessStatus};
-use egui::{ComboBox, DragValue, Grid, TextEdit};
+use egui::{ComboBox, DragValue, Grid, Popup, TextEdit};
 use log::{info, warn};
 
 use RustedSciThe::numerical::LSODE2::{
@@ -49,6 +49,54 @@ mod reactor_ivp_lifecycle;
 pub enum ReactorIvpGuiExecutionMode {
     Lambdify,
     Aot,
+}
+
+fn handle_combo_keyboard<T: Copy + PartialEq>(
+    ctx: &egui::Context,
+    response: &egui::Response,
+    selected: &mut T,
+    options: &[T],
+) {
+    if !response.has_focus() || options.is_empty() {
+        return;
+    }
+    response.clone().highlight();
+    let (activate, previous, next) = ctx.input(|input| {
+        (
+            input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space),
+            input.key_pressed(egui::Key::ArrowUp),
+            input.key_pressed(egui::Key::ArrowDown),
+        )
+    });
+    let popup_id = response.id.with("popup");
+    if activate {
+        if response.clicked() {
+            // egui already toggled the popup from its native activation.
+        } else if Popup::is_id_open(ctx, popup_id) {
+            Popup::close_id(ctx, popup_id);
+        } else {
+            Popup::open_id(ctx, popup_id);
+        }
+    } else if previous || next {
+        let index = options
+            .iter()
+            .position(|option| option == selected)
+            .unwrap_or(0);
+        let next_index = if next {
+            (index + 1) % options.len()
+        } else {
+            (index + options.len() - 1) % options.len()
+        };
+        *selected = options[next_index];
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ReactorIvpGuiCallbackPolicy {
+    #[default]
+    Sequential,
+    Parallel,
+    Auto,
 }
 
 /// Typed export controls for the reactor-IVP postprocessing section.
@@ -294,6 +342,8 @@ pub struct IvpGuiConfig {
     pub physical: ReactorIvpPhysicalConfig,
     pub scaling: ScalingConfig,
     pub initial_state: ReactorIvpInitialStateConfig,
+    pub substances: Vec<String>,
+    pub reactions: Vec<ReactionData>,
     pub thermal_effects: Vec<f64>,
     pub stop_condition_enabled: bool,
     pub stop_condition_species_index: usize,
@@ -303,8 +353,13 @@ pub struct IvpGuiConfig {
     pub symbolic_backend: ReactorIvpSymbolicBackend,
     pub matrix_backend: ReactorIvpMatrixBackend,
     pub execution_mode: ReactorIvpGuiExecutionMode,
+    pub callback_policy: ReactorIvpGuiCallbackPolicy,
+    pub callback_min_work: usize,
     pub aot_toolchain: Lsode2AotToolchain,
     pub aot_profile: Lsode2AotProfile,
+    pub bdf_max_steps: usize,
+    pub radau_max_steps: usize,
+    pub radau_max_newton_iterations: usize,
     pub x0: f64,
     pub x_bound: f64,
     pub first_step: Option<f64>,
@@ -335,6 +390,8 @@ impl Default for IvpGuiConfig {
                 heat_flux: 0.15,
                 species: HashMap::new(),
             },
+            substances: Vec::new(),
+            reactions: Vec::new(),
             thermal_effects: vec![-2.0e5],
             stop_condition_enabled: false,
             stop_condition_species_index: 0,
@@ -344,8 +401,13 @@ impl Default for IvpGuiConfig {
             symbolic_backend: ReactorIvpSymbolicBackend::default(),
             matrix_backend: ReactorIvpMatrixBackend::default(),
             execution_mode: ReactorIvpGuiExecutionMode::default(),
+            callback_policy: ReactorIvpGuiCallbackPolicy::default(),
+            callback_min_work: 128,
             aot_toolchain: Lsode2AotToolchain::default(),
             aot_profile: Lsode2AotProfile::default(),
+            bdf_max_steps: 200_000,
+            radau_max_steps: 200_000,
+            radau_max_newton_iterations: 6,
             x0: 0.0,
             x_bound: 0.01,
             first_step: None,
@@ -377,11 +439,29 @@ impl IvpGuiConfig {
                 controller: self.method,
                 native_execution: self.native_execution,
             },
-            ReactorIvpSolverFamily::Bdf => ReactorIvpFamilyOptions::Bdf { max_steps: 200_000 },
-            ReactorIvpSolverFamily::Radau => ReactorIvpFamilyOptions::Radau {
-                max_steps: 200_000,
-                max_newton_iterations: 6,
+            ReactorIvpSolverFamily::Bdf => ReactorIvpFamilyOptions::Bdf {
+                max_steps: self.bdf_max_steps,
             },
+            ReactorIvpSolverFamily::Radau => ReactorIvpFamilyOptions::Radau {
+                max_steps: self.radau_max_steps,
+                max_newton_iterations: self.radau_max_newton_iterations,
+            },
+        };
+
+        let callback_policy = match self.callback_policy {
+            ReactorIvpGuiCallbackPolicy::Sequential => {
+                crate::ReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Sequential
+            }
+            ReactorIvpGuiCallbackPolicy::Parallel => {
+                crate::ReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Parallel {
+                    min_work: self.callback_min_work,
+                }
+            }
+            ReactorIvpGuiCallbackPolicy::Auto => {
+                crate::ReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Auto {
+                    min_work: self.callback_min_work,
+                }
+            }
         };
 
         ReactorIvpSolverConfig {
@@ -389,7 +469,8 @@ impl IvpGuiConfig {
             symbolic_backend: self.symbolic_backend,
             matrix_backend: self.matrix_backend,
             execution_backend,
-            callback_policy: None,
+            callback_policy: (self.execution_mode == ReactorIvpGuiExecutionMode::Lambdify)
+                .then_some(callback_policy),
             stop_condition: self.stop_condition_enabled.then(|| {
                 ReactorIvpStopCondition::new(
                     self.stop_condition_species_index,
@@ -430,8 +511,38 @@ impl IvpGuiConfig {
                     .map(|value| (name.clone(), *value))
             })
             .collect();
+        config.substances = task.kindata.substances().to_vec();
+        config.reactions = task.kindata.reaction_data().unwrap_or_default().to_vec();
         config.thermal_effects = task.thermal_effects.clone();
         config.solver_family = task.solver_backend_config.family();
+        match task.solver_backend_config.family_options {
+            ReactorIvpFamilyOptions::Bdf { max_steps } => config.bdf_max_steps = max_steps,
+            ReactorIvpFamilyOptions::Radau {
+                max_steps,
+                max_newton_iterations,
+            } => {
+                config.radau_max_steps = max_steps;
+                config.radau_max_newton_iterations = max_newton_iterations;
+            }
+            ReactorIvpFamilyOptions::Lsode2 { .. } => {}
+        }
+        if let Some(policy) = task.solver_backend_config.callback_policy {
+            match policy {
+                crate::ReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Sequential => {
+                    config.callback_policy = ReactorIvpGuiCallbackPolicy::Sequential;
+                }
+                crate::ReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Parallel {
+                    min_work,
+                } => {
+                    config.callback_policy = ReactorIvpGuiCallbackPolicy::Parallel;
+                    config.callback_min_work = min_work;
+                }
+                crate::ReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Auto { min_work } => {
+                    config.callback_policy = ReactorIvpGuiCallbackPolicy::Auto;
+                    config.callback_min_work = min_work;
+                }
+            }
+        }
         if let Some(stop_condition) = task.solver_backend_config.stop_condition {
             config.stop_condition_enabled = true;
             config.stop_condition_species_index = stop_condition.species_index;
@@ -482,6 +593,29 @@ impl IvpGuiConfig {
 
     /// Apply the typed GUI config to a reactor task.
     pub fn apply_to_task(&self, task: &mut SimpleReactorTask) -> Result<(), IvpError> {
+        if self.reactions.len() != self.thermal_effects.len() {
+            return Err(IvpError::InvalidConfiguration(format!(
+                "reaction count ({}) must match thermal-effect count ({})",
+                self.reactions.len(),
+                self.thermal_effects.len()
+            )));
+        }
+        let groups = task.kindata.groups().cloned();
+        task.kindata
+            .set_reaction_data_directly(self.reactions.clone(), groups)
+            .map_err(|error| {
+                IvpError::InvalidConfiguration(format!("invalid reaction set: {error}"))
+            })?;
+        task.kindata.substances = self.substances.clone();
+        task.kindata
+            .stecheodata
+            .set_substances(self.substances.clone());
+        if !self.reactions.is_empty() {
+            task.kindata.analyze_reactions().map_err(|error| {
+                IvpError::InvalidConfiguration(format!("reaction analysis failed: {error}"))
+            })?;
+        }
+
         if self.problem_name.trim().is_empty() {
             task.problem_name = None;
         } else {
@@ -501,10 +635,10 @@ impl IvpGuiConfig {
         task.set_scaling(self.scaling.clone())
             .map_err(IvpError::from)?;
 
-        let mut initial_conditions = HashMap::with_capacity(2 + task.kindata.substances.len());
+        let mut initial_conditions = HashMap::with_capacity(2 + self.substances.len());
         initial_conditions.insert("T".to_string(), self.initial_state.temperature);
         initial_conditions.insert("q".to_string(), self.initial_state.heat_flux);
-        for substance in &task.kindata.substances {
+        for substance in &self.substances {
             let value = self.initial_state.species.get(substance).ok_or_else(|| {
                 IvpError::MissingData(format!(
                     "Missing initial condition for substance `{}`",
@@ -585,16 +719,20 @@ pub struct ReactorIvpPreviewSnapshot {
 }
 
 impl ReactorIvpPreviewSnapshot {
-    /// Print the preview in a human-readable form for console logs.
-    pub fn print_to_console(&self) {
-        info!(
-            "Reactor IVP preview:\n{}",
-            Table::new(self.summary_rows.clone())
-        );
-        info!(
-            "Reactor IVP equations:\n{}",
+    /// Format the preview as deterministic console-ready tables.
+    pub fn format_console_report(&self) -> String {
+        format!(
+            "Reactor IVP preview:\n{}\n\nReactor IVP equations:\n{}",
+            Table::new(self.summary_rows.clone()),
             Table::new(self.equation_rows.clone())
-        );
+        )
+    }
+
+    /// Print the preview directly to stdout regardless of logger configuration.
+    pub fn print_to_console(&self) {
+        let report = self.format_console_report();
+        println!("{report}");
+        info!("{report}");
     }
 }
 
@@ -756,6 +894,16 @@ pub fn build_reactor_ivp_task_preview_snapshot(
         ),
         preview_row(
             "chemistry",
+            "substances",
+            preview_task.kindata.substances.join(", "),
+        ),
+        preview_row(
+            "chemistry",
+            "reactions",
+            preview_task.kindata.vec_of_equations.join("; "),
+        ),
+        preview_row(
+            "chemistry",
             "species_count",
             preview_task.kindata.substances.len().to_string(),
         ),
@@ -797,6 +945,23 @@ fn preview_row(section: &str, field: &str, value: impl Into<String>) -> ReactorI
         field: field.to_string(),
         value: value.into(),
     }
+}
+
+fn equation_references_species(equation: &str, species: &str) -> bool {
+    if species.is_empty() {
+        return false;
+    }
+    equation.match_indices(species).any(|(start, matched)| {
+        let end = start + matched.len();
+        let before = equation[..start].chars().next_back();
+        let after = equation[end..].chars().next();
+        let valid_before = before.is_none_or(|ch| {
+            ch.is_whitespace() || ch.is_ascii_digit() || matches!(ch, '.' | '+' | '=' | '<' | '>')
+        });
+        let valid_after =
+            after.is_none_or(|ch| ch.is_whitespace() || matches!(ch, '+' | '=' | '<' | '>'));
+        valid_before && valid_after
+    })
 }
 
 fn run_reactor_ivp_postprocessing(
@@ -896,6 +1061,10 @@ pub struct ReactorIvpApp {
     last_error: Option<String>,
     last_status: Option<String>,
     last_preview: Option<ReactorIvpPreviewSnapshot>,
+    new_substance_name: String,
+    new_reaction_equation: String,
+    new_reaction_arrhenius: [f64; 3],
+    new_reaction_heat: f64,
     next_run_id: u64,
 }
 
@@ -926,6 +1095,10 @@ impl ReactorIvpApp {
                     last_error: None,
                     last_status: Some("Ready".to_string()),
                     last_preview: None,
+                    new_substance_name: String::new(),
+                    new_reaction_equation: String::new(),
+                    new_reaction_arrhenius: [1.0e3, 0.0, 1.0e4],
+                    new_reaction_heat: 0.0,
                     next_run_id: 1,
                 };
                 app.document_lifecycle
@@ -948,6 +1121,10 @@ impl ReactorIvpApp {
                     last_error: Some(err.to_string()),
                     last_status: None,
                     last_preview: None,
+                    new_substance_name: String::new(),
+                    new_reaction_equation: String::new(),
+                    new_reaction_arrhenius: [1.0e3, 0.0, 1.0e4],
+                    new_reaction_heat: 0.0,
                     next_run_id: 1,
                 }
             }
@@ -1041,6 +1218,11 @@ impl ReactorIvpApp {
         self.calculation_state
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn has_plot_window(&self) -> bool {
+        self.plot_window.is_some()
+    }
+
     /// Replace the active reactor task and resynchronize the typed editor state.
     ///
     /// This is the safe problem-switching primitive for future load paths and
@@ -1071,10 +1253,15 @@ impl ReactorIvpApp {
 
     fn render_problem_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.label("Problem name");
-            ui.add(TextEdit::singleline(&mut self.config.problem_name).desired_width(220.0));
-            ui.label("Description");
-            ui.add(TextEdit::singleline(&mut self.config.problem_description).desired_width(520.0));
+            let name_label = ui.label("Problem name");
+            let name_input =
+                ui.add(TextEdit::singleline(&mut self.config.problem_name).desired_width(220.0));
+            let _ = name_input.labelled_by(name_label.id);
+            let description_label = ui.label("Description");
+            let description_input = ui.add(
+                TextEdit::singleline(&mut self.config.problem_description).desired_width(520.0),
+            );
+            let _ = description_input.labelled_by(description_label.id);
         });
     }
 
@@ -1084,40 +1271,52 @@ impl ReactorIvpApp {
             .num_columns(4)
             .spacing([16.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Density ro");
-                ui.add(DragValue::new(&mut self.config.physical.ro).speed(1.0));
-                ui.label("Heat capacity Cp");
-                ui.add(DragValue::new(&mut self.config.physical.Cp).speed(1.0));
+                let label = ui.label("Density ro");
+                let input = ui.add(DragValue::new(&mut self.config.physical.ro).speed(1.0));
+                let _ = input.labelled_by(label.id);
+                let label = ui.label("Heat capacity Cp");
+                let input = ui.add(DragValue::new(&mut self.config.physical.Cp).speed(1.0));
+                let _ = input.labelled_by(label.id);
                 ui.end_row();
 
-                ui.label("Conductivity Lambda");
-                ui.add(DragValue::new(&mut self.config.physical.Lambda).speed(0.01));
-                ui.label("Mass flux m");
-                ui.add(DragValue::new(&mut self.config.physical.m).speed(0.001));
+                let label = ui.label("Conductivity Lambda");
+                let input = ui.add(DragValue::new(&mut self.config.physical.Lambda).speed(0.01));
+                let _ = input.labelled_by(label.id);
+                let label = ui.label("Mass flux m");
+                let input = ui.add(DragValue::new(&mut self.config.physical.m).speed(0.001));
+                let _ = input.labelled_by(label.id);
                 ui.end_row();
 
-                ui.label("Length L");
-                ui.add(DragValue::new(&mut self.config.physical.L).speed(0.001));
-                ui.label("dT");
-                ui.add(DragValue::new(&mut self.config.scaling.dT).speed(1.0));
+                let label = ui.label("Length L");
+                let input = ui.add(DragValue::new(&mut self.config.physical.L).speed(0.001));
+                let _ = input.labelled_by(label.id);
+                let label = ui.label("dT");
+                let input = ui.add(DragValue::new(&mut self.config.scaling.dT).speed(1.0));
+                let _ = input.labelled_by(label.id);
                 ui.end_row();
 
-                ui.label("T_scale");
-                ui.add(DragValue::new(&mut self.config.scaling.T_scale).speed(1.0));
-                ui.label("Scaling L");
-                ui.add(DragValue::new(&mut self.config.scaling.L).speed(0.001));
+                let label = ui.label("T_scale");
+                let input = ui.add(DragValue::new(&mut self.config.scaling.T_scale).speed(1.0));
+                let _ = input.labelled_by(label.id);
+                let label = ui.label("Scaling L");
+                let input = ui.add(DragValue::new(&mut self.config.scaling.L).speed(0.001));
+                let _ = input.labelled_by(label.id);
                 ui.end_row();
 
-                ui.label("Thermal effects");
+                let thermal_label = ui.label("Thermal effects");
                 if self.config.thermal_effects.is_empty() {
                     ui.label("No thermal effects configured");
                 } else {
-                    ui.add(DragValue::new(&mut self.config.thermal_effects[0]).speed(1000.0));
+                    let input =
+                        ui.add(DragValue::new(&mut self.config.thermal_effects[0]).speed(1000.0));
+                    let _ = input.labelled_by(thermal_label.id);
                 }
                 ui.label("Thermal effects count");
                 ui.label(self.config.thermal_effects.len().to_string());
                 ui.end_row();
             });
+
+        self.render_mechanism_section(ui);
 
         ui.horizontal_wrapped(|ui| {
             ui.label("Stop condition")
@@ -1133,7 +1332,7 @@ impl ReactorIvpApp {
                 ui.label("Available for LSODE2 only");
             }
 
-            let species_count = self.task.kindata.substances.len();
+            let species_count = self.config.substances.len();
             if species_count == 0 {
                 ui.label("No species available");
             } else {
@@ -1145,15 +1344,14 @@ impl ReactorIvpApp {
                     let label = ui.label("Species");
                     let response = ComboBox::from_id_salt("ivp_stop_condition_species")
                         .selected_text(
-                            self.task
-                                .kindata
+                            self.config
                                 .substances
                                 .get(self.config.stop_condition_species_index)
                                 .cloned()
                                 .unwrap_or_else(|| "unknown".to_string()),
                         )
                         .show_ui(ui, |ui| {
-                            for (index, species) in self.task.kindata.substances.iter().enumerate()
+                            for (index, species) in self.config.substances.iter().enumerate()
                             {
                                 ui.selectable_value(
                                     &mut self.config.stop_condition_species_index,
@@ -1162,15 +1360,191 @@ impl ReactorIvpApp {
                                 );
                             }
                         });
-                    let _ = response.response.labelled_by(label.id);
-                    ui.label("Threshold");
-                    ui.add(
+                    let _ = response.response.clone().labelled_by(label.id);
+                    handle_combo_keyboard(
+                        ui.ctx(),
+                        &response.response,
+                        &mut self.config.stop_condition_species_index,
+                        &(0..species_count).collect::<Vec<_>>(),
+                    );
+                    let threshold_label = ui.label("Threshold");
+                    let threshold = ui.add(
                         DragValue::new(&mut self.config.stop_condition_threshold)
                             .speed(0.000001)
                             .range(0.0..=f64::INFINITY),
                     );
+                    let _ = threshold.labelled_by(threshold_label.id);
                 });
             }
+        });
+    }
+
+    fn render_mechanism_section(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.heading("Substances");
+            if self.config.substances.is_empty() {
+                ui.label("No substances configured.");
+            }
+            let mut remove_substance = None;
+            for (index, species) in self.config.substances.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(species);
+                    let used = self
+                        .config
+                        .reactions
+                        .iter()
+                        .any(|reaction| equation_references_species(&reaction.eq, species));
+                    let remove = ui
+                        .add_enabled(!used, egui::Button::new("Remove substance"))
+                        .on_hover_text(if used {
+                            "Remove reactions that use this substance before deleting it."
+                        } else {
+                            "Delete this substance and its initial-state value."
+                        });
+                    if remove.clicked() {
+                        remove_substance = Some(index);
+                    }
+                });
+            }
+            if let Some(index) = remove_substance {
+                let species = self.config.substances.remove(index);
+                self.config.initial_state.species.remove(&species);
+                if self.config.stop_condition_species_index >= self.config.substances.len() {
+                    self.config.stop_condition_species_index =
+                        self.config.substances.len().saturating_sub(1);
+                }
+                self.last_status = Some(format!("Removed substance `{species}`."));
+                self.last_error = None;
+            }
+
+            ui.horizontal(|ui| {
+                let label = ui.label("New substance");
+                let input = ui.text_edit_singleline(&mut self.new_substance_name);
+                let _ = input.clone().labelled_by(label.id);
+                if ui.button("Add substance").clicked() {
+                    let name = self.new_substance_name.trim().to_string();
+                    if name.is_empty() {
+                        self.last_error = Some("Substance name cannot be empty.".to_string());
+                    } else if self
+                        .config
+                        .substances
+                        .iter()
+                        .any(|existing| existing == &name)
+                    {
+                        self.last_error = Some(format!("Substance `{name}` already exists."));
+                    } else {
+                        self.config.substances.push(name.clone());
+                        self.config.initial_state.species.insert(name.clone(), 0.0);
+                        self.new_substance_name.clear();
+                        self.last_status = Some(format!("Added substance `{name}`."));
+                        self.last_error = None;
+                    }
+                }
+            });
+        });
+
+        ui.add_space(6.0);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.heading("Reactions");
+            if self.config.reactions.is_empty() {
+                ui.label("No reactions configured.");
+            }
+            let mut remove_reaction = None;
+            for index in 0..self.config.reactions.len() {
+                ui.push_id(("ivp_reaction", index), |ui| {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        let reaction = &mut self.config.reactions[index];
+                        ui.horizontal(|ui| {
+                            let label = ui.label(format!("Reaction {}", index + 1));
+                            let input = ui.text_edit_singleline(&mut reaction.eq);
+                            let _ = input.clone().labelled_by(label.id);
+                            if ui.button("Remove reaction").clicked() {
+                                remove_reaction = Some(index);
+                            }
+                        });
+                        if let ReactionKinetics::Elementary(data) = &mut reaction.data {
+                            ui.horizontal(|ui| {
+                                for (parameter_index, name) in
+                                    ["A", "n", "E (J/mol)"].into_iter().enumerate()
+                                {
+                                    if let Some(value) = data.Arrenius.get_mut(parameter_index) {
+                                        let label = ui.label(name);
+                                        let input = ui.add(DragValue::new(value).speed(0.1));
+                                        let _ = input.labelled_by(label.id);
+                                    }
+                                }
+                            });
+                        } else {
+                            ui.label(format!(
+                                "Rate model: {:?}; model-specific parameters are preserved.",
+                                reaction.reaction_type
+                            ));
+                        }
+                        if let Some(heat) = self.config.thermal_effects.get_mut(index) {
+                            let label = ui.label("Heat effect (J/mol)");
+                            let input = ui.add(DragValue::new(heat).speed(100.0));
+                            let _ = input.labelled_by(label.id);
+                        }
+                    });
+                });
+            }
+            if let Some(index) = remove_reaction {
+                let equation = self.config.reactions.remove(index).eq;
+                if index < self.config.thermal_effects.len() {
+                    self.config.thermal_effects.remove(index);
+                }
+                self.last_status = Some(format!("Removed reaction `{equation}`."));
+                self.last_error = None;
+            }
+
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                let label = ui.label("New reaction equation");
+                let input = ui.text_edit_singleline(&mut self.new_reaction_equation);
+                let _ = input.clone().labelled_by(label.id);
+            });
+            ui.horizontal_wrapped(|ui| {
+                for (parameter, name) in
+                    self.new_reaction_arrhenius
+                        .iter_mut()
+                        .zip(["A", "n", "E (J/mol)"])
+                {
+                    let label = ui.label(name);
+                    let input = ui.add(DragValue::new(parameter).speed(0.1));
+                    let _ = input.labelled_by(label.id);
+                }
+                let label = ui.label("Heat effect (J/mol)");
+                let input = ui.add(DragValue::new(&mut self.new_reaction_heat).speed(100.0));
+                let _ = input.labelled_by(label.id);
+                if ui.button("Add reaction").clicked() {
+                    let equation = self.new_reaction_equation.trim().to_string();
+                    if equation.is_empty() {
+                        self.last_error = Some("Reaction equation cannot be empty.".to_string());
+                    } else if self
+                        .config
+                        .reactions
+                        .iter()
+                        .any(|reaction| reaction.eq == equation)
+                    {
+                        self.last_error = Some(format!("Reaction `{equation}` already exists."));
+                    } else {
+                        match ReactionData::try_new_elementary(
+                            equation.clone(),
+                            self.new_reaction_arrhenius.to_vec(),
+                            None,
+                        ) {
+                            Ok(reaction) => {
+                                self.config.reactions.push(reaction);
+                                self.config.thermal_effects.push(self.new_reaction_heat);
+                                self.new_reaction_equation.clear();
+                                self.last_status = Some(format!("Added reaction `{equation}`."));
+                                self.last_error = None;
+                            }
+                            Err(error) => self.last_error = Some(error.to_string()),
+                        }
+                    }
+                }
+            });
         });
     }
 
@@ -1180,20 +1554,24 @@ impl ReactorIvpApp {
             .num_columns(4)
             .spacing([16.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Temperature");
-                ui.add(DragValue::new(&mut self.config.initial_state.temperature).speed(1.0));
-                ui.label("Heat flux");
-                ui.add(DragValue::new(&mut self.config.initial_state.heat_flux).speed(0.01));
+                let label = ui.label("Temperature");
+                let input =
+                    ui.add(DragValue::new(&mut self.config.initial_state.temperature).speed(1.0));
+                let _ = input.labelled_by(label.id);
+                let label = ui.label("Heat flux");
+                let input =
+                    ui.add(DragValue::new(&mut self.config.initial_state.heat_flux).speed(0.01));
+                let _ = input.labelled_by(label.id);
                 ui.end_row();
 
                 ui.label("Species");
-                ui.label(format!("{}", self.task.kindata.substances.len()));
+                ui.label(format!("{}", self.config.substances.len()));
                 ui.label("State order");
-                ui.label(self.task.kindata.substances.join(", "));
+                ui.label(self.config.substances.join(", "));
                 ui.end_row();
             });
 
-        if self.task.kindata.substances.is_empty() {
+        if self.config.substances.is_empty() {
             ui.label("No species are loaded yet.");
             return;
         }
@@ -1207,15 +1585,16 @@ impl ReactorIvpApp {
                 ui.label("Canonical");
                 ui.end_row();
 
-                for species in &self.task.kindata.substances {
+                for species in &self.config.substances {
                     let value = self
                         .config
                         .initial_state
                         .species
                         .entry(species.clone())
                         .or_insert(0.0);
-                    ui.label(species);
-                    ui.add(DragValue::new(value).speed(0.01));
+                    let label = ui.label(species);
+                    let input = ui.add(DragValue::new(value).speed(0.01));
+                    let _ = input.labelled_by(label.id);
                     ui.label("yes");
                     ui.end_row();
                 }
@@ -1256,7 +1635,17 @@ impl ReactorIvpApp {
                             "Radau",
                         );
                     });
-                let _ = family_combo.response.labelled_by(family_label.id);
+                let _ = family_combo.response.clone().labelled_by(family_label.id);
+                handle_combo_keyboard(
+                    ui.ctx(),
+                    &family_combo.response,
+                    &mut self.config.solver_family,
+                    &[
+                        ReactorIvpSolverFamily::Lsode2,
+                        ReactorIvpSolverFamily::Bdf,
+                        ReactorIvpSolverFamily::Radau,
+                    ],
+                );
                 if self.config.solver_family != ReactorIvpSolverFamily::Lsode2 {
                     self.config.matrix_backend = ReactorIvpMatrixBackend::Dense;
                     self.config.execution_mode = ReactorIvpGuiExecutionMode::Lambdify;
@@ -1279,7 +1668,16 @@ impl ReactorIvpApp {
                             "ExprLegacy",
                         );
                     });
-                let _ = symbolic_combo.response.labelled_by(symbolic_label.id);
+                let _ = symbolic_combo.response.clone().labelled_by(symbolic_label.id);
+                handle_combo_keyboard(
+                    ui.ctx(),
+                    &symbolic_combo.response,
+                    &mut self.config.symbolic_backend,
+                    &[
+                        ReactorIvpSymbolicBackend::AtomView,
+                        ReactorIvpSymbolicBackend::ExprLegacy,
+                    ],
+                );
                 ui.end_row();
             });
 
@@ -1309,7 +1707,13 @@ impl ReactorIvpApp {
                                 "Adams only",
                             );
                         });
-                    let _ = method_combo.response.labelled_by(method_label.id);
+                    let _ = method_combo.response.clone().labelled_by(method_label.id);
+                    handle_combo_keyboard(
+                        ui.ctx(),
+                        &method_combo.response,
+                        &mut self.config.method,
+                        &[ReactorIvpMethod::Auto, ReactorIvpMethod::Bdf, ReactorIvpMethod::Adams],
+                    );
                     let matrix_label = ui.label("Matrix backend").on_hover_text(
                         "LSODE2 supports sparse and banded layouts. Standalone BDF currently requires Dense.",
                     );
@@ -1327,7 +1731,16 @@ impl ReactorIvpApp {
                                 "Banded",
                             );
                         });
-                    let _ = matrix_combo.response.labelled_by(matrix_label.id);
+                    let _ = matrix_combo.response.clone().labelled_by(matrix_label.id);
+                    handle_combo_keyboard(
+                        ui.ctx(),
+                        &matrix_combo.response,
+                        &mut self.config.matrix_backend,
+                        &[
+                            ReactorIvpMatrixBackend::Sparse,
+                            ReactorIvpMatrixBackend::Banded,
+                        ],
+                    );
                     ui.end_row();
 
                     let execution_label = ui.label("Execution backend").on_hover_text(
@@ -1350,7 +1763,16 @@ impl ReactorIvpApp {
                                 "AOT",
                             );
                         });
-                    let _ = execution_combo.response.labelled_by(execution_label.id);
+                    let _ = execution_combo.response.clone().labelled_by(execution_label.id);
+                    handle_combo_keyboard(
+                        ui.ctx(),
+                        &execution_combo.response,
+                        &mut self.config.execution_mode,
+                        &[
+                            ReactorIvpGuiExecutionMode::Lambdify,
+                            ReactorIvpGuiExecutionMode::Aot,
+                        ],
+                    );
                     ui.label("AOT / stop controls are LSODE2-only");
                     ui.end_row();
                 } else {
@@ -1362,7 +1784,100 @@ impl ReactorIvpApp {
                     ui.label("Lambdify (supported route)");
                     ui.end_row();
                 }
+
+                match self.config.solver_family {
+                    ReactorIvpSolverFamily::Bdf => {
+                        let label = ui.label("BDF maximum steps").on_hover_text(
+                            "Maximum accepted integration steps for standalone BDF.",
+                        );
+                        let input = ui.add(
+                            DragValue::new(&mut self.config.bdf_max_steps)
+                                .range(1..=usize::MAX),
+                        );
+                        let _ = input.labelled_by(label.id);
+                        ui.end_row();
+                    }
+                    ReactorIvpSolverFamily::Radau => {
+                        let label = ui.label("Radau maximum steps").on_hover_text(
+                            "Maximum accepted integration steps for standalone Radau.",
+                        );
+                        let input = ui.add(
+                            DragValue::new(&mut self.config.radau_max_steps)
+                                .range(1..=usize::MAX),
+                        );
+                        let _ = input.labelled_by(label.id);
+                        let label = ui.label("Radau maximum Newton iterations").on_hover_text(
+                            "Maximum Newton iterations per standalone Radau step.",
+                        );
+                        let input = ui.add(
+                            DragValue::new(&mut self.config.radau_max_newton_iterations)
+                                .range(1..=usize::MAX),
+                        );
+                        let _ = input.labelled_by(label.id);
+                        ui.end_row();
+                    }
+                    ReactorIvpSolverFamily::Lsode2 => {}
+                }
             });
+
+        if self.config.execution_mode == ReactorIvpGuiExecutionMode::Lambdify {
+            ui.label("Callback execution");
+            Grid::new("ivp_callback_execution_grid")
+                .num_columns(4)
+                .spacing([16.0, 8.0])
+                .show(ui, |ui| {
+                    let label = ui.label("Callback policy").on_hover_text(
+                        "Controls sequential or parallel evaluation of symbolic residual/Jacobian callbacks. Sequential is the conservative default.",
+                    );
+                    let combo = ComboBox::from_id_salt("ivp_callback_policy")
+                        .selected_text(match self.config.callback_policy {
+                            ReactorIvpGuiCallbackPolicy::Sequential => "Sequential",
+                            ReactorIvpGuiCallbackPolicy::Parallel => "Parallel",
+                            ReactorIvpGuiCallbackPolicy::Auto => "Auto",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.config.callback_policy,
+                                ReactorIvpGuiCallbackPolicy::Sequential,
+                                "Sequential",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.callback_policy,
+                                ReactorIvpGuiCallbackPolicy::Parallel,
+                                "Parallel",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.callback_policy,
+                                ReactorIvpGuiCallbackPolicy::Auto,
+                                "Auto",
+                            );
+                        });
+                    let _ = combo.response.clone().labelled_by(label.id);
+                    handle_combo_keyboard(
+                        ui.ctx(),
+                        &combo.response,
+                        &mut self.config.callback_policy,
+                        &[
+                            ReactorIvpGuiCallbackPolicy::Sequential,
+                            ReactorIvpGuiCallbackPolicy::Parallel,
+                            ReactorIvpGuiCallbackPolicy::Auto,
+                        ],
+                    );
+                    if self.config.callback_policy != ReactorIvpGuiCallbackPolicy::Sequential {
+                        let label = ui.label("Minimum callback work").on_hover_text(
+                            "Work threshold used by Parallel or Auto callback scheduling.",
+                        );
+                        let input = ui.add(
+                            DragValue::new(&mut self.config.callback_min_work)
+                                .range(0..=usize::MAX),
+                        );
+                        let _ = input.labelled_by(label.id);
+                    } else {
+                        ui.label("Threshold unused");
+                    }
+                    ui.end_row();
+                });
+        }
 
         ui.separator();
         ui.strong("Diagnostics");
@@ -1397,7 +1912,18 @@ impl ReactorIvpApp {
                             "Detailed",
                         );
                     });
-                let _ = telemetry_combo.response.labelled_by(telemetry_label.id);
+                let _ = telemetry_combo.response.clone().labelled_by(telemetry_label.id);
+                handle_combo_keyboard(
+                    ui.ctx(),
+                    &telemetry_combo.response,
+                    &mut self.config.telemetry,
+                    &[
+                        SolverTelemetryMode::Off,
+                        SolverTelemetryMode::Counters,
+                        SolverTelemetryMode::Timings,
+                        SolverTelemetryMode::Detailed,
+                    ],
+                );
                 let logging_label = ui.label("Solver logging").on_hover_text(
                     "Logging controls solver messages only and does not enable telemetry collection.",
                 );
@@ -1418,7 +1944,19 @@ impl ReactorIvpApp {
                             "Debug",
                         );
                     });
-                let _ = logging_combo.response.labelled_by(logging_label.id);
+                let _ = logging_combo.response.clone().labelled_by(logging_label.id);
+                handle_combo_keyboard(
+                    ui.ctx(),
+                    &logging_combo.response,
+                    &mut self.config.logging,
+                    &[
+                        SolverLogLevel::Off,
+                        SolverLogLevel::Error,
+                        SolverLogLevel::Warn,
+                        SolverLogLevel::Info,
+                        SolverLogLevel::Debug,
+                    ],
+                );
                 ui.end_row();
             });
 
@@ -1457,7 +1995,21 @@ impl ReactorIvpApp {
                                 "Rust",
                             );
                         });
-                    let _ = toolchain_combo.response.labelled_by(toolchain_label.id);
+                    let _ = toolchain_combo
+                        .response
+                        .clone()
+                        .labelled_by(toolchain_label.id);
+                    handle_combo_keyboard(
+                        ui.ctx(),
+                        &toolchain_combo.response,
+                        &mut self.config.aot_toolchain,
+                        &[
+                            Lsode2AotToolchain::CTcc,
+                            Lsode2AotToolchain::CGcc,
+                            Lsode2AotToolchain::Zig,
+                            Lsode2AotToolchain::Rust,
+                        ],
+                    );
                     let profile_label = ui.label("AOT profile");
                     let profile_combo = ComboBox::from_id_salt("ivp_aot_profile")
                         .selected_text(format!("{:?}", self.config.aot_profile))
@@ -1473,7 +2025,13 @@ impl ReactorIvpApp {
                                 "Debug",
                             );
                         });
-                    let _ = profile_combo.response.labelled_by(profile_label.id);
+                    let _ = profile_combo.response.clone().labelled_by(profile_label.id);
+                    handle_combo_keyboard(
+                        ui.ctx(),
+                        &profile_combo.response,
+                        &mut self.config.aot_profile,
+                        &[Lsode2AotProfile::Release, Lsode2AotProfile::Debug],
+                    );
                     ui.end_row();
                     ui.label("AOT confirmation");
                     ui.label("AOT runs must be explicitly confirmed before execution.");
@@ -1488,32 +2046,39 @@ impl ReactorIvpApp {
             .num_columns(4)
             .spacing([16.0, 8.0])
             .show(ui, |ui| {
-                ui.label("x0");
-                ui.add(DragValue::new(&mut self.config.x0).speed(0.01));
-                ui.label("x_bound");
-                ui.add(DragValue::new(&mut self.config.x_bound).speed(0.01));
+                let label = ui.label("x0");
+                let input = ui.add(DragValue::new(&mut self.config.x0).speed(0.01));
+                let _ = input.labelled_by(label.id);
+                let label = ui.label("x_bound");
+                let input = ui.add(DragValue::new(&mut self.config.x_bound).speed(0.01));
+                let _ = input.labelled_by(label.id);
                 ui.end_row();
 
-                ui.label("first_step");
+                let first_step_label = ui.label("first_step");
                 let mut first_step_enabled = self.config.first_step.is_some();
-                ui.checkbox(&mut first_step_enabled, "");
+                let enabled_response = ui.checkbox(&mut first_step_enabled, "enabled");
+                let _ = enabled_response.labelled_by(first_step_label.id);
                 if first_step_enabled {
                     let value = self.config.first_step.get_or_insert(1e-6);
-                    ui.add(DragValue::new(value).speed(0.000_001));
+                    let input = ui.add(DragValue::new(value).speed(0.000_001));
+                    let _ = input.labelled_by(first_step_label.id);
                 } else {
                     self.config.first_step = None;
                     ui.label("None");
                 }
                 ui.end_row();
 
-                ui.label("max_step");
-                ui.add(DragValue::new(&mut self.config.max_step).speed(0.01));
-                ui.label("rtol");
-                ui.add(DragValue::new(&mut self.config.rtol).speed(0.000001));
+                let label = ui.label("max_step");
+                let input = ui.add(DragValue::new(&mut self.config.max_step).speed(0.01));
+                let _ = input.labelled_by(label.id);
+                let label = ui.label("rtol");
+                let input = ui.add(DragValue::new(&mut self.config.rtol).speed(0.000001));
+                let _ = input.labelled_by(label.id);
                 ui.end_row();
 
-                ui.label("atol");
-                ui.add(DragValue::new(&mut self.config.atol).speed(0.0000001));
+                let label = ui.label("atol");
+                let input = ui.add(DragValue::new(&mut self.config.atol).speed(0.0000001));
+                let _ = input.labelled_by(label.id);
                 ui.end_row();
             });
     }
@@ -1524,58 +2089,60 @@ impl ReactorIvpApp {
             .num_columns(4)
             .spacing([16.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Save TXT");
-                ui.checkbox(&mut self.config.postprocessing.save_txt, "");
-                ui.label("TXT path");
-                ui.add(
+                ui.checkbox(&mut self.config.postprocessing.save_txt, "Save TXT");
+                let label = ui.label("TXT path");
+                let input = ui.add(
                     TextEdit::singleline(&mut self.config.postprocessing.txt_path)
                         .desired_width(360.0)
                         .hint_text("auto"),
                 );
+                let _ = input.labelled_by(label.id);
                 ui.end_row();
 
-                ui.label("Save CSV");
-                ui.checkbox(&mut self.config.postprocessing.save_csv, "");
-                ui.label("CSV path");
-                ui.add(
+                ui.checkbox(&mut self.config.postprocessing.save_csv, "Save CSV");
+                let label = ui.label("CSV path");
+                let input = ui.add(
                     TextEdit::singleline(&mut self.config.postprocessing.csv_path)
                         .desired_width(360.0)
                         .hint_text("auto"),
                 );
+                let _ = input.labelled_by(label.id);
                 ui.end_row();
 
-                ui.label("Write report");
-                ui.checkbox(&mut self.config.postprocessing.write_report, "");
-                ui.label("Report path");
-                ui.add(
+                ui.checkbox(&mut self.config.postprocessing.write_report, "Write report");
+                let label = ui.label("Report path");
+                let input = ui.add(
                     TextEdit::singleline(&mut self.config.postprocessing.report_path)
                         .desired_width(360.0)
                         .hint_text("auto"),
                 );
+                let _ = input.labelled_by(label.id);
                 ui.end_row();
 
-                ui.label("Plotters PNG");
-                ui.checkbox(&mut self.config.postprocessing.plotters_png, "");
-                ui.label("Plotters dir");
-                ui.add(
+                ui.checkbox(&mut self.config.postprocessing.plotters_png, "Plotters PNG");
+                let label = ui.label("Plotters dir");
+                let input = ui.add(
                     TextEdit::singleline(&mut self.config.postprocessing.plotters_dir)
                         .desired_width(360.0)
                         .hint_text("auto"),
                 );
+                let _ = input.labelled_by(label.id);
                 ui.end_row();
 
-                ui.label("Gnuplot PNG");
-                ui.checkbox(&mut self.config.postprocessing.gnuplot_png, "");
-                ui.label("Gnuplot dir");
-                ui.add(
+                ui.checkbox(&mut self.config.postprocessing.gnuplot_png, "Gnuplot PNG");
+                let label = ui.label("Gnuplot dir");
+                let input = ui.add(
                     TextEdit::singleline(&mut self.config.postprocessing.gnuplot_dir)
                         .desired_width(360.0)
                         .hint_text("auto"),
                 );
+                let _ = input.labelled_by(label.id);
                 ui.end_row();
 
-                ui.label("Terminal plot");
-                ui.checkbox(&mut self.config.postprocessing.terminal_plot, "");
+                ui.checkbox(
+                    &mut self.config.postprocessing.terminal_plot,
+                    "Terminal plot",
+                );
                 ui.label("Selected exports");
                 ui.label(if self.config.postprocessing.has_actions() {
                     "configured"
@@ -1690,11 +2257,13 @@ impl ReactorIvpApp {
         }
     }
 
-    fn request_calculation(&mut self) {
+    pub(crate) fn request_calculation(&mut self) {
         if self.calculation_state.is_active() {
             self.last_error = Some("A calculation is already running.".to_string());
             return;
         }
+
+        self.invalidate_published_result();
 
         if matches!(self.config.execution_mode, ReactorIvpGuiExecutionMode::Aot) {
             self.request_aot_calculation();
@@ -1782,6 +2351,8 @@ impl ReactorIvpApp {
             return;
         }
 
+        self.invalidate_published_result();
+
         let mut task = self.task.clone();
         let config = self.config.clone();
         let config_fingerprint = Self::fingerprint_config(&config);
@@ -1850,6 +2421,8 @@ impl ReactorIvpApp {
             return;
         }
 
+        self.invalidate_published_result();
+
         let mut task = self.task.clone();
         let config = self.config.clone();
         let config_fingerprint = Self::fingerprint_config(&config);
@@ -1917,6 +2490,11 @@ impl ReactorIvpApp {
             .expect("reactor IVP test worker thread should start");
     }
 
+    fn invalidate_published_result(&mut self) {
+        self.plot_window = None;
+        self.task.clear_published_solution();
+    }
+
     /// Compute a stable fingerprint for the currently edited solver inputs.
     ///
     /// This is used to reject stale worker results if the user modifies the
@@ -1952,6 +2530,17 @@ impl ReactorIvpApp {
             hasher.write_u64(value_bits);
         }
 
+        for substance in &config.substances {
+            substance.hash(&mut hasher);
+        }
+        for reaction in &config.reactions {
+            if let Ok(serialized) = serde_json::to_vec(reaction) {
+                hasher.write(&serialized);
+            } else {
+                reaction.eq.hash(&mut hasher);
+            }
+        }
+
         for effect in &config.thermal_effects {
             hasher.write_u64(effect.to_bits());
         }
@@ -1964,6 +2553,11 @@ impl ReactorIvpApp {
         config.symbolic_backend.hash(&mut hasher);
         config.matrix_backend.hash(&mut hasher);
         config.execution_mode.hash(&mut hasher);
+        config.callback_policy.hash(&mut hasher);
+        hasher.write_usize(config.callback_min_work);
+        hasher.write_usize(config.bdf_max_steps);
+        hasher.write_usize(config.radau_max_steps);
+        hasher.write_usize(config.radau_max_newton_iterations);
         format!("{:?}", config.telemetry).hash(&mut hasher);
         format!("{:?}", config.logging).hash(&mut hasher);
         format!("{:?}", config.aot_toolchain).hash(&mut hasher);

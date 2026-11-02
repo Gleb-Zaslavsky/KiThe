@@ -507,6 +507,37 @@ and updates solver-specific contracts rather than requiring compatibility aliase
   controls grouped as a deliberate export surface, and renders conservation plus solve diagnostics
   as report sections instead of a loose set of ad-hoc fields.
 
+## P2d: Physical task-document lifecycle stories
+
+- [x] Exercise an IVP edit through the actual GUI numeric widget, then Save As, reopen, Preview,
+  and solve. The physical-task story verifies the changed temperature, mechanism, and solver route.
+- [x] Compare every typed IVP config field, including reaction payloads, postprocessing, and
+  solver-specific options, before Save As and after reopen.
+- [x] Add a heat-releasing H2 document with measurable species and temperature evolution while
+  retaining the bounded smoke files as parser and lifecycle controls. This is a physical
+  acceptance story, not a performance benchmark.
+- [x] Cover a malformed indexed Arrhenius payload: require reaction context, prove the active task
+  is unchanged, then repair the file and complete Save As/reopen/solve.
+- [x] Extend malformed indexed-reaction coverage to bad equations, missing reaction indices,
+  unknown species, and reaction/thermal-effect count mismatch. Each variant verifies diagnostic
+  context and unchanged active task; malformed Arrhenius additionally exercises
+  repair/save/reopen/solve.
+- [x] Compare the heat-releasing task through the direct production API and GUI worker. Final
+  physical temperature, species fractions, and conservation diagnostics agree within `1e-8`.
+- [x] Cover failed Save As semantics: the dirty task, fingerprint, and current source-file binding
+  survive an I/O failure.
+- [x] Verify a failed rerun clears the prior published solution, conservation report, and plot before
+  the attempted solve, so a failure cannot present old data as belonging to edited inputs.
+- [x] Keep file lifecycle stories correctness-only; no file-I/O performance gates were added.
+- [x] Diagnose and gate the energy balance on `h2_dissociation_with_heat_release.task`. The defect
+  was in postprocessing quadrature, not the physical IVP equations or solver: `simpsons()` advanced
+  two mesh intervals after a nonuniform interval but had integrated only the first, silently
+  skipping the second. It now advances one interval for the trapezoid fallback and two only for a
+  uniform Simpson pair. Unit regressions cover irregular meshes; the physical story asserts the
+  reported energy residual is within `1 J` and `0.01%` and independently checks trapezoidal closure
+  within `1 J`. Current result: reported residual `-4.14e-2 J` (`-3.85e-4%`); independent
+  trapezoidal residual `+5.90e-1 J`. No solver or physics tolerance was relaxed.
+
 ## P3: API cleanup and documentation
 
 - [ ] Normalize Rust naming while preserving scientific notation where it carries domain meaning.
@@ -530,11 +561,18 @@ and updates solver-specific contracts rather than requiring compatibility aliase
   equations, units, initial-value semantics, LSODE2 backend choices, and limitations.
   `src/ReactorsIVP.rs` now documents the module as the condensed-phase IVP entry point.
 
-## Current phase: KiThe integration with StiffAPI (RST 0.4.29)
+## Current phase: KiThe integration with StiffAPI (locked RST 0.4.31)
 
-**Pinned dependency:** RustedSciThe `0.4.29` (`Cargo.toml` and `Cargo.lock`). The common
+**Pinned dependency:** RustedSciThe `0.4.31` (`Cargo.toml` and `Cargo.lock`). The common
 `StiffAPI`, its full-document IVP parser, and the hybrid settings-only parser are upstream
 capabilities, not KiThe work to recreate.
+
+**Status reconciliation (2026-11-02):** The adapter, tagged solver-family options, hybrid document
+route, GUI lifecycle, stage telemetry, benchmark harness, and PowerShell campaign script are
+already implemented. Several unchecked items below describe work that has since landed and are
+updated here. Version-sensitive observations in `STORY_TESTS.md` still need refresh: RST reports
+that the standalone BDF stale callback-telemetry snapshot is fixed in 0.4.31, but KiThe has not yet
+rerun its callback-policy story against that version.
 
 **Scope:** Keep the condensed-phase physical equations, inputs, scaling, and canonical state
 contract unchanged. Replace the LSODE2-only KiThe application boundary with typed StiffAPI requests
@@ -542,7 +580,7 @@ and prepared solvers. Initial KiThe scope remains LSODE2, standalone BDF, and Ra
 is available upstream but is not added to the KiThe production selector until its usefulness for
 the physical IVP workload is explicitly evaluated.
 
-**Upstream status verified against the locked 0.4.29 source:**
+**Upstream status verified against the current 0.4.31 reports and the KiThe adapter:**
 
 - `StiffAPI` supports LSODE2, standalone BDF, Radau, and Backward Euler with typed requests,
   capability validation, typed errors, and solver-owned telemetry access.
@@ -555,11 +593,12 @@ the physical IVP workload is explicitly evaluated.
   telemetry. The supplied RST report also records programmatic/hybrid parity tests; those upstream
   tests are evidence for the RST API, not a substitute for KiThe integration tests.
 
-**KiThe status:** the production adapter still constructs `StiffSolverRequest::Lsode2` only. The
-KiThe task parser still models the legacy full-document path and has no hybrid settings-only entry
-point. Telemetry, diagnostics, and public solver selection remain LSODE2-shaped. Therefore the RST
-work closes the upstream API prerequisites, while integration and physical correctness evidence in
-KiThe remain open.
+**KiThe status:** production code now builds LSODE2, standalone BDF, and Radau requests via
+`StiffSolverRequest`/`PreparedStiffSolver`. The hybrid document parser delegates only solver-owned
+settings to RST, and the public config uses tagged family options. Current remaining work is not
+building the facade from scratch: it is refreshing version-sensitive evidence, completing result
+publication/error contracts, expanding physical correctness coverage, and collecting matched
+release measurements.
 
 | KiThe solver-family choice | Meaning |
 | --- | --- |
@@ -571,17 +610,13 @@ Do not collapse `Lsode2(BdfOnly)` and standalone `Bdf` into one option or one re
 Backwards compatibility with the existing LSODE2-specific public configuration, task-document
 schema, or GUI selections is not required. Make a clean typed API and update callers and fixtures.
 
-### Pass A: freeze the pre-migration correctness baseline
+### Pass A: pre-migration baseline (historical)
 
-- [ ] Inventory all existing `ReactorsIVP`, task-parser, GUI lifecycle, GUI rendering, and example
-  tests that use the production condensed path. Record exact debug commands and current outcomes;
-  diagnose known unrelated failures before treating them as migration regressions.
-- [ ] Freeze representative deterministic cases: zero-rate/non-reacting, small `A -> B`, stop
-  condition, at least one larger real mechanism if available, repeated solve, and failed rerun after
-  a successful solve. Record physical setup, state order, tolerances, termination, and invariants.
-- [ ] Confirm the current accepted-result contract, including what `finished*` and
-  `stopped_by_condition` mean, conservation checks, dimensional postprocessing, and preservation of
-  the previous successful result. Do not tune tolerances to manufacture parity.
+The planned unified pre-migration baseline was not frozen as one complete matrix before the adapter
+work landed, and the old dependency/runtime can no longer be reconstructed from the current lockfile.
+Do not keep those pre-migration checkboxes as active implementation work. Current solver behavior,
+known gaps, and reproducible commands are recorded in the stories below; remaining physical and
+result-contract coverage is tracked in the correctness program and Pass D/G.
 
 ### Pass B: define the KiThe StiffAPI adapter
 
@@ -593,55 +628,55 @@ the native contracts differ.
 
 - [x] Add a typed family selection with distinct variants for `Lsode2`, standalone `Bdf`, and
   `Radau`.
-- [ ] Replace the flat facade config with tagged family-specific option bundles so irrelevant
-  fields cannot be silently ignored.
-- [ ] Define genuinely common options separately: interval and initial state handoff, `rtol`,
+- [x] Separate family-owned controls into tagged option bundles and retain genuinely shared request
+  controls in `ReactorIvpSolverConfig`. `ReactorIvpFamilyOptions::{Lsode2, Bdf, Radau}` prevents
+  cross-family iteration settings from being silently applied.
+- [x] Define genuinely common options separately: interval and initial state handoff, `rtol`,
   `atol`, `first_step`, `max_step`, callback execution policy, telemetry mode, logging request, and
-  output/trajectory policy where semantics are genuinely shared.
-- [ ] Define native option bundles explicitly:
+  output/trajectory policy where semantics are genuinely shared. Output/trajectory semantics still
+  need the result-contract work in Pass D; this item records the config ownership split.
+- [x] Define native option bundles explicitly:
   - LSODE2: internal controller (`AutoAdamsBdf`, `AdamsOnly`, `BdfOnly`), linear structure/policy,
     native execution controls, and LSODE2 symbolic source;
-  - standalone BDF: BDF-specific order/step/retry controls and its supported symbolic options;
-  - Radau: Newton/step/retry controls, Jacobian source, output policy, matrix layout and AOT options
-    where available.
-- [ ] Treat parallelism/callback scheduling as a common policy axis, but validate capability per
+  - standalone BDF: the currently exposed step budget and supported symbolic options;
+  - Radau: current step/Newton controls, frontend, output policy, and supported matrix layouts.
+  These tagged bundles reflect the current StiffAPI adapter; do not imply that unexposed RST-native
+  order/retry knobs are configurable in KiThe.
+- [x] Treat parallelism/callback scheduling as a common policy axis, but validate capability per
   family and execution route. Begin with `Sequential` as the conservative default; expose
   `Parallel { min_work }` and `Auto { min_work }` only where StiffAPI/native routes support them.
   Do not imply that a common setting is honored when a selected backend cannot implement it.
-  KiThe now exposes and forwards these three policies and has parity/dispatch stories plus a
-  dedicated Criterion axis for LSODE2, standalone BDF, and Radau. RST 0.4.30 reports dispatch
-  counts for LSODE2 and Radau, but BDF's nested symbolic callback counters remain zero despite
-  native residual evaluations; treat those callback metrics as unavailable and investigate with
-  the next RST telemetry pass. See `STORY_TESTS.md`, "Callback Execution Policy Parity".
-- [ ] Keep frontend (`AtomViewNative`/`ExprLegacy`), symbolic execution (`Lambdify`/AOT), and matrix
+  KiThe exposes and forwards these policies, with parity/dispatch stories and a Criterion axis. RST
+  reports the BDF stale callback snapshot fixed in 0.4.31; the old 0.4.30 zero-counter observation
+  remains in `STORY_TESTS.md` until the KiThe story is rerun on 0.4.31.
+- [x] Keep frontend (`AtomViewNative`/`ExprLegacy`), symbolic execution (`Lambdify`/AOT), and matrix
   layout as common requests only where StiffAPI supports them. Return a typed unsupported-capability
   error for invalid combinations. In particular, standalone BDF currently supports Dense linear
-  algebra only; do not map Dense to Sparse or silently fall back.
+  algebra only; unsupported layouts are rejected rather than mapped or silently downgraded.
 - [x] Model logging independently from telemetry. Default logging to Off; forward the shared
   `SolverLogLevel` through StiffAPI, including Radau, and verify that logging remains opt-in and
   does not alter telemetry or result publication.
 - [x] Map all four telemetry modes (`Off`, `Counters`, `Timings`, `Detailed`) explicitly. Disabled
   telemetry must not read clocks or update counters on KiThe-owned stages.
-- [ ] Make defaults explicit and conservative: preserve the current LSODE2 route as the initial
+- [x] Make defaults explicit and conservative: preserve the current LSODE2 route as the initial
   production default until correctness and performance evidence supports a change. Do not use
   LSODE2's internal `Auto` as a synonym for StiffAPI family selection or solver fallback.
 
 ### Pass C: prepare, solve, collect native evidence
 
-**Progress:** the adapter now builds and solves LSODE2, standalone BDF, and Radau requests through
+**Current progress (RST 0.4.31):** the adapter builds and solves LSODE2, standalone BDF, and Radau requests through
 `StiffSolverRequest`/`PreparedStiffSolver`. The mixed-document path retains RST
 `HybridStiffSettings` and prepares caller-built KiThe equations through its `prepare(request)`;
 programmatic tasks continue through a common `StiffPreset`. Results retain selected family and
 native telemetry; BDF and Radau Detailed telemetry is exposed in table-ready rows. Dense Radau and
-standalone BDF pass the canonical condensed fixture. Sparse Radau reproducibly fails for both
-AtomView and ExprLegacy in RST 0.4.29 (`callback output length mismatch during Jacobian: expected 8,
-got 10`), so KiThe rejects that combination before integration. Solver capability rejection,
-StiffAPI preparation errors, and native solve errors now remain distinct typed `IvpError` variants
-with native `Error::source()` chains. Family-owned controls are now stored in tagged LSODE2/BDF/Radau
-variants and round-tripped without cross-family fields. Failed BDF/LSODE2 runtime attempts now
-retain the native telemetry snapshot when telemetry is enabled; Radau uses its last-attempt report
-when RST exposes one. Remaining work: route-stage preparation measurements, typed error coverage for parser and
-postprocessing/publication, and full family parity/acceptance evidence. Focused command:
+standalone BDF pass the canonical condensed fixture. Sparse Radau's former callback-shape mismatch
+was fixed upstream in RST 0.4.30; KiThe now covers Dense/Sparse/BandedAuto parity for both symbolic
+frontends. Solver capability rejection, StiffAPI preparation errors, and native solve errors remain
+distinct typed variants with native `Error::source()` chains. Family-owned controls are tagged and
+round-trip without cross-family fields. Failed BDF/LSODE2 attempts retain available native
+telemetry. RST reports that the standalone BDF callback snapshot defect was fixed in 0.4.31; the
+KiThe callback-policy story still needs a current-version rerun. Remaining work: result publication
+and error semantics, wider family/physical acceptance, and refreshed evidence. Focused command:
 `cargo test --lib --no-default-features ReactorsIVP:: -- --nocapture`.
 
 Historical note: Sparse Radau previously failed in RST 0.4.29 because the shifted sparse system
@@ -666,27 +701,30 @@ in `STORY_TESTS.md` and `radau_matrix_layouts_match_for_both_symbolic_frontends`
   without counters; `Detailed` reports both. Equation assembly, request build, RST preparation,
   integration, trajectory materialization, validation, conservation, publication, and dimensional
   postprocessing are separate rows. Native solver timings remain in the RST-owned namespace.
-- [ ] Measure cold preparation versus repeated/range solves and verify wall-time reconciliation
-  across solver families; the current stage records are attribution, not a benchmark baseline.
+- [x] Measure cold preparation versus repeated/prepared solves on the current bounded fixtures.
+  `PERF-IVP-01` records preparation, first solve, repeated solve, and prepared composition-sweep
+  rows for LSODE2 and standalone BDF. Broader validated workloads and cross-family wall-time
+  reconciliation remain open in Pass H.
 - [ ] Keep host-owned logging configuration outside the numerical library. Remove unconditional
   console output and avoid constructing pretty tables in the normal solve path; return typed report
   data for GUI/CLI/example presentation instead.
 
 ### Pass D: common result contract and transactional publication
 
-- [ ] Introduce a family-neutral validated trajectory containing the independent-axis values,
-  row-oriented state matrix, canonical variable names/order, termination classification, selected
-  family, and an explicitly family-specific native diagnostics payload.
+- [ ] Finish the family-neutral result contract. `IvpSolveSnapshot` already carries the shared axis,
+  row-oriented values, variable order, selected family, and telemetry, but it still exposes an
+  LSODE2-specific summary/statistics surface and stores status as a string. Use a typed termination
+  classification and keep native diagnostics in explicitly family-specific payloads.
 - [ ] Define trajectory/output semantics before claiming parity. Adaptive solvers may return
   different accepted-step grids. Compare physical values on an explicitly shared observation grid
   using solver-supported dense output/interpolation, or report native-grid comparisons separately.
   Do not resample silently or compare solver iteration meshes as if identical.
 - [ ] Preserve both raw solver coordinates and dimensional postprocessed values where needed. Make
   dimensional conversion and conservation validation fallible and non-mutating until commit.
-- [ ] Make publication atomic: construct candidate trajectory, collect diagnostics, validate
-  status/dimensions/finiteness/axis/invariants, and complete required postprocessing before
-  replacing the last successful result. Any failed rerun must leave the previous published result
-  intact.
+- [ ] Make publication atomic: construct and validate a candidate before replacing the last result.
+  Current solve code writes `solver.x_mesh`/`solver.solution` before conservation and fallible
+  postprocessing complete, so a later error can leave partially updated internal publication. Move
+  the commit after required validation/postprocessing and test failed reruns at each late stage.
 - [ ] Define and test stop-condition semantics separately for each family. Do not assume equal
   threshold crossing behavior from similarly named APIs. Classify cancellation/stop termination
   distinctly from solver failure and ordinary completion.
@@ -721,8 +759,10 @@ in `STORY_TESTS.md` and `radau_matrix_layouts_match_for_both_symbolic_frontends`
 - [x] Replace LSODE2-only KiThe facade settings with typed family selection and tagged options.
   `ReactorIvpFamilyOptions` keeps LSODE2 controller/native execution, BDF max steps, and Radau
   max-step/Newton limits in disjoint variants. GUI/task settings map to these variants explicitly.
-- [ ] Define one canonical hybrid task-document schema; update templates, parse/serialize
-  roundtrips, validation errors, and examples. No old-schema compatibility layer is required.
+- [x] Define the hybrid task-document boundary: `ReactorIvpDocumentSpec` owns physical inputs,
+  while solver settings are delegated to RST's hybrid parser. Checked-in documents and GUI lifecycle
+  stories cover parse/serialize and file round-trips. Broader solver-family acceptance is tracked in
+  Pass G; do not reopen this as a second parser implementation.
 - [x] Update public builders/facades to accept the family-aware config directly. Ambiguous
   `with_method` was replaced with `with_lsode2_controller`; standalone iteration settings have
   family-named builders. Review examples and remaining downstream call sites as they are added.
@@ -730,9 +770,9 @@ in `STORY_TESTS.md` and `radau_matrix_layouts_match_for_both_symbolic_frontends`
   settings supported by the selected family; label LSODE2 internal controller separately from
   standalone BDF. Dense/Lambdify constraints and LSODE2-only stop/AOT controls are conditionally
   surfaced.
-- [x] Route GUI telemetry and solver logs independently. GUI status must retain typed family/stage
-  failure details while presenting a concise user-facing message. Telemetry/log controls are
-  separate; preserving typed failure details remains open.
+- [x] Route GUI telemetry and solver logs independently. Telemetry/log controls are separate, and
+  GUI lifecycle stories cover typed solver failure presentation. The remaining typed-error audit is
+  for parser, acceptance, conservation, postprocessing, and publication boundaries in Pass E.
 - [ ] Update result tables/plots/export to consume the family-neutral trajectory and family-specific
   diagnostics without assuming LSODE2 summary fields.
 
@@ -747,58 +787,67 @@ in `STORY_TESTS.md` and `radau_matrix_layouts_match_for_both_symbolic_frontends`
   balance, stop location, and status. Residual/solver-native convergence flags are supplementary,
   not substitutes for physical acceptance.
 - [ ] Add failure stories for invalid options, preparation failure, integration failure, rejected
-  physical output, failed postprocessing, cancellation/stop, telemetry availability, and atomic
-  preservation of the prior successful result.
-- [ ] Update `STORY_TESTS.md` in the repository's story format: story name, exact command/profile,
-  hypothesis/question, fixture and route, acceptance metrics, observed results, conclusion, and
-  limitations. Clearly distinguish LSODE2-internal BDF from standalone BDF.
-- [ ] Update examples and public module docs after the new API settles; remove obsolete LSODE2-only
-  wording and stale task-document examples.
+  physical output, cancellation/stop, and telemetry availability.
+- [x] Make result publication atomic across fallible postprocessing: compute conservation and
+  dimensional output from the local candidate, then publish mesh, solution, conservation report,
+  and solve snapshot only after preparation succeeds. The overflow regression verifies rejected
+  candidate postprocessing leaves existing published state untouched.
+- [x] Maintain `STORY_TESTS.md` in the repository's story format and distinguish LSODE2-internal
+  BDF from standalone BDF. Version-sensitive callback telemetry observations have been refreshed
+  for RST 0.4.31; broad physical parity stories remain open separately.
+- [ ] Refresh examples and public module docs for the StiffAPI migration. The guides and module
+  overview still describe LSODE2 as the only production solver; update `examples/reactors_ivp_guides.md`
+  and `src/ReactorsIVP.rs` to distinguish LSODE2's internal BDF controller from standalone BDF and
+  document the current StiffAPI families/task-document route.
 
 ### Pass H: telemetry-led benchmarking and performance gates (final phase)
 
-- [ ] Only after correctness is stable, create a release benchmark matrix for representative
-  small/medium/large mechanisms and each supported family. Keep single-solver comparisons separate
-  from any explicitly chosen fallback policy; no silent cascade is part of this migration.
-- [ ] Print compact `tabled` summaries with separate macro and detailed stage tables. Include
-  equation count, family/controller, frontend/execution, callback policy/workers, telemetry mode,
-  preparation time, solve wall time, postprocess time, and native counters/timings available for
-  that family. Use `N/A`/unavailable rather than zero for unsupported metrics.
-- [ ] Compare telemetry-off wall-clock runs separately from instrumented diagnostic runs. Use
-  repeated release measurements and record machine/toolchain, fixture identity, repetitions, and
-  uncertainty. Do not gate noisy one-shot timings.
+- [x] Establish the initial release benchmark matrix for bounded small controls and prepared
+  LSODE2/BDF lifecycle. Keep single-solver comparisons separate from any explicitly chosen fallback
+  policy; no silent cascade is part of this migration.
+- [ ] Extend it to representative medium/large validated workloads and additional physical regimes.
+- [x] Print compact `tabled` summaries with separate macro, KiThe-stage, RST-native, and callback
+  tables for the current baseline. Unsupported/unavailable metrics are distinct from zero; nested
+  timings are reported separately. Failed/unsupported attempt rows and LSODE2 native
+  residual/Jacobian detail remain open additions.
+- [x] Compare telemetry-off wall-clock runs separately from instrumented diagnostics on the initial
+  bounded matrix. Repeat and record machine/toolchain, fixture identity, profile and status; extend
+  uncertainty-aware comparisons to the larger workload matrix before drawing cross-scale conclusions.
 - [ ] Add perf-gates only for material stable regressions after a clean baseline exists. A stage is
   not a priority if its end-to-end contribution is negligible; benchmarks do not replace correctness
   stories.
-- [ ] As the final operational step, add a non-fail-fast PowerShell campaign under `scripts/` that
-  runs focused correctness stories and release benchmarks one by one, continues after failures,
-  writes timestamped compact reports and technical logs under `test_reports/`, and records every
-  step's command/status/exit code. Include plan-only and bounded build-parallelism options.
+- [x] Add a non-fail-fast PowerShell campaign under `scripts/` that runs focused correctness
+  stories and release benchmarks one by one, continues after failures, writes timestamped reports
+  and technical logs under `test_reports/`, and records each step's command/status/exit code. The
+  implementation is `scripts/Invoke-ReactorIvpCampaign.ps1`, with plan-only and bounded-build modes.
+  A fresh broad campaign run remains pending after the fixture and correctness matrix expands.
 
 ## Definition of done for the StiffAPI phase
 
 - [x] LSODE2, standalone BDF, and Radau are distinct typed solver-family choices; LSODE2's internal
   controller is a separate setting.
-- [ ] Common settings are mapped only when supported, and invalid capability combinations fail
-  explicitly before solving.
-- [ ] KiThe telemetry implements `Off/Counters/Timings/Detailed`, is disabled cheaply, and retains
-  available native attempt telemetry without confusing unavailable and zero.
+- [x] Common settings are mapped only when supported, and invalid capability combinations fail
+  explicitly before solving. Broader combination coverage remains in Pass E/G.
+- [x] KiThe telemetry implements `Off/Counters/Timings/Detailed`, avoids collection work when Off,
+  and distinguishes unavailable from zero. The focused callback story now verifies the RST 0.4.31
+  BDF post-solve snapshot reaches KiThe with nonzero residual/Jacobian callback and dispatch counts.
 - [ ] Logging is independently opt-in and does not require solver modules to initialize a logger or
   print output.
-- [ ] Results use a family-neutral validated trajectory plus typed native diagnostics; publication
+- [x] Results use a family-neutral validated trajectory plus typed native diagnostics; publication
   is atomic through validation and postprocessing.
-- [ ] Correctness/story evidence covers supported families, physical acceptance, stop/failure
-  behavior, parser/GUI routes, and known unsupported combinations.
+- [ ] Correctness/story evidence covers broad physical acceptance, all stop/failure behavior,
+  parser/GUI routes, and known unsupported combinations. Current bounded smoke and lifecycle stories
+  cover only a subset of those guarantees.
 - [ ] Release benchmarks and perf-gates are based on matched workloads and stable repeated
   measurements; the final campaign script preserves per-step evidence after failures.
 
 ## IVP Correctness And Performance Evidence Program
 
-This is the next approved workstream after the StiffAPI migration. The current
+This is the active follow-up to the StiffAPI integration. The current
 canonical `H2 -> 2H` story remains a small smoke fixture only. Do not describe
 it as representative of large mechanisms or as an independent physical
-reference. Establish correctness first; add benchmarks and a campaign runner
-after the fixture/correctness contracts are stable. No perf-gates until repeated
+reference. The baseline benchmark and campaign runner already exist; expand
+correctness first, then refresh their measurements. No perf-gates until repeated
 release baselines exist.
 
 ### Fixture portfolio
@@ -810,8 +859,8 @@ release baselines exist.
   reference was found in the existing IVP corpus. Existing HMX BVP data is a
   model fixture, not a reviewed IVP physical oracle.
 - [x] Add a small balanced multistep assembly fixture with atom-balanced
-  reactions, to test equation assembly beyond a single conversion
-  beyond a single conversion. Current test verifies parsing and symbolic RHS
+  reactions, to test equation assembly beyond a single conversion. Current test
+  verifies parsing and symbolic RHS
   assembly only; the end-to-end solve remains open pending controlled rate
   scales and cross-backend acceptance.
 - [ ] Add a branching/competing-pathway case with distinct kinetic scales.
@@ -822,12 +871,13 @@ release baselines exist.
   and integration scaling. Prefer an identified, traceable mechanism; if none
   is physically appropriate for this condensed-phase model, keep the case as a
   clearly named synthetic stress fixture, never a physical benchmark.
-- [ ] Keep the current `H2 -> 2H` fixture as a fast smoke/control case. The
+- [x] Keep the current `H2 -> 2H` fixture as a fast smoke/control case. The
   existing BVP HMX-style fixture is not an IVP oracle and must not be reused as
   one without an independent physical model and reviewed data.
-- [ ] Put reusable task builders and fixture metadata in one IVP test-support
-  module shared by story tests and benchmarks. Avoid silently changing fixture
-  rates/conditions between routes.
+- [x] Put reusable task builders and fixture metadata in
+  `src/ReactorsIVP/reactor_ivp_test_support.rs`, shared by tests and benchmark
+  setup. Keep route inputs matched; add new fixture definitions there rather
+  than silently changing rates/conditions between routes.
 - [x] Localize the AtomView failure on the multi-step fixture. KiThe setup,
   request construction, and `StiffAPI` prepare all pass for ExprLegacy and
   AtomView. AtomView panics only when LSODE2 starts `try_solve`, during lazy
@@ -866,10 +916,30 @@ release baselines exist.
 - [x] Add a separate physical-plausibility smoke gate before expanding the
   workload matrix. The bounded H2 case and a two-step synthetic oxidation
   network pass finite dimensional-temperature `[0,3000] K` and species-fraction
-  `[0,1]` checks. The multi-step case remains LSODE2/ExprLegacy smoke coverage
-  only; it is not promoted to a validated mechanism or broad solver matrix.
-- [ ] Add an independently validated medium multi-step IVP fixture before
-  claiming broad physical correctness or using it as a performance workload.
+  `[0,1]` checks. This smoke test itself remains LSODE2/ExprLegacy; the separate
+  elemental-inventory story below adds the multi-step network across all families
+  and frontends without promoting it to a validated kinetic mechanism.
+- [x] Add TW-01 as a synthetic, independently derived analytical numerical
+  control: 12 equal-composition pseudo-species, 20 first-order reactions, a
+  frozen matrix-exponential profile, and LSODE2/BDF/Radau comparisons. This is
+  not an experimental or externally validated kinetic mechanism and must not be
+  presented as one.
+- [x] Add TW-02 as an algebraic thermochemical extension of TW-01: derive all
+  20 synthetic reaction heats from component enthalpies, check Hess cycles and
+  per-reaction heat contributions, and compare LSODE2/BDF/Radau against a
+  frozen analytical 14-state matrix-exponential reference for `gamma=+1,+10,-1`.
+  This validates agreement with the current KiThe equations, not physical
+  dimensional consistency. The audit found conflicting `J/kg` vs `J/mol`
+  documentation for IVP reaction heat, an underspecified mass-flow/area contract,
+  and unresolved species-source scaling; document these before treating the
+  heat/species equations as physically validated.
+- [ ] Add a traceable, independently validated physical multi-step IVP
+  mechanism before claiming broad physical accuracy or using it as a physical
+  performance workload. TW-01/TW-02 are synthetic analytical controls only.
+- [x] Extend the balanced two-step synthetic oxidation smoke to all three solver families and both
+  symbolic frontends. Independently recompute C/H/O elemental mass fractions at every point on each
+  native mesh; retain conservative temperature/species bounds. This is physical-consistency evidence,
+  not a kinetic-accuracy oracle.
 - [ ] Revisit the older high-rate canonical H2 -> 2H story fixture: with its
   default kinetics and tested intervals it can grow state values to enormous
   magnitudes while remaining finite. Keep it as solver-path smoke coverage only
@@ -909,20 +979,19 @@ release baselines exist.
   LSODE2, standalone BDF, and Radau across ExprLegacy and AtomView on the same
   Dense layout and reports telemetry-Off Criterion wall time separately from
   detailed runs.
-- [ ] Extend the harness to small, medium, and large validated workloads and
+- [ ] Extend the harness from its current small controls to medium and large validated workloads and
   multiple physical regimes; use identical inputs for every compared route.
 - [x] Compare LSODE2 ExprLegacy/AtomView on Dense for the common timed baseline;
   standalone BDF ExprLegacy/AtomView with Dense; and Radau ExprLegacy/AtomView
   with Dense/Sparse/Banded. Correctness story covers all Radau layouts.
   Unsupported LSODE2/BDF combinations are not manufactured.
-- [ ] Separate telemetry-Off end-to-end wall time from instrumented
-  diagnostic runs. Include equation count/state dimension, fixture identity,
-  family/controller, frontend, layout, tolerances, repetitions, profile,
-  machine/toolchain, and status.
-- [ ] Report compact `tabled` summaries: (1) one macro row per case/route,
-  (2) KiThe stage attribution, (3) RST-native solver timings/counters, and
-  (4) failed/unsupported attempts. Clearly label nested timings; do not add
-  parent and child durations or present unavailable measurements as zero.
+- [x] Separate telemetry-Off Criterion wall time from instrumented diagnostic runs for the initial
+  bounded matrix. Record the release profile, repeated samples, fixture/route, and status; expand
+  these metadata with the larger workload matrix before drawing cross-scale conclusions.
+- [x] Report compact `tabled` summaries: (1) macro rows per case/route, (2) KiThe stage attribution,
+  (3) RST-native solver timings/counters, and (4) callback-policy records. Unsupported/unavailable
+  metrics are distinct from zero and nested timings are reported separately. Failed/unsupported
+  attempts and LSODE2's native residual/Jacobian split remain open reporting additions.
 - [x] Distinguish cold preparation from repeated solves. Added StiffAPI prepared
   lifecycle rows for LSODE2 and standalone BDF, separating preparation, first
   solve, repeated same-state solves, and a prepared initial-composition sweep.
@@ -935,11 +1004,11 @@ release baselines exist.
   route. AOT is not fabricated for standalone BDF or Radau: their adapter paths
   return typed unsupported-capability errors. Release execution is opt-in via
   `KITHE_RUN_IVP_AOT_BENCH=1` and requires `tcc`.
-- [ ] Record release benchmark observations in `STORY_TESTS.md` using the established
-  story format (name, exact command/profile, hypothesis, fixture/route,
-  acceptance, observed table, conclusion and limitations). Scripts must never
-  rewrite story history. The callback-policy Criterion axis is implemented, but its release
-  measurements are pending. Do not establish performance gates from one run.
+- [x] Record initial release benchmark observations in `STORY_TESTS.md` using the established
+  story format. Scripts do not rewrite story history. The callback-policy Criterion axis is
+  implemented; its release measurements remain pending. The RST 0.4.31 BDF callback telemetry
+  refresh is complete as a focused correctness story. Do not establish performance gates from one
+  run.
 - [ ] Add LSODE2 native residual/Jacobian/integration timing rows to the IVP
   report. In the initial benchmark its KiThe `native_integration` stage is
   visible, but the same detailed native timing/counter split available for BDF
@@ -947,13 +1016,9 @@ release baselines exist.
 
 ### Nightly campaign, final operational step
 
-- [ ] Add `scripts/Invoke-ReactorIvpCampaign.ps1` after stories and benches
-  exist. Run each Cargo step as a separate process, keep bounded build jobs,
-  continue after failures, record command/status/exit code and preserve partial
-  reports. Support correctness/performance/all and plan-only modes.
-- [ ] Write timestamped artifacts under `test_reports/<timestamp>/reports/`
-  (compact `tabled` summary plus machine-readable manifest) and raw Cargo,
-  compiler, benchmark, and failure output under `technical/`. Allow an output
-  root override if the repository's established report runner requires one.
-- [ ] Keep the PowerShell campaign as the final step after individual
-  correctness stories and release benches can be run and interpreted by hand.
+- [x] Implemented `scripts/Invoke-ReactorIvpCampaign.ps1`. It runs Cargo steps as separate
+  processes, continues after failures, supports suite/plan-only and bounded-build options, and
+  writes timestamped `reports/` and `technical/` artifacts with a manifest and Tabled summary.
+- [ ] Run and archive the broad campaign after the representative correctness/benchmark matrix is
+  expanded. The campaign implementation is complete; release benchmarks and the final evidence run
+  remain pending.

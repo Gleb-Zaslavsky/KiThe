@@ -2,7 +2,7 @@
 
 ## Story: Hybrid Task Settings Route to the Selected RST Family
 
-**Name:** KiThe parses solver-only BVP settings through the RST 0.4.29 hybrid parser.
+**Name:** KiThe parses solver-only BVP settings through the RST 0.4.31 hybrid parser.
 
 **Command:**
 
@@ -18,10 +18,11 @@ strategy-only task documents?
 **What is checked:** Damped, Frozen, and Sci maps are parsed into their typed
 `BvpSolverSettings` variants. The test checks Damped's interval-based initial
 guess columns versus node-based Frozen/Sci columns, confirms legacy inference
-without `solver_family`, and verifies the task's native `dont_save_log` toggle
-stays outside the RST settings parser.
+without `solver_family`, confirms the common `loglevel` setting is owned by
+the RST settings parser, and verifies the removed `dont_save_log` key is
+rejected as an unknown setting.
 
-**Observed result:** Pass on RustedSciThe 0.4.29. All three settings variants
+**Observed result:** Pass on RustedSciThe 0.4.31. All three settings variants
 are produced, the legacy Damped task is accepted, and the family-specific
 initial-guess dimensions are `n_steps` for Damped and `n_steps + 1` for
 Frozen/Sci.
@@ -44,11 +45,12 @@ cargo test --lib --no-default-features bvp_solver_telemetry_choice_is_serialized
 **Question / hypothesis:** Does the BVP GUI let a user select RST's telemetry
 collection mode without coupling that choice to Rust logging or log-file policy?
 
-**What is checked:** The seeded task starts with `telemetry: off`. The GUI
-changes it to `counters`; `dont_save_log` remains independently enabled.
+**What is checked:** The seeded task starts with `telemetry: off` and
+`loglevel: off`. The GUI changes telemetry to `counters` without changing the
+logging level.
 
 **Observed result:** Pass. The selected telemetry value is serialized as
-`counters`, while the logging toggle remains unchanged.
+`counters`, while `loglevel` remains `off`.
 
 **Conclusion:** The task-document path exposes RST telemetry with collection
 disabled by default and keeps telemetry distinct from logging. Route-specific
@@ -465,3 +467,201 @@ Optional SuperLU route: set `SUPERLU_LIBRARY` to the RST SuperLU bridge library 
 
 **Conclusion:** The repaired routes are eligible for the general BVP solver matrix and baseline;
 this does not yet establish physical HMX acceptance for Frozen/Naive.
+
+## Story: Checked-In Physical BVP Task Documents
+
+**Name:** Readable HMX BVP task files load and solve through the production file route.
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features checked_in_physical_bvp_documents_load_and_solve -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** Do checked-in, user-readable BVP documents preserve their physical
+composition, kinetics, and solver settings when parsed by the standard `solve_from_file` path?
+
+**What is checked:** Both compact HMX documents are solved from disk. The story checks finite
+profiles, physical temperature in `0..3000 K`, and all concentration profiles in `0..1`. The pair
+uses the same HMX decomposition model with distinct inlet composition, exercising more than one
+physical input while keeping the fixture small and reviewable.
+
+**Observed result:** Debug story passes for both files. The compact HMX profile spans approximately
+`600..868.98 K`; the alternate-inlet profile spans approximately `600..863.85 K`. Each contains
+33 points. File I/O is correctness coverage only, not a performance gate.
+
+## Story: BVP GUI File Lifecycle
+
+**Name:** A physical BVP task can be edited, saved, reopened, and solved in the GUI.
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features physical_bvp_task_doc_gui_load_edit_save_reload_and_run -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** Does the structured BVP GUI preserve physical inputs through an
+edit/save/reopen cycle and run the reopened document through its normal calculation action?
+
+**What is checked:** The test opens the alternate-inlet HMX task, edits the reaction pre-exponential
+factor through its Physics-tab widget, saves to a temporary task file, and reopens it. It verifies
+species order, reaction data, thermal effects, diffusion coefficients, boundary conditions, physical
+inputs, integral-valued Float types, and the full typed GUI solver snapshot (including backend,
+initial guess, and postprocessing settings). The checked-in source file must remain unchanged.
+The same saved task is then solved through direct `solve_from_file` and the GUI calculation path;
+the complete postprocessed mesh and solution matrix handed to the plot window must agree componentwise
+within `1e-8 * max(|reference|, 1)` (mesh `1e-12`).
+
+**Observed result:** Debug GUI story passes and both routes produce matching physical profiles. The
+actual GUI widget edit survives Save As and reload, while the source file remains unchanged. This catches a prior
+serialization defect where integral-valued `Float`s were written without a decimal point and
+reparsed as `Integer`, causing otherwise valid solver inputs to fail validation. File I/O is not
+performance-measured.
+
+## Story: BVP Document Failure and Result Provenance
+
+**Name:** Rejected file replacements preserve the active result; rejected reruns clear stale output.
+
+**Commands:**
+
+```powershell
+cargo test --lib --no-default-features malformed_bvp_replacement_preserves_dirty_active_document_transactionally -- --nocapture --test-threads=1
+cargo test --lib --no-default-features rejected_bvp_rerun_clears_previous_plot_result -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** Does a failed document replacement leave the current task and its
+successful result intact, while a new run request invalidates old output before new-input
+validation can fail?
+
+**What is checked:** After a successful HMX solve, a malformed replacement is requested while the
+document has unsaved edits. The active document, typed GUI snapshot, path, dirty flag, and complete
+plot payload remain unchanged. In the second story, an invalid solver backend is submitted after a
+successful run; the request fails visibly and the previous plot is cleared.
+
+**Observed result:** Both Debug stories pass. File-load failure is transactional with respect to the
+existing result; failed rerun cannot leave old plot data displayed as if it belonged to the rejected
+inputs.
+
+## Story: BVP Numerical Failure Recovery
+
+**Name:** A failed HMX BVP solve can be corrected and rerun without stale output.
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features bvp_numerical_failure_can_be_repaired_and_rerun -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** When the nonlinear iteration budget is insufficient for the physical
+task, does the GUI report a numerical failure, then produce a fresh physical profile after the user
+repairs that setting?
+
+**What is checked:** The checked-in HMX task is run with `max_iterations=1`, which must fail without
+a plot. The task is repaired to `max_iterations=100` and rerun. The successful result must contain a
+finite profile and a physically bounded Kelvin temperature column.
+
+**Observed result:** Debug story passes: the constrained solve fails, the corrected solve completes,
+and only the recovered run publishes a new plot.
+
+## Story: BVP Solver-Family Physical Readiness in the GUI
+
+**Name:** The selected solver family reports its measured compact-HMX acceptance status.
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features bvp_family_switch_exposes_capability_specific_controls_in_compact_window -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** Can users distinguish physical-route validation status without losing
+the ability to inspect or select a solver family?
+
+**What is checked:** In the compact BVP window, the solver panel reports compact-HMX physical
+acceptance for Damped, BVP_sci, and Frozen/Naive as the family selector changes. Frozen/Naive remain
+selectable; the GUI does not imply physical acceptance where the endpoint contract is not met.
+This is presentation of measured status, not a change to solver policy or the acceptance gate.
+
+**Observed result:** Debug GUI story passes. Damped and BVP_sci display accepted status, while
+Frozen/Naive display that compact-HMX boundary acceptance remains open. The route selection and
+typed solver configuration are unchanged.
+
+## Story: BVP Conditional Controls in a Compact Viewport
+
+**Name:** Every currently supported conditional solver control is reachable in a compact BVP window.
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features bvp_conditional_solver_controls_are_reachable_in_compact_viewport -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** In an 820x620 window, can a user scroll each solver-family panel to every
+control revealed by the selected execution mode, matrix layout, and callback policy?
+
+**What is checked:** The story checks control bounds after scrolling for Damped Lambdify sequential
+and parallel-threshold settings, Damped AOT build controls, and BVP_sci Lambdify dense/sparse/banded
+and AOT controls. Conditional sparse factorization, callback threshold, bandwidth, and AOT build
+fields are included. The test seeds valid document settings to exercise each rendered branch;
+selector interactions and typed setting round-trips are covered by separate stories.
+
+**Observed result:** Debug story passes. Each checked control is brought into the compact viewport
+and its widget rectangle intersects the visible screen. This is UI reachability coverage only; it
+does not claim solver correctness or extend route capability.
+
+## Story: BVP_sci AOT Document Controls
+
+**Name:** BVP_sci AOT artifact and chunk settings remain document-driven and parser-valid.
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features bvp_sci_aot_artifact_and_chunk_controls_roundtrip_into_hybrid_api -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** Does the GUI expose the artifact-lifecycle and chunking settings that
+the locked RST hybrid parser supports, and does the resulting task document preserve them as typed
+solver configuration?
+
+**What is checked:** The AOT BVP_sci panel renders output/handoff paths, crate/module overrides,
+and residual/sparse/banded chunk controls. The production hybrid parser reconstructs each supplied
+value. The story also verifies that a build profile is omitted for `require_prebuilt`, where RST
+rejects that otherwise-inapplicable field.
+
+**Observed result:** Debug story passes against RustedSciThe 0.4.30. All artifact and chunking values
+survive the GUI document path; no compiler is invoked. Damped target chunk counts were not part of
+this BVP_sci story and are covered separately against the RST 0.4.31 Damped parser below.
+Run it with:
+
+```powershell
+cargo test --lib --no-default-features malformed_bvp_replacement_preserves_dirty_active_document_transactionally -- --nocapture --test-threads=1
+```
+
+## Story: Damped AOT Target Chunk Counts in the GUI
+
+**Name:** Optional Damped AOT chunk-count overrides reach the RST hybrid settings API.
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features bvp_damped_aot_chunk_targets_roundtrip_into_hybrid_api -- --nocapture --test-threads=1
+cargo test --lib --no-default-features bvp_aot_chunk_target_counts_must_be_positive -- --nocapture --test-threads=1
+cargo test --lib --no-default-features bvp_conditional_solver_controls_are_reachable_in_compact_viewport -- --nocapture --test-threads=1
+```
+
+**Question / hypothesis:** Can users optionally override RST's Damped AOT residual and Jacobian
+target chunk counts, while leaving defaults untouched when overrides are disabled and avoiding
+irrelevant controls for Lambdify?
+
+**What is checked:** Both controls render on the Damped AOT path, their values are normalized to the
+integer representation expected by the production hybrid parser, and the parsed generated-backend
+configuration contains the requested `ByTargetChunkCount` policies. Switching to Lambdify removes
+the AOT-only values and widgets. Zero is rejected before solver handoff. Hover/help content and
+reachability in an 820x620 viewport are covered as well.
+
+**Observed result:** Debug stories pass on RustedSciThe 0.4.31. The GUI forwards residual target
+count 5 and Jacobian target count 3 as typed RST policies; zero is rejected, and Lambdify emits no
+chunk overrides.
+
+**Conclusion:** The document-driven GUI now exposes the RST 0.4.31 Damped AOT chunk controls without
+changing RST defaults or adding these AOT-only settings to the Lambdify route. This verifies settings
+construction, not runtime performance or generated-code execution.

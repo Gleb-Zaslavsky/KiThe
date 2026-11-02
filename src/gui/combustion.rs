@@ -95,6 +95,13 @@ pub enum ProblemsEnum {
     None,
     BVPSimple,
 }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum BvpEditorTab {
+    #[default]
+    Physics,
+    Solver,
+}
 impl ProblemsEnum {
     /// Returns the template configuration string for the selected problem type.
     ///
@@ -144,10 +151,16 @@ impl std::fmt::Display for ProblemsEnum {
 /// * `Vector` - Multiple drag widgets for each vector element
 /// * `Boolean` - Checkbox widget
 /// * `Optional` - Read/edit an existing typed payload without inventing its type
-fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) -> bool {
+fn render_value(
+    ui: &mut egui::Ui,
+    value: &mut Value,
+    field_name: &str,
+    label_id: egui::Id,
+) -> bool {
     match value {
         Value::String(s) => {
             let response = ui.text_edit_singleline(s);
+            let _ = response.clone().labelled_by(label_id);
             if response.changed() {
                 info!("Field '{}' changed to: {}", field_name, s);
             }
@@ -163,6 +176,7 @@ fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) -> bool 
                     format!("{:.6}", n)
                 }
             }));
+            let _ = response.clone().labelled_by(label_id);
             if response.changed() {
                 info!("Field '{}' changed to: {}", field_name, f);
             }
@@ -170,6 +184,7 @@ fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) -> bool 
         }
         Value::Integer(i) => {
             let response = ui.add(egui::DragValue::new(i).speed(1));
+            let _ = response.clone().labelled_by(label_id);
             if response.changed() {
                 info!("Field '{}' changed to: {}", field_name, i);
             }
@@ -177,6 +192,7 @@ fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) -> bool 
         }
         Value::Usize(u) => {
             let response = ui.add(egui::DragValue::new(u).speed(1));
+            let _ = response.clone().labelled_by(label_id);
             if response.changed() {
                 info!("Field '{}' changed to: {}", field_name, u);
             }
@@ -195,6 +211,7 @@ fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) -> bool 
                             format!("{:.6}", n)
                         }
                     }));
+                let _ = response.clone().labelled_by(label_id);
                 hovered |= response.hovered();
                 if response.changed() {
                     info!("Field '{}[{}]' changed to: {}", field_name, i, v);
@@ -204,6 +221,7 @@ fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) -> bool 
         }
         Value::Boolean(b) => {
             let response = ui.checkbox(b, "");
+            let _ = response.clone().labelled_by(label_id);
             if response.changed() {
                 info!("Field '{}' changed to: {}", field_name, b);
             }
@@ -214,7 +232,7 @@ fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) -> bool 
             ui.horizontal(|ui| {
                 if let Some(inner) = opt {
                     ui.label("Some:");
-                    hovered = render_value(ui, inner, field_name);
+                    hovered = render_value(ui, inner, field_name, label_id);
                 } else {
                     // A generic `None` carries no information about its inner
                     // type. Typed optional controls are responsible for
@@ -252,6 +270,51 @@ fn render_value(ui: &mut egui::Ui, value: &mut Value, field_name: &str) -> bool 
 ///
 /// Field deletion is handled safely by collecting fields to delete first,
 /// then removing them outside the iteration to avoid borrowing conflicts.
+#[derive(Clone, Copy)]
+struct SectionRenderOptions {
+    framed: bool,
+    allow_add_field: bool,
+    hidden_fields: &'static [&'static str],
+    add_name_label: &'static str,
+    add_value_label: &'static str,
+    add_button_label: &'static str,
+}
+
+impl SectionRenderOptions {
+    const fn framed_read_only(hidden_fields: &'static [&'static str]) -> Self {
+        Self {
+            framed: true,
+            allow_add_field: false,
+            hidden_fields,
+            add_name_label: "New field:",
+            add_value_label: "Value:",
+            add_button_label: "Add Field",
+        }
+    }
+
+    const fn element_editor() -> Self {
+        Self {
+            framed: true,
+            allow_add_field: true,
+            hidden_fields: &[],
+            add_name_label: "Element:",
+            add_value_label: "Atom count:",
+            add_button_label: "Add element",
+        }
+    }
+
+    const fn compatibility(framed: bool) -> Self {
+        Self {
+            framed,
+            allow_add_field: true,
+            hidden_fields: &[],
+            add_name_label: "New field:",
+            add_value_label: "Value:",
+            add_button_label: "Add Field",
+        }
+    }
+}
+
 fn render_section(
     ui: &mut egui::Ui,
     name: &str,
@@ -260,6 +323,7 @@ fn render_section(
     new_field_value: &mut String,
     help_map: Option<&[(&str, &str)]>,
     current_help: &mut String,
+    options: SectionRenderOptions,
 ) -> (bool, bool, Vec<String>) {
     let mut add_field = false;
     let mut delete_section = false;
@@ -267,100 +331,136 @@ fn render_section(
 
     ui.push_id(name, |ui| {
         ui.horizontal(|ui| {
-            let section_header =
-                egui::CollapsingHeader::new(name)
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        let mut fields_to_delete = Vec::new();
-                        let mut field_names = sorted_section_field_names(section);
-                        for field_name in field_names.drain(..) {
-                            let Some(maybe_values) = section.get_mut(&field_name) else {
-                                continue;
-                            };
-                            ui.push_id((name, field_name.as_str()), |ui| {
-                                ui.horizontal(|ui| {
-                                    let field_label = ui.label(&field_name);
-
-                                    // Update help info on hover.
-                                    if field_label.hovered() {
-                                        if let Some(map) = help_map {
-                                            let help_key = format!("{}.{}", name, field_name);
-                                            if let Some((_, help_text)) =
-                                                map.iter().find(|(key, _)| *key == help_key)
-                                            {
-                                                *current_help = help_text.to_string();
-                                            }
-                                        }
-                                    }
-
-                                    if let Some(values) = maybe_values {
-                                        // Special handling for Vec<String> fields like substances.
-                                        if values.len() > 1
-                                            && values.iter().all(|v| matches!(v, Value::String(_)))
-                                        {
-                                            let mut combined_text = values
-                                                .iter()
-                                                .filter_map(|v| {
-                                                    if let Value::String(s) = v {
-                                                        Some(s.as_str())
-                                                    } else {
-                                                        None
-                                                    }
-                                                })
-                                                .collect::<Vec<_>>()
-                                                .join(", ");
-
-                                            if ui.text_edit_singleline(&mut combined_text).changed()
-                                            {
-                                                let new_substances: Vec<Value> = combined_text
-                                                    .split(',')
-                                                    .map(|s| Value::String(s.trim().to_string()))
-                                                    .filter(|v| {
-                                                        if let Value::String(s) = v {
-                                                            !s.is_empty()
-                                                        } else {
-                                                            true
-                                                        }
-                                                    })
-                                                    .collect();
-                                                *values = new_substances;
-                                                info!(
-                                                    "Field '{}' changed to: {}",
-                                                    field_name, combined_text
-                                                );
-                                            }
-                                        } else {
-                                            for v in values.iter_mut() {
-                                                render_value(ui, v, &field_name);
-                                            }
-                                        }
-                                    } else {
-                                        ui.label("None");
-                                    }
-
-                                    if ui.button("❌").clicked() {
-                                        fields_to_delete.push(field_name.clone());
-                                    }
-                                });
-                            });
-                        }
-
-                        requested_field_deletions.extend(fields_to_delete);
-
-                        ui.separator();
+            let mut render_fields = |ui: &mut egui::Ui| {
+                let mut fields_to_delete = Vec::new();
+                let mut field_names = sorted_section_field_names(section);
+                for field_name in field_names.drain(..) {
+                    if options.hidden_fields.contains(&field_name.as_str()) {
+                        continue;
+                    }
+                    let Some(maybe_values) = section.get_mut(&field_name) else {
+                        continue;
+                    };
+                    ui.push_id((name, field_name.as_str()), |ui| {
                         ui.horizontal(|ui| {
-                            ui.label("New field:");
-                            ui.text_edit_singleline(new_field_name);
-                            ui.label("Value:");
-                            ui.text_edit_singleline(new_field_value);
-                            if ui.button("Add Field").clicked() {
-                                add_field = true;
+                            let field_label = ui.label(&field_name);
+                            let mut field_control_hovered = false;
+
+                            // Update help info on hover.
+                            if field_label.hovered() {
+                                if let Some(map) = help_map {
+                                    let help_key = format!("{}.{}", name, field_name);
+                                    if let Some((_, help_text)) =
+                                        map.iter().find(|(key, _)| *key == help_key)
+                                    {
+                                        *current_help = help_text.to_string();
+                                    }
+                                }
+                            }
+
+                            if let Some(values) = maybe_values {
+                                // Special handling for Vec<String> fields like substances.
+                                if values.len() > 1
+                                    && values.iter().all(|v| matches!(v, Value::String(_)))
+                                {
+                                    let mut combined_text = values
+                                        .iter()
+                                        .filter_map(|v| {
+                                            if let Value::String(s) = v {
+                                                Some(s.as_str())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+
+                                    let response = ui.text_edit_singleline(&mut combined_text);
+                                    let _ = response.clone().labelled_by(field_label.id);
+                                    field_control_hovered = response.hovered();
+                                    if response.changed() {
+                                        let new_substances: Vec<Value> = combined_text
+                                            .split(',')
+                                            .map(|s| Value::String(s.trim().to_string()))
+                                            .filter(|v| {
+                                                if let Value::String(s) = v {
+                                                    !s.is_empty()
+                                                } else {
+                                                    true
+                                                }
+                                            })
+                                            .collect();
+                                        *values = new_substances;
+                                        info!(
+                                            "Field '{}' changed to: {}",
+                                            field_name, combined_text
+                                        );
+                                    }
+                                } else {
+                                    for v in values.iter_mut() {
+                                        field_control_hovered |=
+                                            render_value(ui, v, &field_name, field_label.id);
+                                    }
+                                }
+                            } else {
+                                ui.label("None");
+                            }
+
+                            if field_control_hovered {
+                                if let Some(map) = help_map {
+                                    let help_key = format!("{}.{}", name, field_name);
+                                    if let Some((_, help_text)) =
+                                        map.iter().find(|(key, _)| *key == help_key)
+                                    {
+                                        *current_help = help_text.to_string();
+                                    }
+                                }
+                            }
+
+                            if ui.button("❌").clicked() {
+                                fields_to_delete.push(field_name.clone());
                             }
                         });
                     });
+                }
+
+                requested_field_deletions.extend(fields_to_delete);
+
+                if options.allow_add_field {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let name_label = ui.label(options.add_name_label);
+                        let name_response = ui.text_edit_singleline(new_field_name);
+                        let _ = name_response.labelled_by(name_label.id);
+                        let value_label = ui.label(options.add_value_label);
+                        let value_response = ui.text_edit_singleline(new_field_value);
+                        let _ = value_response.labelled_by(value_label.id);
+                        if ui.button(options.add_button_label).clicked() {
+                            add_field = true;
+                        }
+                    });
+                }
+            };
+
+            let section_response = if options.framed {
+                Some(
+                    egui::Frame::group(ui.style())
+                        .show(ui, |ui| {
+                            let heading = ui.heading(name);
+                            render_fields(ui);
+                            heading
+                        })
+                        .inner,
+                )
+            } else {
+                let response = egui::CollapsingHeader::new(name)
+                    .default_open(false)
+                    .show(ui, |ui| render_fields(ui));
+                Some(response.header_response)
+            };
 
             // Update help info on section header hover
-            if section_header.header_response.hovered() {
+            if section_response.is_some_and(|response| response.hovered()) {
                 if let Some(map) = help_map {
                     if let Some((_, help_text)) = map.iter().find(|(key, _)| *key == name) {
                         *current_help = help_text.to_string();
@@ -596,6 +696,7 @@ fn render_bvp_adaptive_grid_panel(
                             Ok(mut max_refinements) => {
                                 let response =
                                     ui.add(egui::DragValue::new(&mut max_refinements).speed(1));
+                                let _ = response.clone().labelled_by(label.id);
                                 if response.hovered() {
                                     if let Some(help_text) = help_text {
                                         *current_help = help_text.to_string();
@@ -676,7 +777,7 @@ fn render_grid_refinement_section(
                         }
 
                         let mut selected_method = current_method.clone();
-                        egui::ComboBox::from_id_salt("grid_refinement.method")
+                        let method_combo = egui::ComboBox::from_id_salt("grid_refinement.method")
                             .selected_text(grid_refinement_method_label(&selected_method))
                             .show_ui(ui, |ui| {
                                 for method in BVP_GRID_REFINEMENT_METHODS {
@@ -687,6 +788,16 @@ fn render_grid_refinement_section(
                                     );
                                 }
                             });
+                        let _ = method_combo.response.clone().labelled_by(label_response.id);
+                        if method_combo.response.hovered() {
+                            if let Some(map) = help_map {
+                                if let Some((_, help_text)) =
+                                    map.iter().find(|(key, _)| *key == "grid_refinement")
+                                {
+                                    *current_help = help_text.to_string();
+                                }
+                            }
+                        }
                         ui.end_row();
 
                         if selected_method != current_method {
@@ -710,20 +821,19 @@ fn render_grid_refinement_section(
                             })
                             .expect("grid refinement section should contain a vector payload");
 
-                        ui.label("Parameters");
+                        let params_label = ui.label("Parameters");
                         if params.is_empty() {
                             ui.label("No parameters");
                         } else {
                             ui.horizontal(|ui| {
                                 for (index, value) in params.iter_mut().enumerate() {
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(value)
-                                                .speed(0.01)
-                                                .prefix(format!("p{}=", index + 1)),
-                                        )
-                                        .changed()
-                                    {
+                                    let response = ui.add(
+                                        egui::DragValue::new(value)
+                                            .speed(0.01)
+                                            .prefix(format!("p{}=", index + 1)),
+                                    );
+                                    let _ = response.clone().labelled_by(params_label.id);
+                                    if response.changed() {
                                         info!(
                                             "Grid refinement parameter {} changed to: {}",
                                             index + 1,
@@ -777,8 +887,18 @@ fn current_grid_refinement_state(
 /// Serializes a parser value using the same DSL that `DocumentParser` accepts.
 fn value_to_document_string(value: &Value) -> String {
     match value {
+        Value::String(value) if value.is_empty() => "Some()".to_string(),
         Value::String(value) => value.clone(),
-        Value::Float(value) => value.to_string(),
+        Value::Float(value) => {
+            let rendered = value.to_string();
+            if rendered.contains('.') || rendered.contains('e') || rendered.contains('E') {
+                rendered
+            } else if !value.is_finite() {
+                rendered
+            } else {
+                format!("{rendered}.0")
+            }
+        }
         Value::Integer(value) => value.to_string(),
         Value::Usize(value) => value.to_string(),
         Value::Boolean(value) => value.to_string(),
@@ -822,23 +942,6 @@ fn ensure_section_mut<'a>(
         .or_insert_with(HashMap::new)
 }
 
-/// Insert a user-created section without replacing existing task data.
-pub(crate) fn insert_section_if_absent(
-    document: &mut DocumentMap,
-    section_name: String,
-) -> Result<(), String> {
-    match document.entry(section_name.clone()) {
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(HashMap::new());
-            Ok(())
-        }
-        std::collections::hash_map::Entry::Occupied(_) => Err(format!(
-            "Section `{}` already exists; existing data was preserved",
-            section_name
-        )),
-    }
-}
-
 /// Insert a user-created field without silently replacing its current value.
 pub(crate) fn insert_field_if_absent(
     section: &mut HashMap<String, Option<Vec<Value>>>,
@@ -862,6 +965,7 @@ pub(crate) fn insert_field_if_absent(
 pub(crate) enum DocumentDeleteRequest {
     Section { section: String },
     Field { section: String, field: String },
+    Species { species: String },
 }
 
 impl DocumentDeleteRequest {
@@ -871,8 +975,88 @@ impl DocumentDeleteRequest {
             Self::Field { section, field } => {
                 format!("field `{}.{}`", section, field)
             }
+            Self::Species { species } => {
+                format!("substance `{}` and its dependent data", species)
+            }
         }
     }
+}
+
+fn reaction_references_species(equation: &str, species: &str) -> bool {
+    equation
+        .split("=>")
+        .flat_map(|side| side.split('+'))
+        .any(|term| {
+            let term = term.trim();
+            if term == species {
+                return true;
+            }
+            let coefficient_end = term
+                .char_indices()
+                .take_while(|(_, ch)| ch.is_ascii_digit() || *ch == '.')
+                .map(|(index, ch)| index + ch.len_utf8())
+                .last();
+            coefficient_end.is_some_and(|end| term[end..].trim() == species)
+        })
+}
+
+pub(crate) fn add_bvp_species(document: &mut DocumentMap, species: &str) -> Result<(), String> {
+    let species = species.trim();
+    if species.is_empty() || species.contains(',') {
+        return Err("Substance name must be non-empty and cannot contain a comma.".to_string());
+    }
+
+    let process_conditions = document
+        .get_mut("process_conditions")
+        .ok_or_else(|| "Missing process_conditions section.".to_string())?;
+    let substances = process_conditions
+        .entry("substances".to_string())
+        .or_insert_with(|| Some(Vec::new()))
+        .get_or_insert_with(Vec::new);
+    if substances
+        .iter()
+        .filter_map(Value::as_string)
+        .any(|existing| existing == species)
+    {
+        return Err(format!("Substance `{species}` already exists."));
+    }
+    substances.push(Value::String(species.to_string()));
+
+    let boundary_conditions = document
+        .entry("boundary_condition".to_string())
+        .or_default();
+    boundary_conditions.insert(species.to_string(), Some(vec![Value::Float(0.0)]));
+
+    let diffusion = document
+        .entry("diffusion_coefficients".to_string())
+        .or_default();
+    let default_diffusion = diffusion
+        .values()
+        .filter_map(|values| values.as_ref()?.first()?.as_float())
+        .find(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(9.296e-6);
+    diffusion.insert(
+        species.to_string(),
+        Some(vec![Value::Float(default_diffusion)]),
+    );
+    document.entry(species.to_string()).or_default();
+    Ok(())
+}
+
+pub(crate) fn add_bvp_reaction(document: &mut DocumentMap, equation: &str) -> Result<(), String> {
+    let equation = equation.trim();
+    if equation.is_empty() {
+        return Err("Reaction equation cannot be empty.".to_string());
+    }
+    let reactions = document.entry("reactions".to_string()).or_default();
+    if reactions.contains_key(equation) {
+        return Err(format!("Reaction `{equation}` already exists."));
+    }
+    reactions.insert(
+        equation.to_string(),
+        Some(vec![Value::Vector(vec![1.0, 0.0, 0.0, 0.0])]),
+    );
+    Ok(())
 }
 
 /// Apply an already-authorized deletion and report whether data was removed.
@@ -885,6 +1069,30 @@ pub(crate) fn apply_document_deletion(
         DocumentDeleteRequest::Field { section, field } => document
             .get_mut(section)
             .is_some_and(|section_map| section_map.remove(field).is_some()),
+        DocumentDeleteRequest::Species { species } => {
+            let mut removed = false;
+            if let Some(values) = document
+                .get_mut("process_conditions")
+                .and_then(|section| section.get_mut("substances"))
+                .and_then(Option::as_mut)
+            {
+                let before = values.len();
+                values.retain(|value| value.as_string().is_none_or(|name| name != species));
+                removed |= values.len() != before;
+            }
+            for section_name in ["boundary_condition", "diffusion_coefficients"] {
+                removed |= document
+                    .get_mut(section_name)
+                    .is_some_and(|section| section.remove(species).is_some());
+            }
+            removed |= document.remove(species).is_some();
+            if let Some(reactions) = document.get_mut("reactions") {
+                let before = reactions.len();
+                reactions.retain(|equation, _| !reaction_references_species(equation, species));
+                removed |= reactions.len() != before;
+            }
+            removed
+        }
     }
 }
 
@@ -922,7 +1130,7 @@ fn ensure_bvp_solver_backend_defaults(document: &mut DocumentMap) {
         ("telemetry", Value::String("off".to_string())),
         (
             "loglevel",
-            Value::Optional(Some(Box::new(Value::String("info".to_string())))),
+            Value::Optional(Some(Box::new(Value::String("off".to_string())))),
         ),
     ];
     for (field_name, value) in common_defaults {
@@ -944,7 +1152,6 @@ fn ensure_bvp_solver_backend_defaults(document: &mut DocumentMap) {
                 ("refinement_steps", Value::Usize(5)),
                 ("abs_tolerance", Value::Float(1e-7)),
                 ("max_iterations", Value::Usize(100)),
-                ("dont_save_log", Value::Boolean(true)),
             ];
             for (field_name, value) in defaults {
                 let _ = ensure_field_slot(section, field_name, value);
@@ -966,7 +1173,6 @@ fn ensure_bvp_solver_backend_defaults(document: &mut DocumentMap) {
                 ("symbolic_backend", Value::String("AtomView".to_string())),
                 ("tolerance", Value::Float(1e-6)),
                 ("max_iterations", Value::Usize(50)),
-                ("dont_save_log", Value::Boolean(true)),
             ];
             for (field_name, value) in defaults {
                 let _ = ensure_field_slot(section, field_name, value);
@@ -1033,6 +1239,8 @@ pub(crate) fn normalize_bvp_usize_fields(document: &mut DocumentMap) -> Result<(
         ("process_conditions", "n_steps"),
         ("solver_settings", "max_iterations"),
         ("solver_settings", "refinement_steps"),
+        ("solver_settings", "aot_residual_target_chunks"),
+        ("solver_settings", "aot_jacobian_target_chunks"),
         ("strategy_params", "max_jac"),
         ("strategy_params", "max_damp_iter"),
         ("adaptive_strategy", "version"),
@@ -1046,6 +1254,22 @@ pub(crate) fn normalize_bvp_usize_fields(document: &mut DocumentMap) -> Result<(
         normalize_usize_field(section, field_name).map_err(|error| {
             format!("invalid integer field `{section_name}.{field_name}`: {error}")
         })?;
+    }
+    for field_name in ["aot_residual_target_chunks", "aot_jacobian_target_chunks"] {
+        let Some(section) = document.get("solver_settings") else {
+            continue;
+        };
+        let Some(values) = section.get(field_name).and_then(Option::as_ref) else {
+            continue;
+        };
+        let Some(value) = values.first() else {
+            continue;
+        };
+        if try_value_as_usize(value).is_ok_and(|value| value == 0) {
+            return Err(format!(
+                "invalid integer field `solver_settings.{field_name}`: expected a positive chunk count"
+            ));
+        }
     }
     Ok(())
 }
@@ -1294,7 +1518,7 @@ fn render_solver_backend_row(
                 ui.label("None");
             } else {
                 for value in values.iter_mut() {
-                    input_hovered |= render_value(ui, value, field_name);
+                    input_hovered |= render_value(ui, value, field_name, label_response.id);
                 }
             }
         }
@@ -1320,6 +1544,39 @@ fn update_solver_field_help(
             *current_help = help_text.to_string();
         }
     }
+}
+
+fn render_solver_backend_optional_text_row(
+    ui: &mut egui::Ui,
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    field_name: &str,
+    display_name: &str,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) {
+    let label_response = ui.label(display_name);
+    let mut value = string_field_value(section, field_name).unwrap_or_default();
+    let response = ui.add(egui::TextEdit::singleline(&mut value).desired_width(220.0));
+    let _ = response.clone().labelled_by(label_response.id);
+    if response.changed() {
+        if value.trim().is_empty() {
+            section.remove(field_name);
+        } else {
+            set_string_field(section, field_name, &value);
+        }
+    }
+    if label_response.hovered() || response.hovered() {
+        if let Some(help_text) = help_map
+            .and_then(|map| {
+                map.iter()
+                    .find(|(key, _)| *key == format!("solver_settings.{field_name}"))
+            })
+            .map(|(_, text)| *text)
+        {
+            *current_help = help_text.to_string();
+        }
+    }
+    ui.end_row();
 }
 
 /// Renders a solver backend row that must stay as `usize`.
@@ -1359,6 +1616,7 @@ fn render_solver_backend_usize_row(
         Ok(mut current_value) => {
             let _ = normalize_usize_field(section, field_name);
             let response = ui.add(egui::DragValue::new(&mut current_value).speed(1));
+            let _ = response.clone().labelled_by(label_response.id);
             if response.changed() {
                 section.insert(
                     field_name.to_string(),
@@ -1383,6 +1641,78 @@ fn render_solver_backend_usize_row(
         }
     }
 
+    ui.end_row();
+}
+
+fn render_solver_backend_optional_positive_usize_row(
+    ui: &mut egui::Ui,
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    field_name: &str,
+    display_name: &str,
+    override_label: &str,
+    default_value: usize,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) {
+    let label_response = ui.label(display_name);
+    let mut enabled = section.contains_key(field_name);
+    ui.horizontal(|ui| {
+        let toggle = ui.checkbox(&mut enabled, override_label);
+        let _ = toggle.clone().labelled_by(label_response.id);
+        if toggle.changed() {
+            if enabled {
+                section.insert(
+                    field_name.to_string(),
+                    Some(vec![Value::Usize(default_value)]),
+                );
+            } else {
+                section.remove(field_name);
+            }
+        }
+
+        if enabled {
+            let stored = section
+                .get(field_name)
+                .and_then(Option::as_ref)
+                .and_then(|values| values.first())
+                .map(try_value_as_usize);
+            let (mut value, validation_error) = match stored {
+                Some(Ok(value)) if value > 0 => (value, None),
+                Some(Ok(_)) => (default_value, Some("must be greater than zero".to_string())),
+                Some(Err(error)) => (default_value, Some(error.to_string())),
+                None => (default_value, Some("missing chunk count".to_string())),
+            };
+            let drag = ui.add(
+                egui::DragValue::new(&mut value)
+                    .range(1..=usize::MAX)
+                    .speed(1),
+            );
+            let _ = drag.clone().labelled_by(label_response.id);
+            if drag.changed() {
+                section.insert(field_name.to_string(), Some(vec![Value::Usize(value)]));
+            } else if let Some(error) = validation_error {
+                ui.colored_label(egui::Color32::RED, error);
+                if ui.button("Reset").clicked() {
+                    section.insert(
+                        field_name.to_string(),
+                        Some(vec![Value::Usize(default_value)]),
+                    );
+                }
+            }
+            if drag.hovered() {
+                update_solver_field_help(field_name, help_map, current_help);
+            }
+        } else {
+            ui.label("RST default");
+        }
+
+        if toggle.hovered() {
+            update_solver_field_help(field_name, help_map, current_help);
+        }
+    });
+    if label_response.hovered() {
+        update_solver_field_help(field_name, help_map, current_help);
+    }
     ui.end_row();
 }
 
@@ -1553,6 +1883,20 @@ fn render_bvp_solver_backend_panel(
         set_bvp_solver_family(document, family);
         ensure_bvp_solver_backend_defaults(document);
     }
+    match family {
+        BvpSolverFamily::Damped => {
+            ui.label("Compact HMX physical acceptance: passed for Damped.");
+        }
+        BvpSolverFamily::Frozen => {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "Compact HMX physical acceptance is open: Frozen/Naive do not currently meet the boundary contract.",
+            );
+        }
+        BvpSolverFamily::Sci => {
+            ui.label("Compact HMX physical acceptance: passed for BVP_sci.");
+        }
+    }
     let section = ensure_section_mut(document, "solver_settings");
     if family != BvpSolverFamily::Sci {
         normalize_bvp_solver_backend_section(section);
@@ -1700,26 +2044,37 @@ fn render_bvp_solver_backend_panel(
                 "loglevel",
                 "loglevel",
                 &[
-                    ("None", None),
+                    ("off", Some("off")),
                     ("error", Some("error")),
                     ("warn", Some("warn")),
                     ("info", Some("info")),
                     ("debug", Some("debug")),
-                    ("trace", Some("trace")),
                 ],
-                "info",
+                "off",
                 help_map,
                 current_help,
             );
-            render_solver_backend_row(
-                ui,
-                section,
-                "dont_save_log",
-                "dont_save_log",
-                Value::Boolean(true),
-                help_map,
-                current_help,
-            );
+            if family == BvpSolverFamily::Damped {
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "bvp_logging_mode",
+                    "Backend event logging",
+                    &["off", "warnings", "detailed"],
+                    "off",
+                    help_map,
+                    current_help,
+                );
+                render_solver_backend_usize_row(
+                    ui,
+                    section,
+                    "bvp_logging_max_events",
+                    "Maximum logged events",
+                    256,
+                    help_map,
+                    current_help,
+                );
+            }
         });
 
     ui.add_space(8.0);
@@ -1812,6 +2167,50 @@ fn render_bvp_solver_backend_panel(
                     help_map,
                     current_help,
                 );
+                render_solver_backend_optional_positive_usize_row(
+                    ui,
+                    section,
+                    "aot_residual_target_chunks",
+                    "Residual target chunks",
+                    "Override",
+                    4,
+                    help_map,
+                    current_help,
+                );
+                render_solver_backend_optional_positive_usize_row(
+                    ui,
+                    section,
+                    "aot_jacobian_target_chunks",
+                    "Jacobian target chunks",
+                    "Override",
+                    4,
+                    help_map,
+                    current_help,
+                );
+            } else {
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "lambdify_execution_policy",
+                    "Lambdify callback policy",
+                    &["sequential", "parallel", "auto"],
+                    "sequential",
+                    help_map,
+                    current_help,
+                );
+                if string_field_value(section, "lambdify_execution_policy")
+                    .is_some_and(|policy| !policy.eq_ignore_ascii_case("sequential"))
+                {
+                    render_solver_backend_usize_row(
+                        ui,
+                        section,
+                        "lambdify_min_work",
+                        "Minimum callback work",
+                        128,
+                        help_map,
+                        current_help,
+                    );
+                }
             }
             render_solver_backend_choice_row(
                 ui,
@@ -1915,6 +2314,57 @@ fn render_sci_solver_backend_controls(
                 section.remove("banded_lower");
                 section.remove("banded_upper");
             }
+            if !aot_enabled {
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "execution_policy",
+                    "Callback execution policy",
+                    &["sequential", "parallel", "auto"],
+                    "sequential",
+                    help_map,
+                    current_help,
+                );
+                if string_field_value(section, "execution_policy")
+                    .is_some_and(|policy| !policy.eq_ignore_ascii_case("sequential"))
+                {
+                    render_solver_backend_usize_row(
+                        ui,
+                        section,
+                        "execution_min_work",
+                        "Minimum callback work",
+                        128,
+                        help_map,
+                        current_help,
+                    );
+                }
+            }
+            render_solver_backend_choice_row(
+                ui,
+                section,
+                "output_policy",
+                "Solution output",
+                &["final_only", "mesh_and_values", "dense_output"],
+                "mesh_and_values",
+                help_map,
+                current_help,
+            );
+            if string_field_value(section, "matrix_layout")
+                .is_some_and(|layout| layout.eq_ignore_ascii_case("sparse"))
+            {
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "sparse_factorization",
+                    "Sparse factorization",
+                    &["standard_faer", "superlu"],
+                    "standard_faer",
+                    help_map,
+                    current_help,
+                );
+            } else {
+                section.remove("sparse_factorization");
+            }
             render_solver_backend_row(
                 ui,
                 section,
@@ -1993,16 +2443,25 @@ fn render_sci_solver_backend_controls(
                     help_map,
                     current_help,
                 );
-                render_solver_backend_choice_row(
-                    ui,
-                    section,
-                    "aot_build_profile",
-                    "AOT build profile",
-                    &["release", "debug"],
-                    "release",
-                    help_map,
-                    current_help,
-                );
+                let build_policy = string_field_value(section, "aot_build_policy")
+                    .unwrap_or_else(|| "build_if_missing".to_string());
+                if matches!(
+                    build_policy.to_ascii_lowercase().as_str(),
+                    "build_if_missing" | "rebuild_always"
+                ) {
+                    render_solver_backend_choice_row(
+                        ui,
+                        section,
+                        "aot_build_profile",
+                        "AOT build profile",
+                        &["release", "debug"],
+                        "release",
+                        help_map,
+                        current_help,
+                    );
+                } else {
+                    section.remove("aot_build_profile");
+                }
                 render_solver_backend_choice_row(
                     ui,
                     section,
@@ -2028,6 +2487,113 @@ fn render_sci_solver_backend_controls(
                     );
                 } else {
                     section.remove("aot_c_compiler");
+                }
+
+                for (field, label) in [
+                    ("aot_output_dir", "AOT output directory"),
+                    ("aot_handoff_path", "AOT handoff path"),
+                    ("aot_crate_name", "Generated crate name"),
+                    ("aot_module_name", "Generated module name"),
+                ] {
+                    render_solver_backend_optional_text_row(
+                        ui,
+                        section,
+                        field,
+                        label,
+                        help_map,
+                        current_help,
+                    );
+                }
+
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "aot_residual_chunking",
+                    "Residual chunking",
+                    &["whole", "target_chunks", "output_count"],
+                    "whole",
+                    help_map,
+                    current_help,
+                );
+                let residual_chunking = string_field_value(section, "aot_residual_chunking")
+                    .unwrap_or_else(|| "whole".to_string());
+                if residual_chunking.eq_ignore_ascii_case("whole") {
+                    section.remove("aot_residual_chunk_size");
+                } else {
+                    render_solver_backend_usize_row(
+                        ui,
+                        section,
+                        "aot_residual_chunk_size",
+                        "Residual chunk size",
+                        4,
+                        help_map,
+                        current_help,
+                    );
+                }
+
+                let matrix_layout = string_field_value(section, "matrix_layout")
+                    .unwrap_or_else(|| "banded_auto".to_string())
+                    .to_ascii_lowercase();
+                if matches!(matrix_layout.as_str(), "sparse" | "banded_auto") {
+                    render_solver_backend_choice_row(
+                        ui,
+                        section,
+                        "aot_sparse_jacobian_chunking",
+                        "Sparse Jacobian chunking",
+                        &["whole", "target_chunks", "nnz", "rows"],
+                        "whole",
+                        help_map,
+                        current_help,
+                    );
+                    let chunking = string_field_value(section, "aot_sparse_jacobian_chunking")
+                        .unwrap_or_else(|| "whole".to_string());
+                    if chunking.eq_ignore_ascii_case("whole") {
+                        section.remove("aot_sparse_jacobian_chunk_size");
+                    } else {
+                        render_solver_backend_usize_row(
+                            ui,
+                            section,
+                            "aot_sparse_jacobian_chunk_size",
+                            "Sparse Jacobian chunk size",
+                            4,
+                            help_map,
+                            current_help,
+                        );
+                    }
+                } else {
+                    section.remove("aot_sparse_jacobian_chunking");
+                    section.remove("aot_sparse_jacobian_chunk_size");
+                }
+
+                if matches!(matrix_layout.as_str(), "banded" | "banded_auto") {
+                    render_solver_backend_choice_row(
+                        ui,
+                        section,
+                        "aot_banded_jacobian_chunking",
+                        "Banded Jacobian chunking",
+                        &["whole", "target_chunks", "diagonals"],
+                        "whole",
+                        help_map,
+                        current_help,
+                    );
+                    let chunking = string_field_value(section, "aot_banded_jacobian_chunking")
+                        .unwrap_or_else(|| "whole".to_string());
+                    if chunking.eq_ignore_ascii_case("whole") {
+                        section.remove("aot_banded_jacobian_chunk_size");
+                    } else {
+                        render_solver_backend_usize_row(
+                            ui,
+                            section,
+                            "aot_banded_jacobian_chunk_size",
+                            "Banded Jacobian chunk size",
+                            4,
+                            help_map,
+                            current_help,
+                        );
+                    }
+                } else {
+                    section.remove("aot_banded_jacobian_chunking");
+                    section.remove("aot_banded_jacobian_chunk_size");
                 }
             } else {
                 for field in [
@@ -2071,6 +2637,7 @@ const BVP_POSTPROCESSING_SECTIONS: &[&str] = &["postprocessing"];
 
 fn is_bvp_structured_section(section_name: &str, species_sections: &[String]) -> bool {
     section_name == "solver_settings"
+        || section_name == "kithe_settings"
         || BVP_PHYSICS_SECTIONS.contains(&section_name)
         || BVP_SOLVER_ADVANCED_SECTIONS.contains(&section_name)
         || BVP_ADAPTIVE_SOLVER_SECTIONS.contains(&section_name)
@@ -2079,6 +2646,230 @@ fn is_bvp_structured_section(section_name: &str, species_sections: &[String]) ->
         || species_sections
             .iter()
             .any(|species| species == section_name)
+}
+
+fn suggested_reaction_equation(document: &DocumentMap) -> String {
+    let species = bvp_species_section_names(document);
+    let existing = document.get("reactions");
+    for reactant in &species {
+        for product in &species {
+            if reactant == product {
+                continue;
+            }
+            let candidate = format!("{reactant}=>{product}");
+            if !existing.is_some_and(|section| section.contains_key(&candidate)) {
+                return candidate;
+            }
+        }
+    }
+    String::new()
+}
+
+fn render_bvp_species_manager(
+    ui: &mut egui::Ui,
+    document: &mut DocumentMap,
+    name_draft: &mut String,
+    pending_deletion: &mut Option<DocumentDeleteRequest>,
+    status: &mut Option<String>,
+    is_error: &mut bool,
+) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.heading("Substances");
+        let names = bvp_species_section_names(document);
+        for species in &names {
+            ui.horizontal(|ui| {
+                ui.label(species);
+                if ui.button("Remove substance").clicked() && pending_deletion.is_none() {
+                    *pending_deletion = Some(DocumentDeleteRequest::Species {
+                        species: species.clone(),
+                    });
+                }
+            });
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            let name_label = ui.label("Substance name");
+            let name_response = ui.text_edit_singleline(name_draft);
+            let name_response = name_response.labelled_by(name_label.id);
+            name_response.on_hover_text(
+                "Adding a substance also creates its boundary value, diffusion coefficient, and empty atomic-composition section.",
+            );
+            if ui.button("Add substance").clicked() {
+                match add_bvp_species(document, name_draft) {
+                    Ok(()) => {
+                        *status = Some(format!("Added substance `{}`.", name_draft.trim()));
+                        *is_error = false;
+                        name_draft.clear();
+                    }
+                    Err(message) => {
+                        *status = Some(message);
+                        *is_error = true;
+                    }
+                }
+            }
+        });
+    });
+}
+
+fn render_bvp_reaction_manager(
+    ui: &mut egui::Ui,
+    document: &mut DocumentMap,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+    equation_draft: &mut String,
+    pending_deletion: &mut Option<DocumentDeleteRequest>,
+    status: &mut Option<String>,
+    is_error: &mut bool,
+) {
+    const PARAMETER_NAMES: [&str; 4] = ["A", "n", "E (J/mol)", "Q (J/mol)"];
+    const DEFAULT_PARAMETERS: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
+
+    if equation_draft.is_empty() {
+        *equation_draft = suggested_reaction_equation(document);
+    }
+
+    let mut added_reaction = false;
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        let heading = ui.heading("Reactions");
+        if heading.hovered()
+            && let Some((_, help)) =
+                help_map.and_then(|map| map.iter().find(|(key, _)| *key == "reactions"))
+        {
+            *current_help = (*help).to_string();
+        }
+        let equations = document
+            .get("reactions")
+            .map(sorted_section_field_names)
+            .unwrap_or_default();
+        let mut equation_renames = Vec::new();
+        if equations.is_empty() {
+            ui.label("No reactions defined.");
+        }
+
+        for (index, equation) in equations.into_iter().enumerate() {
+            let Some(Some(parameters)) = document
+                .get_mut("reactions")
+                .and_then(|reactions| reactions.get_mut(&equation))
+            else {
+                continue;
+            };
+            let valid_parameters = match parameters.as_slice() {
+                [Value::Vector(values)] => values.len() == DEFAULT_PARAMETERS.len(),
+                values if values.len() == DEFAULT_PARAMETERS.len() => {
+                    values.iter().all(|value| matches!(value, Value::Float(_)))
+                }
+                _ => false,
+            };
+            ui.push_id(("bvp_reaction", index), |ui| {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let equation_label = ui.label(format!("Reaction {}", index + 1));
+                        let mut edited_equation = equation.clone();
+                        let response = ui.text_edit_singleline(&mut edited_equation);
+                        let _ = response.clone().labelled_by(equation_label.id);
+                        response
+                            .on_hover_text("Reaction equation using the listed substance names.");
+                        if edited_equation != equation {
+                            equation_renames.push((equation.clone(), edited_equation));
+                        }
+                        if ui.button("Remove reaction").clicked() && pending_deletion.is_none() {
+                            *pending_deletion = Some(DocumentDeleteRequest::Field {
+                                section: "reactions".to_string(),
+                                field: equation.clone(),
+                            });
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        for (parameter_index, parameter_name) in PARAMETER_NAMES.iter().enumerate()
+                        {
+                            let parameter = if valid_parameters {
+                                match parameters.as_mut_slice() {
+                                    [Value::Vector(values)] => values.get_mut(parameter_index),
+                                    _ => parameters.get_mut(parameter_index).and_then(|value| {
+                                        match value {
+                                            Value::Float(value) => Some(value),
+                                            _ => None,
+                                        }
+                                    }),
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some(parameter) = parameter {
+                                ui.vertical(|ui| {
+                                    let label = ui.label(*parameter_name);
+                                    let response =
+                                        ui.add(egui::DragValue::new(parameter).speed(0.1));
+                                    let _ = response.labelled_by(label.id);
+                                });
+                            }
+                        }
+                    });
+                    if !valid_parameters {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(180, 30, 30),
+                            "Expected four numeric reaction parameters [A, n, E, Q].",
+                        );
+                    }
+                });
+            });
+        }
+
+        for (old, new) in equation_renames {
+            let new = new.trim().to_string();
+            let Some(reactions) = document.get_mut("reactions") else {
+                continue;
+            };
+            if new.is_empty() {
+                *status = Some("Reaction equation cannot be empty.".to_string());
+                *is_error = true;
+            } else if old != new && reactions.contains_key(&new) {
+                *status = Some(format!("Reaction `{new}` already exists."));
+                *is_error = true;
+            } else if old != new {
+                if let Some(parameters) = reactions.remove(&old) {
+                    reactions.insert(new.clone(), parameters);
+                    *status = Some(format!("Updated reaction to `{new}`."));
+                    *is_error = false;
+                }
+            }
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            let label = ui.label("New reaction");
+            let response = ui.text_edit_singleline(equation_draft);
+            let _ = response.clone().labelled_by(label.id);
+            response
+                .on_hover_text("Add as many distinct reaction equations as the mechanism needs.");
+            if ui
+                .add_enabled(
+                    !equation_draft.trim().is_empty(),
+                    egui::Button::new("Add reaction"),
+                )
+                .clicked()
+            {
+                let equation = equation_draft.trim().to_string();
+                match add_bvp_reaction(document, &equation) {
+                    Ok(()) => {
+                        *status = Some(format!("Added reaction `{equation}`."));
+                        *is_error = false;
+                        *equation_draft = String::new();
+                        added_reaction = true;
+                    }
+                    Err(message) => {
+                        *status = Some(message);
+                        *is_error = true;
+                    }
+                }
+            }
+        });
+    });
+    if added_reaction {
+        *equation_draft = suggested_reaction_equation(document);
+    }
 }
 
 /// Renders a titled group of BVP sections in the structured screen layout.
@@ -2096,6 +2887,7 @@ fn render_bvp_section_group(
     new_field_names: &mut HashMap<String, String>,
     new_field_values: &mut HashMap<String, String>,
     pending_deletion: &mut Option<DocumentDeleteRequest>,
+    framed_sections: bool,
 ) {
     ui.group(|ui| {
         ui.vertical(|ui| {
@@ -2130,6 +2922,16 @@ fn render_bvp_section_group(
                             render_grid_refinement_section(ui, section, help_map, current_help);
                         (add_field, delete_section, Vec::new())
                     } else {
+                        let options = if framed_sections {
+                            let hidden_fields = if *section_name == "process_conditions" {
+                                &["substances"][..]
+                            } else {
+                                &[]
+                            };
+                            SectionRenderOptions::framed_read_only(hidden_fields)
+                        } else {
+                            SectionRenderOptions::compatibility(false)
+                        };
                         render_section(
                             ui,
                             section_name,
@@ -2138,6 +2940,7 @@ fn render_bvp_section_group(
                             field_value,
                             help_map,
                             current_help,
+                            options,
                         )
                     };
 
@@ -2227,6 +3030,7 @@ fn render_bvp_dynamic_section_group(
     new_field_names: &mut HashMap<String, String>,
     new_field_values: &mut HashMap<String, String>,
     pending_deletion: &mut Option<DocumentDeleteRequest>,
+    framed_sections: bool,
 ) {
     if section_names.is_empty() {
         return;
@@ -2267,6 +3071,11 @@ fn render_bvp_dynamic_section_group(
                     field_value,
                     help_map,
                     current_help,
+                    if framed_sections {
+                        SectionRenderOptions::element_editor()
+                    } else {
+                        SectionRenderOptions::compatibility(false)
+                    },
                 );
 
                 if add_field {
@@ -2616,37 +3425,43 @@ pub(crate) fn build_bvp_task_preview_snapshot(
 /// Prints a BVP preview snapshot as a readable console report.
 ///
 /// The output is intentionally side-effect free with respect to task data.
-pub(crate) fn print_bvp_task_preview(snapshot: &BvpTaskPreviewSnapshot) {
-    info!("=== BVP TASK PREVIEW ===");
+pub(crate) fn format_bvp_task_preview(snapshot: &BvpTaskPreviewSnapshot) -> String {
+    let mut report = String::from("=== BVP TASK PREVIEW ===\n");
     if snapshot.validation_report.is_valid() {
-        info!("Validation: ok");
+        report.push_str("Validation: ok\n");
     } else {
-        warn!("Validation issues:");
+        report.push_str("Validation issues:\n");
         for issue in &snapshot.validation_report.issues {
-            warn!("- {}", issue);
+            report.push_str(&format!("- {issue}\n"));
         }
     }
 
-    info!("--- Normalized document ---");
+    report.push_str("--- Normalized document ---\n");
     if snapshot.parameter_rows.is_empty() {
-        info!("(no document fields to preview)");
+        report.push_str("(no document fields to preview)\n");
     } else {
-        info!(
-            "{}",
-            Table::new(snapshot.parameter_rows.clone()).to_string()
-        );
+        report.push_str(&Table::new(snapshot.parameter_rows.clone()).to_string());
+        report.push('\n');
     }
 
     if let Some(error) = &snapshot.equation_build_error {
-        warn!("{}", error);
+        report.push_str(error);
+        report.push('\n');
     }
 
-    info!("--- Assembled equations ---");
+    report.push_str("--- Assembled equations ---\n");
     if snapshot.equation_rows.is_empty() {
-        info!("(no equations to preview)");
+        report.push_str("(no equations to preview)\n");
     } else {
-        info!("{}", Table::new(snapshot.equation_rows.clone()).to_string());
+        report.push_str(&Table::new(snapshot.equation_rows.clone()).to_string());
     }
+    report
+}
+
+pub(crate) fn print_bvp_task_preview(snapshot: &BvpTaskPreviewSnapshot) {
+    let report = format_bvp_task_preview(snapshot);
+    println!("{report}");
+    info!("{}", report);
 }
 
 /// Execute one reactor task without touching egui state.
@@ -2677,17 +3492,28 @@ fn execute_bvp_calculation(mut document: DocumentMap, problem: ProblemsEnum) -> 
                 return BvpWorkerOutcome::Completed { plot: None };
             }
 
-            let Some(solution) = reactor.solver.solution.take() else {
-                return BvpWorkerOutcome::Failed(
-                    "Calculation completed, but no solution matrix was returned.".to_string(),
-                );
+            let report = match reactor.postprocessing_report() {
+                Ok(report) => report,
+                Err(error) => {
+                    return BvpWorkerOutcome::Failed(format!(
+                        "Calculation completed, but result postprocessing failed: {error}"
+                    ));
+                }
             };
-            let Some(x_mesh) = reactor.solver.x_mesh.take() else {
-                return BvpWorkerOutcome::Failed(
-                    "Calculation completed, but no mesh was returned.".to_string(),
-                );
-            };
-            let values = std::mem::take(&mut reactor.solver.unknowns);
+            let solution = report.solution;
+            let x_mesh = report.x_mesh;
+            let values = reactor
+                .solver
+                .unknowns
+                .iter()
+                .map(|name| {
+                    if name == "Teta" {
+                        "Temperature (K)".to_string()
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
             if x_mesh.len() != solution.nrows() {
                 return BvpWorkerOutcome::Failed(format!(
                     "Solver result shape mismatch: mesh has {} points but solution has {} rows",
@@ -2721,13 +3547,12 @@ fn execute_bvp_calculation(mut document: DocumentMap, problem: ProblemsEnum) -> 
 /// Main application state for the combustion reactor GUI.
 ///
 /// This struct maintains all the state necessary for the GUI application,
-/// including the current document being edited, UI state for adding new
-/// fields and sections, file management, and window visibility flags.
+/// including the current document being edited, UI state for adding optional
+/// fields, file management, and window visibility flags.
 ///
 /// # Fields
 ///
 /// * `document` - The parsed configuration document as a nested HashMap structure
-/// * `new_section_name` - Input buffer for creating new sections
 /// * `new_field_names` - Per-section input buffers for new field names
 /// * `new_field_values` - Per-section input buffers for new field values
 /// * `selected_problem` - Currently selected problem type
@@ -2742,10 +3567,12 @@ fn execute_bvp_calculation(mut document: DocumentMap, problem: ProblemsEnum) -> 
 /// text files and passed directly to solvers.
 pub struct CombustionApp {
     pub document: DocumentMap,
-    pub new_section_name: String,
     pub new_field_names: HashMap<String, String>,
     pub new_field_values: HashMap<String, String>,
+    new_species_name: String,
+    new_reaction_equation: String,
     pub selected_problem: ProblemsEnum,
+    pub(super) active_bvp_tab: BvpEditorTab,
     pub current_file_path: Option<std::path::PathBuf>,
     pub(crate) document_lifecycle: DocumentLifecycleState,
     pub show_help_window: bool,
@@ -2770,12 +3597,9 @@ pub struct CombustionApp {
 }
 
 impl CombustionApp {
-    /// Creates a new CombustionApp instance with default problem type.
-    ///
-    /// This is a convenience constructor that creates an app with the default
-    /// problem type (None), resulting in an empty document ready for user input.
+    /// Creates a new BVP editor with its canonical starter task.
     pub fn new() -> Self {
-        Self::new_with_problem(ProblemsEnum::default())
+        Self::new_with_problem(ProblemsEnum::BVPSimple)
     }
 
     /// Converts the current document to a string representation suitable for file storage.
@@ -2841,12 +3665,45 @@ impl CombustionApp {
         help_map: Option<&[(&str, &str)]>,
     ) {
         let mut editor_document = self.document.clone();
-        render_bvp_solver_backend_panel(
-            ui,
-            &mut editor_document,
-            help_map,
-            &mut self.current_help_info,
-        );
+        ui.group(|ui| {
+            render_bvp_solver_backend_panel(
+                ui,
+                &mut editor_document,
+                help_map,
+                &mut self.current_help_info,
+            );
+        });
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            ui.heading("Equation assembly");
+            ui.label("KiThe symbolic RHS construction");
+            let section = ensure_section_mut(&mut editor_document, "kithe_settings");
+            let selected = string_field_value(section, "symbolic_rhs_assembly_policy")
+                .unwrap_or_else(|| "auto".to_string());
+            let label = ui.label("Assembly parallelism");
+            let mut next = selected.clone();
+            let response = egui::ComboBox::from_id_salt("bvp_symbolic_rhs_assembly_policy")
+                .selected_text(match selected.as_str() {
+                    "sequential" => "Sequential",
+                    "parallel" => "Parallel",
+                    _ => "Auto",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut next, "auto".to_string(), "Auto");
+                    ui.selectable_value(&mut next, "sequential".to_string(), "Sequential");
+                    ui.selectable_value(&mut next, "parallel".to_string(), "Parallel");
+                });
+            let help = "Controls KiThe's symbolic equation construction; Auto selects sequential or parallel assembly by system size.";
+            if response.response.hovered() || label.hovered() {
+                self.current_help_info = help.to_string();
+            }
+            let _ = response.response.labelled_by(label.id);
+            if next != selected {
+                set_string_field(section, "symbolic_rhs_assembly_policy", &next);
+            }
+            ui.label(help).on_hover_text(help);
+        });
+        ui.add_space(8.0);
         let family = BvpGuiConfig::from_document(&editor_document).0.core.family;
         let advanced_sections: &[&str] = match family {
             BvpSolverFamily::Damped => BVP_SOLVER_ADVANCED_SECTIONS,
@@ -2864,6 +3721,7 @@ impl CombustionApp {
                 &mut self.new_field_names,
                 &mut self.new_field_values,
                 &mut self.pending_document_deletion,
+                false,
             );
         }
         if family == BvpSolverFamily::Damped {
@@ -2884,6 +3742,7 @@ impl CombustionApp {
             &mut self.new_field_names,
             &mut self.new_field_values,
             &mut self.pending_document_deletion,
+            false,
         );
         render_bvp_section_group(
             ui,
@@ -2895,6 +3754,7 @@ impl CombustionApp {
             &mut self.new_field_names,
             &mut self.new_field_values,
             &mut self.pending_document_deletion,
+            false,
         );
 
         self.document = editor_document;
@@ -3090,10 +3950,12 @@ impl CombustionApp {
 
         Self {
             document,
-            new_section_name: String::new(),
             new_field_names: HashMap::new(),
             new_field_values: HashMap::new(),
+            new_species_name: String::new(),
+            new_reaction_equation: String::new(),
             selected_problem: problem,
+            active_bvp_tab: BvpEditorTab::Physics,
             current_file_path: None,
             document_lifecycle: DocumentLifecycleState::default(),
             show_help_window: false,
@@ -3153,9 +4015,8 @@ impl CombustionApp {
     /// The window is organized into several sections:
     /// 1. Top toolbar with File menu, problem selector, and Read Task button
     /// 2. Main content area with scrollable document sections
-    /// 3. Section creation controls
-    /// 4. Bottom calculation button
-    /// 5. Conditional help window overlay
+    /// 3. Bottom calculation button
+    /// 4. Conditional help window overlay
     ///
     /// # State Management
     ///
@@ -3170,7 +4031,7 @@ impl CombustionApp {
         self.refresh_bvp_gui_snapshot();
         let was_open = *open;
         let mut window_open = *open;
-        egui::Window::new("Gas-phase Combustion/Steady State Plug Flow")
+        egui::Window::new("Gas-phase combustion BVP")
             .open(&mut window_open)
             .default_size(ctx.content_rect().size())
             .resizable(true)
@@ -3209,27 +4070,22 @@ impl CombustionApp {
 
                     ui.separator();
 
-                    // Problem selection dropdown
-                    ui.label("Problem Type:");
-                    let current_problem = self.selected_problem.clone();
-                    let mut ui_selected_problem = current_problem.clone();
-                    egui::ComboBox::from_label("")
-                        .selected_text(format!("{}", current_problem))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut ui_selected_problem, ProblemsEnum::None, "None");
-                            ui.selectable_value(
-                                &mut ui_selected_problem,
-                                ProblemsEnum::BVPSimple,
-                                "BVP Simple",
-                            );
-                        });
-
-                    // If problem changed, either switch immediately or queue confirmation.
-                    if ui_selected_problem != current_problem {
-                        let _ = self.request_problem_switch(ui_selected_problem);
-                    }
-
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.calculation_state.is_active() {
+                            let cancelling = matches!(
+                                self.calculation_state,
+                                CalculationState::Cancelling { .. }
+                            );
+                            if ui
+                                .add_enabled(
+                                    !cancelling,
+                                    egui::Button::new("Cancel calculation"),
+                                )
+                                .clicked()
+                            {
+                                self.cancel_calculation();
+                            }
+                        }
                         if ui.button("📁 Read Task").clicked() {
                             if let Some(path) = rfd::FileDialog::new()
                                 .add_filter("text", &["txt"])
@@ -3246,7 +4102,7 @@ impl CombustionApp {
         ui.add_space(10.0);
 
                 // Main content area
-                ui.label("Gas-phase Combustion and Steady State Plug Flow Analysis");
+                ui.label("Gas-phase combustion / steady-state plug-flow BVP");
 
                 // Context-sensitive help display (always present to prevent layout shifts)
                 let help_map = match self.selected_problem {
@@ -3255,11 +4111,18 @@ impl CombustionApp {
                 };
 
                 if matches!(self.selected_problem, ProblemsEnum::BVPSimple) {
-                    let editor_height = (ui.available_height() - 80.0).max(220.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("bvp_structured_editor_scroll")
-                        .max_height(editor_height)
-                        .show(ui, |ui| self.render_bvp_structured_editor(ui, help_map));
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(
+                            &mut self.active_bvp_tab,
+                            BvpEditorTab::Physics,
+                            "Physics",
+                        );
+                        ui.selectable_value(
+                            &mut self.active_bvp_tab,
+                            BvpEditorTab::Solver,
+                            "Solver",
+                        );
+                    });
                 }
 
                 ui.separator();
@@ -3299,11 +4162,16 @@ impl CombustionApp {
                 ui.add_space(20.0);
 
                 // Render document sections
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                let editor_height = (ui.available_height() - 160.0).max(120.0);
+                egui::ScrollArea::vertical()
+                    .max_height(editor_height)
+                    .show(ui, |ui| {
                     if matches!(self.selected_problem, ProblemsEnum::BVPSimple) {
+                        if self.active_bvp_tab == BvpEditorTab::Physics {
                         let bvp_species_sections = bvp_species_section_names(&self.document);
                         let family = BvpGuiConfig::from_document(&self.document).0.core.family;
                         let mut physics_sections = BVP_PHYSICS_SECTIONS.to_vec();
+                        physics_sections.retain(|section| *section != "reactions");
                         if family != BvpSolverFamily::Damped {
                             physics_sections.retain(|section| *section != "bounds");
                         }
@@ -3317,6 +4185,29 @@ impl CombustionApp {
                             &mut self.new_field_names,
                             &mut self.new_field_values,
                             &mut self.pending_document_deletion,
+                            true,
+                        );
+                        ui.add_space(8.0);
+
+                        render_bvp_species_manager(
+                            ui,
+                            &mut self.document,
+                            &mut self.new_species_name,
+                            &mut self.pending_document_deletion,
+                            &mut self.last_run_message,
+                            &mut self.last_run_is_error,
+                        );
+                        ui.add_space(8.0);
+
+                        render_bvp_reaction_manager(
+                            ui,
+                            &mut self.document,
+                            help_map,
+                            &mut self.current_help_info,
+                            &mut self.new_reaction_equation,
+                            &mut self.pending_document_deletion,
+                            &mut self.last_run_message,
+                            &mut self.last_run_is_error,
                         );
                         ui.add_space(8.0);
 
@@ -3330,6 +4221,7 @@ impl CombustionApp {
                             &mut self.new_field_names,
                             &mut self.new_field_values,
                             &mut self.pending_document_deletion,
+                            true,
                         );
                         ui.add_space(8.0);
 
@@ -3369,6 +4261,7 @@ impl CombustionApp {
                                         field_value,
                                         help_map,
                                         &mut self.current_help_info,
+                                        SectionRenderOptions::compatibility(false),
                                     );
 
                                     if add_field {
@@ -3435,6 +4328,9 @@ impl CombustionApp {
                                     }
                                 }
                             });
+                        } else {
+                            self.render_bvp_structured_editor(ui, help_map);
+                        }
                     } else {
                         let mut sections_to_process = Vec::new();
                         let mut sections_to_delete = Vec::new();
@@ -3463,6 +4359,7 @@ impl CombustionApp {
                                 field_value,
                                 help_map,
                                 &mut self.current_help_info,
+                                SectionRenderOptions::compatibility(false),
                             );
 
                             if add_field {
@@ -3530,25 +4427,7 @@ impl CombustionApp {
                     }
                     self.sync_document_state_after_edit();
 
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("New section name:");
-                        ui.text_edit_singleline(&mut self.new_section_name);
-                        if ui.button("Create Section").clicked()
-                            && !self.new_section_name.is_empty()
-                        {
-                            match insert_section_if_absent(
-                                &mut self.document,
-                                self.new_section_name.clone(),
-                            ) {
-                                Ok(()) => info!("Created new section: {}", self.new_section_name),
-                                Err(message) => warn!("{}", message),
-                            }
-                            self.new_section_name.clear();
-                            self.sync_document_state_after_edit();
-                        }
                     });
-                });
 
                 // Big RUN CALCULATION button at the bottom
                 ui.separator();
@@ -3624,18 +4503,6 @@ impl CombustionApp {
                             self.request_calculation();
                         }
                     });
-                    if calculation_active {
-                        let cancelling = matches!(
-                            self.calculation_state,
-                            CalculationState::Cancelling { .. }
-                        );
-                        if ui
-                            .add_enabled(!cancelling, egui::Button::new("Cancel calculation"))
-                            .clicked()
-                        {
-                            self.cancel_calculation();
-                        }
-                    }
                 });
             });
 
@@ -3704,6 +4571,7 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     ("diffusion_coefficients", "Molecular diffusion coefficients for each chemical substance [m²/s]."),
     ("reactions", "Chemical reactions with Arrhenius kinetic parameters [A, n, E, Q]."),
     ("solver_settings", "Structured solver backend controls. Residuals/Jacobian assembly is exclusive: choose Lambdify or AOT, then refine matrix and symbolic backends with explicit dropdowns."),
+    ("kithe_settings.symbolic_rhs_assembly_policy", "KiThe symbolic RHS equation assembly policy. Auto selects sequential or parallel construction based on system size; Sequential and Parallel force that policy."),
     ("solver_settings.solver_family", "BVP solver family. Damped and Frozen use the BVP_api routes; Sci selects the collocation-based BVP_sci route. Each family exposes only its supported settings."),
     ("bounds", "Variable bounds for solver convergence. Format: lower_bound, upper_bound for each variable type."),
     ("rel_tolerance", "Relative convergence tolerances for each variable type in the numerical solver."),
@@ -3761,12 +4629,15 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     ("solver_settings.execution_min_work", "Minimum callback work used by BVP_sci parallel/auto execution policies; requires execution_policy."),
     ("solver_settings.output_policy", "BVP_sci solution output selection policy."),
     ("solver_settings.sparse_factorization", "Sparse factorization backend for BVP_sci sparse matrix layout."),
+    ("solver_settings.lambdify_execution_policy", "Damped Lambdify callback scheduling: sequential, parallel, or auto. Sequential remains the default."),
+    ("solver_settings.lambdify_min_work", "Minimum work threshold for parallel/auto Damped Lambdify callbacks."),
+    ("solver_settings.bvp_logging_mode", "Damped backend event logging: off, warnings, or detailed. Independent of log level and telemetry."),
+    ("solver_settings.bvp_logging_max_events", "Maximum retained Damped backend log events when backend event logging is enabled."),
     ("solver_settings.linear_sys_method", "Optional linear-system override. Type: Optional<String>. Leave None for the default matrix-backend policy."),
     ("solver_settings.abs_tolerance", "Absolute convergence tolerance. Type: Float. Range: 1e-12 to 1e-3. Smaller=more accurate"),
     ("solver_settings.max_iterations", "Maximum solver iterations. Type: Usize. Range: 10-1000. Higher=more attempts to converge"),
     ("solver_settings.telemetry", "Internal solver telemetry. Type: String. Options: off, counters, timings, detailed. Defaults to off; logging is configured separately. A route may reject unsupported telemetry modes."),
-    ("solver_settings.loglevel", "Logging verbosity level. Type: Optional<String>. Options: Some(info), Some(debug), None"),
-    ("solver_settings.dont_save_log", "Disable log file saving. Type: Boolean. true=no log files, false=save logs"),
+    ("solver_settings.loglevel", "Common BVP text-logging level. Type: Optional<String>. Options: off, error, warn, info, debug; defaults to off."),
     ("solver_settings.generated_backend", "High-level solver preset used by the RustedSciThe backend. Type: String. Default: banded_lambdify."),
     ("solver_settings.matrix_backend", "Compatibility alias for solver_settings.method. The structured GUI synchronizes this field automatically."),
     ("solver_settings.backend_policy", "Derived execution policy from the visible backend selector. KiThe writes lambdify_only or aot_only automatically."),
@@ -3774,9 +4645,21 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     ("solver_settings.aot_codegen_backend", "AOT code generation backend. Type: String. Options: C, Rust, Zig. Only visible when the execution backend is AOT."),
     ("solver_settings.aot_c_compiler", "C compiler choice, visible only for the C codegen backend. Type: String. Options: tcc, gcc."),
     ("solver_settings.aot_build_policy", "AOT build lifecycle policy. Type: String. Options: use_if_available, build_if_missing, require_prebuilt, rebuild_always."),
-    ("solver_settings.aot_build_profile", "AOT build profile. Type: String. Options: release, debug."),
+    ("solver_settings.aot_build_profile", "AOT build profile. Type: String. Options: release, debug. Used only with build_if_missing or rebuild_always."),
+    ("solver_settings.aot_output_dir", "Optional parent directory for generated BVP_sci AOT artifacts. Empty leaves the RST default unchanged."),
+    ("solver_settings.aot_handoff_path", "Optional durable registry handoff path for process-isolated AOT artifact publication."),
+    ("solver_settings.aot_crate_name", "Optional override for the generated Rust crate name."),
+    ("solver_settings.aot_module_name", "Optional override for the generated module name."),
+    ("solver_settings.aot_residual_chunking", "BVP_sci AOT residual grouping: whole, target_chunks, or output_count."),
+    ("solver_settings.aot_residual_chunk_size", "Positive target chunk count or maximum outputs per residual chunk; required except when chunking is whole."),
+    ("solver_settings.aot_sparse_jacobian_chunking", "Sparse Jacobian grouping: whole, target_chunks, nnz, or rows. Shown for sparse and automatic matrix layouts."),
+    ("solver_settings.aot_sparse_jacobian_chunk_size", "Positive target count, nonzero-entry cap, or row count for sparse Jacobian chunks; required except when chunking is whole."),
+    ("solver_settings.aot_banded_jacobian_chunking", "Banded Jacobian grouping: whole, target_chunks, or diagonals. Shown for banded and automatic matrix layouts."),
+    ("solver_settings.aot_banded_jacobian_chunk_size", "Positive target count or diagonal count for banded Jacobian chunks; required except when chunking is whole."),
     ("solver_settings.aot_compile_preset", "AOT compile preset. Type: String. Options: production, fast_build, dev_fastest."),
     ("solver_settings.aot_execution_policy", "Runtime execution policy for compiled callbacks. Type: String. Options: auto, sequential, parallel."),
+    ("solver_settings.aot_residual_target_chunks", "Optional positive target chunk count for Damped AOT residual generation. Leave Override off to use the RST default."),
+    ("solver_settings.aot_jacobian_target_chunks", "Optional positive target chunk count for Damped AOT Jacobian generation. Leave Override off to use the RST default."),
     ("solver_settings.banded_linear_solver", "Banded linear solver policy. Type: String. Options: auto, faithful, block_tridiagonal, block_tridiagonal_consistent, faer_sparse, general_partial_pivot."),
     ("solver_settings.refinement_steps", "Iterative refinement steps for the banded linear solver. Type: Usize. Default: 5. Set 0 to disable extra refinement."),
     // bounds fields
