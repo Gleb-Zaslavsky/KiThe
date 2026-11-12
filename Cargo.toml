@@ -1,6 +1,6 @@
 [package]
 name = "KiThe"
-version = "0.3.14"
+version = "0.3.16"
 edition = "2024"
 author = "Gleb Zaslavsky"
 license = "MIT"
@@ -57,7 +57,7 @@ strum_macros = "0.28.0"
 serde_json = "1.0.151"
 sha2 = "0.10.8"
 loc = "0.5.0"
-RustedSciThe = "0.4.29"
+RustedSciThe = "0.4.35"   
 rayon = "1.11.0"
 nalgebra = { version = "0.35.0", features = ["serde"] }
 prettytable-rs = "0.10.0"
@@ -72,11 +72,11 @@ enum_dispatch = "0.3.13"
 tempfile = "3.26.0"
 reborrow = "0.5.5"
 nom = "8.0.0"
-eframe = "0.36.2"
-egui = "0.36.2"
-egui_plot = "0.37.0"
-egui_kittest = "0.36.0"
-egui_extras = { version = "0.36.2", features = ["image"] }
+eframe = "0.37.0"
+egui = { version = "0.37.0", features = ["default_fonts", "monochrome_emoji_fonts"] }
+egui_plot = "0.38.0"
+egui_kittest = "0.37.0"
+egui_extras = { version = "0.37.0", features = ["image"] }
 rfd = "0.17.2"
 plotters = "0.3"
 chrono = "0.4.41"
@@ -85,14 +85,14 @@ polars ={ version = "0.55.2", features = ["lazy", "csv", "parquet", "rolling_win
 ndarray = "0.17.2"
 
 ndarray-stats = "0.7.0"
-rand = "0.10.2"
+rand = "0.10.3"
 rand_distr = "0.6.0"
 splines = "5.0.0"
 bspline = "1.1.0"
 
 
 lstsq = "0.8.0"
-KiThePlot = "0.7.0"
+KiThePlot = "0.8.0"
 
 [build-dependencies]
 winres = "0.1"

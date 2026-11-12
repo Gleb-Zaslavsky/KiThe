@@ -1,0 +1,222 @@
+{
+  "reference": "Independent Merzhanov-Filonenko first-order flow BVP; SciPy solve_bvp",
+  "scipy_version": "1.17.1",
+  "numpy_version": "2.4.6",
+  "universal_gas_constant_J_per_mol_K": 8.31446261815324,
+  "equations": [
+    "theta_prime = p",
+    "p_prime = p - source(theta)",
+    "source = delta*exp(theta/(1+beta*theta))*(1-gamma*theta)/(1+beta*theta)"
+  ],
+  "boundary_conditions": [
+    "theta(0)=0",
+    "p(xi_max)=0"
+  ],
+  "solver": {
+    "method": "scipy.integrate.solve_bvp",
+    "jacobian": "analytic derivative of the dimensionless RHS",
+    "reference_tolerance": 2e-07,
+    "mesh_convergence_tolerances": [
+      2e-05,
+      2e-07
+    ],
+    "tail_epsilon_studies": [
+      1e-05,
+      1e-08,
+      1e-10
+    ]
+  },
+  "fixed_parameters": {
+    "T0_K": 300.0,
+    "cp_J_per_kg_K": 1000.0,
+    "rho0_kg_per_m3": 1.0,
+    "lambda_W_per_m_K": 0.1,
+    "mass_flux_kg_per_m2_s": 0.01,
+    "beta": 0.05,
+    "gamma": 0.01,
+    "adiabatic_temperature_K": 1800.0,
+    "rhoD_kg_per_m_s": 0.0001
+  },
+  "cases": [
+    {
+      "name": "MF-LOW",
+      "delta": 0.0001,
+      "regime": "long induction; weak inlet heat flux",
+      "scipy_status": 0,
+      "scipy_message": "The algorithm converged to the desired accuracy.",
+      "solver_tolerance": 2e-07,
+      "tail_epsilon": 1e-10,
+      "profile_csv": "mf1963_mf_low.csv",
+      "plot_svg": "mf_low_profiles.svg",
+      "profile_rows": 7314,
+      "dimensionless_parameters": {
+        "beta": 0.05,
+        "gamma": 0.01,
+        "reaction_order": 1,
+        "theta_adiabatic": 100.0
+      },
+      "dimensional_parameters": {
+        "T0_K": 300.0,
+        "cp_J_per_kg_K": 1000.0,
+        "rho0_kg_per_m3": 1.0,
+        "lambda_W_per_m_K": 0.1,
+        "mass_flux_kg_per_m2_s": 0.01,
+        "E_J_per_mol": 49886.775708919435,
+        "Q_J_per_kg": 1500000.0,
+        "rhoD_kg_per_m_s": 0.0001,
+        "k_at_T0_per_s": 1e-06,
+        "k0_per_s": 485.1651954097885,
+        "temperature_scale_K": 15.0,
+        "length_scale_m": 0.01
+      },
+      "diagnostics": {
+        "domain_length_xi": 12017.324603855763,
+        "domain_length_m": 120.17324603855764,
+        "seed_mesh_nodes": 3893,
+        "adaptive_mesh_nodes": 4514,
+        "collocation_iterations": 5,
+        "max_rms_collocation_residual": 1.990788986116915e-07,
+        "bc_theta_inlet": 0.0,
+        "bc_slope_outlet": 3.2311742677852644e-27,
+        "theta_outlet": 99.99999999983015,
+        "tail_conversion_error": 1.6984191830715645e-12,
+        "inlet_slope": 0.00010000940255426409,
+        "inlet_heat_flux_W_per_m2": 0.015001410383139614,
+        "xi_theta_90": 11997.748087544498,
+        "x_theta_90_m": 119.97748087544498,
+        "convective_approx_xi_theta_90": 12085.382794457064,
+        "convective_approx_relative_delta_at_theta_90": -0.007251297571869993,
+        "xi_source_max": 11996.338870908587,
+        "x_source_max_m": 119.96338870908586,
+        "source_max": 38.20305848858276,
+        "source_integral_quad": 100.00010002780425,
+        "source_integral_quad_error_estimate": 1.3807316105731257e-08,
+        "source_integral_ode_identity": 100.00010000923271,
+        "source_integral_identity_abs_error": 1.857154074969003e-08,
+        "temperature_inlet_K": 300.0,
+        "temperature_outlet_K": 1799.9999999974525,
+        "reactant_fraction_outlet": 1.6984191830715645e-12,
+        "arrhenius_k0_per_s": 485.1651954097885,
+        "mass_heat_release_J_per_kg": 1500000.0,
+        "thermal_diffusivity_density_product_kg_per_m_s": 0.0001
+      },
+      "convergence_studies": [
+        {
+          "kind": "finite_domain_tail",
+          "tail_epsilon": 1e-05,
+          "domain_length_xi": 12008.262799643864,
+          "adaptive_mesh_nodes": 4502,
+          "common_domain_max_theta_delta_vs_reference": 5.600322751320164e-06,
+          "common_domain_max_slope_delta_vs_reference": 1.2707019508256588e-05
+        },
+        {
+          "kind": "finite_domain_tail",
+          "tail_epsilon": 1e-08,
+          "domain_length_xi": 12013.699886130991,
+          "adaptive_mesh_nodes": 4505,
+          "common_domain_max_theta_delta_vs_reference": 2.414676174566921e-07,
+          "common_domain_max_slope_delta_vs_reference": 2.566186454444619e-07
+        },
+        {
+          "kind": "collocation_tolerance",
+          "tolerance": 2e-05,
+          "adaptive_mesh_nodes": 3962,
+          "reference_tolerance": 2e-07,
+          "reference_mesh_nodes": 4514,
+          "max_theta_delta_vs_reference": 0.0004957800784666233,
+          "max_slope_delta_vs_reference": 0.000507318675939672
+        }
+      ]
+    },
+    {
+      "name": "MF-HIGH",
+      "delta": 0.1,
+      "regime": "compact intense front near the inlet",
+      "scipy_status": 0,
+      "scipy_message": "The algorithm converged to the desired accuracy.",
+      "solver_tolerance": 2e-07,
+      "tail_epsilon": 1e-10,
+      "profile_csv": "mf1963_mf_high.csv",
+      "plot_svg": "mf_high_profiles.svg",
+      "profile_rows": 3655,
+      "dimensionless_parameters": {
+        "beta": 0.05,
+        "gamma": 0.01,
+        "reaction_order": 1,
+        "theta_adiabatic": 100.0
+      },
+      "dimensional_parameters": {
+        "T0_K": 300.0,
+        "cp_J_per_kg_K": 1000.0,
+        "rho0_kg_per_m3": 1.0,
+        "lambda_W_per_m_K": 0.1,
+        "mass_flux_kg_per_m2_s": 0.01,
+        "E_J_per_mol": 49886.775708919435,
+        "Q_J_per_kg": 1500000.0,
+        "rhoD_kg_per_m_s": 0.0001,
+        "k_at_T0_per_s": 0.001,
+        "k0_per_s": 485165.1954097886,
+        "temperature_scale_K": 15.0,
+        "length_scale_m": 0.01
+      },
+      "diagnostics": {
+        "domain_length_xi": 0.5427079731331537,
+        "domain_length_m": 0.005427079731331537,
+        "seed_mesh_nodes": 78,
+        "adaptive_mesh_nodes": 855,
+        "collocation_iterations": 6,
+        "max_rms_collocation_residual": 1.9931598898179662e-07,
+        "bc_theta_inlet": 0.0,
+        "bc_slope_outlet": 0.0,
+        "theta_outlet": 99.99999999979143,
+        "tail_conversion_error": 2.085664974060819e-12,
+        "inlet_slope": 1781.2652645256653,
+        "inlet_heat_flux_W_per_m2": 267189.7896788498,
+        "xi_theta_90": 0.06540874769813847,
+        "x_theta_90_m": 0.0006540874769813846,
+        "convective_approx_xi_theta_90": 12.085382794457068,
+        "convective_approx_relative_delta_at_theta_90": -0.9945877802291759,
+        "xi_source_max": 0.04358419907586729,
+        "x_source_max_m": 0.0004358419907586729,
+        "source_max": 38203.05850297821,
+        "source_integral_quad": 1881.26526434562,
+        "source_integral_quad_error_estimate": 9.492173421517432e-09,
+        "source_integral_ode_identity": 1881.2652645254568,
+        "source_integral_identity_abs_error": 1.7983688849199098e-07,
+        "temperature_inlet_K": 300.0,
+        "temperature_outlet_K": 1799.9999999968716,
+        "reactant_fraction_outlet": 2.085664974060819e-12,
+        "arrhenius_k0_per_s": 485165.1954097886,
+        "mass_heat_release_J_per_kg": 1500000.0,
+        "thermal_diffusivity_density_product_kg_per_m_s": 0.0001
+      },
+      "convergence_studies": [
+        {
+          "kind": "finite_domain_tail",
+          "tail_epsilon": 1e-05,
+          "domain_length_xi": 0.32634408596168646,
+          "adaptive_mesh_nodes": 816,
+          "common_domain_max_theta_delta_vs_reference": 9.8155518060139e-06,
+          "common_domain_max_slope_delta_vs_reference": 0.0005321107915551675
+        },
+        {
+          "kind": "finite_domain_tail",
+          "tail_epsilon": 1e-08,
+          "domain_length_xi": 0.45616206222169103,
+          "adaptive_mesh_nodes": 857,
+          "common_domain_max_theta_delta_vs_reference": 5.515261136679328e-08,
+          "common_domain_max_slope_delta_vs_reference": 1.2207699455757393e-06
+        },
+        {
+          "kind": "collocation_tolerance",
+          "tolerance": 2e-05,
+          "adaptive_mesh_nodes": 198,
+          "reference_tolerance": 2e-07,
+          "reference_mesh_nodes": 855,
+          "max_theta_delta_vs_reference": 9.358776836165816e-06,
+          "max_slope_delta_vs_reference": 0.0005129341038809798
+        }
+      ]
+    }
+  ]
+}

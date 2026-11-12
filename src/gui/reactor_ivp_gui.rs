@@ -10,12 +10,12 @@
 
 use crate::Kinetics::mechfinder_api::{ReactionData, ReactionKinetics};
 
-use crate::ReactorsBVP::reactor_BVP_utils::ScalingConfig;
-use crate::ReactorsIVP::SimpleReactorIVP::{
+use crate::SimpleReactorsBVP::reactor_BVP_utils::ScalingConfig;
+use crate::SimpleReactorsIVP::SimpleReactorIVP::{
     IvpError, IvpSolveSnapshot, ReactorIvpInitialStateConfig, ReactorIvpPhysicalConfig,
     SimpleReactorTask,
 };
-use crate::ReactorsIVP::solver_backend::{
+use crate::SimpleReactorsIVP::solver_backend::{
     ReactorIvpExecutionBackend, ReactorIvpFamilyOptions, ReactorIvpMatrixBackend, ReactorIvpMethod,
     ReactorIvpSolverConfig, ReactorIvpSolverFamily, ReactorIvpStopCondition,
     ReactorIvpSymbolicBackend,
@@ -360,7 +360,9 @@ pub struct IvpGuiConfig {
     pub bdf_max_steps: usize,
     pub radau_max_steps: usize,
     pub radau_max_newton_iterations: usize,
+    /// Lower dimensionless spatial coordinate z=x/L.
     pub x0: f64,
+    /// Upper dimensionless spatial coordinate z=x/L.
     pub x_bound: f64,
     pub first_step: Option<f64>,
     pub max_step: f64,
@@ -450,15 +452,15 @@ impl IvpGuiConfig {
 
         let callback_policy = match self.callback_policy {
             ReactorIvpGuiCallbackPolicy::Sequential => {
-                crate::ReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Sequential
+                crate::SimpleReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Sequential
             }
             ReactorIvpGuiCallbackPolicy::Parallel => {
-                crate::ReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Parallel {
+                crate::SimpleReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Parallel {
                     min_work: self.callback_min_work,
                 }
             }
             ReactorIvpGuiCallbackPolicy::Auto => {
-                crate::ReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Auto {
+                crate::SimpleReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Auto {
                     min_work: self.callback_min_work,
                 }
             }
@@ -528,16 +530,18 @@ impl IvpGuiConfig {
         }
         if let Some(policy) = task.solver_backend_config.callback_policy {
             match policy {
-                crate::ReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Sequential => {
+                crate::SimpleReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Sequential => {
                     config.callback_policy = ReactorIvpGuiCallbackPolicy::Sequential;
                 }
-                crate::ReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Parallel {
+                crate::SimpleReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Parallel {
                     min_work,
                 } => {
                     config.callback_policy = ReactorIvpGuiCallbackPolicy::Parallel;
                     config.callback_min_work = min_work;
                 }
-                crate::ReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Auto { min_work } => {
+                crate::SimpleReactorsIVP::solver_backend::ReactorIvpCallbackPolicy::Auto {
+                    min_work,
+                } => {
                     config.callback_policy = ReactorIvpGuiCallbackPolicy::Auto;
                     config.callback_min_work = min_work;
                 }
@@ -1282,7 +1286,7 @@ impl ReactorIvpApp {
                 let label = ui.label("Conductivity Lambda");
                 let input = ui.add(DragValue::new(&mut self.config.physical.Lambda).speed(0.01));
                 let _ = input.labelled_by(label.id);
-                let label = ui.label("Mass flux m");
+                let label = ui.label("Mass flux m (kg/(m²·s))");
                 let input = ui.add(DragValue::new(&mut self.config.physical.m).speed(0.001));
                 let _ = input.labelled_by(label.id);
                 ui.end_row();
@@ -1303,7 +1307,7 @@ impl ReactorIvpApp {
                 let _ = input.labelled_by(label.id);
                 ui.end_row();
 
-                let thermal_label = ui.label("Thermal effects");
+                let thermal_label = ui.label("Thermal effects (J/mol)");
                 if self.config.thermal_effects.is_empty() {
                     ui.label("No thermal effects configured");
                 } else {
@@ -1558,7 +1562,9 @@ impl ReactorIvpApp {
                 let input =
                     ui.add(DragValue::new(&mut self.config.initial_state.temperature).speed(1.0));
                 let _ = input.labelled_by(label.id);
-                let label = ui.label("Heat flux");
+                let label = ui.label("Heat flux (W/m²)").on_hover_text(
+                    "Physical input. The solver state uses q_scaled = q * L / T_scale.",
+                );
                 let input =
                     ui.add(DragValue::new(&mut self.config.initial_state.heat_flux).speed(0.01));
                 let _ = input.labelled_by(label.id);
@@ -2046,10 +2052,14 @@ impl ReactorIvpApp {
             .num_columns(4)
             .spacing([16.0, 8.0])
             .show(ui, |ui| {
-                let label = ui.label("x0");
+                let label = ui
+                    .label("z0")
+                    .on_hover_text("Dimensionless position z = x/L.");
                 let input = ui.add(DragValue::new(&mut self.config.x0).speed(0.01));
                 let _ = input.labelled_by(label.id);
-                let label = ui.label("x_bound");
+                let label = ui
+                    .label("z_bound")
+                    .on_hover_text("Dimensionless position z = x/L.");
                 let input = ui.add(DragValue::new(&mut self.config.x_bound).speed(0.01));
                 let _ = input.labelled_by(label.id);
                 ui.end_row();

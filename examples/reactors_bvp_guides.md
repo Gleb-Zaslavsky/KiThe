@@ -1,6 +1,6 @@
-# ReactorsBVP Example Guides
+# SimpleReactorsBVP Example Guides
 
-These guides cover the ordinary `src/ReactorsBVP/` workflows and intentionally avoid
+These guides cover the ordinary `src/SimpleReactorsBVP/` workflows and intentionally avoid
 `src/experimental_kinetics/`.
 
 The snippets below are short, test-derived walkthroughs. They are meant as
@@ -12,10 +12,10 @@ Use this path when you already know the kinetic mechanism and want to assemble
 the BVP object in memory.
 
 ```rust
-use KiThe::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
-use KiThe::ReactorsBVP::reactor_BVP_utils::ScalingConfig;
+use KiThe::SimpleReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
+use KiThe::SimpleReactorsBVP::reactor_BVP_utils::ScalingConfig;
 
-fn main() -> Result<(), KiThe::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+fn main() -> Result<(), KiThe::SimpleReactorsBVP::SimpleReactorBVP::ReactorError> {
     let mut reactor = SimpleReactorTask::new();
 
     // Fill in the physical inputs first.
@@ -38,9 +38,9 @@ fn main() -> Result<(), KiThe::ReactorsBVP::SimpleReactorBVP::ReactorError> {
 Use this path when the problem definition lives in a document file.
 
 ```rust
-use KiThe::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
+use KiThe::SimpleReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
 
-fn main() -> Result<(), KiThe::ReactorsBVP::SimpleReactorBVP::ReactorError> {
+fn main() -> Result<(), KiThe::SimpleReactorsBVP::SimpleReactorBVP::ReactorError> {
     let mut reactor = SimpleReactorTask::new();
 
     // Parse the task document and let the reactor build the solver state.
@@ -56,8 +56,8 @@ fn main() -> Result<(), KiThe::ReactorsBVP::SimpleReactorBVP::ReactorError> {
 Use this path when you want to build solver constraints from smaller config maps.
 
 ```rust
-use KiThe::ReactorsBVP::reactor_BVP_utils::{create_bounds_map, create_tolerance_map};
-use KiThe::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
+use KiThe::SimpleReactorsBVP::reactor_BVP_utils::{create_bounds_map, create_tolerance_map};
+use KiThe::SimpleReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
 use std::collections::HashMap;
 
 fn main() {
@@ -85,7 +85,7 @@ fn main() {
 Use this path when you want data snapshots but do not need terminal or file output.
 
 ```rust
-use KiThe::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
+use KiThe::SimpleReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
 
 fn main() {
     let reactor = SimpleReactorTask::new();
@@ -105,7 +105,7 @@ solver's native snapshot intact. `Off` is the default; use counters while
 profiling callback volume or detailed snapshots when decision traces matter.
 
 ```rust
-use KiThe::ReactorsBVP::SimpleReactorBVP::{BVPSolver, ReactorError};
+use KiThe::SimpleReactorsBVP::SimpleReactorBVP::{BVPSolver, ReactorError};
 use RustedSciThe::numerical::BVP_api::{BvpApiTelemetryMode, BvpSolverTelemetrySnapshot};
 
 fn inspect_solver(solver: &BVPSolver) {

@@ -5,7 +5,7 @@
 //! before a real solve.
 
 use KiThe::Kinetics::User_reactions::KinData;
-use KiThe::ReactorsIVP::SimpleReactorIVP::{IvpError, SimpleReactorTask};
+use KiThe::SimpleReactorsIVP::SimpleReactorIVP::{IvpError, SimpleReactorTask};
 use KiThe::gui::reactor_ivp_gui::{IvpGuiConfig, build_reactor_ivp_task_preview_snapshot};
 use std::collections::HashMap;
 

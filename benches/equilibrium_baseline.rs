@@ -69,18 +69,18 @@ enum ScenarioTask {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BackendRoute {
     Production,
-    LegacyLm,
-    LegacyNr,
-    LegacyTr,
+    NativeLm,
+    NativeNr,
+    NativeTr,
 }
 
 impl BackendRoute {
     fn label(self) -> &'static str {
         match self {
             Self::Production => "production",
-            Self::LegacyLm => "legacy_lm",
-            Self::LegacyNr => "legacy_nr",
-            Self::LegacyTr => "legacy_tr",
+            Self::NativeLm => "native_lm",
+            Self::NativeNr => "native_nr",
+            Self::NativeTr => "native_tr",
         }
     }
 }
@@ -526,7 +526,7 @@ struct PrettyMacroMeasurement {
 
 #[cfg(feature = "equilibrium-benchmark-prettyprint")]
 #[derive(Tabled)]
-struct PrettyLegacyPhEnvelopeRow {
+struct PrettyNativePhEnvelopeRow {
     #[tabled(rename = "case")]
     case_name: String,
     #[tabled(rename = "backend")]
@@ -543,12 +543,12 @@ struct PrettyLegacyPhEnvelopeRow {
     trial_total: String,
     #[tabled(rename = "nonlinear solve")]
     nonlinear_solve: String,
-    #[tabled(rename = "Legacy backend wall")]
-    legacy_backend_wall: String,
+    #[tabled(rename = "Native backend wall")]
+    native_backend_wall: String,
 }
 
 #[cfg(feature = "equilibrium-benchmark-prettyprint")]
-impl PrettyLegacyPhEnvelopeRow {
+impl PrettyNativePhEnvelopeRow {
     fn from_measurement(case_name: String, measurement: &Measurement) -> Option<Self> {
         if measurement.ph_route.is_empty() || measurement.solver_name == "" {
             return None;
@@ -588,7 +588,7 @@ impl PrettyLegacyPhEnvelopeRow {
             // Accepted backend metrics and P,H timing are intentionally kept
             // as separate observations: nested routes can contain several
             // trial/attempt scopes, so forcing one ratio can be misleading.
-            legacy_backend_wall: format!("{:.2} ms", backend_us / 1_000.0),
+            native_backend_wall: format!("{:.2} ms", backend_us / 1_000.0),
         })
     }
 }
@@ -1209,21 +1209,21 @@ fn instrumented_builder_with_route(
         .reference_pressure_pa(reference_pressure_pa);
     let builder = match route {
         BackendRoute::Production => builder.production_cascade(),
-        BackendRoute::LegacyLm => builder
-            .solver_policy(SolverPolicy::Single(SolverBackend::Legacy(
-                LegacyEquilibriumSolver::LM,
+        BackendRoute::NativeLm => builder
+            .solver_policy(SolverPolicy::Single(SolverBackend::Native(
+                NativeEquilibriumSolver::LM,
             )))
-            .expect("single legacy-LM benchmark policy must validate"),
-        BackendRoute::LegacyNr => builder
-            .solver_policy(SolverPolicy::Single(SolverBackend::Legacy(
-                LegacyEquilibriumSolver::NR,
+            .expect("single native-LM benchmark policy must validate"),
+        BackendRoute::NativeNr => builder
+            .solver_policy(SolverPolicy::Single(SolverBackend::Native(
+                NativeEquilibriumSolver::NR,
             )))
-            .expect("single legacy-NR benchmark policy must validate"),
-        BackendRoute::LegacyTr => builder
-            .solver_policy(SolverPolicy::Single(SolverBackend::Legacy(
-                LegacyEquilibriumSolver::TR,
+            .expect("single native-NR benchmark policy must validate"),
+        BackendRoute::NativeTr => builder
+            .solver_policy(SolverPolicy::Single(SolverBackend::Native(
+                NativeEquilibriumSolver::TR,
             )))
-            .expect("single legacy-TR benchmark policy must validate"),
+            .expect("single native-TR benchmark policy must validate"),
     };
     builder
         .preset(EquilibriumCalculatorPreset::Timed)
@@ -1369,15 +1369,15 @@ fn ph_builder(
 fn accepted_backend_name(report: &EquilibriumSolveReport) -> &'static str {
     match report.accepted_backend {
         SolverBackend::RustedSciThe(_) => "rst",
-        SolverBackend::Legacy(_) => "legacy",
+        SolverBackend::Native(_) => "native",
     }
 }
 
 fn accepted_solver_name(report: &EquilibriumSolveReport) -> &'static str {
     match report.accepted_backend {
-        SolverBackend::Legacy(LegacyEquilibriumSolver::LM) => "legacy_lm",
-        SolverBackend::Legacy(LegacyEquilibriumSolver::NR) => "legacy_nr",
-        SolverBackend::Legacy(LegacyEquilibriumSolver::TR) => "legacy_tr",
+        SolverBackend::Native(NativeEquilibriumSolver::LM) => "native_lm",
+        SolverBackend::Native(NativeEquilibriumSolver::NR) => "native_nr",
+        SolverBackend::Native(NativeEquilibriumSolver::TR) => "native_tr",
         SolverBackend::RustedSciThe(solver) => solver.name(),
     }
 }
@@ -2044,58 +2044,58 @@ fn baseline_scenarios() -> Vec<Scenario> {
             task: ScenarioTask::PhElementInventory,
             route: BackendRoute::Production,
         },
-        // Fixed legacy policies are deliberately retained as diagnostic
+        // Fixed native policies are deliberately retained as diagnostic
         // controls. They expose method-specific regressions that a healthy
         // production cascade can hide by accepting an RST attempt first.
         Scenario {
             universe: Universe::SmallH2O,
             task: ScenarioTask::PtElementInventory,
-            route: BackendRoute::LegacyLm,
+            route: BackendRoute::NativeLm,
         },
         Scenario {
             universe: Universe::SmallH2O,
             task: ScenarioTask::PtElementInventory,
-            route: BackendRoute::LegacyNr,
+            route: BackendRoute::NativeNr,
         },
         Scenario {
             universe: Universe::SmallH2O,
             task: ScenarioTask::PtElementInventory,
-            route: BackendRoute::LegacyTr,
+            route: BackendRoute::NativeTr,
         },
         Scenario {
             universe: Universe::SmallH2O,
             task: ScenarioTask::PhElementInventory,
-            route: BackendRoute::LegacyLm,
+            route: BackendRoute::NativeLm,
         },
         Scenario {
             universe: Universe::Stanjan15,
             task: ScenarioTask::PhElementInventory,
-            route: BackendRoute::LegacyLm,
+            route: BackendRoute::NativeLm,
         },
         Scenario {
             universe: Universe::Stanjan15,
             task: ScenarioTask::PhElementInventory,
-            route: BackendRoute::LegacyTr,
+            route: BackendRoute::NativeTr,
         },
         Scenario {
             universe: Universe::Tp1907,
             task: ScenarioTask::PhElementInventory,
-            route: BackendRoute::LegacyTr,
+            route: BackendRoute::NativeTr,
         },
         Scenario {
             universe: Universe::Rp1311_40,
             task: ScenarioTask::PhElementInventory,
-            route: BackendRoute::LegacyLm,
+            route: BackendRoute::NativeLm,
         },
         Scenario {
             universe: Universe::Rp1311_40,
             task: ScenarioTask::PhElementInventory,
-            route: BackendRoute::LegacyNr,
+            route: BackendRoute::NativeNr,
         },
         Scenario {
             universe: Universe::Rp1311_40,
             task: ScenarioTask::PhElementInventory,
-            route: BackendRoute::LegacyTr,
+            route: BackendRoute::NativeTr,
         },
     ]);
     for universe in [Universe::Stanjan15, Universe::Tp1907, Universe::Rp1311_40] {
@@ -2116,27 +2116,27 @@ fn baseline_scenarios() -> Vec<Scenario> {
         Scenario {
             universe: Universe::Stanjan15,
             task: ScenarioTask::PtElementInventory,
-            route: BackendRoute::LegacyLm,
+            route: BackendRoute::NativeLm,
         },
         Scenario {
             universe: Universe::Tp1907,
             task: ScenarioTask::PtElementInventory,
-            route: BackendRoute::LegacyLm,
+            route: BackendRoute::NativeLm,
         },
         Scenario {
             universe: Universe::Rp1311_40,
             task: ScenarioTask::PtElementInventory,
-            route: BackendRoute::LegacyLm,
+            route: BackendRoute::NativeLm,
         },
         Scenario {
             universe: Universe::Rp1311_40,
             task: ScenarioTask::PtElementInventory,
-            route: BackendRoute::LegacyNr,
+            route: BackendRoute::NativeNr,
         },
         Scenario {
             universe: Universe::Rp1311_40,
             task: ScenarioTask::PtElementInventory,
-            route: BackendRoute::LegacyTr,
+            route: BackendRoute::NativeTr,
         },
     ]);
     // Ranges measure continuation reuse and remain on the small fixture so
@@ -2166,7 +2166,7 @@ fn assert_pretty_coverage(
     nonlinear_rows: &[PrettyNonlinearRow],
     attempt_rows: &[PrettyAttemptRow],
     solver_rows: &[PrettySolverMeasurement],
-    legacy_ph_rows: &[PrettyLegacyPhEnvelopeRow],
+    native_ph_rows: &[PrettyNativePhEnvelopeRow],
 ) {
     for scenario in scenarios {
         let case = scenario.label();
@@ -2209,12 +2209,12 @@ fn assert_pretty_coverage(
             )
         {
             assert_eq!(
-                legacy_ph_rows
+                native_ph_rows
                     .iter()
                     .filter(|row| row.case_name == case)
                     .count(),
                 1,
-                "Legacy P,H envelope table must cover {case}"
+                "Native P,H envelope table must cover {case}"
             );
         }
 
@@ -2267,7 +2267,7 @@ fn print_baseline_table(targets: &[(Universe, f64)]) {
     #[cfg(feature = "equilibrium-benchmark-prettyprint")]
     let mut pretty_solver_rows = Vec::new();
     #[cfg(feature = "equilibrium-benchmark-prettyprint")]
-    let mut pretty_legacy_ph_rows = Vec::new();
+    let mut pretty_native_ph_rows = Vec::new();
     #[cfg(feature = "equilibrium-benchmark-prettyprint")]
     let mut pretty_macro_rows = Vec::new();
     #[cfg(feature = "equilibrium-benchmark-prettyprint")]
@@ -2317,9 +2317,9 @@ fn print_baseline_table(targets: &[(Universe, f64)]) {
                     ScenarioTask::PhMolecular | ScenarioTask::PhElementInventory
                 )
             {
-                pretty_legacy_ph_rows.push(
-                    PrettyLegacyPhEnvelopeRow::from_measurement(case_name.clone(), &mean)
-                        .expect("Legacy P,H benchmark must expose an accepted backend"),
+                pretty_native_ph_rows.push(
+                    PrettyNativePhEnvelopeRow::from_measurement(case_name.clone(), &mean)
+                        .expect("Native P,H benchmark must expose an accepted backend"),
                 );
             }
         }
@@ -2356,7 +2356,7 @@ fn print_baseline_table(targets: &[(Universe, f64)]) {
             &pretty_nonlinear_rows,
             &pretty_attempt_rows,
             &pretty_solver_rows,
-            &pretty_legacy_ph_rows,
+            &pretty_native_ph_rows,
         );
         println!("\nEquilibrium macro time budget");
         println!(
@@ -2389,7 +2389,7 @@ fn print_baseline_table(targets: &[(Universe, f64)]) {
         println!("{}", Table::new(pretty_nonlinear_rows));
 
         println!(
-            "\nLegacy/ RST backend attempt detail (one row per attempt, including fallback and recovery attempts)"
+            "\nNative/ RST backend attempt detail (one row per attempt, including fallback and recovery attempts)"
         );
         println!(
             "Attempt percentages use that attempt's own backend wall time. `wall-only` preserves failed-call elapsed time without inventing iterations or callback splits; `n/a` means only that internal detail was not published."
@@ -2398,15 +2398,15 @@ fn print_baseline_table(targets: &[(Universe, f64)]) {
 
         println!("\nAccepted solver callback summary (percent of accepted backend wall time)");
         println!(
-            "Residual/Jacobian/linear timings are measured inside legacy LM/NR/TR callbacks and linear solves. RST reports n/a for its internal linear split."
+            "Residual/Jacobian/linear timings are measured inside native LM/NR/TR callbacks and linear solves. RST reports n/a for its internal linear split."
         );
         println!("{}", Table::new(pretty_solver_rows));
 
-        println!("\nLegacy P,H end-to-end envelope");
+        println!("\nNative P,H end-to-end envelope");
         println!(
-            "This chain uses explicit parent denominators: P,H workflow/facade, trial total/workflow, and nonlinear solve/trial (or monolithic execution). Legacy backend wall is shown separately because nested routes can contain several trial/attempt scopes. `n/a (monolithic)` is intentional."
+            "This chain uses explicit parent denominators: P,H workflow/facade, trial total/workflow, and nonlinear solve/trial (or monolithic execution). Native backend wall is shown separately because nested routes can contain several trial/attempt scopes. `n/a (monolithic)` is intentional."
         );
-        println!("{}", Table::new(pretty_legacy_ph_rows));
+        println!("{}", Table::new(pretty_native_ph_rows));
     }
 }
 

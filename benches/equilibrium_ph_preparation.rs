@@ -282,9 +282,9 @@ fn production_policy_without_backtracking() -> SolverPolicy {
         .map(SolverBackend::RustedSciThe)
         .collect::<Vec<_>>();
     backends.extend([
-        SolverBackend::Legacy(LegacyEquilibriumSolver::LM),
-        SolverBackend::Legacy(LegacyEquilibriumSolver::NR),
-        SolverBackend::Legacy(LegacyEquilibriumSolver::TR),
+        SolverBackend::Native(NativeEquilibriumSolver::LM),
+        SolverBackend::Native(NativeEquilibriumSolver::NR),
+        SolverBackend::Native(NativeEquilibriumSolver::TR),
     ]);
     SolverPolicy::Cascade(backends)
 }

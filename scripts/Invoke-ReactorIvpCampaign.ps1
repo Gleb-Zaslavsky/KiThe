@@ -36,9 +36,9 @@ function New-Step([string]$Id, [string]$SuiteName, [string]$Filter, [string]$Des
 
 $steps = @()
 if ($Suite -in @('all', 'correctness')) {
-    $steps += New-Step 'ivp-stories' 'correctness' 'ReactorsIVP::reactor_ivp_story_tests' 'IVP correctness, bounded physical smoke, frontend/family parity and prepared lifecycle stories'
+    $steps += New-Step 'ivp-stories' 'correctness' 'SimpleReactorsIVP::reactor_ivp_story_tests' 'IVP correctness, bounded physical smoke, frontend/family parity and prepared lifecycle stories'
     $steps += New-Step 'ivp-multistep-frontend-parity' 'correctness' 'multistep_oxidation_expr_and_atomview_publish_matching_bounded_profiles' 'ExprLegacy/AtomView parity on the bounded two-step oxidation symbolic system'
-    $steps += New-Step 'ivp-aot-stories' 'correctness' 'ReactorsIVP::reactor_ivp_aot_story_tests' 'Gated LSODE2 AOT sparse/banded correctness stories' 'KITHE_RUN_IVP_AOT_TESTS' '1'
+    $steps += New-Step 'ivp-aot-stories' 'correctness' 'SimpleReactorsIVP::reactor_ivp_aot_story_tests' 'Gated LSODE2 AOT sparse/banded correctness stories' 'KITHE_RUN_IVP_AOT_TESTS' '1'
 }
 if ($Suite -in @('all', 'performance')) {
     $steps += [pscustomobject]@{

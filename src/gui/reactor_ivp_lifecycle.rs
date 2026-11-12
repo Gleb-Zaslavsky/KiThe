@@ -15,12 +15,12 @@ use rfd::FileDialog;
 use crate::gui::document_lifecycle::{GuiFileOperationKind, GuiFileOperationResult};
 
 use super::{IvpGuiConfig, ReactorIvpApp, ReactorIvpCalculationState};
-use crate::ReactorsIVP::SimpleReactorIVP::IvpError;
-use crate::ReactorsIVP::solver_backend::{
+use crate::SimpleReactorsIVP::SimpleReactorIVP::IvpError;
+use crate::SimpleReactorsIVP::solver_backend::{
     ReactorIvpExecutionBackend, ReactorIvpMatrixBackend, ReactorIvpMethod, ReactorIvpSolverConfig,
     ReactorIvpSolverFamily, ReactorIvpSymbolicBackend,
 };
-use crate::ReactorsIVP::task_parser_reactor_IVP::{
+use crate::SimpleReactorsIVP::task_parser_reactor_IVP::{
     ReactorIvpDocumentSpec, ReactorIvpMechanismSpec, ReactorIvpStopConditionSpec,
 };
 
@@ -55,7 +55,7 @@ impl ReactorIvpApp {
         Ok(ReactorIvpDocumentSpec {
             problem_name: preview_task.problem_name.clone(),
             problem_description: preview_task.problem_description.clone(),
-            physical: crate::ReactorsIVP::SimpleReactorIVP::ReactorIvpPhysicalConfig {
+            physical: crate::SimpleReactorsIVP::SimpleReactorIVP::ReactorIvpPhysicalConfig {
                 ro: preview_task.ro,
                 Cp: preview_task.Cp,
                 Lambda: preview_task.Lambda,
@@ -194,7 +194,7 @@ impl ReactorIvpApp {
     /// Load a typed document from disk and resynchronize the GUI state.
     pub(crate) fn load_document_from_path(&mut self, path: PathBuf) -> GuiFileOperationResult {
         let result = match fs::read_to_string(&path) {
-            Ok(content) => match crate::ReactorsIVP::task_parser_reactor_IVP::parse_reactor_ivp_document_from_str(&content) {
+            Ok(content) => match crate::SimpleReactorsIVP::task_parser_reactor_IVP::parse_reactor_ivp_document_from_str(&content) {
                 Ok(spec) => {
                     let mut task = self.task.clone();
                     if let Err(error) = spec.validate(&task.kindata.substances) {
@@ -437,7 +437,7 @@ fn reactor_solver_config_to_parser_settings(
 
     let family_options = config.family_options;
     let (max_iterations, lsode2) = match family_options {
-        crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Lsode2 {
+        crate::SimpleReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Lsode2 {
             controller,
             native_execution,
         } => (
@@ -458,10 +458,10 @@ fn reactor_solver_config_to_parser_settings(
                 native_execution: Some(native_execution),
             }),
         ),
-        crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Bdf { max_steps } => {
+        crate::SimpleReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Bdf { max_steps } => {
             (Some(max_steps), None)
         }
-        crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Radau {
+        crate::SimpleReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Radau {
             max_newton_iterations,
             ..
         } => (Some(max_newton_iterations), None),
@@ -617,7 +617,7 @@ fn parser_solver_settings_to_reactor_config(
         .as_ref()
         .and_then(|lsode2| lsode2.native_execution)
         .unwrap_or_else(|| match ReactorIvpSolverConfig::default().family_options {
-            crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Lsode2 {
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Lsode2 {
                 native_execution,
                 ..
             } => native_execution,
@@ -646,18 +646,18 @@ fn parser_solver_settings_to_reactor_config(
     config.logging = settings.solver_options.logging.unwrap_or(config.logging);
     config.family_options = match family {
         ReactorIvpSolverFamily::Lsode2 => {
-            crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Lsode2 {
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Lsode2 {
                 controller,
                 native_execution,
             }
         }
         ReactorIvpSolverFamily::Bdf => {
-            crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Bdf {
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Bdf {
                 max_steps: settings.solver_options.max_iterations.unwrap_or(200_000),
             }
         }
         ReactorIvpSolverFamily::Radau => {
-            crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Radau {
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Radau {
                 max_steps: 200_000,
                 max_newton_iterations: settings.solver_options.max_iterations.unwrap_or(6),
             }
@@ -696,27 +696,27 @@ mod solver_family_document_tests {
             if family == ReactorIvpSolverFamily::Bdf {
                 assert!(matches!(
                     restored.family_options,
-                    crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Bdf {
+                    crate::SimpleReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Bdf {
                         max_steps: 23
                     }
                 ));
                 assert!(matches!(
                     restored.family_options,
-                    crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Bdf {
+                    crate::SimpleReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Bdf {
                         max_steps
                     } if max_steps == expected_limit
                 ));
             } else {
                 assert!(matches!(
                     restored.family_options,
-                    crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Radau {
+                    crate::SimpleReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Radau {
                         max_newton_iterations: 7,
                         ..
                     }
                 ));
                 assert!(matches!(
                     restored.family_options,
-                    crate::ReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Radau {
+                    crate::SimpleReactorsIVP::solver_backend::ReactorIvpFamilyOptions::Radau {
                         max_newton_iterations,
                         ..
                     } if max_newton_iterations == expected_limit

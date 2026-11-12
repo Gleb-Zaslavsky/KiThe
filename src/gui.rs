@@ -39,6 +39,8 @@ mod reactor_ivp_gui_quality_tests;
 #[cfg(test)]
 mod reactor_ivp_gui_tests;
 pub mod settings_gui;
+#[cfg(test)]
+mod solid_state_ivp_gui_tests;
 pub mod thermochemistry_gui;
 #[cfg(test)]
 mod thermochemistry_gui_tests;

@@ -3,9 +3,9 @@ pub mod Examples;
 #[allow(non_snake_case)]
 pub mod Kinetics;
 #[allow(non_snake_case)]
-pub mod ReactorsBVP;
+pub mod SimpleReactorsBVP;
 #[allow(non_snake_case)]
-pub mod ReactorsIVP;
+pub mod SimpleReactorsIVP;
 #[allow(non_snake_case)]
 pub mod Thermodynamics;
 #[allow(non_snake_case)]

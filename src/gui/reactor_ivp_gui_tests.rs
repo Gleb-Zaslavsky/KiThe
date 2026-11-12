@@ -17,7 +17,7 @@ mod tests {
         build_reactor_ivp_task_preview_snapshot,
     };
     use crate::Kinetics::mechfinder_api::{ReactionData, ReactionKinetics};
-    use crate::ReactorsIVP::solver_backend::{
+    use crate::SimpleReactorsIVP::solver_backend::{
         ReactorIvpCallbackPolicy, ReactorIvpExecutionBackend, ReactorIvpFamilyOptions,
     };
     use RustedSciThe::numerical::SolverTelemetryMode;
@@ -81,11 +81,11 @@ mod tests {
         for (choice, expected_family) in [
             (
                 "BDF (standalone)",
-                crate::ReactorsIVP::solver_backend::ReactorIvpSolverFamily::Bdf,
+                crate::SimpleReactorsIVP::solver_backend::ReactorIvpSolverFamily::Bdf,
             ),
             (
                 "Radau",
-                crate::ReactorsIVP::solver_backend::ReactorIvpSolverFamily::Radau,
+                crate::SimpleReactorsIVP::solver_backend::ReactorIvpSolverFamily::Radau,
             ),
         ] {
             let app = Rc::new(RefCell::new(ReactorIvpApp::new()));
@@ -113,7 +113,7 @@ mod tests {
             assert_eq!(app_ref.config.solver_family, expected_family);
             assert_eq!(
                 app_ref.config.matrix_backend,
-                crate::ReactorsIVP::solver_backend::ReactorIvpMatrixBackend::Dense
+                crate::SimpleReactorsIVP::solver_backend::ReactorIvpMatrixBackend::Dense
             );
             assert_eq!(
                 app_ref.config.execution_mode,
@@ -165,15 +165,15 @@ mod tests {
         let config = app.borrow().config.clone();
         assert_eq!(
             config.symbolic_backend,
-            crate::ReactorsIVP::solver_backend::ReactorIvpSymbolicBackend::ExprLegacy
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpSymbolicBackend::ExprLegacy
         );
         assert_eq!(
             config.method,
-            crate::ReactorsIVP::solver_backend::ReactorIvpMethod::Adams
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpMethod::Adams
         );
         assert_eq!(
             config.matrix_backend,
-            crate::ReactorsIVP::solver_backend::ReactorIvpMatrixBackend::Banded
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpMatrixBackend::Banded
         );
         assert_eq!(format!("{:?}", config.telemetry), "Detailed");
         assert_eq!(format!("{:?}", config.logging), "Debug");
@@ -225,7 +225,7 @@ mod tests {
         harness.run();
         assert_eq!(
             app.borrow().config.solver_family,
-            crate::ReactorsIVP::solver_backend::ReactorIvpSolverFamily::Bdf
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpSolverFamily::Bdf
         );
     }
 
@@ -257,13 +257,13 @@ mod tests {
         press_on!("Solver family", egui::Key::ArrowDown);
         assert_eq!(
             app.borrow().config.solver_family,
-            crate::ReactorsIVP::solver_backend::ReactorIvpSolverFamily::Bdf
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpSolverFamily::Bdf
         );
         press_on!("Solver family", egui::Key::ArrowUp);
         press_on!("Symbolic frontend", egui::Key::ArrowDown);
         assert_eq!(
             app.borrow().config.symbolic_backend,
-            crate::ReactorsIVP::solver_backend::ReactorIvpSymbolicBackend::ExprLegacy
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpSymbolicBackend::ExprLegacy
         );
         press_on!("LSODE2 controller", egui::Key::ArrowDown);
         press_on!("Matrix backend", egui::Key::ArrowDown);
@@ -273,11 +273,11 @@ mod tests {
         press_on!("AOT profile", egui::Key::ArrowDown);
         assert_eq!(
             app.borrow().config.method,
-            crate::ReactorsIVP::solver_backend::ReactorIvpMethod::Bdf
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpMethod::Bdf
         );
         assert_eq!(
             app.borrow().config.matrix_backend,
-            crate::ReactorsIVP::solver_backend::ReactorIvpMatrixBackend::Banded
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpMatrixBackend::Banded
         );
         assert_eq!(
             app.borrow().config.execution_mode,
@@ -285,7 +285,7 @@ mod tests {
         );
         assert_eq!(
             app.borrow().config.symbolic_backend,
-            crate::ReactorsIVP::solver_backend::ReactorIvpSymbolicBackend::ExprLegacy
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpSymbolicBackend::ExprLegacy
         );
         assert_eq!(format!("{:?}", app.borrow().config.aot_toolchain), "Zig");
         assert_eq!(format!("{:?}", app.borrow().config.aot_profile), "Debug");
@@ -354,7 +354,8 @@ mod tests {
             ReactorIvpFamilyOptions::Bdf { max_steps: 12_345 }
         ));
 
-        config.solver_family = crate::ReactorsIVP::solver_backend::ReactorIvpSolverFamily::Radau;
+        config.solver_family =
+            crate::SimpleReactorsIVP::solver_backend::ReactorIvpSolverFamily::Radau;
         config.radau_max_steps = 23_456;
         config.radau_max_newton_iterations = 9;
         assert!(matches!(

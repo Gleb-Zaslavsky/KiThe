@@ -1,0 +1,350 @@
+{
+  "specification": "TW-04",
+  "reference_method": "DOP853",
+  "cross_check_method": "Radau",
+  "rtol": 1e-12,
+  "atol": [
+    1e-14,
+    1e-11,
+    1e-14,
+    1e-14,
+    1e-14,
+    1e-14,
+    1e-14,
+    1e-14,
+    1e-14,
+    1e-14,
+    1e-14,
+    1e-14,
+    1e-14,
+    1e-14
+  ],
+  "max_step": 0.0002,
+  "convergence_report": "../external_reference/tw_04/calibration.json",
+  "convergence_rtol_levels": [
+    1e-09,
+    1e-10,
+    1e-11
+  ],
+  "python": "3.14.6",
+  "numpy": "2.4.6",
+  "scipy": "1.17.1",
+  "physical_parameters": {
+    "rho_kg_m3": 1000.0,
+    "cp_j_kg_k": 1000.0,
+    "lambda_w_m_k": 10000.0,
+    "length_m": 0.01,
+    "mass_flux_kg_m2_s": 1.0,
+    "temperature_offset_k": 300.0,
+    "temperature_scale_k": 100.0,
+    "molar_mass_kg_mol": 0.060052,
+    "reference_temperature_k": 400.0
+  },
+  "initial_state": {
+    "theta": 1.0,
+    "qhat": 5000.0,
+    "mass_fractions": [
+      0.12,
+      0.08,
+      0.07,
+      0.09,
+      0.1,
+      0.06,
+      0.11,
+      0.05,
+      0.07,
+      0.08,
+      0.09,
+      0.08
+    ]
+  },
+  "species_formula": {
+    "C": 2,
+    "H": 4,
+    "O": 2
+  },
+  "enthalpies_j_mol": [
+    0.0,
+    -40.0,
+    -25.0,
+    -65.0,
+    -15.0,
+    -80.0,
+    -35.0,
+    -100.0,
+    -50.0,
+    -90.0,
+    -60.0,
+    -115.0
+  ],
+  "reaction_heats_at_gamma_1_j_mol": [
+    40.0,
+    -15.0,
+    40.0,
+    -50.0,
+    65.0,
+    -45.0,
+    65.0,
+    -50.0,
+    40.0,
+    -30.0,
+    55.0,
+    -115.0,
+    15.0,
+    40.0,
+    10.0,
+    35.0,
+    35.0,
+    10.0,
+    25.0,
+    15.0
+  ],
+  "mechanism": [
+    {
+      "id": "R01",
+      "from": 0,
+      "to": 1,
+      "k_ref_s_inv": 0.7,
+      "activation_energy_j_mol": 20000.0,
+      "pre_exponential_s_inv": 286.36792226772315
+    },
+    {
+      "id": "R02",
+      "from": 1,
+      "to": 2,
+      "k_ref_s_inv": 1.1,
+      "activation_energy_j_mol": 45000.0,
+      "pre_exponential_s_inv": 827945.8321950313
+    },
+    {
+      "id": "R03",
+      "from": 2,
+      "to": 3,
+      "k_ref_s_inv": 0.5,
+      "activation_energy_j_mol": 30000.0,
+      "pre_exponential_s_inv": 4137.228398592299
+    },
+    {
+      "id": "R04",
+      "from": 3,
+      "to": 4,
+      "k_ref_s_inv": 1.6,
+      "activation_energy_j_mol": 65000.0,
+      "pre_exponential_s_inv": 492669356.292804
+    },
+    {
+      "id": "R05",
+      "from": 4,
+      "to": 5,
+      "k_ref_s_inv": 0.8,
+      "activation_energy_j_mol": 40000.0,
+      "pre_exponential_s_inv": 133888.30514927796
+    },
+    {
+      "id": "R06",
+      "from": 5,
+      "to": 6,
+      "k_ref_s_inv": 1.3,
+      "activation_energy_j_mol": 55000.0,
+      "pre_exponential_s_inv": 19790909.628795903
+    },
+    {
+      "id": "R07",
+      "from": 6,
+      "to": 7,
+      "k_ref_s_inv": 0.6,
+      "activation_energy_j_mol": 25000.0,
+      "pre_exponential_s_inv": 1103.9112544075567
+    },
+    {
+      "id": "R08",
+      "from": 7,
+      "to": 8,
+      "k_ref_s_inv": 1.9,
+      "activation_energy_j_mol": 70000.0,
+      "pre_exponential_s_inv": 2631150866.939175
+    },
+    {
+      "id": "R09",
+      "from": 8,
+      "to": 9,
+      "k_ref_s_inv": 0.9,
+      "activation_energy_j_mol": 35000.0,
+      "pre_exponential_s_inv": 33491.807342446344
+    },
+    {
+      "id": "R10",
+      "from": 9,
+      "to": 10,
+      "k_ref_s_inv": 1.4,
+      "activation_energy_j_mol": 60000.0,
+      "pre_exponential_s_inv": 95853289.40386415
+    },
+    {
+      "id": "R11",
+      "from": 10,
+      "to": 11,
+      "k_ref_s_inv": 0.75,
+      "activation_energy_j_mol": 25000.0,
+      "pre_exponential_s_inv": 1379.889068009446
+    },
+    {
+      "id": "R12",
+      "from": 11,
+      "to": 0,
+      "k_ref_s_inv": 1.2,
+      "activation_energy_j_mol": 70000.0,
+      "pre_exponential_s_inv": 1661779494.9089527
+    },
+    {
+      "id": "R13",
+      "from": 0,
+      "to": 4,
+      "k_ref_s_inv": 0.45,
+      "activation_energy_j_mol": 55000.0,
+      "pre_exponential_s_inv": 6850699.48689089
+    },
+    {
+      "id": "R14",
+      "from": 1,
+      "to": 5,
+      "k_ref_s_inv": 0.95,
+      "activation_energy_j_mol": 35000.0,
+      "pre_exponential_s_inv": 35352.46330591558
+    },
+    {
+      "id": "R15",
+      "from": 2,
+      "to": 6,
+      "k_ref_s_inv": 1.7,
+      "activation_energy_j_mol": 75000.0,
+      "pre_exponential_s_inv": 10587603120.128727
+    },
+    {
+      "id": "R16",
+      "from": 3,
+      "to": 7,
+      "k_ref_s_inv": 0.55,
+      "activation_energy_j_mol": 20000.0,
+      "pre_exponential_s_inv": 225.00336749606822
+    },
+    {
+      "id": "R17",
+      "from": 4,
+      "to": 8,
+      "k_ref_s_inv": 1.05,
+      "activation_energy_j_mol": 60000.0,
+      "pre_exponential_s_inv": 71889967.05289812
+    },
+    {
+      "id": "R18",
+      "from": 5,
+      "to": 9,
+      "k_ref_s_inv": 1.8,
+      "activation_energy_j_mol": 45000.0,
+      "pre_exponential_s_inv": 1354820.4526827785
+    },
+    {
+      "id": "R19",
+      "from": 6,
+      "to": 10,
+      "k_ref_s_inv": 0.65,
+      "activation_energy_j_mol": 80000.0,
+      "pre_exponential_s_inv": 18206173228.492203
+    },
+    {
+      "id": "R20",
+      "from": 7,
+      "to": 11,
+      "k_ref_s_inv": 1.5,
+      "activation_energy_j_mol": 30000.0,
+      "pre_exponential_s_inv": 12411.685195776896
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "tw_04a",
+      "gamma": 0.0,
+      "grid_points": 1001,
+      "peak_abs_q_volume_z": 0.0,
+      "dop853_nfev": 75017,
+      "radau_nfev": 35051,
+      "cross_method_delta": {
+        "max_mass_fraction": 2.628453010800058e-14,
+        "max_theta": 1.021405182655144e-14,
+        "max_qhat": 8.913048077374697e-11
+      },
+      "diagnostics": {
+        "temperature_min_k": 400.0,
+        "temperature_max_k": 450.0250083354177,
+        "minimum_mass_fraction": 0.0006495754559067417,
+        "mass_balance_error": 1.5543122344752192e-15,
+        "max_energy_invariant": 4.473710291108546e-11,
+        "normalized_energy_invariant": 4.471197001145343e-15
+      }
+    },
+    {
+      "name": "tw_04b",
+      "gamma": 1000.0,
+      "grid_points": 1006,
+      "peak_abs_q_volume_z": 0.037200000000000004,
+      "dop853_nfev": 75017,
+      "radau_nfev": 35051,
+      "cross_method_delta": {
+        "max_mass_fraction": 2.631228568361621e-14,
+        "max_theta": 9.103828801926284e-15,
+        "max_qhat": 2.8194335754960775e-11
+      },
+      "diagnostics": {
+        "temperature_min_k": 400.0,
+        "temperature_max_k": 450.01923244520594,
+        "minimum_mass_fraction": 0.0006497914319904984,
+        "mass_balance_error": 8.881784197001252e-16,
+        "max_energy_invariant": 2.9254820788082725e-11,
+        "normalized_energy_invariant": 2.8981246184876158e-15
+      }
+    },
+    {
+      "name": "tw_04c",
+      "gamma": 100000.0,
+      "grid_points": 1006,
+      "peak_abs_q_volume_z": 0.0376,
+      "dop853_nfev": 75017,
+      "radau_nfev": 35044,
+      "cross_method_delta": {
+        "max_mass_fraction": 2.609024107869118e-14,
+        "max_theta": 1.2878587085651816e-14,
+        "max_qhat": 1.7917045624926686e-10
+      },
+      "diagnostics": {
+        "temperature_min_k": 400.0,
+        "temperature_max_k": 449.1352460510507,
+        "minimum_mass_fraction": 0.000682693547200552,
+        "mass_balance_error": 1.5543122344752192e-15,
+        "max_energy_invariant": 2.2708945834892802e-11,
+        "normalized_energy_invariant": 1.4407939847373537e-15
+      }
+    },
+    {
+      "name": "tw_04d",
+      "gamma": 500000.0,
+      "grid_points": 1006,
+      "peak_abs_q_volume_z": 0.039400000000000004,
+      "dop853_nfev": 75017,
+      "radau_nfev": 35508,
+      "cross_method_delta": {
+        "max_mass_fraction": 2.4896751327219135e-14,
+        "max_theta": 9.992007221626409e-15,
+        "max_qhat": 8.376446203328669e-10
+      },
+      "diagnostics": {
+        "temperature_min_k": 400.0,
+        "temperature_max_k": 428.6685958715874,
+        "minimum_mass_fraction": 0.002000858192241203,
+        "mass_balance_error": 1.5543122344752192e-15,
+        "max_energy_invariant": 4.410427578704912e-11,
+        "normalized_energy_invariant": 1.1220317634346644e-15
+      }
+    }
+  ]
+}

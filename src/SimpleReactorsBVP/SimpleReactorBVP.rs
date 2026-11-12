@@ -1,0 +1,2264 @@
+//! # Simple Reactor BVP Module
+//!
+//! This module provides a comprehensive framework for modeling chemical reactors using boundary value problems (BVP).
+//! It implements dimensionless reactor equations for mass and heat transfer with chemical reactions.
+//!
+//! ## Main Structures
+//!
+//! - **`SimpleReactorTask`**: Main reactor modeling structure that aggregates kinetics, thermodynamics, and transport properties
+//! - **`BVPSolver`**: Wrapper for different BVP solvers (NRBVP damped Newton-Raphson, BVPsci adaptive)
+//! - **`ToleranceConfig`**: Helper for setting solver tolerances across all variables (C, J, Teta, q)
+//! - **`BoundsConfig`**: Helper for setting variable bounds across all variables
+//! - **`FastElemReact`**: Simple structure for elementary reactions with Arrhenius parameters
+//!
+//! ## Key Features
+//!
+//! - **Automatic dimensionless scaling**: Converts dimensional equations to dimensionless form for numerical stability
+//! - **Flexible tolerance/bounds setup**: Automatically expands simple configs to full variable maps (C0,C1,... J0,J1,...)
+//! - **Multiple solver backends**: Supports both damped Newton-Raphson and adaptive mesh refinement solvers
+//! - **Transport property calculation**: Automatic calculation of Peclet numbers and Lewis numbers
+//! - **Post-processing**: Converts dimensionless results back to dimensional form
+//!
+//! ## Mathematical Model
+//!
+//! The module solves dimensionless reactor equations:
+//! - **Mass balance**: dCi/dz = Ji/(D*ρ), dJi/dz = Pe_D*Ji - l²*Gi
+//! - **Energy balance**: dTeta/dz = q/λ, dq/dz = Pe_q*q - l²*Q/dT
+//!
+//! Where z = x/L (dimensionless coordinate), Teta = (T-T₀)/dT (dimensionless temperature)
+//! PAY ATTENTION TO THE DIMENSION OF INPUT PARAMETERS
+use crate::Kinetics::User_reactions::KinData;
+use crate::Kinetics::mechfinder_api::ReactionData;
+use crate::SimpleReactorsBVP::reactor_BVP_utils::{
+    BoundsConfig, ScalingConfig, ToleranceConfig, create_bounds_map, create_tolerance_map,
+};
+use crate::SimpleReactorsBVP::solver_backend::ReactorBvpSolverConfig;
+use RustedSciThe::command_interpreter::task_parser_bvp_hybrid::HybridBvpSettingsError;
+#[cfg(test)]
+use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::NRBVP;
+use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{DampedSolverOptions, SolverParams};
+use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
+use RustedSciThe::numerical::BVP_Damp::telemetry::BvpLoggingConfig;
+use RustedSciThe::numerical::BVP_api::{
+    BvpApiError, BvpApiTelemetryMode, BvpBoundaryCondition, BvpBoundarySide, BvpProblem,
+    BvpSciSparseFactorization as ApiBvpSciSparseFactorization, BvpSettingsError,
+    BvpSolver as RstBvpSolver, BvpSolverConfig, BvpSolverSettings, BvpSolverTelemetrySnapshot,
+};
+use RustedSciThe::numerical::BVP_sci::new::{
+    BvpSciAssembly, BvpSciExecution, BvpSciMatrixLayout, BvpSciOptions, BvpSciTelemetryMode,
+};
+use RustedSciThe::numerical::logging::SolverLogLevel;
+use RustedSciThe::symbolic::symbolic_engine::Expr;
+use log::info;
+
+use nalgebra::{DMatrix, DVector};
+
+use std::collections::HashMap;
+use std::fmt;
+
+/// Universal gas constant in J/(mol·K)
+pub const R_G: f64 = 8.314;
+
+#[derive(Debug, Clone)]
+pub struct SolutionQuality {
+    pub energy_balane_error_abs: f64,
+    pub energy_balane_error_rel: f64,
+
+    /// steps where sum of mass fractions is larger than the threshold
+    pub sum_of_mass_fractions: Vec<(usize, f64)>,
+    pub atomic_mass_balance_error: Vec<(usize, f64)>,
+}
+
+impl Default for SolutionQuality {
+    fn default() -> Self {
+        Self {
+            energy_balane_error_abs: 0.0,
+            energy_balane_error_rel: 0.0,
+
+            sum_of_mass_fractions: Vec::new(),
+            atomic_mass_balance_error: Vec::new(),
+        }
+    }
+}
+/// Error types for reactor modeling operations
+#[derive(Debug)]
+pub enum ReactorError {
+    /// Missing required data (e.g., molar masses, kinetic parameters)
+    MissingData(String),
+    /// Invalid configuration (e.g., negative transport coefficients)
+    InvalidConfiguration(String),
+    /// Numeric input is non-finite or otherwise unusable for reactor physics
+    InvalidNumericValue(String),
+    /// Numerical calculation errors
+    CalculationError(String),
+    /// Parsing errors for chemical equations or parameters
+    ParseError(String),
+    /// Array/vector index out of bounds
+    IndexOutOfBounds(String),
+    /// Typed failure from the shared RustedSciThe BVP API.
+    BvpApi(BvpApiError),
+    /// Typed failure while parsing/building RustedSciThe Damped settings.
+    BvpSettings(HybridBvpSettingsError),
+    /// Typed failure while applying a facade-wide telemetry request.
+    BvpTelemetry(BvpSettingsError),
+    /// The solver returned a finite profile that violates a prescribed endpoint value.
+    BvpBoundaryConditionViolation {
+        state: String,
+        endpoint: usize,
+        expected: f64,
+        actual: f64,
+        absolute_error: f64,
+        tolerance: f64,
+    },
+    /// A finite solver profile contains a value outside a configured state bound.
+    BvpStateBoundViolation {
+        state: String,
+        node: usize,
+        value: f64,
+        lower: f64,
+        upper: f64,
+    },
+}
+
+impl fmt::Display for ReactorError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ReactorError::MissingData(msg) => write!(f, "Missing data: {}", msg),
+            ReactorError::InvalidConfiguration(msg) => write!(f, "Invalid configuration: {}", msg),
+            ReactorError::InvalidNumericValue(msg) => write!(f, "Invalid numeric value: {}", msg),
+            ReactorError::CalculationError(msg) => write!(f, "Calculation error: {}", msg),
+            ReactorError::ParseError(msg) => write!(f, "Parse error: {}", msg),
+            ReactorError::IndexOutOfBounds(msg) => write!(f, "Index out of bounds: {}", msg),
+            ReactorError::BvpApi(source) => write!(f, "BVP solver failed: {source}"),
+            ReactorError::BvpSettings(source) => {
+                write!(f, "BVP solver settings are invalid: {source}")
+            }
+            ReactorError::BvpTelemetry(source) => {
+                write!(f, "BVP telemetry configuration is invalid: {source}")
+            }
+            ReactorError::BvpBoundaryConditionViolation {
+                state,
+                endpoint,
+                expected,
+                actual,
+                absolute_error,
+                tolerance,
+            } => write!(
+                f,
+                "BVP solution violates the boundary condition for `{state}` at endpoint {endpoint}: actual={actual}, expected={expected}, absolute error={absolute_error}, tolerance={tolerance}"
+            ),
+            ReactorError::BvpStateBoundViolation {
+                state,
+                node,
+                value,
+                lower,
+                upper,
+            } => write!(
+                f,
+                "BVP solution violates bounds for `{state}` at node {node}: value={value}, bounds=[{lower}, {upper}]"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReactorError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ReactorError::BvpApi(source) => Some(source),
+            ReactorError::BvpSettings(source) => Some(source),
+            ReactorError::BvpTelemetry(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// Policy for assembling symbolic RHS expressions in `create_bvp_equations`.
+///
+/// `Auto` keeps small systems sequential and switches to parallel assembly for
+/// larger ones where Rayon overhead is likely to pay off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolicRhsAssemblyPolicy {
+    Auto,
+    Sequential,
+    Parallel,
+}
+
+/// Gas-density closure used by the physical reactor model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DensityModel {
+    /// Ideal-gas density at constant pressure and fixed reference composition.
+    #[default]
+    IdealGasFixedComposition,
+    /// Density is frozen at the reference state `(P, M, Tm)`.
+    Constant,
+}
+/*
+       (1/l)*  d(Lambda*( (1/l)* dT/d(x/l)  )  )/d(x/l) - c*m*( (1/l)* dT/d(x/l) + Q =0
+        define: z = x/l
+        d(Lambda* dT/dz   )/dz - c*m*l* dT/dz + l^2*Q =0
+        define  Teta = (T-dT)/dT
+         d(Lambda* dTeta/dz   )/dz - c*m*l* dTeta/dz + l^2*Q/dT =0
+        define: q = Lambda* dTeta/dz
+         d(Lambda* dTeta/dz   )/dz - c*m*l* dT/dz + l^2*Q/dT =0
+        got equations:
+        dT/dz = q/Lambda
+        dq/dz - (c*m*l)/Lambda *q + (l^2)*Q/dT =0
+        and finally:
+        dT/dz = q/Lambda
+        dq/dz - Pe_q*q + (l^2)*Q/dT =0
+
+        (1/l)*  d(D*ro*( (1/l)* dCi/d(x/l)  )  )/d(x/l) - m*( (1/l)* dCi/d(x/l) + Gi =0
+        define: z = x/l
+        d(D*ro* dCi/dz   )/dz - m*l* dT/dz + l^2*Gi =0
+        define: Ji = D*ro dC/dz
+         d(Ji)/dz - m*l* dС/dz + l^2*Gi =0
+        got equations:
+        dCi/dz = Ji/D*ro;
+        dJi/dz - (m*l)/ro*D *Ji + (l^2)*Gi =0
+
+*/
+/// Canonical in-memory description of an elementary reaction used by the BVP
+/// pipeline.
+///
+/// `eq` stores the symbolic reaction equation, `A`, `n`, and `E` are the
+/// Arrhenius parameters, and `Q` is the heat release contribution used by the
+/// reactor energy balance.
+///
+/// Rate = A * T^n * exp(-E/(R*T)) * ∏[Ci]^νi
+#[derive(Debug, Clone)]
+pub struct FastElemReact {
+    /// Chemical equation (e.g., "A + B => C + D")
+    pub eq: String,
+    /// Pre-exponential factor (units depend on reaction order)
+    pub A: f64,
+    /// Temperature exponent (dimensionless)
+    pub n: f64,
+    /// Activation energy (J/mol)
+    pub E: f64,
+    /// Molar heat of reaction (J/mol).
+    pub Q: f64,
+}
+
+impl FastElemReact {
+    /// Molar heat of reaction in J/mol.
+    ///
+    /// Prefer this accessor to the legacy public `Q` field in new code.
+    pub fn heat_of_reaction(&self) -> f64 {
+        self.Q
+    }
+}
+
+/// Main reactor modeling structure that aggregates all reactor properties and methods
+///
+/// This structure handles the complete workflow from kinetic data to BVP solution:
+/// 1. Kinetic preprocessing (stoichiometry, rate expressions)
+/// 2. Transport property calculations (Peclet numbers, diffusion)
+/// 3. Dimensionless scaling and equation setup
+/// 4. BVP solving with multiple solver options
+/// 5. Post-processing and visualization
+#[derive(Debug, Clone)]
+pub struct SimpleReactorTask {
+    /// Optional problem identifier
+    pub problem_name: Option<String>,
+    /// Optional problem description
+    pub problem_description: Option<String>,
+    /// Kinetic data (reactions, substances, rate constants)
+    pub kindata: KinData,
+    /// Molar heat of reaction for each reaction (J/mol).
+    pub thermal_effects: Vec<f64>,
+    /// Pressure (Pa)
+    pub P: f64,
+    /// Reference temperature (K) for density and transport closures.
+    pub Tm: f64,
+    /// Density closure. Defaults to the temperature-dependent fixed-composition model.
+    pub density_model: DensityModel,
+    /// Heat capacity (J/kg·K)
+    pub Cp: f64,
+    /// Physical inlet mass fractions/temperature and optional outlet heat/species fluxes.
+    /// Flux fields use `q` in W/m^2 and `<species>_flux` in kg/(m^2 s).
+    pub boundary_condition: HashMap<String, f64>,
+    /// Legacy public thermal-conductivity field (W/m·K); prefer `thermal_conductivity()`.
+    pub Lambda: f64,
+    /// Diffusion coefficients for each substance (m²/s)
+    pub Diffusion: HashMap<String, f64>,
+    /// Mass flux per unit area (kg/(m^2*s)).
+    pub m: f64,
+    /// Scaling parameters for dimensionless transformation
+    pub scaling: ScalingConfig,
+    /// Characteristic length (m)
+    pub L: f64,
+    /// Temperature scaling expression: T = T_scale*Teta + dT
+    pub T_scaling: Expr,
+    /// Legacy public mean-molar-mass field (kg/mol); prefer `mean_molar_mass_kg_per_mol()`.
+    pub M: f64,
+    /// Transport coefficients D*ρ for each substance
+    pub D_ro_map: HashMap<String, f64>,
+    /// Thermal Peclet number: Pe_q = L*m*Cp/λ, with `m` as mass flux.
+    pub Pe_q: f64,
+    /// Mass Peclet numbers for each substance: Pe_D = m*L/(D*ρ)
+    pub Pe_D: Vec<f64>,
+    /// Reaction rate expressions for each reaction
+    pub map_eq_rate: HashMap<String, Expr>,
+    /// System of differential equations (substance -> (variable, equation))
+    pub map_of_equations: HashMap<String, (String, Expr)>,
+    /// heat release function
+    pub heat_release: Expr,
+    /// Policy for symbolic RHS assembly in `create_bvp_equations`
+    pub symbolic_rhs_assembly_policy: SymbolicRhsAssemblyPolicy,
+    /// BVP solver instance
+    pub solver: BVPSolver,
+}
+/// Boundary Value Problem solver wrapper
+///
+/// Supports multiple solver backends:
+/// - NRBVP: Damped Newton-Raphson with finite differences
+/// - BVPsci: Adaptive mesh refinement with collocation
+#[derive(Debug, Clone)]
+pub struct BVPSolver {
+    /// Independent variable name (typically "x" or "z")
+    pub arg_name: String,
+    /// Domain range (start, end) - typically (0.0, 1.0) for dimensionless
+    pub x_range: (f64, f64),
+    /// Names of unknown variables ["Teta", "q", "C0", "J0", "C1", "J1", ...]
+    pub unknowns: Vec<String>,
+    /// System of differential equations dy/dx = f(x,y)
+    pub eq_system: Vec<Expr>,
+    /// Legacy public boundary-condition map; prefer `state_boundary_conditions()`.
+    pub BorderConditions: HashMap<String, (usize, f64)>,
+    /// Solution matrix (mesh_points × variables)
+    pub solution: Option<DMatrix<f64>>,
+    /// Spatial mesh points
+    pub x_mesh: Option<DVector<f64>>,
+    /// struct that stores balance errors - filled at the end of solution
+    pub quality: SolutionQuality,
+    /// Latest native, route-tagged solver telemetry, when available.
+    pub last_telemetry: Option<BvpSolverTelemetrySnapshot>,
+    /// Optional common telemetry override for direct programmatic solves.
+    /// `None` preserves the route-native mode supplied by a hybrid settings parser.
+    pub telemetry_mode_override: Option<BvpApiTelemetryMode>,
+    /// Physical mapping `T[K] = scale * Teta + offset` for reactor-owned solves.
+    pub(crate) temperature_affine_transform: Option<(f64, f64)>,
+}
+
+impl Default for BVPSolver {
+    fn default() -> Self {
+        Self {
+            arg_name: "x".to_string(),
+            x_range: (0.0, 1.0),
+            unknowns: Vec::new(),
+            eq_system: Vec::new(),
+            BorderConditions: HashMap::new(),
+            solution: None,
+            x_mesh: None,
+            quality: SolutionQuality::default(),
+            last_telemetry: None,
+            telemetry_mode_override: None,
+            temperature_affine_transform: None,
+        }
+    }
+}
+
+/// Validate the matrix returned by the BVP backend.
+///
+/// The backend may complete without a structured failure but still provide an
+/// unusable solution buffer. This helper keeps the public contract strict by
+/// rejecting empty or non-finite matrices before they enter reactor state.
+pub(crate) fn validate_bvp_solution_matrix(solution: &DMatrix<f64>) -> Result<(), ReactorError> {
+    if solution.nrows() == 0 || solution.ncols() == 0 {
+        return Err(ReactorError::CalculationError(
+            "BVP solver returned an empty solution matrix".to_string(),
+        ));
+    }
+    if let Some((idx, value)) = solution
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(ReactorError::InvalidNumericValue(format!(
+            "BVP solver returned non-finite value {} at flat index {}",
+            value, idx
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_bvp_profile_bounds(
+    solution: &DMatrix<f64>,
+    states: &[String],
+    bounds: &HashMap<String, (f64, f64)>,
+) -> Result<(), ReactorError> {
+    for (state_index, state) in states.iter().enumerate() {
+        let Some(&(lower, upper)) = bounds.get(state) else {
+            continue;
+        };
+        for node in 0..solution.nrows() {
+            let value = solution[(node, state_index)];
+            let slack =
+                64.0 * f64::EPSILON * lower.abs().max(upper.abs()).max(value.abs()).max(1.0);
+            if value < lower - slack || value > upper + slack {
+                return Err(ReactorError::BvpStateBoundViolation {
+                    state: state.clone(),
+                    node,
+                    value,
+                    lower,
+                    upper,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn positive_temperature_teta_lower_bound(
+    temperature_scale: f64,
+    temperature_offset: f64,
+) -> Result<f64, ReactorError> {
+    if !temperature_scale.is_finite()
+        || temperature_scale <= 0.0
+        || !temperature_offset.is_finite()
+        || temperature_offset <= 0.0
+    {
+        return Err(ReactorError::InvalidConfiguration(
+            "temperature transform requires finite positive scale and offset".into(),
+        ));
+    }
+    let zero_kelvin_teta = -temperature_offset / temperature_scale;
+    if !zero_kelvin_teta.is_finite() {
+        return Err(ReactorError::InvalidConfiguration(
+            "temperature transform cannot produce a finite positive-Kelvin Teta bound".into(),
+        ));
+    }
+    let margin = 64.0 * f64::EPSILON * zero_kelvin_teta.abs().max(1.0);
+    let lower = zero_kelvin_teta + margin;
+    if !lower.is_finite() || temperature_scale * lower + temperature_offset <= 0.0 {
+        return Err(ReactorError::InvalidConfiguration(
+            "temperature transform cannot produce a representable positive-Kelvin Teta bound"
+                .into(),
+        ));
+    }
+    Ok(lower)
+}
+
+pub(crate) fn apply_teta_lower_bound(
+    bounds: &mut HashMap<String, (f64, f64)>,
+    required_lower: f64,
+) -> Result<(), ReactorError> {
+    if let Some((lower, upper)) = bounds.get_mut("Teta") {
+        if *upper < required_lower {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Teta upper bound {upper} is incompatible with positive absolute temperature; it must be at least {required_lower}"
+            )));
+        }
+        *lower = lower.max(required_lower);
+    } else {
+        bounds.insert("Teta".into(), (required_lower, 1e20));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_positive_kelvin_profile(
+    solution: &DMatrix<f64>,
+    states: &[String],
+    temperature_transform: Option<(f64, f64)>,
+) -> Result<(), ReactorError> {
+    let Some((temperature_scale, temperature_offset)) = temperature_transform else {
+        return Ok(());
+    };
+    let Some(state_index) = states.iter().position(|state| state == "Teta") else {
+        return Ok(());
+    };
+    for node in 0..solution.nrows() {
+        let temperature = temperature_scale * solution[(node, state_index)] + temperature_offset;
+        if !temperature.is_finite() || temperature <= 0.0 {
+            return Err(ReactorError::BvpStateBoundViolation {
+                state: "T (K)".into(),
+                node,
+                value: temperature,
+                lower: 0.0,
+                upper: f64::INFINITY,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Owned handoff payload for building an NRBVP backend snapshot.
+///
+/// The solver owns the canonical reactor state, while this struct packages the
+/// backend-specific runtime settings so both direct and parser-driven solve
+/// paths can assemble the same NRBVP object through one helper.
+pub(crate) struct NrbvpHandoffConfig {
+    pub initial_guess: DMatrix<f64>,
+    pub t0: f64,
+    pub t_end: f64,
+    pub n_steps: usize,
+    pub solver_backend_config: ReactorBvpSolverConfig,
+    pub scheme: String,
+    pub strategy: String,
+    pub strategy_params: Option<SolverParams>,
+    pub linear_sys_method: Option<String>,
+    pub method: String,
+    pub abs_tolerance: f64,
+    pub rel_tolerance: Option<HashMap<String, f64>>,
+    pub max_iterations: usize,
+    pub bounds: Option<HashMap<String, (f64, f64)>>,
+    pub loglevel: Option<String>,
+    pub bvp_logging_config: Option<BvpLoggingConfig>,
+}
+
+impl NrbvpHandoffConfig {
+    /// Build a handoff config with the fields required by the backend.
+    pub(crate) fn new(
+        initial_guess: DMatrix<f64>,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+        scheme: String,
+        strategy: String,
+        strategy_params: Option<SolverParams>,
+        linear_sys_method: Option<String>,
+        method: String,
+        abs_tolerance: f64,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        max_iterations: usize,
+        bounds: Option<HashMap<String, (f64, f64)>>,
+        loglevel: Option<String>,
+    ) -> Self {
+        Self {
+            initial_guess,
+            t0,
+            t_end,
+            n_steps,
+            solver_backend_config: ReactorBvpSolverConfig::default_lambdify(),
+            scheme,
+            strategy,
+            strategy_params,
+            linear_sys_method,
+            method,
+            abs_tolerance,
+            rel_tolerance,
+            max_iterations,
+            bounds,
+            loglevel,
+            bvp_logging_config: None,
+        }
+    }
+
+    /// Override the generated callback backend while preserving legacy solver settings.
+    #[allow(dead_code)]
+    pub(crate) fn with_solver_backend_config(
+        mut self,
+        solver_backend_config: ReactorBvpSolverConfig,
+    ) -> Self {
+        self.solver_backend_config = solver_backend_config;
+        self
+    }
+
+    pub(crate) fn with_bvp_logging_config(mut self, config: BvpLoggingConfig) -> Self {
+        self.bvp_logging_config = Some(config);
+        self
+    }
+}
+
+/// Apply legacy Newton/runtime settings on top of the generated-backend facade.
+///
+/// The matrix/execution/symbolic route comes from `solver_backend_config`, while
+/// older public methods still pass scheme, strategy, tolerances, and bounds as
+/// positional values. Keeping the merge here prevents parser/direct paths from
+/// drifting while the public API is migrated gradually.
+fn build_damped_options(config: &NrbvpHandoffConfig) -> Result<DampedSolverOptions, ReactorError> {
+    let mut options = config
+        .solver_backend_config
+        .to_rusted_options()
+        .map_err(ReactorError::InvalidConfiguration)?;
+    options = options
+        .with_scheme_name(config.scheme.clone())
+        .with_strategy_params(config.strategy_params.clone())
+        .with_abs_tolerance(config.abs_tolerance)
+        .with_max_iterations(config.max_iterations);
+    if let Some(level) = config.loglevel.as_deref() {
+        options = options.with_logging_level(parse_solver_log_level(level)?);
+    }
+    if let Some(logging_config) = config.bvp_logging_config.clone() {
+        options = options.with_bvp_logging_config(logging_config);
+    }
+    options.strategy = config.strategy.clone();
+    options.linear_sys_method = config.linear_sys_method.clone();
+    options.method = config.method.clone();
+    if let Some(rel_tolerance) = config.rel_tolerance.clone() {
+        options = options.with_rel_tolerance(rel_tolerance);
+    }
+    if let Some(bounds) = config.bounds.clone() {
+        options = options.with_bounds(bounds);
+    }
+    Ok(options)
+}
+
+fn parse_solver_log_level(level: &str) -> Result<SolverLogLevel, ReactorError> {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" => Ok(SolverLogLevel::Off),
+        "error" => Ok(SolverLogLevel::Error),
+        "warn" | "warning" => Ok(SolverLogLevel::Warn),
+        "info" => Ok(SolverLogLevel::Info),
+        "debug" => Ok(SolverLogLevel::Debug),
+        other => Err(ReactorError::InvalidConfiguration(format!(
+            "unsupported BVP logging level `{other}`; expected off, error, warn, info, or debug"
+        ))),
+    }
+}
+
+fn apply_bvp_telemetry_mode(
+    config: BvpSolverConfig,
+    mode: BvpApiTelemetryMode,
+) -> Result<BvpSolverConfig, ReactorError> {
+    match config {
+        BvpSolverConfig::CorrectionNewton {
+            options,
+            initial_guess,
+        } => Ok(BvpSolverSettings::CorrectionNewton(options)
+            .with_telemetry_mode(mode)
+            .map_err(ReactorError::BvpTelemetry)?
+            .with_initial_guess(initial_guess)),
+        BvpSolverConfig::CorrectionNewtonNodeAligned {
+            options,
+            initial_guess,
+        } => Ok(BvpSolverSettings::CorrectionNewton(options)
+            .with_telemetry_mode(mode)
+            .map_err(ReactorError::BvpTelemetry)?
+            .with_node_aligned_initial_guess(initial_guess)),
+        BvpSolverConfig::Damped {
+            options,
+            initial_guess,
+        } => Ok(BvpSolverSettings::Damped(options)
+            .with_telemetry_mode(mode)
+            .map_err(ReactorError::BvpTelemetry)?
+            .with_initial_guess(initial_guess)),
+        BvpSolverConfig::DampedNodeAligned {
+            options,
+            initial_guess,
+        } => Ok(BvpSolverSettings::Damped(options)
+            .with_telemetry_mode(mode)
+            .map_err(ReactorError::BvpTelemetry)?
+            .with_node_aligned_initial_guess(initial_guess)),
+        BvpSolverConfig::Frozen {
+            options,
+            initial_guess,
+        } => Ok(BvpSolverSettings::Frozen(options)
+            .with_telemetry_mode(mode)
+            .map_err(ReactorError::BvpTelemetry)?
+            .with_initial_guess(initial_guess)),
+        BvpSolverConfig::FrozenNodeAligned {
+            options,
+            initial_guess,
+        } => Ok(BvpSolverSettings::Frozen(options)
+            .with_telemetry_mode(mode)
+            .map_err(ReactorError::BvpTelemetry)?
+            .with_node_aligned_initial_guess(initial_guess)),
+        BvpSolverConfig::Sci {
+            options,
+            sparse_factorization,
+            aot_config,
+            initial_guess,
+        } => Ok(BvpSolverSettings::Sci {
+            options,
+            sparse_factorization,
+            aot_config,
+        }
+        .with_telemetry_mode(mode)
+        .map_err(ReactorError::BvpTelemetry)?
+        .with_initial_guess(initial_guess)),
+        BvpSolverConfig::SciWithFreeParameters {
+            options,
+            sparse_factorization,
+            aot_config,
+            initial_guess,
+            free_parameters,
+        } => {
+            let settings = BvpSolverSettings::Sci {
+                options,
+                sparse_factorization,
+                aot_config: aot_config.clone(),
+            }
+            .with_telemetry_mode(mode)
+            .map_err(ReactorError::BvpTelemetry)?;
+            let BvpSolverSettings::Sci { options, .. } = settings else {
+                unreachable!("Sci settings retain their route")
+            };
+            Ok(BvpSolverConfig::SciWithFreeParameters {
+                options,
+                sparse_factorization,
+                aot_config,
+                initial_guess,
+                free_parameters,
+            })
+        }
+    }
+}
+
+fn bvp_boundary_tolerance(config: &BvpSolverConfig, state: &str, expected: f64) -> f64 {
+    match config {
+        BvpSolverConfig::CorrectionNewton { options, .. }
+        | BvpSolverConfig::CorrectionNewtonNodeAligned { options, .. } => {
+            let relative = options
+                .relative_tolerances
+                .get(state)
+                .copied()
+                .unwrap_or(options.default_relative_tolerance);
+            options.absolute_tolerance + relative * expected.abs()
+        }
+        BvpSolverConfig::Damped { options, .. }
+        | BvpSolverConfig::DampedNodeAligned { options, .. } => {
+            let relative = options
+                .rel_tolerance
+                .as_ref()
+                .and_then(|tolerances| tolerances.get(state))
+                .copied()
+                .unwrap_or(0.0);
+            options.abs_tolerance + relative * expected.abs()
+        }
+        BvpSolverConfig::Frozen { options, .. }
+        | BvpSolverConfig::FrozenNodeAligned { options, .. } => options.tolerance,
+        BvpSolverConfig::Sci { options, .. }
+        | BvpSolverConfig::SciWithFreeParameters { options, .. } => {
+            options.boundary_tolerance.unwrap_or(options.tolerance)
+        }
+    }
+}
+
+impl BVPSolver {
+    /// Solve with the fixed-mesh Frozen/Naive family through the shared BVP API.
+    ///
+    /// KiThe accepts a full nodal profile. The RST Frozen route stores only
+    /// unconstrained nodal values, so the prescribed endpoint is removed from
+    /// each state's seed before crossing the backend boundary.
+    pub fn solve_BVPfrozen(
+        &mut self,
+        initial_guess: DMatrix<f64>,
+        options: FrozenSolverOptions,
+    ) -> Result<(), ReactorError> {
+        self.last_telemetry = None;
+        let nodes = initial_guess.ncols();
+        if initial_guess.nrows() != self.unknowns.len() || nodes < 2 {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Frozen initial guess must have shape {}xN with N >= 2, got {}x{nodes}",
+                self.unknowns.len(),
+                initial_guess.nrows()
+            )));
+        }
+        if initial_guess.iter().any(|value| !value.is_finite()) {
+            return Err(ReactorError::InvalidNumericValue(
+                "Frozen initial guess contains a non-finite value".to_string(),
+            ));
+        }
+
+        let intervals = nodes - 1;
+        let problem = self.build_bvp_problem(self.x_range.0, self.x_range.1, intervals)?;
+        let internal_initial_guess =
+            self.frozen_internal_initial_guess(&initial_guess, intervals)?;
+        self.solve_config_with_bvp_api(
+            problem,
+            BvpSolverConfig::Frozen {
+                options,
+                initial_guess: internal_initial_guess,
+            },
+        )
+    }
+
+    fn frozen_internal_initial_guess(
+        &self,
+        full_profile: &DMatrix<f64>,
+        intervals: usize,
+    ) -> Result<DMatrix<f64>, ReactorError> {
+        let mut reduced = DMatrix::zeros(self.unknowns.len(), intervals);
+        for (state, name) in self.unknowns.iter().enumerate() {
+            let (side, _) = self.BorderConditions.get(name).copied().ok_or_else(|| {
+                ReactorError::MissingData(format!(
+                    "Missing boundary condition for BVP state `{name}`"
+                ))
+            })?;
+            let boundary_node = match side {
+                0 => 0,
+                1 => intervals,
+                other => {
+                    return Err(ReactorError::InvalidConfiguration(format!(
+                        "Boundary endpoint for `{name}` must be 0 or 1, got {other}"
+                    )));
+                }
+            };
+            for reduced_node in 0..intervals {
+                let full_node = if reduced_node < boundary_node {
+                    reduced_node
+                } else {
+                    reduced_node + 1
+                };
+                reduced[(state, reduced_node)] = full_profile[(state, full_node)];
+            }
+        }
+        Ok(reduced)
+    }
+
+    /// Convert the solver boundary-condition map into the backend shape.
+    ///
+    /// The backend expects each physical boundary value wrapped in a single-item
+    /// vector, so we build that representation in one place and reuse it across
+    /// solver entry points.
+    #[cfg(test)]
+    pub(crate) fn backend_boundary_conditions(&self) -> HashMap<String, Vec<(usize, f64)>> {
+        let mut backend_bc = HashMap::with_capacity(self.BorderConditions.len());
+        for (name, &(boundary_index, value)) in &self.BorderConditions {
+            backend_bc.insert(name.clone(), vec![(boundary_index, value)]);
+        }
+        backend_bc
+    }
+
+    /// Build the owned NRBVP backend object from the current solver snapshot.
+    ///
+    /// This keeps the ownership boundary explicit: the solver still owns the
+    /// canonical equation system, but the backend gets its own owned copy at one
+    /// well-defined handoff point.
+    #[cfg(test)]
+    pub(crate) fn build_nrbvp_backend(
+        &self,
+        config: NrbvpHandoffConfig,
+    ) -> Result<NRBVP, ReactorError> {
+        let options = build_damped_options(&config)?;
+        let backend = NRBVP::new_with_options(
+            self.eq_system.clone(),
+            config.initial_guess,
+            self.unknowns.clone(),
+            self.arg_name.clone(),
+            self.backend_boundary_conditions(),
+            config.t0,
+            config.t_end,
+            config.n_steps,
+            options,
+        );
+        Ok(backend)
+    }
+
+    fn build_bvp_problem(
+        &self,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+    ) -> Result<BvpProblem, ReactorError> {
+        if n_steps < 2 {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Damped BVP requires at least 2 intervals, got {n_steps}"
+            )));
+        }
+        n_steps.checked_add(1).ok_or_else(|| {
+            ReactorError::InvalidConfiguration("BVP interval count overflows node count".into())
+        })?;
+        if !t0.is_finite() || !t_end.is_finite() || t_end <= t0 {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "BVP domain must be finite and increasing, got [{t0}, {t_end}]"
+            )));
+        }
+        let mesh = (0..=n_steps)
+            .map(|index| match index {
+                0 => t0,
+                index if index == n_steps => t_end,
+                _ => t0 + (t_end - t0) * index as f64 / n_steps as f64,
+            })
+            .collect();
+        self.build_bvp_problem_on_domain_mesh(mesh, (t0, t_end))
+    }
+
+    fn build_bvp_problem_on_domain_mesh(
+        &self,
+        mut mesh: Vec<f64>,
+        domain: (f64, f64),
+    ) -> Result<BvpProblem, ReactorError> {
+        if mesh.len() < 3 {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "BVP mesh requires at least 2 intervals, got {} nodes",
+                mesh.len()
+            )));
+        }
+        if mesh.iter().any(|value| !value.is_finite())
+            || mesh.windows(2).any(|pair| pair[1] <= pair[0])
+        {
+            return Err(ReactorError::InvalidConfiguration(
+                "BVP mesh coordinates must be finite and strictly increasing".into(),
+            ));
+        }
+        let (t0, t_end) = domain;
+        if !t0.is_finite() || !t_end.is_finite() || t_end <= t0 {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "BVP domain must be finite and increasing, got [{t0}, {t_end}]"
+            )));
+        }
+        let endpoint_tolerance = |actual: f64, expected: f64| {
+            16.0 * f64::EPSILON * actual.abs().max(expected.abs()).max(1.0)
+        };
+        if (mesh[0] - t0).abs() > endpoint_tolerance(mesh[0], t0)
+            || (mesh[mesh.len() - 1] - t_end).abs()
+                > endpoint_tolerance(mesh[mesh.len() - 1], t_end)
+        {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Explicit BVP mesh must span the configured domain [{t0}, {t_end}], got [{}, {}]",
+                mesh[0],
+                mesh[mesh.len() - 1]
+            )));
+        }
+        mesh[0] = t0;
+        let last = mesh.len() - 1;
+        mesh[last] = t_end;
+
+        if self.eq_system.len() != self.unknowns.len() || self.unknowns.is_empty() {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "BVP equation/state dimensions differ: {} equations, {} states",
+                self.eq_system.len(),
+                self.unknowns.len()
+            )));
+        }
+        if self.BorderConditions.len() != self.unknowns.len() {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Expected one boundary condition per state: {} states, {} conditions",
+                self.unknowns.len(),
+                self.BorderConditions.len()
+            )));
+        }
+
+        let mut boundary_conditions = Vec::with_capacity(self.unknowns.len());
+        for (state, name) in self.unknowns.iter().enumerate() {
+            let (side, value) = self.BorderConditions.get(name).copied().ok_or_else(|| {
+                ReactorError::MissingData(format!(
+                    "Missing boundary condition for BVP state `{name}`"
+                ))
+            })?;
+            let side = match side {
+                0 => BvpBoundarySide::Left,
+                1 => BvpBoundarySide::Right,
+                other => {
+                    return Err(ReactorError::InvalidConfiguration(format!(
+                        "Boundary endpoint for `{name}` must be 0 or 1, got {other}"
+                    )));
+                }
+            };
+            boundary_conditions.push(BvpBoundaryCondition { state, side, value });
+        }
+
+        BvpProblem::new(
+            self.eq_system.clone(),
+            self.unknowns.clone(),
+            self.arg_name.clone(),
+            mesh,
+            boundary_conditions,
+        )
+        .map_err(ReactorError::BvpApi)
+    }
+
+    /// Solve the prepared reactor BVP on an explicit solver-coordinate mesh.
+    ///
+    /// `mesh` is expressed in this solver's independent coordinate and must
+    /// span its configured `x_range`. `initial_guess` is a full state-major
+    /// profile with shape `state_count x mesh.len()`, including both endpoint
+    /// nodes. Each boundary-aligned profile value must match the configured
+    /// physical boundary condition before the profile is handed to RST.
+    /// Damped may refine the supplied starting mesh; fixed-mesh routes preserve
+    /// it. Dimensional postprocessing remains the ordinary reactor path.
+    pub fn solve_with_bvp_api_on_mesh(
+        &mut self,
+        mesh: Vec<f64>,
+        initial_guess: DMatrix<f64>,
+        settings: BvpSolverSettings,
+    ) -> Result<(), ReactorError> {
+        self.last_telemetry = None;
+        let node_count = mesh.len();
+        let problem = self.build_bvp_problem_on_domain_mesh(mesh, self.x_range)?;
+        if initial_guess.nrows() != self.unknowns.len() || initial_guess.ncols() != node_count {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Node-aligned BVP initial guess must have shape {}x{node_count}, got {}x{}",
+                self.unknowns.len(),
+                initial_guess.nrows(),
+                initial_guess.ncols()
+            )));
+        }
+        if initial_guess.iter().any(|value| !value.is_finite()) {
+            return Err(ReactorError::InvalidNumericValue(
+                "Node-aligned BVP initial guess contains a non-finite value".into(),
+            ));
+        }
+        for (state, name) in self.unknowns.iter().enumerate() {
+            let (side, expected) = self.BorderConditions.get(name).copied().ok_or_else(|| {
+                ReactorError::MissingData(format!(
+                    "Missing boundary condition for BVP state `{name}`"
+                ))
+            })?;
+            let node = match side {
+                0 => 0,
+                1 => node_count - 1,
+                other => {
+                    return Err(ReactorError::InvalidConfiguration(format!(
+                        "Boundary endpoint for `{name}` must be 0 or 1, got {other}"
+                    )));
+                }
+            };
+            let actual = initial_guess[(state, node)];
+            let tolerance = 1e-10 * expected.abs().max(1.0);
+            if (actual - expected).abs() > tolerance {
+                return Err(ReactorError::InvalidConfiguration(format!(
+                    "Node-aligned initial guess violates `{name}` boundary condition at node {node}: expected {expected:.9e}, got {actual:.9e} (tolerance {tolerance:.3e})"
+                )));
+            }
+        }
+        let config = settings.with_node_aligned_initial_guess(initial_guess);
+        self.solve_config_with_bvp_api(problem, config)
+    }
+
+    fn solve_config_with_bvp_api(
+        &mut self,
+        problem: BvpProblem,
+        mut config: BvpSolverConfig,
+    ) -> Result<(), ReactorError> {
+        self.last_telemetry = None;
+        if let Some((temperature_scale, temperature_offset)) = self.temperature_affine_transform {
+            let positive_teta_lower =
+                positive_temperature_teta_lower_bound(temperature_scale, temperature_offset)?;
+            match &mut config {
+                BvpSolverConfig::Damped { options, .. }
+                | BvpSolverConfig::DampedNodeAligned { options, .. } => {
+                    if let Some(bounds) = options.bounds.as_mut() {
+                        apply_teta_lower_bound(bounds, positive_teta_lower)?;
+                    }
+                }
+                BvpSolverConfig::CorrectionNewton { options, .. }
+                | BvpSolverConfig::CorrectionNewtonNodeAligned { options, .. } => {
+                    apply_teta_lower_bound(&mut options.bounds, positive_teta_lower)?;
+                }
+                _ => {}
+            }
+        }
+        let config = match self.telemetry_mode_override {
+            Some(mode) => apply_bvp_telemetry_mode(config, mode)?,
+            None => config,
+        };
+        let boundary_tolerances = self
+            .unknowns
+            .iter()
+            .map(|state| {
+                let expected = self
+                    .BorderConditions
+                    .get(state)
+                    .map(|(_, value)| *value)
+                    .unwrap_or(0.0);
+                bvp_boundary_tolerance(&config, state, expected)
+            })
+            .collect::<Vec<_>>();
+        let state_bounds = match &config {
+            BvpSolverConfig::Damped { options, .. }
+            | BvpSolverConfig::DampedNodeAligned { options, .. } => {
+                options.bounds.clone().unwrap_or_default()
+            }
+            BvpSolverConfig::CorrectionNewton { options, .. }
+            | BvpSolverConfig::CorrectionNewtonNodeAligned { options, .. } => {
+                options.bounds.clone()
+            }
+            _ => HashMap::new(),
+        };
+        let mut solver = RstBvpSolver::new(problem, config).map_err(ReactorError::BvpApi)?;
+
+        if let Err(error) = solver.solve() {
+            self.last_telemetry = Some(solver.telemetry_snapshot());
+            return Err(ReactorError::BvpApi(error));
+        }
+        self.last_telemetry = Some(solver.telemetry_snapshot());
+        let view = solver
+            .solution_view()
+            .ok_or_else(|| ReactorError::BvpApi(BvpApiError::MissingResult))?;
+        let state_count = view.state_count();
+        let mesh = view.mesh().to_vec();
+        let node_count = mesh.len();
+        let solution = DMatrix::from_fn(node_count, state_count, |node, state| {
+            view.value(node, state).unwrap_or(f64::NAN)
+        });
+
+        validate_bvp_solution_matrix(&solution)?;
+        if state_count != self.unknowns.len()
+            || node_count == 0
+            || mesh.iter().any(|value| !value.is_finite())
+        {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "BVP API returned inconsistent solution dimensions: expected {} states, got {state_count} states and {node_count} mesh points",
+                self.unknowns.len()
+            )));
+        }
+        validate_bvp_profile_bounds(&solution, &self.unknowns, &state_bounds)?;
+        validate_positive_kelvin_profile(
+            &solution,
+            &self.unknowns,
+            self.temperature_affine_transform,
+        )?;
+
+        for (state, name) in self.unknowns.iter().enumerate() {
+            let &(endpoint, expected) = self.BorderConditions.get(name).ok_or_else(|| {
+                ReactorError::InvalidConfiguration(format!(
+                    "Missing boundary condition for BVP state `{name}` after solve"
+                ))
+            })?;
+            let row = match endpoint {
+                0 => 0,
+                1 => node_count - 1,
+                _ => {
+                    return Err(ReactorError::InvalidConfiguration(format!(
+                        "Boundary endpoint for `{name}` must be 0 or 1, got {endpoint}"
+                    )));
+                }
+            };
+            let actual = solution[(row, state)];
+            let absolute_error = (actual - expected).abs();
+            let tolerance = boundary_tolerances[state];
+            if absolute_error > tolerance {
+                return Err(ReactorError::BvpBoundaryConditionViolation {
+                    state: name.clone(),
+                    endpoint,
+                    expected,
+                    actual,
+                    absolute_error,
+                    tolerance,
+                });
+            }
+        }
+
+        self.solution = Some(solution);
+        self.x_mesh = Some(DVector::from_vec(mesh));
+        Ok(())
+    }
+
+    /// Set a route-independent telemetry override for subsequent solves.
+    ///
+    /// The request is validated against the selected route at solve time. This
+    /// keeps one facade setting while retaining RST's native snapshot types.
+    pub fn with_bvp_telemetry_mode(mut self, mode: BvpApiTelemetryMode) -> Self {
+        self.telemetry_mode_override = Some(mode);
+        self
+    }
+
+    pub(crate) fn solve_with_hybrid_settings(
+        &mut self,
+        settings: BvpSolverSettings,
+        initial_guess: DMatrix<f64>,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+    ) -> Result<(), ReactorError> {
+        self.last_telemetry = None;
+        if n_steps < 2 {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "BVP requires at least two intervals, got {n_steps}"
+            )));
+        }
+        let expected_columns = match &settings {
+            BvpSolverSettings::CorrectionNewton(_) | BvpSolverSettings::Damped(_) => n_steps,
+            BvpSolverSettings::Frozen(_) | BvpSolverSettings::Sci { .. } => {
+                n_steps.checked_add(1).ok_or_else(|| {
+                    ReactorError::InvalidConfiguration(
+                        "BVP interval count overflows node count".into(),
+                    )
+                })?
+            }
+        };
+        if initial_guess.nrows() != self.unknowns.len()
+            || initial_guess.ncols() != expected_columns
+            || initial_guess.iter().any(|value| !value.is_finite())
+        {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Initial guess for selected BVP family must be finite with shape {}x{expected_columns}, got {}x{}",
+                self.unknowns.len(),
+                initial_guess.nrows(),
+                initial_guess.ncols()
+            )));
+        }
+        let problem = self.build_bvp_problem(t0, t_end, n_steps)?;
+        let config = settings.with_initial_guess(initial_guess);
+        self.solve_config_with_bvp_api(problem, config)
+    }
+
+    /// Solve through the shared typed BVP API and publish only a validated result.
+    pub(crate) fn solve_with_bvp_api(
+        &mut self,
+        config: NrbvpHandoffConfig,
+    ) -> Result<(), ReactorError> {
+        self.last_telemetry = None;
+        let problem = self.build_bvp_problem(config.t0, config.t_end, config.n_steps)?;
+        if config.initial_guess.nrows() != self.unknowns.len()
+            || config.initial_guess.ncols() != config.n_steps
+        {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Damped initial guess must have shape {}x{}, got {}x{}",
+                self.unknowns.len(),
+                config.n_steps,
+                config.initial_guess.nrows(),
+                config.initial_guess.ncols()
+            )));
+        }
+
+        let options = build_damped_options(&config)?;
+        self.solve_config_with_bvp_api(
+            problem,
+            BvpSolverConfig::Damped {
+                options,
+                initial_guess: config.initial_guess,
+            },
+        )
+    }
+
+    /// Solve BVP using damped Newton-Raphson method (NRBVP)
+    ///
+    /// This is the main solver method with full parameter control
+    pub fn solve_NRBVP(
+        &mut self,
+        initial_guess: DMatrix<f64>,
+        n_steps: usize,
+        scheme: String,
+        strategy: String,
+        strategy_params: Option<SolverParams>,
+        linear_sys_method: Option<String>,
+        method: String,
+        abs_tolerance: f64,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        max_iterations: usize,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        loglevel: Option<String>,
+    ) -> Result<(), ReactorError> {
+        self.solve_NRBVP_impl(
+            initial_guess,
+            n_steps,
+            scheme,
+            strategy,
+            strategy_params,
+            linear_sys_method,
+            method,
+            abs_tolerance,
+            rel_tolerance,
+            max_iterations,
+            Bounds,
+            loglevel,
+        )
+    }
+
+    /// Solve BVP with simplified tolerance configuration
+    ///
+    /// Uses ToleranceConfig to automatically generate tolerances for all variables
+    pub fn solve_NRBVP_with_tolerance_config(
+        &mut self,
+        initial_guess: DMatrix<f64>,
+        n_steps: usize,
+        scheme: String,
+        strategy: String,
+        strategy_params: Option<SolverParams>,
+        linear_sys_method: Option<String>,
+        method: String,
+        abs_tolerance: f64,
+        tolerance_config: ToleranceConfig,
+        substances: &[String],
+        max_iterations: usize,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        loglevel: Option<String>,
+    ) -> Result<(), ReactorError> {
+        let rel_tolerance = Some(tolerance_config.to_full_tolerance_map(substances));
+        self.solve_NRBVP_impl(
+            initial_guess,
+            n_steps,
+            scheme,
+            strategy,
+            strategy_params,
+            linear_sys_method,
+            method,
+            abs_tolerance,
+            rel_tolerance,
+            max_iterations,
+            Bounds,
+            loglevel,
+        )
+    }
+
+    /// Solve BVP with both tolerance and bounds configurations
+    ///
+    /// Most convenient method - automatically generates both tolerances and bounds
+    /// for all variables from simple configs
+    pub fn solve_NRBVP_with_configs(
+        &mut self,
+        initial_guess: DMatrix<f64>,
+        n_steps: usize,
+        scheme: String,
+        strategy: String,
+        strategy_params: Option<SolverParams>,
+        linear_sys_method: Option<String>,
+        method: String,
+        abs_tolerance: f64,
+        tolerance_config: ToleranceConfig,
+        bounds_config: BoundsConfig,
+        substances: &[String],
+        max_iterations: usize,
+        loglevel: Option<String>,
+    ) -> Result<(), ReactorError> {
+        let rel_tolerance = Some(tolerance_config.to_full_tolerance_map(substances));
+        let bounds = Some(bounds_config.to_full_bounds_map(substances));
+        self.solve_NRBVP_impl(
+            initial_guess,
+            n_steps,
+            scheme,
+            strategy,
+            strategy_params,
+            linear_sys_method,
+            method,
+            abs_tolerance,
+            rel_tolerance,
+            max_iterations,
+            bounds,
+            loglevel,
+        )
+    }
+
+    /// Internal implementation for NRBVP solver
+    ///
+    /// All public solve methods delegate to this implementation
+    fn solve_NRBVP_impl(
+        &mut self,
+        initial_guess: DMatrix<f64>,
+        n_steps: usize,
+        scheme: String,
+        strategy: String,
+        strategy_params: Option<SolverParams>,
+        linear_sys_method: Option<String>,
+        method: String,
+        abs_tolerance: f64,
+        rel_tolerance: Option<HashMap<String, f64>>,
+        max_iterations: usize,
+        Bounds: Option<HashMap<String, (f64, f64)>>,
+        loglevel: Option<String>,
+    ) -> Result<(), ReactorError> {
+        info!("starting solver!");
+        let config = NrbvpHandoffConfig::new(
+            initial_guess,
+            self.x_range.0,
+            self.x_range.1,
+            n_steps,
+            scheme,
+            strategy,
+            strategy_params,
+            linear_sys_method,
+            method,
+            abs_tolerance,
+            rel_tolerance,
+            max_iterations,
+            Bounds,
+            loglevel,
+        );
+        self.solve_with_bvp_api(config)
+    }
+    /// Solve with adaptive collocation through the shared BVP API.
+    pub fn solve_BVPsci(
+        &mut self,
+        initial_guess: DMatrix<f64>,
+        n_steps: usize,
+        max_nodes: usize,
+        tol: f64,
+    ) -> Result<(), ReactorError> {
+        self.last_telemetry = None;
+        if n_steps < 2 {
+            return Err(ReactorError::InvalidConfiguration(
+                "BVP_sci requires at least two mesh nodes".to_string(),
+            ));
+        }
+        if initial_guess.nrows() != self.unknowns.len() || initial_guess.ncols() != n_steps {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "BVP_sci initial guess must have shape {}x{n_steps}, got {}x{}",
+                self.unknowns.len(),
+                initial_guess.nrows(),
+                initial_guess.ncols()
+            )));
+        }
+        if initial_guess.iter().any(|value| !value.is_finite()) {
+            return Err(ReactorError::InvalidNumericValue(
+                "BVP_sci initial guess contains a non-finite value".to_string(),
+            ));
+        }
+
+        let problem = self.build_bvp_problem(self.x_range.0, self.x_range.1, n_steps - 1)?;
+        let options = BvpSciOptions::default()
+            .with_execution(BvpSciExecution::Lambdify)
+            .with_assembly(BvpSciAssembly::ExprLegacy)
+            .with_matrix_layout(BvpSciMatrixLayout::Dense)
+            .with_tolerance(tol)
+            .with_limits(max_nodes, 100, 20)
+            .with_telemetry(BvpSciTelemetryMode::Off);
+        self.solve_config_with_bvp_api(
+            problem,
+            BvpSolverConfig::Sci {
+                options,
+                sparse_factorization: ApiBvpSciSparseFactorization::StandardFaer,
+                aot_config: None,
+                initial_guess,
+            },
+        )
+    }
+    /// Get reference to solution matrix
+    ///
+    /// Returns None if solve hasn't been called yet
+    pub fn get_solution(&self) -> Option<&DMatrix<f64>> {
+        self.solution.as_ref()
+    }
+
+    /// Read-only state endpoint conditions in canonical variable order.
+    ///
+    /// The public `BorderConditions` field remains available for compatibility.
+    pub fn state_boundary_conditions(&self) -> &HashMap<String, (usize, f64)> {
+        &self.BorderConditions
+    }
+
+    /// Debug print solution summary
+    ///
+    /// Prints solution matrix dimensions and sample values for each variable
+    pub fn debug_solution(&self) {
+        if let Some(solution) = &self.solution {
+            info!("\n=== SOLUTION DEBUG ===");
+            info!(
+                "Solution matrix shape: {} x {}",
+                solution.nrows(),
+                solution.ncols()
+            );
+            info!("Unknowns: {:?}", self.unknowns);
+
+            // Print the first and last few values for each variable.
+            for (i, var_name) in self.unknowns.iter().enumerate() {
+                if i < solution.ncols() {
+                    let col = solution.column(i);
+                    info!(
+                        "{}: [first...{:.6}, {:.6}, {:.6}, ... last: {:.6}, {:.6}, {:.6}]",
+                        var_name,
+                        col[0],
+                        col[1.min(col.len() - 1)],
+                        col[2.min(col.len() - 1)],
+                        col[col.len() - 3],
+                        col[col.len() - 2],
+                        col[col.len() - 1]
+                    );
+                }
+            }
+            info!("=== END DEBUG ===\n");
+        }
+    }
+}
+
+impl SimpleReactorTask {
+    /// Create new reactor task with default values
+    pub fn new() -> Self {
+        Self {
+            problem_name: None,
+            problem_description: None,
+            kindata: KinData::new(),
+            thermal_effects: Vec::new(),
+            P: 0.0,
+            Tm: 0.0,
+            density_model: DensityModel::default(),
+            Cp: 0.0,
+            boundary_condition: HashMap::new(),
+            Lambda: 0.0,
+            Diffusion: HashMap::new(),
+
+            m: 0.0,
+            scaling: ScalingConfig::default(),
+            L: 1.0,
+            T_scaling: Expr::Const(0.0),
+            M: 0.0,
+            D_ro_map: HashMap::new(),
+            Pe_q: 0.0,
+            Pe_D: Vec::new(),
+            map_eq_rate: HashMap::new(),
+            map_of_equations: HashMap::new(),
+            heat_release: Expr::Const(0.0),
+            symbolic_rhs_assembly_policy: SymbolicRhsAssemblyPolicy::Auto,
+            solver: BVPSolver::default(),
+        }
+    }
+
+    /// Create tolerance map from simplified config for this reactor's substances
+    pub fn create_tolerance_map_for_system(
+        &self,
+        tolerance_config: HashMap<String, f64>,
+    ) -> HashMap<String, f64> {
+        create_tolerance_map(tolerance_config, &self.kindata.substances)
+    }
+
+    /// Create bounds map from simplified config for this reactor's substances
+    pub fn create_bounds_map_for_system(
+        &self,
+        bounds_config: HashMap<String, (f64, f64)>,
+    ) -> HashMap<String, (f64, f64)> {
+        create_bounds_map(bounds_config, &self.kindata.substances)
+    }
+
+    /// Set scaling parameters using ScalingConfig
+    pub fn set_scaling(&mut self, scaling: ScalingConfig) -> Result<(), ReactorError> {
+        scaling.validate()?;
+        self.solver.temperature_affine_transform = Some((scaling.T_scale, scaling.dT));
+        self.scaling = scaling;
+        Ok(())
+    }
+
+    /// Set scaling parameters from individual values
+    pub fn set_scaling_values(
+        &mut self,
+        dT: f64,
+        L: f64,
+        T_scale: f64,
+    ) -> Result<(), ReactorError> {
+        let scaling = ScalingConfig::new(dT, L, T_scale);
+        self.set_scaling(scaling)
+    }
+
+    /// Set the symbolic RHS assembly policy in place.
+    pub fn set_symbolic_rhs_assembly_policy(&mut self, policy: SymbolicRhsAssemblyPolicy) {
+        self.symbolic_rhs_assembly_policy = policy;
+    }
+
+    /// Select the gas-density closure used while assembling chemical source terms.
+    pub fn set_density_model(&mut self, model: DensityModel) {
+        self.density_model = model;
+    }
+
+    /// Builder-style helper for configuring symbolic RHS assembly.
+    ///
+    /// This is convenient when the caller wants to configure the reactor in a
+    /// fluent style before calling `setup_bvp`.
+    pub fn with_symbolic_rhs_assembly_policy(mut self, policy: SymbolicRhsAssemblyPolicy) -> Self {
+        self.symbolic_rhs_assembly_policy = policy;
+        self
+    }
+    /////////////////////////////////SETTERS////////////////////////////////////////////////////////////////////////////////
+    /// Set problem name for identification
+    pub fn set_problem_name(&mut self, name: &str) {
+        self.problem_name = Some(name.to_string());
+    }
+
+    /// Set problem description
+    pub fn set_problem_description(&mut self, description: &str) {
+        self.problem_description = Some(description.to_string());
+    }
+    /// Set boundary conditions for substances and temperature
+    ///
+    /// Keys should include substance names and "T" for temperature
+    pub fn set_boundary_conditions(&mut self, conditions: HashMap<String, f64>) {
+        self.boundary_condition = conditions;
+    }
+
+    /// Read-only access to the diffusion coefficients snapshot.
+    ///
+    /// New code should prefer this getter instead of reaching into the public
+    /// `Diffusion` field directly.
+    pub fn diffusion_coefficients(&self) -> &HashMap<String, f64> {
+        &self.Diffusion
+    }
+
+    /// Read-only thermal conductivity in W/(m K).
+    pub fn thermal_conductivity(&self) -> f64 {
+        self.Lambda
+    }
+
+    /// Read-only mean molar mass in kg/mol.
+    pub fn mean_molar_mass_kg_per_mol(&self) -> f64 {
+        self.M
+    }
+
+    /// Read-only access to the raw boundary-condition snapshot.
+    ///
+    /// This keeps the legacy field available while giving external code a
+    /// cleaner place to read from.
+    pub fn boundary_conditions(&self) -> &HashMap<String, f64> {
+        &self.boundary_condition
+    }
+
+    /// Read-only access to the cached transport coefficients `D * rho`.
+    ///
+    /// The cache is populated by `transport_coefficients()` and then reused by
+    /// Lewis and Peclet number calculations.
+    pub fn transport_cache(&self) -> &HashMap<String, f64> {
+        &self.D_ro_map
+    }
+
+    /// Read-only access to the mass Peclet numbers.
+    ///
+    /// `Pe_D` is a domain-standard symbol, so the method keeps the scientific
+    /// naming while still offering a stable accessor for new code.
+    pub fn mass_peclet_numbers(&self) -> &[f64] {
+        &self.Pe_D
+    }
+
+    /// Read-only access to the thermal Peclet number.
+    pub fn thermal_peclet_number(&self) -> f64 {
+        self.Pe_q
+    }
+
+    /// Read-only access to the temperature scaling shift `dT`.
+    pub fn temperature_shift(&self) -> f64 {
+        self.scaling.dT
+    }
+
+    /// Read-only access to the characteristic reactor length.
+    pub fn characteristic_length(&self) -> f64 {
+        self.scaling.L
+    }
+
+    /// Read-only access to the temperature scaling factor.
+    pub fn temperature_scale(&self) -> f64 {
+        self.scaling.T_scale
+    }
+
+    /// Read-only access to the full scaling configuration snapshot.
+    ///
+    /// New callers should prefer this over stitching `dT`, `L`, and `T_scale`
+    /// together manually from the public fields.
+    pub fn scaling_config(&self) -> &ScalingConfig {
+        &self.scaling
+    }
+
+    /// Set all reactor parameters at once.
+    ///
+    /// `thermal_effects` are reaction heats in J/mol, `P` is pressure in Pa,
+    /// `Tm` is temperature in K, `Cp` is heat capacity in J/(kg·K), `Lambda`
+    /// is thermal conductivity in W/(m·K), `Diffusion` stores species
+    /// diffusivities in m²/s, `m` is mass flux in kg/(m²·s), and `scaling`
+    /// controls the dimensionless transformation.
+    pub fn set_parameters(
+        &mut self,
+        thermal_effects: Vec<f64>,
+        P: f64,
+        Tm: f64,
+        Cp: f64,
+        boundary_condition: HashMap<String, f64>,
+        Lambda: f64,
+        Diffusion: HashMap<String, f64>,
+        m: f64,
+
+        scaling: ScalingConfig,
+    ) {
+        self.thermal_effects = thermal_effects;
+        self.P = P;
+        self.Tm = Tm;
+        self.Cp = Cp;
+        self.boundary_condition = boundary_condition;
+        self.Lambda = Lambda;
+        self.Diffusion = Diffusion;
+        self.m = m;
+
+        self.scaling = scaling;
+    }
+    /// Complete BVP setup workflow
+    ///
+    /// Orchestrates the entire setup process:
+    /// 1. Kinetic preprocessing
+    /// 2. Scaling and transport calculations  
+    /// 3. Equation system assembly
+    /// 4. Boundary condition setup
+    pub fn setup_bvp(&mut self) -> Result<(), ReactorError> {
+        //
+        self.check_task()?;
+        info!("task checked!");
+        // Process
+        self.scaling_processing()?;
+        info!("scaling processed!");
+        //
+        // Process kinetics
+        self.kinetic_processing()?;
+        info!("kinetics processed!");
+
+        // Calculate mean molar mass
+        self.mean_molar_mass()?;
+        info!("mean molar mass calculated");
+
+        // dbg!("here");
+        // Calculate Peclet numbers
+        self.peclet_numbers()?;
+        info!("Peclet numbers calculated");
+        // Create BVP equations
+        self.create_bvp_equations()?;
+        info!("BVP equations created");
+        self.set_solver_BC()?;
+        info!("Boundary conditions created!");
+        self.check_before_solution()?;
+        info!("BVP setup completed!");
+
+        Ok(())
+    }
+
+    /// Set transport properties.
+    ///
+    /// `lambda` is thermal conductivity in W/(m·K), `cp` is heat capacity in
+    /// J/(kg·K), and `diffusion` maps species names to diffusivities in m²/s.
+    pub fn set_transport_properties(
+        &mut self,
+        lambda: f64,
+        cp: f64,
+        diffusion: HashMap<String, f64>,
+    ) {
+        self.Lambda = lambda;
+        self.Cp = cp;
+        self.Diffusion = diffusion;
+    }
+
+    /// Set operating conditions.
+    ///
+    /// `pressure` is in Pa, `temperature` is in K, and `mass_flux` is in kg/(m²·s).
+    pub fn set_operating_conditions(&mut self, pressure: f64, temperature: f64, mass_flux: f64) {
+        self.P = pressure;
+        self.Tm = temperature;
+        self.m = mass_flux;
+    }
+
+    /// Set thermal effects (heat of reaction) for each reaction
+    pub fn set_thermal_effects(&mut self, thermal_effects: Vec<f64>) {
+        self.thermal_effects = thermal_effects;
+    }
+
+    /// Set elementary reactions from FastElemReact structures
+    ///
+    /// Convenient method to quickly set up elementary reactions with Arrhenius kinetics
+    pub fn fast_react_set(&mut self, vec_of_maps: Vec<FastElemReact>) -> Result<(), ReactorError> {
+        let mut elementary_reaction_vec = Vec::new();
+        let mut Q_vec = Vec::new();
+        for (idx, map_of_reactiondata) in vec_of_maps.iter().enumerate() {
+            // Check equation string
+            let eq = if !map_of_reactiondata.eq.is_empty() {
+                map_of_reactiondata.eq.clone()
+            } else {
+                return Err(ReactorError::MissingData(format!(
+                    "No equation in input hashmap at index {}",
+                    idx
+                )));
+            };
+
+            // Check Arrhenius parameters
+            let A = map_of_reactiondata.A;
+            let n = map_of_reactiondata.n;
+            let E = map_of_reactiondata.E;
+            let Q = map_of_reactiondata.Q;
+            // Check for non-finite values (in case of uninitialized or corrupted f64)
+            if !A.is_finite() {
+                return Err(ReactorError::MissingData(format!(
+                    "Missing Arrhenius parameter 'A' in input hashmap at index {}",
+                    idx
+                )));
+            }
+            if !n.is_finite() {
+                return Err(ReactorError::MissingData(format!(
+                    "Missing Arrhenius parameter 'n' in input hashmap at index {}",
+                    idx
+                )));
+            }
+            if !E.is_finite() {
+                return Err(ReactorError::MissingData(format!(
+                    "Missing Arrhenius parameter 'E' in input hashmap at index {}",
+                    idx
+                )));
+            }
+            if !Q.is_finite() {
+                return Err(ReactorError::MissingData(format!(
+                    "Missing Arrhenius parameter 'Q' in input hashmap at index {}",
+                    idx
+                )));
+            }
+            let arrenius = vec![A, n, E];
+            let reactdata = ReactionData::new_elementary(eq.clone(), arrenius, None);
+            Q_vec.push(Q);
+            elementary_reaction_vec.push(reactdata);
+        }
+
+        let mut kindata = KinData::new();
+        kindata
+            .set_reaction_data_directly(elementary_reaction_vec, None)
+            .map_err(|err| ReactorError::CalculationError(err.to_string()))?;
+        self.kindata = kindata;
+        self.thermal_effects = Q_vec;
+        Ok(())
+    }
+    ///////////////////////////////////////////VALIDATION////////////////////////////////////////////////
+    /// Validate reactor task configuration
+    ///
+    /// Checks:
+    /// - All physical properties are positive
+    /// - Diffusion coefficients exist for all substances
+    /// - Thermal effects match number of reactions
+    /// - Scaling parameters are valid
+    /// - Boundary conditions are complete
+    pub fn check_task(&self) -> Result<(), ReactorError> {
+        let ensure_finite_positive = |name: &str, value: f64| -> Result<(), ReactorError> {
+            if !value.is_finite() {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "{} must be finite, got {}",
+                    name, value
+                )));
+            }
+            if value <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "{} must be positive, got {}",
+                    name, value
+                )));
+            }
+            Ok(())
+        };
+
+        // Check basic properties
+        ensure_finite_positive("P", self.P)?;
+        ensure_finite_positive("Tm", self.Tm)?;
+        ensure_finite_positive("Cp", self.Cp)?;
+        ensure_finite_positive("Lambda", self.Lambda)?;
+        ensure_finite_positive("m", self.m)?;
+
+        ensure_finite_positive("M", self.M)?;
+
+        // Check diffusion entries match substances
+        if self.Diffusion.len() != self.kindata.substances.len() {
+            return Err(ReactorError::InvalidConfiguration(
+                "Diffusion entries must match number of substances".to_string(),
+            ));
+        }
+        for substance in &self.kindata.substances {
+            if !self.Diffusion.contains_key(substance) {
+                return Err(ReactorError::MissingData(format!(
+                    "Missing diffusion coefficient for {}",
+                    substance
+                )));
+            }
+            let diffusion = *self.Diffusion.get(substance).ok_or_else(|| {
+                ReactorError::MissingData(format!(
+                    "Missing diffusion coefficient for {}",
+                    substance
+                ))
+            })?;
+            if !diffusion.is_finite() || diffusion <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Diffusion coefficient for {} must be finite and positive, got {}",
+                    substance, diffusion
+                )));
+            }
+        }
+
+        // Check thermal effects length
+        if self.thermal_effects.len() != self.kindata.vec_of_equations.len() {
+            return Err(ReactorError::InvalidConfiguration(
+                "Thermal effects length must match number of reactions".to_string(),
+            ));
+        }
+        for (idx, effect) in self.thermal_effects.iter().enumerate() {
+            if !effect.is_finite() {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Thermal effect at index {} must be finite, got {}",
+                    idx, effect
+                )));
+            }
+        }
+
+        // Validate scaling parameters
+        self.scaling.validate()?;
+
+        // Check boundary conditions
+        let temperature = self.boundary_condition.get("T").ok_or_else(|| {
+            ReactorError::MissingData("Missing T in boundary conditions".to_string())
+        })?;
+        if !temperature.is_finite() || *temperature <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Boundary temperature must be finite and positive, got {}",
+                temperature
+            )));
+        }
+
+        let mut boundary_fraction_sum = 0.0;
+        for substance in &self.kindata.substances {
+            let fraction = *self.boundary_condition.get(substance).ok_or_else(|| {
+                ReactorError::MissingData(format!("Missing boundary condition for {}", substance))
+            })?;
+            if !fraction.is_finite() || fraction < 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Boundary fraction for {} must be finite and non-negative, got {}",
+                    substance, fraction
+                )));
+            }
+            boundary_fraction_sum += fraction;
+        }
+        if !boundary_fraction_sum.is_finite() || boundary_fraction_sum <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Boundary fractions must sum to a positive finite value, got {}",
+                boundary_fraction_sum
+            )));
+        }
+        if (boundary_fraction_sum - 1.0).abs() > 1e-6 {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Boundary fractions must be normalized to 1.0, got {}",
+                boundary_fraction_sum
+            )));
+        }
+
+        Ok(())
+    }
+    /// Validate system before solving
+    ///
+    /// Checks that all arrays have consistent dimensions:
+    /// - Equation system length = 2*n_substances + 2
+    /// - Unknown variables, equations, and boundary conditions match
+    /// - Peclet numbers are calculated and positive
+    pub fn check_before_solution(&self) -> Result<(), ReactorError> {
+        let n_substances = self.kindata.substances.len();
+        let expected_len = 2 * n_substances + 2;
+
+        if self.solver.eq_system.len() != expected_len {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "eq_system length {} != expected {}",
+                self.solver.eq_system.len(),
+                expected_len
+            )));
+        }
+        if self.solver.unknowns.len() != expected_len {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "unknowns length {} != expected {}",
+                self.solver.unknowns.len(),
+                expected_len
+            )));
+        }
+        if self.map_of_equations.len() != expected_len {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "map_of_equations length {} != expected {}",
+                self.map_of_equations.len(),
+                expected_len
+            )));
+        }
+        if self.solver.BorderConditions.len() != expected_len {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "BorderConditions length {} != expected {}",
+                self.solver.BorderConditions.len(),
+                expected_len
+            )));
+        }
+        if self.Pe_D.len() != n_substances {
+            return Err(ReactorError::InvalidConfiguration(format!(
+                "Pe_D length {} != substances {}",
+                self.Pe_D.len(),
+                n_substances
+            )));
+        }
+        if !self.M.is_finite() || self.M <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "M must be finite and positive, got {}",
+                self.M
+            )));
+        }
+        if !self.Pe_q.is_finite() || self.Pe_q <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Pe_q must be finite and positive, got {}",
+                self.Pe_q
+            )));
+        }
+        for (idx, pe_d) in self.Pe_D.iter().enumerate() {
+            if !pe_d.is_finite() || *pe_d <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Pe_D[{}] must be finite and positive, got {}",
+                    idx, pe_d
+                )));
+            }
+        }
+        Ok(())
+    }
+    ///////////////////////////////////////////KINETICS AND THERMAL PREPROCESSING////////////////////////////////////////////////
+
+    ///
+    pub fn kinetic_processing(&mut self) -> Result<(), ReactorError> {
+        let kd = &mut self.kindata;
+        // stoichiometry and element matrix
+        kd.analyze_reactions()
+            .map_err(|err| ReactorError::CalculationError(err.to_string()))?;
+        // in elementary reactions there are only Arrhenius parameters - no concentration or pressure dependencies
+        kd.calc_sym_constants(None, None, Some(self.T_scaling.clone()))
+            .map_err(|err| ReactorError::CalculationError(err.to_string()))?;
+        Ok(())
+    }
+
+    ///
+    pub fn mean_molar_mass(&mut self) -> Result<(), ReactorError> {
+        let mut mean_mass_inv = 0.0;
+        let molar_masses = self
+            .kindata
+            .stecheodata
+            .vec_of_molmasses
+            .as_ref()
+            .ok_or_else(|| ReactorError::MissingData("Molar masses not calculated".to_string()))?;
+        // M_mean = sum_i(xi*Mi)
+        //   x(i) = (ω(i) / M(i)) / ∑(ω(j) / M(j)) where ω(j) - is mass fruction
+        // so M_men = ∑(xi*Mi) = ∑ω(i)  / ∑(ω(j) / M(j))= 1/∑(ω(j) / M(j))
+        if !self.M.is_finite() || self.M <= 0.0 {
+            for (i, substance) in self.kindata.substances.iter().enumerate() {
+                if let Some(conc) = self.boundary_condition.get(substance) {
+                    let mol_mass = molar_masses.get(i).ok_or_else(|| {
+                        ReactorError::IndexOutOfBounds(format!(
+                            "Molar mass index {} out of bounds",
+                            i
+                        ))
+                    })?;
+                    if !conc.is_finite() || *conc < 0.0 {
+                        return Err(ReactorError::InvalidNumericValue(format!(
+                            "Boundary fraction for {} must be finite and non-negative, got {}",
+                            substance, conc
+                        )));
+                    }
+                    if !mol_mass.is_finite() || *mol_mass <= 0.0 {
+                        return Err(ReactorError::InvalidNumericValue(format!(
+                            "Molar mass for {} must be finite and positive, got {}",
+                            substance, mol_mass
+                        )));
+                    }
+                    mean_mass_inv += conc / mol_mass;
+                }
+            }
+            if !mean_mass_inv.is_finite() || mean_mass_inv <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Mean molar mass denominator must be finite and positive, got {}",
+                    mean_mass_inv
+                )));
+            }
+            let mean_mass = 1.0 / mean_mass_inv;
+            if !mean_mass.is_finite() || mean_mass <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Mean molar mass must be finite and positive, got {}",
+                    mean_mass
+                )));
+            }
+            self.M = mean_mass / 1000.0; // from g/mol to kg/mol
+        }
+        Ok(())
+    }
+    ///
+    /// Recompute the cached transport coefficients in place.
+    ///
+    /// The method updates `self.D_ro_map` directly so later hot-path reads can
+    /// borrow the cached data instead of rebuilding or cloning the map.
+    pub fn transport_coefficients(&mut self) -> Result<(), ReactorError> {
+        /*
+           D = A*T^1.5/P;
+           D0  = A*T0^1.5/P0;
+           D/D0 = (P0/P)*(T/T0)^1.5;
+           D = D0*(P0/P)*(T/T0)^1.5;
+           PV = (m/M)RT
+           ro = P/(R*T)
+           D*ro = (P/(R*T))*D0*(P0/P)*(T/T0)^1.5=(P0/(R*T0))*D0*(T/T0)^0.5=
+           D0*ro0*(T/T0)^0.5 ;
+           finally
+           D*ro = D0*ro0*(T/T0)^0.5
+        */
+        if !self.P.is_finite() || self.P <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Pressure must be finite and positive, got {}",
+                self.P
+            )));
+        }
+        if !self.Tm.is_finite() || self.Tm <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Temperature must be finite and positive, got {}",
+                self.Tm
+            )));
+        }
+        if !self.M.is_finite() || self.M <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Mean molar mass must be finite and positive, got {}",
+                self.M
+            )));
+        }
+        // ro at standard conditions
+        // PV = (m/M)*RT => ro = m/V = P*M/RT;
+        let ro0 = self.M * self.P / (R_G * 298.15);
+        if !ro0.is_finite() || ro0 <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Reference density must be finite and positive, got {}",
+                ro0
+            )));
+        }
+        let mut D_ro_map = HashMap::new();
+        for subs in self.kindata.substances.iter() {
+            if let Some(D_i) = self.Diffusion.get(subs) {
+                if !D_i.is_finite() || *D_i <= 0.0 {
+                    return Err(ReactorError::InvalidNumericValue(format!(
+                        "Diffusion coefficient for {} must be finite and positive, got {}",
+                        subs, D_i
+                    )));
+                }
+                let D_ro = D_i * ro0 * (self.Tm / 298.15).powf(0.5);
+                if !D_ro.is_finite() || D_ro <= 0.0 {
+                    return Err(ReactorError::InvalidNumericValue(format!(
+                        "D*ro for {} must be finite and positive, got {}",
+                        subs, D_ro
+                    )));
+                }
+                D_ro_map.insert(subs.clone(), D_ro);
+            }
+        }
+        self.D_ro_map = D_ro_map;
+        Ok(())
+    }
+    /// Process scaling parameters for dimensionless equations
+    /// Teta = (T - dT)/T_scaling
+    /// Creates temperature scaling: T = (Teta*T_scaling + dT)
+    /// Sets characteristic length L for spatial scaling: z = x/L
+    pub fn scaling_processing(&mut self) -> Result<(), ReactorError> {
+        // Validate scaling parameters
+        self.scaling.validate()?;
+
+        // Create temperature scaling expression: T = T_scale*Teta + dT.
+        let dT = self.scaling.dT;
+        let T_scale = self.scaling.T_scale;
+        let Teta = Expr::Var("Teta".to_owned());
+        self.T_scaling = Teta.clone() * Expr::Const(T_scale) + Expr::Const(dT);
+        self.solver.temperature_affine_transform = Some((T_scale, dT));
+
+        // Set characteristic length
+        self.L = self.scaling.L;
+        Ok(())
+    }
+    pub fn peclet_numbers(&mut self) -> Result<(), ReactorError> {
+        if !self.Lambda.is_finite() || self.Lambda <= 0.0 {
+            return Err(ReactorError::InvalidConfiguration(
+                "Lambda must be positive".to_string(),
+            ));
+        }
+        if !self.m.is_finite() || self.m <= 0.0 {
+            return Err(ReactorError::InvalidConfiguration(
+                "Mass flux must be positive".to_string(),
+            ));
+        }
+        if !self.L.is_finite() || !self.Cp.is_finite() {
+            return Err(ReactorError::InvalidNumericValue(
+                "Peclet inputs must be finite".to_string(),
+            ));
+        }
+
+        let Pe_q = (self.L * self.m * self.Cp) / self.Lambda;
+        if !Pe_q.is_finite() || Pe_q <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Pe_q must be finite and positive, got {}",
+                Pe_q
+            )));
+        }
+        let mut Pe_D = Vec::new();
+        self.transport_coefficients()?;
+
+        for subs in self.kindata.substances.iter() {
+            let ro_D_i = self.D_ro_map.get(subs).ok_or_else(|| {
+                ReactorError::MissingData(format!(
+                    "Transport coefficient for substance '{}' not found",
+                    subs
+                ))
+            })?;
+            if *ro_D_i <= 0.0 {
+                return Err(ReactorError::InvalidConfiguration(format!(
+                    "Transport coefficient for '{}' must be positive",
+                    subs
+                )));
+            }
+            let Pe_D_i = (self.m * self.L) / ro_D_i;
+            if !Pe_D_i.is_finite() || Pe_D_i <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Pe_D for '{}' must be finite and positive, got {}",
+                    subs, Pe_D_i
+                )));
+            }
+            Pe_D.push(Pe_D_i);
+        }
+
+        self.Pe_q = Pe_q;
+        self.Pe_D = Pe_D;
+        Ok(())
+    }
+    /// Return the ideal-gas density for the current reactor state.
+    ///
+    /// The value is only meaningful when the thermodynamic inputs are finite
+    /// and strictly positive, so we fail fast instead of silently returning
+    /// `Inf` or `NaN`.
+    pub fn ideal_gas_density(&self) -> Result<f64, ReactorError> {
+        if !self.M.is_finite() || self.M <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Mean molar mass must be finite and positive, got {}",
+                self.M
+            )));
+        }
+        if !self.P.is_finite() || self.P <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Pressure must be finite and positive, got {}",
+                self.P
+            )));
+        }
+        if !self.Tm.is_finite() || self.Tm <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Temperature must be finite and positive, got {}",
+                self.Tm
+            )));
+        }
+        let density = self.M * self.P / (R_G * self.Tm);
+        if !density.is_finite() || density <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Ideal gas density must be finite and positive, got {}",
+                density
+            )));
+        }
+        Ok(density)
+    }
+
+    /// Build the symbolic gas density after the temperature scaling is prepared.
+    pub(crate) fn density_expression(&self) -> Result<Expr, ReactorError> {
+        let rho_ref = self.ideal_gas_density()?;
+        match self.density_model {
+            DensityModel::Constant => Ok(Expr::Const(rho_ref)),
+            DensityModel::IdealGasFixedComposition => {
+                self.scaling.validate()?;
+                let numerator = rho_ref * self.Tm;
+                if !numerator.is_finite() || numerator <= 0.0 {
+                    return Err(ReactorError::InvalidNumericValue(format!(
+                        "Density-temperature numerator must be finite and positive, got {numerator}"
+                    )));
+                }
+                Ok(Expr::Const(numerator) / self.T_scaling.clone())
+            }
+        }
+    }
+    /// Compute the average Lewis number from the current transport snapshot.
+    ///
+    /// The method borrows the diffusion map directly so it stays cheap and
+    /// does not clone the full transport state on every call.
+    pub fn Le_number(&self) -> Result<f64, ReactorError> {
+        if self.D_ro_map.is_empty() {
+            return Err(ReactorError::MissingData(
+                "Cannot compute Lewis number without diffusion coefficients".to_string(),
+            ));
+        }
+        if !self.Lambda.is_finite() || self.Lambda <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Thermal conductivity must be finite and positive, got {}",
+                self.Lambda
+            )));
+        }
+        if !self.Cp.is_finite() || self.Cp <= 0.0 {
+            return Err(ReactorError::InvalidNumericValue(format!(
+                "Heat capacity must be finite and positive, got {}",
+                self.Cp
+            )));
+        }
+
+        let mut le_sum = 0.0;
+        let mut le_count = 0usize;
+
+        for diffusion in self.D_ro_map.values() {
+            if !diffusion.is_finite() || *diffusion <= 0.0 {
+                return Err(ReactorError::InvalidNumericValue(format!(
+                    "Diffusion coefficient must be finite and positive, got {}",
+                    diffusion
+                )));
+            }
+            le_sum += self.Lambda / (self.Cp * diffusion);
+            le_count += 1;
+        }
+
+        Ok(le_sum / le_count as f64)
+    }
+}
+
+/////////////////////////////////////////TESTS/////////////////////////////////////////////////////////

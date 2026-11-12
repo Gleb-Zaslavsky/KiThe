@@ -1,0 +1,313 @@
+{
+  "reference": "independent scalar reduced BVP; SciPy solve_bvp",
+  "scipy_version": "1.18.1",
+  "equation": "theta_prime = alpha*theta_second + (1-theta)*exp(-beta/(1+delta*theta))",
+  "first_order_rhs": "theta_second=(theta_prime-(1-theta)*exp(-beta/(1+delta*theta)))/alpha",
+  "boundary_conditions": [
+    "theta(0)=0",
+    "theta_prime(eta_max)=0"
+  ],
+  "parameters": {
+    "alpha": 2.0,
+    "beta": 7.0,
+    "delta": 10.0
+  },
+  "solver_tolerance": 2e-08,
+  "profile_points": 2001,
+  "summaries": [
+    {
+      "eta_max": 10.0,
+      "failed_seeds": [],
+      "branches": [
+        {
+          "seed_theta": 0.01,
+          "file": "zz1962b_eta10_branch1.csv",
+          "mesh_nodes": 101,
+          "iterations": 1,
+          "max_collocation_rms_residual": 1.1270342017229145e-09,
+          "convergence_study": [
+            {
+              "rtol": 1e-05,
+              "initial_mesh_nodes": 51,
+              "adaptive_mesh_nodes": 51,
+              "max_delta_vs_frozen_profile": 1.9559920304002e-06,
+              "max_collocation_rms_residual": 1.8158586677550227e-07
+            },
+            {
+              "rtol": 1e-07,
+              "initial_mesh_nodes": 101,
+              "adaptive_mesh_nodes": 101,
+              "max_delta_vs_frozen_profile": 9.360931137875061e-09,
+              "max_collocation_rms_residual": 1.2428151614634918e-09
+            },
+            {
+              "rtol": 2e-08,
+              "initial_mesh_nodes": 201,
+              "adaptive_mesh_nodes": 201,
+              "max_delta_vs_frozen_profile": 5.2556252752578025e-11,
+              "max_collocation_rms_residual": 1.4659519858922874e-10
+            }
+          ],
+          "bc_residuals": [
+            0.0,
+            0.0
+          ],
+          "theta_out": 0.011843050102239874,
+          "theta_min": 0.0,
+          "theta_max": 0.011843050102239874,
+          "T_out_K": 335.5291503067196,
+          "Y_A_out": 0.9881569498977602,
+          "theta_prime_in": 0.0010685152810962176,
+          "theta_prime_out": -2.9381455357883543e-21,
+          "max_rate": 0.0018909339979537652,
+          "eta_at_max_rate": 10.0
+        },
+        {
+          "seed_theta": 0.1,
+          "file": "zz1962b_eta10_branch2.csv",
+          "mesh_nodes": 195,
+          "iterations": 2,
+          "max_collocation_rms_residual": 1.2703050018401035e-08,
+          "convergence_study": [
+            {
+              "rtol": 1e-05,
+              "initial_mesh_nodes": 51,
+              "adaptive_mesh_nodes": 51,
+              "max_delta_vs_frozen_profile": 2.6494294043388766e-06,
+              "max_collocation_rms_residual": 5.750314972645159e-07
+            },
+            {
+              "rtol": 1e-07,
+              "initial_mesh_nodes": 101,
+              "adaptive_mesh_nodes": 179,
+              "max_delta_vs_frozen_profile": 8.004793772276031e-10,
+              "max_collocation_rms_residual": 2.1281737720886402e-08
+            },
+            {
+              "rtol": 2e-08,
+              "initial_mesh_nodes": 201,
+              "adaptive_mesh_nodes": 386,
+              "max_delta_vs_frozen_profile": 3.823879962672194e-10,
+              "max_collocation_rms_residual": 2.623399522228999e-09
+            }
+          ],
+          "bc_residuals": [
+            0.0,
+            0.0
+          ],
+          "theta_out": 0.1490497417068752,
+          "theta_min": 0.0,
+          "theta_max": 0.1490497417068752,
+          "T_out_K": 747.1492251206257,
+          "Y_A_out": 0.8509502582931248,
+          "theta_prime_in": 0.002940906573527164,
+          "theta_prime_out": -1.2155832691773018e-20,
+          "max_rate": 0.051196449029622004,
+          "eta_at_max_rate": 10.0
+        },
+        {
+          "seed_theta": 0.6,
+          "file": "zz1962b_eta10_branch3.csv",
+          "mesh_nodes": 300,
+          "iterations": 2,
+          "max_collocation_rms_residual": 9.03269507336292e-09,
+          "convergence_study": [
+            {
+              "rtol": 1e-05,
+              "initial_mesh_nodes": 51,
+              "adaptive_mesh_nodes": 99,
+              "max_delta_vs_frozen_profile": 3.508704694010767e-07,
+              "max_collocation_rms_residual": 6.031569983486745e-07
+            },
+            {
+              "rtol": 1e-07,
+              "initial_mesh_nodes": 101,
+              "adaptive_mesh_nodes": 297,
+              "max_delta_vs_frozen_profile": 4.926259122850496e-09,
+              "max_collocation_rms_residual": 1.6664254568486362e-08
+            },
+            {
+              "rtol": 2e-08,
+              "initial_mesh_nodes": 201,
+              "adaptive_mesh_nodes": 598,
+              "max_delta_vs_frozen_profile": 2.2422443068936815e-10,
+              "max_collocation_rms_residual": 2.0838330281958544e-09
+            }
+          ],
+          "bc_residuals": [
+            0.0,
+            0.0
+          ],
+          "theta_out": 0.852018428758781,
+          "theta_min": 0.0,
+          "theta_max": 0.852018428758781,
+          "T_out_K": 2856.055286276343,
+          "Y_A_out": 0.14798157124121902,
+          "theta_prime_in": 0.05187135434508248,
+          "theta_prime_out": -1.0614381620280451e-20,
+          "max_rate": 0.15572446190728004,
+          "eta_at_max_rate": 4.555
+        }
+      ]
+    },
+    {
+      "eta_max": 15.0,
+      "failed_seeds": [
+        {
+          "seed_theta": 0.3,
+          "error": "solve_bvp failed eta_max=15.0 seed=0.3: The maximum number of mesh nodes is exceeded."
+        }
+      ],
+      "branches": [
+        {
+          "seed_theta": 0.01,
+          "file": "zz1962b_eta15_branch1.csv",
+          "mesh_nodes": 196,
+          "iterations": 2,
+          "max_collocation_rms_residual": 4.693835692587975e-10,
+          "convergence_study": [
+            {
+              "rtol": 1e-05,
+              "initial_mesh_nodes": 51,
+              "adaptive_mesh_nodes": 51,
+              "max_delta_vs_frozen_profile": 0.0001768653651402774,
+              "max_collocation_rms_residual": 7.5731655911612556e-06
+            },
+            {
+              "rtol": 1e-07,
+              "initial_mesh_nodes": 101,
+              "adaptive_mesh_nodes": 152,
+              "max_delta_vs_frozen_profile": 4.853803470261653e-11,
+              "max_collocation_rms_residual": 1.0955954151550527e-09
+            },
+            {
+              "rtol": 2e-08,
+              "initial_mesh_nodes": 201,
+              "adaptive_mesh_nodes": 387,
+              "max_delta_vs_frozen_profile": 1.1256328334707799e-11,
+              "max_collocation_rms_residual": 3.560752092383675e-10
+            }
+          ],
+          "bc_residuals": [
+            0.0,
+            0.0
+          ],
+          "theta_out": 0.03759179768665187,
+          "theta_min": 0.0,
+          "theta_max": 0.03759179768665187,
+          "T_out_K": 412.7753930599556,
+          "Y_A_out": 0.9624082023133481,
+          "theta_prime_in": 0.001128730429829217,
+          "theta_prime_out": -4.215312401570229e-21,
+          "max_rate": 0.005941289036132809,
+          "eta_at_max_rate": 15.0
+        },
+        {
+          "seed_theta": 0.6,
+          "file": "zz1962b_eta15_branch2.csv",
+          "mesh_nodes": 253,
+          "iterations": 3,
+          "max_collocation_rms_residual": 1.9735116867074265e-08,
+          "convergence_study": [
+            {
+              "rtol": 1e-05,
+              "initial_mesh_nodes": 51,
+              "adaptive_mesh_nodes": 51,
+              "max_delta_vs_frozen_profile": 1.0391477546944916e-05,
+              "max_collocation_rms_residual": 3.62471435819054e-06
+            },
+            {
+              "rtol": 1e-07,
+              "initial_mesh_nodes": 101,
+              "adaptive_mesh_nodes": 162,
+              "max_delta_vs_frozen_profile": 4.7741830488945425e-09,
+              "max_collocation_rms_residual": 9.052645055673094e-08
+            },
+            {
+              "rtol": 2e-08,
+              "initial_mesh_nodes": 201,
+              "adaptive_mesh_nodes": 370,
+              "max_delta_vs_frozen_profile": 1.2017506989536741e-09,
+              "max_collocation_rms_residual": 7.0718097969706844e-09
+            }
+          ],
+          "bc_residuals": [
+            0.0,
+            0.0
+          ],
+          "theta_out": 0.9698349843243936,
+          "theta_min": 0.0,
+          "theta_max": 0.9698349843243936,
+          "T_out_K": 3209.504952973181,
+          "Y_A_out": 0.030165015675606366,
+          "theta_prime_in": 0.0520654031778837,
+          "theta_prime_out": 7.813878938420921e-20,
+          "max_rate": 0.15572438211739456,
+          "eta_at_max_rate": 4.545
+        }
+      ]
+    },
+    {
+      "eta_max": 20.0,
+      "failed_seeds": [
+        {
+          "seed_theta": 0.01,
+          "error": "solve_bvp failed eta_max=20.0 seed=0.01: The maximum number of mesh nodes is exceeded."
+        },
+        {
+          "seed_theta": 0.1,
+          "error": "solve_bvp failed eta_max=20.0 seed=0.1: A singular Jacobian encountered when solving the collocation system."
+        },
+        {
+          "seed_theta": 0.3,
+          "error": "solve_bvp failed eta_max=20.0 seed=0.3: A singular Jacobian encountered when solving the collocation system."
+        }
+      ],
+      "branches": [
+        {
+          "seed_theta": 0.6,
+          "file": "zz1962b_eta20_branch1.csv",
+          "mesh_nodes": 264,
+          "iterations": 3,
+          "max_collocation_rms_residual": 1.889135636591151e-08,
+          "convergence_study": [
+            {
+              "rtol": 1e-05,
+              "initial_mesh_nodes": 51,
+              "adaptive_mesh_nodes": 54,
+              "max_delta_vs_frozen_profile": 2.3825952419204155e-06,
+              "max_collocation_rms_residual": 8.205217700533165e-06
+            },
+            {
+              "rtol": 1e-07,
+              "initial_mesh_nodes": 101,
+              "adaptive_mesh_nodes": 195,
+              "max_delta_vs_frozen_profile": 5.1714609400344e-09,
+              "max_collocation_rms_residual": 9.493964234405521e-08
+            },
+            {
+              "rtol": 2e-08,
+              "initial_mesh_nodes": 201,
+              "adaptive_mesh_nodes": 400,
+              "max_delta_vs_frozen_profile": 1.2315428676856754e-09,
+              "max_collocation_rms_residual": 1.673855683374367e-08
+            }
+          ],
+          "bc_residuals": [
+            0.0,
+            0.0
+          ],
+          "theta_out": 0.9939397143247108,
+          "theta_min": 0.0,
+          "theta_max": 0.9939397143247108,
+          "T_out_K": 3281.8191429741323,
+          "Y_A_out": 0.0060602856752891565,
+          "theta_prime_in": 0.05206610929558598,
+          "theta_prime_out": 1.3499587596865412e-21,
+          "max_rate": 0.1557244094200431,
+          "eta_at_max_rate": 4.54
+        }
+      ]
+    }
+  ]
+}

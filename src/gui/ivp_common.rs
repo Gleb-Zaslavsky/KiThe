@@ -2,8 +2,7 @@ use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     ColumnMeta, ColumnNature, History, TGADataset, TGADomainError, TGASchema, Unit,
 };
 use crate::Kinetics::solid_state_kinetics_IVP::{KineticModelIVP, KineticModelNames};
-use RustedSciThe::numerical::ODE_api2::{NonStiffMethod, SolverType};
-use RustedSciThe::numerical::Radau::prelude::*;
+use RustedSciThe::numerical::StiffAPI::StiffSolverKind;
 use egui_extras::{Column as TableColumn, TableBuilder};
 use nalgebra::{DMatrix, DVector};
 use polars::prelude::{Column as PolarsColumn, DataFrame, IntoLazy};
@@ -13,29 +12,28 @@ use strum_macros::EnumIter;
 
 #[derive(Debug, Clone, PartialEq, EnumIter)]
 pub enum SolverTypeShotcut {
-    RadauOrder3,
-    RadauOrder5,
-    RadauOrder7,
-    LSODE,
-    NonstiffRK45,
-    NonStiffDoPri,
-    NonStiffAB4,
+    Radau,
+    LSODE2,
     BDF,
     BackwardEuler,
 }
 
 impl SolverTypeShotcut {
-    pub fn get_solvertype(&self) -> SolverType {
+    pub fn stiff_solver_kind(&self) -> StiffSolverKind {
         match self {
-            Self::RadauOrder3 => SolverType::Radau,
-            Self::RadauOrder5 => SolverType::Radau,
-            Self::RadauOrder7 => SolverType::Radau,
-            Self::LSODE => SolverType::Lsode2,
-            Self::NonstiffRK45 => SolverType::NonStiff(NonStiffMethod::Rk45),
-            Self::NonStiffDoPri => SolverType::NonStiff(NonStiffMethod::Dopri),
-            Self::NonStiffAB4 => SolverType::NonStiff(NonStiffMethod::Ab4),
-            Self::BDF => SolverType::Bdf,
-            Self::BackwardEuler => SolverType::BackwardEuler,
+            Self::Radau => StiffSolverKind::Radau,
+            Self::LSODE2 => StiffSolverKind::Lsode2,
+            Self::BDF => StiffSolverKind::Bdf,
+            Self::BackwardEuler => StiffSolverKind::BackwardEuler,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Radau => "Radau",
+            Self::LSODE2 => "LSODE2",
+            Self::BDF => "BDF",
+            Self::BackwardEuler => "Backward Euler",
         }
     }
 }
@@ -116,7 +114,11 @@ impl IvpTaskState {
     }
 
     pub fn show_model_table(&mut self, ui: &mut egui::Ui) {
+        let catalog_height = (ui.available_height() - 300.0).clamp(220.0, 560.0);
         TableBuilder::new(ui)
+            .vscroll(true)
+            .min_scrolled_height(180.0)
+            .max_scroll_height(catalog_height)
             .column(TableColumn::auto().resizable(true))
             .column(TableColumn::auto().resizable(true))
             .column(TableColumn::remainder())
@@ -133,9 +135,9 @@ impl IvpTaskState {
             })
             .body(|mut body| {
                 for model in KineticModelNames::iter() {
-                    body.row(20.0, |mut row| {
+                    body.row(24.0, |mut row| {
                         row.col(|ui| {
-                            if ui.button("Select").clicked() {
+                            if ui.button("Use model").clicked() {
                                 self.select_model_clicked(model.clone());
                             }
                         });
@@ -143,7 +145,8 @@ impl IvpTaskState {
                             ui.label(format!("{:?}", model));
                         });
                         row.col(|ui| {
-                            ui.label(model.map_of_names_and_formulas());
+                            let formula = model.map_of_names_and_formulas();
+                            ui.label(&formula).on_hover_text(formula);
                         });
                     });
                 }
@@ -152,14 +155,10 @@ impl IvpTaskState {
 
     pub fn show_solver_combo(&mut self, ui: &mut egui::Ui) {
         egui::ComboBox::from_label("Select Solver")
-            .selected_text(format!("{:?}", self.selected_solver))
+            .selected_text(self.selected_solver.label())
             .show_ui(ui, |ui| {
                 for solver in SolverTypeShotcut::iter() {
-                    ui.selectable_value(
-                        &mut self.selected_solver,
-                        solver.clone(),
-                        format!("{:?}", solver),
-                    );
+                    ui.selectable_value(&mut self.selected_solver, solver.clone(), solver.label());
                 }
             });
     }
@@ -168,60 +167,52 @@ impl IvpTaskState {
         self.sync_param_buffers();
         ui.horizontal_wrapped(|ui| {
             for (idx, param) in self.required_params.iter().enumerate() {
-                ui.label(param);
-                if ui
-                    .text_edit_singleline(&mut self.param_strings[idx])
-                    .changed()
-                {
-                    if let Ok(parsed) = self.param_strings[idx].trim().parse::<f64>() {
-                        self.params[idx] = parsed;
+                let label = ui.label(param);
+                ui.label_inputs_by(label.id, |ui| {
+                    if ui
+                        .text_edit_singleline(&mut self.param_strings[idx])
+                        .changed()
+                    {
+                        if let Ok(parsed) = self.param_strings[idx].trim().parse::<f64>() {
+                            self.params[idx] = parsed;
+                        }
                     }
-                }
+                });
                 ui.label(format!("{}", self.params[idx]));
             }
         });
     }
 
     pub fn show_problem_inputs(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("t_final:");
-            ui.text_edit_singleline(&mut self.t_final_string);
-            if let Ok(parsed) = self.t_final_string.trim().parse::<f64>() {
-                self.t_final = parsed;
-            }
-            ui.label(self.t_final.to_string());
-        });
-        ui.horizontal(|ui| {
-            ui.label("beta:");
-            ui.text_edit_singleline(&mut self.beta_string);
-            if let Ok(parsed) = self.beta_string.trim().parse::<f64>() {
-                self.beta = parsed;
-            }
-            ui.label(self.beta.to_string());
-        });
-        ui.horizontal(|ui| {
-            ui.label("T0:");
-            ui.text_edit_singleline(&mut self.t0_string);
-            if let Ok(parsed) = self.t0_string.trim().parse::<f64>() {
-                self.t0 = parsed;
-            }
-            ui.label(self.t0.to_string());
-        });
-        ui.horizontal(|ui| {
-            ui.label("E:");
-            ui.text_edit_singleline(&mut self.e_string);
-            if let Ok(parsed) = self.e_string.trim().parse::<f64>() {
-                self.e = parsed;
-            }
-            ui.label(self.e.to_string());
-        });
-        ui.horizontal(|ui| {
-            ui.label("A:");
-            ui.text_edit_singleline(&mut self.a_string);
-            if let Ok(parsed) = self.a_string.trim().parse::<f64>() {
-                self.a = parsed;
-            }
-            ui.label(self.a.to_string());
+        ui.horizontal_wrapped(|ui| {
+            let input = |ui: &mut egui::Ui,
+                         label_text: &str,
+                         value: &mut String,
+                         parsed_value: &mut f64| {
+                ui.horizontal(|ui| {
+                    let label = ui.label(format!("{label_text}:"));
+                    ui.label_inputs_by(label.id, |ui| {
+                        ui.add_sized(
+                            [100.0, ui.spacing().interact_size.y],
+                            egui::TextEdit::singleline(value),
+                        );
+                    });
+                });
+                if let Ok(parsed) = value.trim().parse::<f64>() {
+                    *parsed_value = parsed;
+                }
+            };
+
+            input(
+                ui,
+                "t_final [s]",
+                &mut self.t_final_string,
+                &mut self.t_final,
+            );
+            input(ui, "beta [K/s]", &mut self.beta_string, &mut self.beta);
+            input(ui, "T0 [K]", &mut self.t0_string, &mut self.t0);
+            input(ui, "E [J/mol]", &mut self.e_string, &mut self.e);
+            input(ui, "A [1/s]", &mut self.a_string, &mut self.a);
         });
     }
 
@@ -257,7 +248,7 @@ impl IvpTaskState {
             .collect::<Result<Vec<_>, _>>()?;
         self.params = params.clone();
 
-        let solver = self.selected_solver.get_solvertype();
+        let solver = self.selected_solver.stiff_solver_kind();
         let mut kinetic_model = KineticModelIVP::new(solver);
         kinetic_model.set_problem(self.t_final, self.beta, self.t0, self.e, self.a)?;
         kinetic_model.set_model(model, params)?;
@@ -266,6 +257,47 @@ impl IvpTaskState {
         let (time, values) = kinetic_model.get_result()?;
 
         Ok(IvpResult { time, values })
+    }
+}
+
+#[cfg(test)]
+mod solver_selector_tests {
+    use super::*;
+
+    #[test]
+    fn selector_exposes_each_stiff_api_route_once() {
+        let choices: Vec<_> = SolverTypeShotcut::iter().collect();
+
+        assert_eq!(
+            choices,
+            [
+                SolverTypeShotcut::Radau,
+                SolverTypeShotcut::LSODE2,
+                SolverTypeShotcut::BDF,
+                SolverTypeShotcut::BackwardEuler,
+            ]
+        );
+        assert_eq!(choices[0].label(), "Radau");
+        assert_eq!(choices[1].label(), "LSODE2");
+        assert_eq!(choices[2].label(), "BDF");
+        assert_eq!(choices[3].label(), "Backward Euler");
+
+        assert!(matches!(
+            choices[0].stiff_solver_kind(),
+            StiffSolverKind::Radau
+        ));
+        assert!(matches!(
+            choices[1].stiff_solver_kind(),
+            StiffSolverKind::Lsode2
+        ));
+        assert!(matches!(
+            choices[2].stiff_solver_kind(),
+            StiffSolverKind::Bdf
+        ));
+        assert!(matches!(
+            choices[3].stiff_solver_kind(),
+            StiffSolverKind::BackwardEuler
+        ));
     }
 }
 

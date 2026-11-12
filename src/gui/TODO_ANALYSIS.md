@@ -140,7 +140,7 @@ typed round-trip assertions.
   physical validation. The family panel now reports compact-HMX acceptance for
   Damped/Sci and clearly identifies the open Frozen/Naive boundary contract;
   the compact-window story verifies all three labels. The physical solver gap
-  remains open in `src/ReactorsBVP/TODO_ANALYSIS.md`.
+  remains open in `src/SimpleReactorsBVP/TODO_ANALYSIS.md`.
 - [ ] Reduce raw-document editing for common BVP workflows while retaining the
   compatibility editor for advanced fields. Promote only frequent fields whose
   parser and typed facade contracts are already stable.
@@ -207,6 +207,11 @@ typed round-trip assertions.
   policy actually compiles. A story verifies the GUI document against the RST
   0.4.30 production parser. Damped target-chunk overrides are covered by the
   separate RST 0.4.31 round-trip story above.
+- [x] Expose RST 0.4.32 fixed-mesh `CorrectionNewton` in the structured BVP
+  Solver tab. Its frontend, Lambdify/AOT execution, matrix layout, tolerances,
+  iteration/Jacobian/damping limits, telemetry, logging, and supported AOT
+  toolchain settings round-trip through the hybrid parser. Grid-refinement
+  controls are intentionally unavailable on this route.
 
 ## Reactor IVP GUI: expanded solver controls and accessibility
 

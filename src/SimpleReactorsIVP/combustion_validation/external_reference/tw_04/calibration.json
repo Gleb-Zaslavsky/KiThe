@@ -1,0 +1,463 @@
+{
+  "python": "3.14.6",
+  "numpy": "2.4.6",
+  "scipy": "1.17.1",
+  "gamma_probes": [
+    {
+      "gamma": 0.0,
+      "max_temperature_change_k": 0.0,
+      "max_mass_fraction_change": 0.0,
+      "nonlinear_temperature_departure_k": 0.0,
+      "temperature_min_k": 400.0,
+      "temperature_max_k": 450.02500833541706,
+      "minimum_mass_fraction": 0.000649575455906764,
+      "mass_balance_error": 8.881784197001252e-16,
+      "max_energy_invariant": 9.760636743294526e-12,
+      "normalized_energy_invariant": 9.757026287892397e-16,
+      "nfev": 15002
+    },
+    {
+      "gamma": 1.0,
+      "max_temperature_change_k": 1.871888167670477e-05,
+      "max_mass_fraction_change": 8.779527499447326e-08,
+      "nonlinear_temperature_departure_k": 0.0,
+      "temperature_min_k": 400.0,
+      "temperature_max_k": 450.02500258720363,
+      "minimum_mass_fraction": 0.0006495756708982394,
+      "mass_balance_error": 1.2212453270876722e-15,
+      "max_energy_invariant": 6.728395618438299e-12,
+      "normalized_energy_invariant": 6.72244023001443e-16,
+      "nfev": 15002
+    },
+    {
+      "gamma": 10.0,
+      "max_temperature_change_k": 0.00018719031606906356,
+      "max_mass_fraction_change": 8.779600841335444e-07,
+      "nonlinear_temperature_departure_k": 2.490992301318329e-09,
+      "temperature_min_k": 400.0,
+      "temperature_max_k": 450.02495085079204,
+      "minimum_mass_fraction": 0.0006495776059101388,
+      "mass_balance_error": 6.661338147750939e-16,
+      "max_energy_invariant": 1.2472689547848859e-11,
+      "normalized_energy_invariant": 1.2458210367467138e-15,
+      "nfev": 15002
+    },
+    {
+      "gamma": 100.0,
+      "max_temperature_change_k": 0.0018720531337521606,
+      "max_mass_fraction_change": 8.78033449469573e-06,
+      "nonlinear_temperature_departure_k": 2.739828914855025e-07,
+      "temperature_min_k": 400.0,
+      "temperature_max_k": 450.02443324009243,
+      "minimum_mass_fraction": 0.0006495969647990932,
+      "mass_balance_error": 6.661338147750939e-16,
+      "max_energy_invariant": 1.708189145688266e-11,
+      "normalized_energy_invariant": 1.705555259561193e-15,
+      "nfev": 15002
+    },
+    {
+      "gamma": 1000.0,
+      "max_temperature_change_k": 0.01873554748681272,
+      "max_mass_fraction_change": 8.787675201238354e-05,
+      "nonlinear_temperature_departure_k": 2.7676786430674838e-05,
+      "temperature_min_k": 400.0,
+      "temperature_max_k": 450.0192324452054,
+      "minimum_mass_fraction": 0.0006497914319905162,
+      "mass_balance_error": 4.440892098500626e-16,
+      "max_energy_invariant": 1.9549695196019456e-11,
+      "normalized_energy_invariant": 1.93944110951337e-15,
+      "nfev": 15002
+    },
+    {
+      "gamma": 10000.0,
+      "max_temperature_change_k": 0.1888757576762714,
+      "max_mass_fraction_change": 0.0008861733315922993,
+      "nonlinear_temperature_departure_k": 0.0028008112844872812,
+      "temperature_min_k": 400.0,
+      "temperature_max_k": 449.9647253898801,
+      "minimum_mass_fraction": 0.0006518252733931886,
+      "mass_balance_error": 6.661338147750939e-16,
+      "max_energy_invariant": 8.542944129885655e-12,
+      "normalized_energy_invariant": 8.06063864157551e-16,
+      "nfev": 15002
+    },
+    {
+      "gamma": 100000.0,
+      "max_temperature_change_k": 2.062674634478583,
+      "max_mass_fraction_change": 0.009679167372164121,
+      "nonlinear_temperature_departure_k": 0.3149409418410869,
+      "temperature_min_k": 400.0,
+      "temperature_max_k": 449.135246051051,
+      "minimum_mass_fraction": 0.0006826935472005431,
+      "mass_balance_error": 8.881784197001252e-16,
+      "max_energy_invariant": 1.0839329434020328e-11,
+      "normalized_energy_invariant": 6.468938805831615e-16,
+      "nfev": 15002
+    },
+    {
+      "gamma": 200000.0,
+      "max_temperature_change_k": 4.63952864614464,
+      "max_mass_fraction_change": 0.02159238873330005,
+      "nonlinear_temperature_departure_k": 1.4627894814463502,
+      "temperature_min_k": 400.0,
+      "temperature_max_k": 447.4125761689208,
+      "minimum_mass_fraction": 0.000749776192201797,
+      "mass_balance_error": 8.881784197001252e-16,
+      "max_energy_invariant": 1.979216790459759e-11,
+      "normalized_energy_invariant": 8.164432679489256e-16,
+      "nfev": 15002
+    },
+    {
+      "gamma": 300000.0,
+      "max_temperature_change_k": 8.061790186291034,
+      "max_mass_fraction_change": 0.0367401842690675,
+      "nonlinear_temperature_departure_k": 3.9337534464742703,
+      "temperature_min_k": 400.0,
+      "temperature_max_k": 444.3667908613679,
+      "minimum_mass_fraction": 0.0008829448370277485,
+      "mass_balance_error": 4.440892098500626e-16,
+      "max_energy_invariant": 2.1971757746541698e-11,
+      "normalized_energy_invariant": 7.020707657619751e-16,
+      "nfev": 15002
+    },
+    {
+      "gamma": 500000.0,
+      "max_temperature_change_k": 21.896118310114957,
+      "max_mass_fraction_change": 0.09195936155442141,
+      "nonlinear_temperature_departure_k": 18.482305751206695,
+      "temperature_min_k": 400.0,
+      "temperature_max_k": 428.6685958715856,
+      "minimum_mass_fraction": 0.0020008581922413816,
+      "mass_balance_error": 9.992007221626409e-16,
+      "max_energy_invariant": 3.8960390469355843e-11,
+      "normalized_energy_invariant": 1.026754137389974e-15,
+      "nfev": 15002
+    }
+  ],
+  "selected_scenario_convergence": [
+    {
+      "scenario": "tw_04a",
+      "gamma": 0.0,
+      "precision": {
+        "DOP853": {
+          "levels": {
+            "1e-09": {
+              "nfev": 1283,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 450.0250083354171,
+              "minimum_mass_fraction": 0.0006495754558944468,
+              "mass_balance_error": 8.881784197001252e-16,
+              "max_energy_invariant": 3.1366020891709923e-12,
+              "normalized_energy_invariant": 3.133782250212759e-16
+            },
+            "1e-10": {
+              "nfev": 1364,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 450.0250083354171,
+              "minimum_mass_fraction": 0.0006495754558961091,
+              "mass_balance_error": 4.440892098500626e-16,
+              "max_energy_invariant": 2.497557716196752e-12,
+              "normalized_energy_invariant": 2.495520731455352e-16
+            },
+            "1e-11": {
+              "nfev": 1409,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 450.0250083354171,
+              "minimum_mass_fraction": 0.0006495754558982261,
+              "mass_balance_error": 3.3306690738754696e-16,
+              "max_energy_invariant": 1.6928680679484387e-12,
+              "normalized_energy_invariant": 1.691527127015436e-16
+            }
+          },
+          "rtol_1e-10_to_1e-11": {
+            "max_mass_fraction": 2.127968912191136e-10,
+            "max_temperature_k": 1.1368683772161603e-13,
+            "max_qhat": 3.637978807091713e-12
+          }
+        },
+        "Radau": {
+          "levels": {
+            "1e-09": {
+              "nfev": 2548,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 450.0250083354175,
+              "minimum_mass_fraction": 0.0006495754565824306,
+              "mass_balance_error": 5.551115123125783e-16,
+              "max_energy_invariant": 1.447197917059384e-11,
+              "normalized_energy_invariant": 1.4457371237752939e-15
+            },
+            "1e-10": {
+              "nfev": 3531,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 450.02500833541717,
+              "minimum_mass_fraction": 0.00064957545609346,
+              "mass_balance_error": 5.551115123125783e-16,
+              "max_energy_invariant": 4.413802656699772e-12,
+              "normalized_energy_invariant": 4.4129244631053666e-16
+            },
+            "1e-11": {
+              "nfev": 3998,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 450.02500833541706,
+              "minimum_mass_fraction": 0.0006495754559747037,
+              "mass_balance_error": 6.661338147750939e-16,
+              "max_energy_invariant": 1.397371107714207e-11,
+              "normalized_energy_invariant": 1.3960297041828071e-15
+            }
+          },
+          "rtol_1e-10_to_1e-11": {
+            "max_mass_fraction": 8.791467553947996e-12,
+            "max_temperature_k": 2.8421709430404007e-13,
+            "max_qhat": 1.4551915228366852e-11
+          }
+        }
+      },
+      "dop853_vs_radau_max_y": 1.4876226726162622e-10,
+      "dop853_vs_radau_max_temperature_k": 1.1368683772161603e-13,
+      "dop853_vs_radau_max_qhat": 1.4551915228366852e-11
+    },
+    {
+      "scenario": "tw_04b",
+      "gamma": 1000.0,
+      "precision": {
+        "DOP853": {
+          "levels": {
+            "1e-09": {
+              "nfev": 1283,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 450.0192324452057,
+              "minimum_mass_fraction": 0.000649791431978251,
+              "mass_balance_error": 6.661338147750939e-16,
+              "max_energy_invariant": 4.495070982102334e-12,
+              "normalized_energy_invariant": 4.452373431401542e-16
+            },
+            "1e-10": {
+              "nfev": 1364,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 450.01923244520555,
+              "minimum_mass_fraction": 0.0006497914319795182,
+              "mass_balance_error": 9.992007221626409e-16,
+              "max_energy_invariant": 3.0384583737941284e-12,
+              "normalized_energy_invariant": 3.0157628623351324e-16
+            },
+            "1e-11": {
+              "nfev": 1409,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 450.0192324452057,
+              "minimum_mass_fraction": 0.0006497914319817016,
+              "mass_balance_error": 5.551115123125783e-16,
+              "max_energy_invariant": 2.41007214185629e-12,
+              "normalized_energy_invariant": 2.3912451892384764e-16
+            }
+          },
+          "rtol_1e-10_to_1e-11": {
+            "max_mass_fraction": 2.1240482983575504e-10,
+            "max_temperature_k": 3.637978807091713e-12,
+            "max_qhat": 1.2373675417620689e-08
+          }
+        },
+        "Radau": {
+          "levels": {
+            "1e-09": {
+              "nfev": 2548,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 450.0192324452056,
+              "minimum_mass_fraction": 0.0006497914326018849,
+              "mass_balance_error": 4.440892098500626e-16,
+              "max_energy_invariant": 4.102052031385028e-12,
+              "normalized_energy_invariant": 4.087777044408322e-16
+            },
+            "1e-10": {
+              "nfev": 3531,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 450.0192324452057,
+              "minimum_mass_fraction": 0.0006497914321600824,
+              "mass_balance_error": 1.1102230246251565e-15,
+              "max_energy_invariant": 5.6488147492927965e-12,
+              "normalized_energy_invariant": 5.613936563201281e-16
+            },
+            "1e-11": {
+              "nfev": 3998,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 450.0192324452058,
+              "minimum_mass_fraction": 0.0006497914320570491,
+              "mass_balance_error": 4.440892098500626e-16,
+              "max_energy_invariant": 3.97148980368911e-12,
+              "normalized_energy_invariant": 3.942738925483361e-16
+            }
+          },
+          "rtol_1e-10_to_1e-11": {
+            "max_mass_fraction": 9.197809180960803e-12,
+            "max_temperature_k": 9.038103598868474e-12,
+            "max_qhat": 1.1859810911118984e-09
+          }
+        }
+      },
+      "dop853_vs_radau_max_y": 1.4915948250843192e-10,
+      "dop853_vs_radau_max_temperature_k": 4.888534022029489e-12,
+      "dop853_vs_radau_max_qhat": 5.538822733797133e-09
+    },
+    {
+      "scenario": "tw_04c",
+      "gamma": 100000.0,
+      "precision": {
+        "DOP853": {
+          "levels": {
+            "1e-09": {
+              "nfev": 1238,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 449.1352460510516,
+              "minimum_mass_fraction": 0.0006826935471869717,
+              "mass_balance_error": 4.440892098500626e-16,
+              "max_energy_invariant": 8.959499808725013e-12,
+              "normalized_energy_invariant": 5.4946658736642845e-16
+            },
+            "1e-10": {
+              "nfev": 1319,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 449.13524605105124,
+              "minimum_mass_fraction": 0.0006826935471893275,
+              "mass_balance_error": 4.440892098500626e-16,
+              "max_energy_invariant": 1.4551915228366852e-11,
+              "normalized_energy_invariant": 7.811594959416354e-16
+            },
+            "1e-11": {
+              "nfev": 1409,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 449.13524605105124,
+              "minimum_mass_fraction": 0.000682693547198285,
+              "mass_balance_error": 6.661338147750939e-16,
+              "max_energy_invariant": 1.8042456417788344e-11,
+              "normalized_energy_invariant": 9.790958022630045e-16
+            }
+          },
+          "rtol_1e-10_to_1e-11": {
+            "max_mass_fraction": 3.559190928092981e-10,
+            "max_temperature_k": 4.832259037357289e-10,
+            "max_qhat": 1.589963176229503e-06
+          }
+        },
+        "Radau": {
+          "levels": {
+            "1e-09": {
+              "nfev": 2569,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 449.13524605105147,
+              "minimum_mass_fraction": 0.0006826935473230773,
+              "mass_balance_error": 4.440892098500626e-16,
+              "max_energy_invariant": 6.468159341466162e-12,
+              "normalized_energy_invariant": 4.1135022289502173e-16
+            },
+            "1e-10": {
+              "nfev": 3605,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 449.1352460510516,
+              "minimum_mass_fraction": 0.0006826935472422699,
+              "mass_balance_error": 5.551115123125783e-16,
+              "max_energy_invariant": 1.2998491172311333e-11,
+              "normalized_energy_invariant": 7.107799785254635e-16
+            },
+            "1e-11": {
+              "nfev": 4394,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 449.13524605105096,
+              "minimum_mass_fraction": 0.0006826935472485732,
+              "mass_balance_error": 7.771561172376096e-16,
+              "max_energy_invariant": 1.4106493750887239e-11,
+              "normalized_energy_invariant": 8.426171366597572e-16
+            }
+          },
+          "rtol_1e-10_to_1e-11": {
+            "max_mass_fraction": 7.426281811717672e-12,
+            "max_temperature_k": 4.987441570847295e-10,
+            "max_qhat": 8.625647751614451e-08
+          }
+        }
+      },
+      "dop853_vs_radau_max_y": 2.2949270955807677e-10,
+      "dop853_vs_radau_max_temperature_k": 2.7472424335428514e-10,
+      "dop853_vs_radau_max_qhat": 9.04448825167492e-07
+    },
+    {
+      "scenario": "tw_04d",
+      "gamma": 500000.0,
+      "precision": {
+        "DOP853": {
+          "levels": {
+            "1e-09": {
+              "nfev": 794,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 428.6685958716463,
+              "minimum_mass_fraction": 0.002000858192231917,
+              "mass_balance_error": 4.440892098500626e-16,
+              "max_energy_invariant": 4.388223118212409e-11,
+              "normalized_energy_invariant": 1.140102627875591e-15
+            },
+            "1e-10": {
+              "nfev": 869,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 428.6685958716056,
+              "minimum_mass_fraction": 0.002000858192238127,
+              "mass_balance_error": 4.440892098500626e-16,
+              "max_energy_invariant": 7.893019571270088e-11,
+              "normalized_energy_invariant": 2.090219445516389e-15
+            },
+            "1e-11": {
+              "nfev": 1019,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 428.66859587159297,
+              "minimum_mass_fraction": 0.0020008581922404873,
+              "mass_balance_error": 4.440892098500626e-16,
+              "max_energy_invariant": 2.935784948476794e-11,
+              "normalized_energy_invariant": 8.981641103530283e-16
+            }
+          },
+          "rtol_1e-10_to_1e-11": {
+            "max_mass_fraction": 1.6882765341980077e-09,
+            "max_temperature_k": 2.963759015983669e-09,
+            "max_qhat": 9.136838571066619e-06
+          }
+        },
+        "Radau": {
+          "levels": {
+            "1e-09": {
+              "nfev": 3013,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 428.6685958715779,
+              "minimum_mass_fraction": 0.002000858192064796,
+              "mass_balance_error": 7.771561172376096e-16,
+              "max_energy_invariant": 4.1375791681730334e-11,
+              "normalized_energy_invariant": 9.750201681652225e-16
+            },
+            "1e-10": {
+              "nfev": 4614,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 428.66859587158444,
+              "minimum_mass_fraction": 0.002000858192202512,
+              "mass_balance_error": 4.440892098500626e-16,
+              "max_energy_invariant": 2.5500490608010296e-11,
+              "normalized_energy_invariant": 6.694802261776679e-16
+            },
+            "1e-11": {
+              "nfev": 6475,
+              "temperature_min_k": 400.0,
+              "temperature_max_k": 428.66859587158524,
+              "minimum_mass_fraction": 0.002000858192234666,
+              "mass_balance_error": 8.881784197001252e-16,
+              "max_energy_invariant": 5.160982752272503e-11,
+              "normalized_energy_invariant": 1.3620323349849453e-15
+            }
+          },
+          "rtol_1e-10_to_1e-11": {
+            "max_mass_fraction": 5.178010797912691e-12,
+            "max_temperature_k": 8.169536158675328e-10,
+            "max_qhat": 2.1665073290932924e-07
+          }
+        }
+      },
+      "dop853_vs_radau_max_y": 1.0335218271484425e-09,
+      "dop853_vs_radau_max_temperature_k": 1.201499344460899e-09,
+      "dop853_vs_radau_max_qhat": 3.877373728755629e-06
+    }
+  ]
+}

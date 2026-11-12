@@ -103,7 +103,7 @@ use RustedSciThe::symbolic::symbolic_engine::Expr;
 use prettytable::{Cell, Row, Table, row};
 use serde_json::json;
 use serde_json::{Value, from_reader, to_writer_pretty};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 
 use std::io::Write;
@@ -751,6 +751,47 @@ impl KinData {
     /// Return the substance names produced by stoichiometric analysis.
     pub fn substances(&self) -> &[String] {
         &self.substances
+    }
+
+    /// Replace the reaction-derived species list with an explicit species universe.
+    ///
+    /// This supports inert/diluent species that participate in transport or balances but do not
+    /// appear in any reaction. Composition-derived caches are invalidated and can be rebuilt by
+    /// the normal analysis lifecycle.
+    pub fn set_species_universe(&mut self, substances: Vec<String>) -> KineticsResult<()> {
+        self.ensure_state_allowed(
+            "set_species_universe",
+            &[
+                KinDataState::ReactionDataParsed,
+                KinDataState::Analyzed,
+                KinDataState::Sorted,
+            ],
+        )?;
+        if substances.is_empty() {
+            return Err(KineticsError::InvalidReactionData(
+                "explicit species universe must not be empty".to_string(),
+            ));
+        }
+        let mut seen = HashSet::with_capacity(substances.len());
+        for name in &substances {
+            if name.trim().is_empty() {
+                return Err(KineticsError::InvalidReactionData(
+                    "explicit species universe contains an empty name".to_string(),
+                ));
+            }
+            if !seen.insert(name.as_str()) {
+                return Err(KineticsError::InvalidReactionData(format!(
+                    "explicit species universe contains duplicate `{name}`"
+                )));
+            }
+        }
+
+        let mut next = self.clone();
+        next.substances = substances.clone();
+        next.stecheodata.set_substances(substances);
+        next.finalize_reaction_mutation(false, Some(KinDataState::ReactionDataParsed))?;
+        *self = next;
+        Ok(())
     }
 
     /// Return optional custom group definitions used by formula parsing.

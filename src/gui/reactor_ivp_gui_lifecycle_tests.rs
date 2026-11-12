@@ -16,7 +16,7 @@ mod tests {
     use super::super::reactor_ivp_gui::{
         IvpGuiConfig, ReactorIvpApp, ReactorIvpCalculationState, ReactorIvpGuiExecutionMode,
     };
-    use crate::ReactorsIVP::solver_backend::{
+    use crate::SimpleReactorsIVP::solver_backend::{
         ReactorIvpExecutionBackend, ReactorIvpMatrixBackend, ReactorIvpMethod,
         ReactorIvpSymbolicBackend,
     };
@@ -256,7 +256,7 @@ mod tests {
         );
         assert_eq!(
             task.solver_backend_config.stop_condition,
-            Some(crate::ReactorsIVP::solver_backend::ReactorIvpStopCondition::new(0, 1.0e-4))
+            Some(crate::SimpleReactorsIVP::solver_backend::ReactorIvpStopCondition::new(0, 1.0e-4))
         );
     }
 

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kithe-tw04-reference"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy==2.4.6",
+    "scipy==1.17.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.0.2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tw_04"]

@@ -1,0 +1,303 @@
+{
+  "model": "independent temperature-dependent linear reaction-diffusion BVP",
+  "coordinate": "z=x/L in [0,1]",
+  "temperature_formula": "T=T0 + q_phys_R*L/lambda*(exp(Pe_q*(z-1))-exp(-Pe_q))/Pe_q",
+  "temperature_parameters": {
+    "T0_K": 298.15,
+    "T_scale_K": 100.0,
+    "T_ref_K": 330.0,
+    "q_phys_right_W_m2": 1000.0,
+    "Pe_q": 1.0
+  },
+  "scenarios": [
+    {
+      "scenario": "bvp04b_4_5",
+      "species": [
+        "X0",
+        "X1",
+        "X2",
+        "X3"
+      ],
+      "molar_masses_kg_per_mol": [
+        0.060052,
+        0.060052,
+        0.060052,
+        0.060052
+      ],
+      "formula_atom_counts": [
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        }
+      ],
+      "inlet_mass_fractions": [
+        0.5,
+        0.25,
+        0.15,
+        0.1
+      ],
+      "initial_internal_species_fluxes": [
+        -1.3814676681829636e-05,
+        -5.814158357510973e-06,
+        5.5584348225692454e-06,
+        1.4070400216771369e-05
+      ],
+      "condition_2_phi_jj": 1.8534276629418898,
+      "mixed_boundary_linear_residual_l2": 0.0,
+      "mass_invariant_relative_drift": 4.376720777307562e-15,
+      "max_element_invariant_relative_drift": 1.6858005866704524e-15,
+      "convergence_max_state_delta_last_two": 9.992007221626409e-16,
+      "study_rtol_max_step": [
+        [
+          1e-09,
+          0.02
+        ],
+        [
+          1e-11,
+          0.02
+        ],
+        [
+          1e-11,
+          0.01
+        ],
+        [
+          1e-11,
+          0.005
+        ]
+      ],
+      "scipy_version": "1.18.1",
+      "method": "DOP853",
+      "profile_points": 2001
+    },
+    {
+      "scenario": "bvp04c_12_20",
+      "species": [
+        "X0",
+        "X1",
+        "X2",
+        "X3",
+        "X4",
+        "X5",
+        "X6",
+        "X7",
+        "X8",
+        "X9",
+        "X10",
+        "X11"
+      ],
+      "molar_masses_kg_per_mol": [
+        0.060052,
+        0.060052,
+        0.060052,
+        0.060052,
+        0.060052,
+        0.060052,
+        0.060052,
+        0.060052,
+        0.060052,
+        0.060052,
+        0.060052,
+        0.060052
+      ],
+      "formula_atom_counts": [
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        },
+        {
+          "C": 2,
+          "H": 4,
+          "O": 2
+        }
+      ],
+      "inlet_mass_fractions": [
+        0.12,
+        0.08,
+        0.07,
+        0.09,
+        0.1,
+        0.06,
+        0.11,
+        0.05,
+        0.07,
+        0.08,
+        0.09,
+        0.08
+      ],
+      "initial_internal_species_fluxes": [
+        -1.5280647529044583e-06,
+        -2.6020345857110306e-06,
+        -2.0974720342534143e-06,
+        -5.7541734631499256e-06,
+        -5.645122520780008e-07,
+        -1.188594223140676e-06,
+        8.285108481235397e-07,
+        -1.7713663208171699e-06,
+        4.4617661123876125e-06,
+        2.254696256311149e-06,
+        5.8622662405511975e-06,
+        2.0989781746811563e-06
+      ],
+      "condition_2_phi_jj": 4.15231438631455,
+      "mixed_boundary_linear_residual_l2": 1.3122177993619563e-20,
+      "mass_invariant_relative_drift": 2.4120946809377845e-15,
+      "max_element_invariant_relative_drift": 7.813021063451937e-16,
+      "convergence_max_state_delta_last_two": 3.608224830031759e-16,
+      "study_rtol_max_step": [
+        [
+          1e-09,
+          0.02
+        ],
+        [
+          1e-11,
+          0.02
+        ],
+        [
+          1e-11,
+          0.01
+        ],
+        [
+          1e-11,
+          0.005
+        ]
+      ],
+      "scipy_version": "1.18.1",
+      "method": "DOP853",
+      "profile_points": 2001
+    },
+    {
+      "scenario": "bvp04d_ozone_4_2",
+      "species": [
+        "O3",
+        "O2",
+        "O",
+        "N2"
+      ],
+      "molar_masses_kg_per_mol": [
+        0.047997,
+        0.031998,
+        0.015999,
+        0.028014
+      ],
+      "formula_atom_counts": [
+        {
+          "O": 3
+        },
+        {
+          "O": 2
+        },
+        {
+          "O": 1
+        },
+        {
+          "N": 2
+        }
+      ],
+      "inlet_mass_fractions": [
+        0.35,
+        0.25,
+        0.1,
+        0.3
+      ],
+      "initial_internal_species_fluxes": [
+        -5.829468757797755e-06,
+        -4.644690172972274e-06,
+        1.0474158930770034e-05,
+        0.0
+      ],
+      "condition_2_phi_jj": 1.577371612710464,
+      "mixed_boundary_linear_residual_l2": 0.0,
+      "mass_invariant_relative_drift": 3.048286003547902e-15,
+      "max_element_invariant_relative_drift": 1.1735517512754668e-15,
+      "convergence_max_state_delta_last_two": 6.106226635438361e-16,
+      "study_rtol_max_step": [
+        [
+          1e-09,
+          0.02
+        ],
+        [
+          1e-11,
+          0.02
+        ],
+        [
+          1e-11,
+          0.01
+        ],
+        [
+          1e-11,
+          0.005
+        ]
+      ],
+      "scipy_version": "1.18.1",
+      "method": "DOP853",
+      "profile_points": 2001
+    }
+  ]
+}

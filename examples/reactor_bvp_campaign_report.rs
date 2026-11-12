@@ -35,13 +35,10 @@ struct Step {
     exit_code: Option<i32>,
     #[tabled(rename = "Technical log")]
     technical_log: String,
-    #[serde(skip)]
     #[tabled(skip)]
     description: String,
-    #[serde(skip)]
     #[tabled(skip)]
     reason: String,
-    #[serde(skip)]
     #[tabled(skip)]
     command: String,
 }

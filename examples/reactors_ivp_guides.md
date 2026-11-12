@@ -1,6 +1,6 @@
 # Reactor IVP Example Guides
 
-These guides cover the condensed-phase reactor IVP workflow in `src/ReactorsIVP/`.
+These guides cover the condensed-phase reactor IVP workflow in `src/SimpleReactorsIVP/`.
 They intentionally avoid the BVP model and the solid-state kinetics code.
 
 Run the preview example with:
@@ -15,8 +15,8 @@ Use this when you already have the mechanism in memory and want to assemble a
 runnable task directly.
 
 ```rust
-use KiThe::ReactorsIVP::SimpleReactorIVP::SimpleReactorTask;
-use KiThe::ReactorsIVP::solver_backend::{ReactorIvpMatrixBackend, ReactorIvpMethod, ReactorIvpSolverConfig};
+use KiThe::SimpleReactorsIVP::SimpleReactorIVP::SimpleReactorTask;
+use KiThe::SimpleReactorsIVP::solver_backend::{ReactorIvpMatrixBackend, ReactorIvpMethod, ReactorIvpSolverConfig};
 use RustedSciThe::numerical::LSODE2::{Lsode2AotProfile, Lsode2AotToolchain, Lsode2NativeExecutionConfig};
 use std::collections::HashMap;
 
@@ -46,8 +46,8 @@ Use this when the task is stored as a document and you want to validate the
 physics layer before solving.
 
 ```rust
-use KiThe::ReactorsIVP::SimpleReactorIVP::SimpleReactorTask;
-use KiThe::ReactorsIVP::task_parser_reactor_IVP::{
+use KiThe::SimpleReactorsIVP::SimpleReactorIVP::SimpleReactorTask;
+use KiThe::SimpleReactorsIVP::task_parser_reactor_IVP::{
     build_canonical_condensed_reactor_ivp_task_template,
     parse_reactor_ivp_document_from_str,
 };
@@ -92,7 +92,7 @@ Use the typed solver config when you need fixed BDF, fixed Adams, or AOT.
 The supported matrix routes are Sparse and validated Banded.
 
 ```rust
-use KiThe::ReactorsIVP::solver_backend::{
+use KiThe::SimpleReactorsIVP::solver_backend::{
     ReactorIvpExecutionBackend, ReactorIvpMatrixBackend, ReactorIvpMethod,
     ReactorIvpSolverConfig, ReactorIvpSymbolicBackend,
 };

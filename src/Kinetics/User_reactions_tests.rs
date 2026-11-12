@@ -2412,6 +2412,51 @@ mod tests {
     }
 
     #[test]
+    fn explicit_species_universe_keeps_inert_species_and_is_transactional() {
+        let mut kd = KinData::new();
+        kd.set_reaction_data_directly(
+            vec![ReactionData::new_elementary(
+                "H2 + 0.5 O2 -> H2O".to_string(),
+                vec![1.0, 0.0, 0.0],
+                None,
+            )],
+            None,
+        )
+        .unwrap();
+
+        kd.kinetic_main().unwrap();
+        assert!(
+            !kd.stoichiometric_analyzer().stecheo_matrx.is_empty(),
+            "initial analysis should populate composition data"
+        );
+
+        kd.set_species_universe(vec!["H2".into(), "O2".into(), "H2O".into(), "N2".into()])
+            .unwrap();
+        assert_eq!(kd.substances(), ["H2", "O2", "H2O", "N2"]);
+        assert_eq!(
+            kd.state(),
+            crate::Kinetics::User_reactions::KinDataState::ReactionDataParsed
+        );
+        assert!(
+            kd.stoichiometric_analyzer().matrix_of_elements.is_none(),
+            "changing the species universe must invalidate composition data"
+        );
+        kd.kinetic_main().unwrap();
+        assert_eq!(kd.substances(), ["H2", "O2", "H2O", "N2"]);
+
+        let before = kd.clone();
+        assert!(
+            kd.set_species_universe(vec!["H2".into(), "H2".into()])
+                .is_err()
+        );
+        assert_eq!(kd.state(), before.state());
+        assert_eq!(kd.substances(), before.substances());
+        assert!(kd.set_species_universe(Vec::new()).is_err());
+        assert_eq!(kd.state(), before.state());
+        assert_eq!(kd.substances(), before.substances());
+    }
+
+    #[test]
     fn test_set_reactions_directly_resets_stale_state_before_installing_new_reactions() {
         let mut kd = KinData::new();
         kd.reaction_ids = Some(vec![

@@ -1,9 +1,9 @@
-use crate::ReactorsBVP::solver_backend::{
+use crate::SimpleReactorsBVP::solver_backend::{
     ReactorBvpAotBuildPolicy, ReactorBvpAotBuildProfile, ReactorBvpAotCompiler,
     ReactorBvpAotConfig, ReactorBvpAotExecutionPolicy, ReactorBvpExecutionBackend,
     ReactorBvpMatrixBackend, ReactorBvpSolverConfig, ReactorBvpSymbolicBackend,
 };
-use crate::ReactorsBVP::task_value_conversion::try_value_as_usize;
+use crate::SimpleReactorsBVP::task_value_conversion::try_value_as_usize;
 use RustedSciThe::command_interpreter::task_parser::{DocumentMap, Value};
 use log::info;
 use std::collections::HashMap;
@@ -77,6 +77,7 @@ pub(crate) enum BvpSolverFamily {
     Damped,
     Frozen,
     Sci,
+    CorrectionNewton,
 }
 
 impl BvpSolverFamily {
@@ -85,6 +86,9 @@ impl BvpSolverFamily {
             "damped" | "bvp_damp" => Some(Self::Damped),
             "frozen" => Some(Self::Frozen),
             "sci" | "bvp_sci" => Some(Self::Sci),
+            "correction_newton" | "bvp_correction_newton" | "correctionnewton" => {
+                Some(Self::CorrectionNewton)
+            }
             _ => None,
         }
     }
@@ -94,6 +98,111 @@ impl BvpSolverFamily {
             Self::Damped => "damped",
             Self::Frozen => "frozen",
             Self::Sci => "sci",
+            Self::CorrectionNewton => "correction_newton",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum BvpCorrectionNewtonAssembly {
+    #[default]
+    ExprLegacy,
+    AtomView,
+}
+
+impl BvpCorrectionNewtonAssembly {
+    fn parse(raw: &str) -> Option<Self> {
+        match normalize_key(raw).as_str() {
+            "expr" | "exprlegacy" | "expr_legacy" | "legacy" => Some(Self::ExprLegacy),
+            "atom" | "atomview" | "atom_view" | "atomviewnative" | "atom_view_native" => {
+                Some(Self::AtomView)
+            }
+            _ => None,
+        }
+    }
+
+    fn as_document_value(self) -> &'static str {
+        match self {
+            Self::ExprLegacy => "expr_legacy",
+            Self::AtomView => "atom_view_native",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum BvpCorrectionNewtonExecution {
+    #[default]
+    Lambdify,
+    Aot,
+}
+
+impl BvpCorrectionNewtonExecution {
+    fn parse(raw: &str) -> Option<Self> {
+        match normalize_key(raw).as_str() {
+            "lambdify" => Some(Self::Lambdify),
+            "aot" => Some(Self::Aot),
+            _ => None,
+        }
+    }
+
+    fn as_document_value(self) -> &'static str {
+        match self {
+            Self::Lambdify => "lambdify",
+            Self::Aot => "aot",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum BvpCorrectionNewtonLayout {
+    Dense,
+    #[default]
+    Sparse,
+    BandedAuto,
+}
+
+impl BvpCorrectionNewtonLayout {
+    fn parse(raw: &str) -> Option<Self> {
+        match normalize_key(raw).as_str() {
+            "dense" => Some(Self::Dense),
+            "sparse" => Some(Self::Sparse),
+            "banded" | "banded_auto" | "bandedauto" => Some(Self::BandedAuto),
+            _ => None,
+        }
+    }
+
+    fn as_document_value(self) -> &'static str {
+        match self {
+            Self::Dense => "dense",
+            Self::Sparse => "sparse",
+            Self::BandedAuto => "banded_auto",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BvpCorrectionNewtonConfig {
+    pub assembly: BvpCorrectionNewtonAssembly,
+    pub execution: BvpCorrectionNewtonExecution,
+    pub matrix_layout: BvpCorrectionNewtonLayout,
+    pub absolute_tolerance: f64,
+    pub default_relative_tolerance: f64,
+    pub max_iterations: usize,
+    pub max_jacobian_age: usize,
+    pub max_damping_trials: usize,
+}
+
+impl Default for BvpCorrectionNewtonConfig {
+    fn default() -> Self {
+        Self {
+            assembly: BvpCorrectionNewtonAssembly::ExprLegacy,
+            execution: BvpCorrectionNewtonExecution::Lambdify,
+            matrix_layout: BvpCorrectionNewtonLayout::Sparse,
+            absolute_tolerance: 1e-5,
+            default_relative_tolerance: 1e-5,
+            max_iterations: 100,
+            max_jacobian_age: 5,
+            max_damping_trials: 7,
         }
     }
 }
@@ -386,6 +495,7 @@ impl Default for BvpPostprocessingConfig {
 pub(crate) struct BvpGuiConfig {
     pub core: BvpCoreSolverConfig,
     pub backend: ReactorBvpSolverConfig,
+    pub correction_newton: BvpCorrectionNewtonConfig,
     pub advanced_solver: BvpAdvancedSolverConfig,
     pub initial_guess: BvpInitialGuessConfig,
     pub adaptive_grid: BvpAdaptiveGridConfig,
@@ -397,6 +507,7 @@ impl Default for BvpGuiConfig {
         Self {
             core: BvpCoreSolverConfig::default(),
             backend: ReactorBvpSolverConfig::default_lambdify(),
+            correction_newton: BvpCorrectionNewtonConfig::default(),
             advanced_solver: BvpAdvancedSolverConfig::default(),
             initial_guess: BvpInitialGuessConfig::default(),
             adaptive_grid: BvpAdaptiveGridConfig::default(),
@@ -418,6 +529,7 @@ impl BvpGuiConfig {
         if let Some(section) = solver_section {
             config.core = parse_core_solver_config(section, &mut report);
             config.backend = parse_backend_config(section, &mut report);
+            config.correction_newton = parse_correction_newton_config(section, &mut report);
         }
         config.advanced_solver = parse_advanced_solver_config(
             document.get("rel_tolerance"),
@@ -439,8 +551,14 @@ impl BvpGuiConfig {
         {
             let solver_section = ensure_section_mut(document, "solver_settings");
             self.core.apply_to_section(solver_section);
-            if self.core.family != BvpSolverFamily::Sci {
+            if matches!(
+                self.core.family,
+                BvpSolverFamily::Damped | BvpSolverFamily::Frozen
+            ) {
                 self.backend.apply_to_section(solver_section);
+            }
+            if self.core.family == BvpSolverFamily::CorrectionNewton {
+                self.correction_newton.apply_to_section(solver_section);
             }
             for field_name in BVP_POSTPROCESSING_FIELD_NAMES {
                 solver_section.remove(*field_name);
@@ -461,6 +579,15 @@ impl BvpGuiConfig {
                 document.remove("strategy_params");
                 document.remove("adaptive_strategy");
                 document.remove("grid_refinement");
+            }
+            BvpSolverFamily::CorrectionNewton => {
+                document.remove("strategy_params");
+                document.remove("adaptive_strategy");
+                document.remove("grid_refinement");
+                let relative = ensure_section_mut(document, "rel_tolerance");
+                self.advanced_solver
+                    .rel_tolerance
+                    .apply_to_section(relative);
             }
         }
         self.initial_guess.apply_to_document(document);
@@ -542,6 +669,12 @@ fn normalize_bvp_solver_family_document(
         "aot_residual_target_chunks",
         "aot_jacobian_target_chunks",
     ];
+    let correction_newton_numeric = [
+        "absolute_tolerance",
+        "default_relative_tolerance",
+        "max_jacobian_age",
+        "max_damping_trials",
+    ];
 
     match family {
         BvpSolverFamily::Damped => {
@@ -551,6 +684,12 @@ fn normalize_bvp_solver_family_document(
                     section.remove(field);
                 }
                 section.remove("tolerance");
+                for field in ["assembly", "execution", "matrix_layout"]
+                    .into_iter()
+                    .chain(correction_newton_numeric)
+                {
+                    section.remove(field);
+                }
             }
             if reset_family_defaults {
                 document.remove("adaptive_strategy");
@@ -579,6 +718,12 @@ fn normalize_bvp_solver_family_document(
                 for field in ["abs_tolerance", "banded_linear_solver", "refinement_steps"] {
                     section.remove(field);
                 }
+                for field in ["assembly", "execution", "matrix_layout"]
+                    .into_iter()
+                    .chain(correction_newton_numeric)
+                {
+                    section.remove(field);
+                }
                 if reset_family_defaults {
                     set_string_field(section, "strategy", "Frozen");
                     set_float_field(section, "tolerance", 1e-6);
@@ -602,6 +747,9 @@ fn normalize_bvp_solver_family_document(
                 for field in damped_backend {
                     section.remove(field);
                 }
+                for field in correction_newton_numeric {
+                    section.remove(field);
+                }
                 for field in ["scheme", "strategy", "linear_sys_method", "max_iterations"] {
                     section.remove(field);
                 }
@@ -612,6 +760,72 @@ fn normalize_bvp_solver_family_document(
                     set_float_field(section, "tolerance", 1e-4);
                     set_usize_field(section, "max_nodes", 256);
                 }
+            }
+        }
+        BvpSolverFamily::CorrectionNewton => {
+            document.remove("adaptive_strategy");
+            document.remove("grid_refinement");
+            document.remove("strategy_params");
+            {
+                let section = ensure_section_mut(document, "solver_settings");
+                for field in [
+                    "scheme",
+                    "strategy",
+                    "linear_sys_method",
+                    "abs_tolerance",
+                    "tolerance",
+                    "banded_linear_solver",
+                    "refinement_steps",
+                    "generated_backend",
+                    "backend_policy",
+                    "matrix_backend",
+                    "method",
+                    "symbolic_backend",
+                    "lambdify_execution_policy",
+                    "lambdify_min_work",
+                    "bvp_logging_mode",
+                    "bvp_logging_max_events",
+                    "expr_indexed_lambdify",
+                    "expr_dependency_columns",
+                    "banded_lower",
+                    "banded_upper",
+                    "boundary_tolerance",
+                    "max_nodes",
+                    "max_newton_iterations",
+                    "max_jacobian_refreshes",
+                    "max_mesh_refinements",
+                    "max_backtracking_steps",
+                    "execution_policy",
+                    "execution_min_work",
+                    "output_policy",
+                    "sparse_factorization",
+                ] {
+                    section.remove(field);
+                }
+                if reset_family_defaults {
+                    for field in [
+                        "aot_codegen_backend",
+                        "aot_c_compiler",
+                        "aot_build_policy",
+                        "aot_build_profile",
+                        "aot_output_dir",
+                        "aot_handoff_path",
+                        "aot_crate_name",
+                        "aot_module_name",
+                        "aot_residual_chunking",
+                        "aot_residual_chunk_size",
+                        "aot_sparse_jacobian_chunking",
+                        "aot_sparse_jacobian_chunk_size",
+                        "aot_banded_jacobian_chunking",
+                        "aot_banded_jacobian_chunk_size",
+                    ] {
+                        section.remove(field);
+                    }
+                    BvpCorrectionNewtonConfig::default().apply_to_section(section);
+                }
+            }
+            if reset_family_defaults {
+                set_bounds_and_relative_tolerances(document);
             }
         }
     }
@@ -719,11 +933,11 @@ impl ReactorBvpSolverConfig {
                     section,
                     "aot_compile_preset",
                     match aot.compile_preset {
-                        crate::ReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::Production =>
+                        crate::SimpleReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::Production =>
                             "production",
-                        crate::ReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::FastBuild =>
+                        crate::SimpleReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::FastBuild =>
                             "fast_build",
-                        crate::ReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::DevFastest =>
+                        crate::SimpleReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::DevFastest =>
                             "dev_fastest",
                     },
                 );
@@ -798,7 +1012,41 @@ impl BvpCoreSolverConfig {
                 section.remove("banded_linear_solver");
                 section.remove("refinement_steps");
             }
+            BvpSolverFamily::CorrectionNewton => {
+                for field in [
+                    "scheme",
+                    "strategy",
+                    "linear_sys_method",
+                    "abs_tolerance",
+                    "tolerance",
+                    "banded_linear_solver",
+                    "refinement_steps",
+                ] {
+                    section.remove(field);
+                }
+            }
         }
+    }
+}
+
+impl BvpCorrectionNewtonConfig {
+    fn apply_to_section(&self, section: &mut HashMap<String, Option<Vec<Value>>>) {
+        set_string_field(section, "assembly", self.assembly.as_document_value());
+        set_string_field(section, "execution", self.execution.as_document_value());
+        set_string_field(
+            section,
+            "matrix_layout",
+            self.matrix_layout.as_document_value(),
+        );
+        set_float_field(section, "absolute_tolerance", self.absolute_tolerance);
+        set_float_field(
+            section,
+            "default_relative_tolerance",
+            self.default_relative_tolerance,
+        );
+        set_usize_field(section, "max_iterations", self.max_iterations);
+        set_usize_field(section, "max_jacobian_age", self.max_jacobian_age);
+        set_usize_field(section, "max_damping_trials", self.max_damping_trials);
     }
 }
 
@@ -977,6 +1225,73 @@ fn parse_core_solver_config(
     core
 }
 
+fn parse_correction_newton_config(
+    section: &HashMap<String, Option<Vec<Value>>>,
+    report: &mut BvpGuiMigrationReport,
+) -> BvpCorrectionNewtonConfig {
+    let mut config = BvpCorrectionNewtonConfig::default();
+    if let Some(value) = string_field(section, "assembly") {
+        if let Some(parsed) = BvpCorrectionNewtonAssembly::parse(&value) {
+            config.assembly = parsed;
+        } else {
+            report.push_warning(format!(
+                "Unknown CorrectionNewton assembly `{value}`. Falling back to `expr_legacy`."
+            ));
+        }
+    }
+    if let Some(value) = string_field(section, "execution") {
+        if let Some(parsed) = BvpCorrectionNewtonExecution::parse(&value) {
+            config.execution = parsed;
+        } else {
+            report.push_warning(format!(
+                "Unknown CorrectionNewton execution `{value}`. Falling back to `lambdify`."
+            ));
+        }
+    }
+    if let Some(value) = string_field(section, "matrix_layout") {
+        if let Some(parsed) = BvpCorrectionNewtonLayout::parse(&value) {
+            config.matrix_layout = parsed;
+        } else {
+            report.push_warning(format!(
+                "Unknown CorrectionNewton matrix layout `{value}`. Falling back to `sparse`."
+            ));
+        }
+    }
+    for (field, target) in [
+        ("absolute_tolerance", &mut config.absolute_tolerance),
+        (
+            "default_relative_tolerance",
+            &mut config.default_relative_tolerance,
+        ),
+    ] {
+        if let Some(value) = float_field(section, field) {
+            if value.is_finite() && value > 0.0 {
+                *target = value;
+            } else {
+                report.push_warning(format!(
+                    "Invalid solver_settings.{field}; falling back to CorrectionNewton default."
+                ));
+            }
+        }
+    }
+    for (field, target) in [
+        ("max_iterations", &mut config.max_iterations),
+        ("max_jacobian_age", &mut config.max_jacobian_age),
+        ("max_damping_trials", &mut config.max_damping_trials),
+    ] {
+        if let Some(value) = usize_field(section, field) {
+            if value > 0 || field == "max_jacobian_age" {
+                *target = value;
+            } else {
+                report.push_warning(format!(
+                    "Invalid solver_settings.{field}; falling back to CorrectionNewton default."
+                ));
+            }
+        }
+    }
+    config
+}
+
 fn parse_backend_config(
     section: &HashMap<String, Option<Vec<Value>>>,
     report: &mut BvpGuiMigrationReport,
@@ -1046,15 +1361,15 @@ fn parse_backend_config(
             match normalize_key(&compile_preset).as_str() {
                 "production" | "prod" => {
                     aot_config.compile_preset =
-                        crate::ReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::Production
+                        crate::SimpleReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::Production
                 }
                 "fast_build" | "fastbuild" => {
                     aot_config.compile_preset =
-                        crate::ReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::FastBuild
+                        crate::SimpleReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::FastBuild
                 }
                 "dev_fastest" | "devfastest" | "fastest" => {
                     aot_config.compile_preset =
-                        crate::ReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::DevFastest
+                        crate::SimpleReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::DevFastest
                 }
                 other => report.push_warning(format!(
                     "Unknown AOT compile preset `{other}`. Falling back to `dev_fastest`."
@@ -1826,10 +2141,22 @@ pub(crate) fn validate_aot_toolchain_fields(document: &DocumentMap) -> Result<()
 /// Build the AOT confirmation payload only when the effective document requests it.
 pub(crate) fn aot_toolchain_request(document: &DocumentMap) -> Option<AotToolchainRequest> {
     let section = document.get("solver_settings")?;
-    let generated_backend = string_field(section, "generated_backend")?;
+    let correction_newton_aot = string_field(section, "solver_family")
+        .and_then(|family| BvpSolverFamily::parse(&family))
+        == Some(BvpSolverFamily::CorrectionNewton)
+        && string_field(section, "execution")
+            .is_some_and(|execution| execution.eq_ignore_ascii_case("aot"));
+    let generated_backend = if correction_newton_aot {
+        "correction_newton_aot".to_string()
+    } else {
+        string_field(section, "generated_backend")?
+    };
     let policy_requests_aot = string_field(section, "backend_policy")
         .is_some_and(|policy| policy.trim().eq_ignore_ascii_case("aot_only"));
-    if !generated_backend_requests_aot(&generated_backend) && !policy_requests_aot {
+    if !correction_newton_aot
+        && !generated_backend_requests_aot(&generated_backend)
+        && !policy_requests_aot
+    {
         return None;
     }
 
@@ -1846,7 +2173,7 @@ pub(crate) fn aot_toolchain_request(document: &DocumentMap) -> Option<AotToolcha
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ReactorsBVP::task_parser_reactor_BVP::SIMPLE_BVP_TEMPLATE;
+    use crate::SimpleReactorsBVP::task_parser_reactor_BVP::SIMPLE_BVP_TEMPLATE;
     use RustedSciThe::command_interpreter::task_parser::DocumentParser;
 
     fn parse_template() -> DocumentMap {
@@ -1965,7 +2292,7 @@ mod tests {
                 assert_eq!(aot.build_profile, ReactorBvpAotBuildProfile::Debug);
                 assert_eq!(
                     aot.compile_preset,
-                    crate::ReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::FastBuild
+                    crate::SimpleReactorsBVP::solver_backend::ReactorBvpAotCompilePreset::FastBuild
                 );
                 assert_eq!(aot.execution_policy, ReactorBvpAotExecutionPolicy::Parallel);
                 assert_eq!(aot.residual_target_chunks, Some(12));

@@ -1,5 +1,5 @@
-use crate::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
-use crate::ReactorsBVP::task_parser_reactor_BVP::create_template;
+use crate::SimpleReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
+use crate::SimpleReactorsBVP::task_parser_reactor_BVP::create_template;
 use crate::cli::reactor_help::{REACTOR_ENG_HELPER, REACTOR_RU_HELPER};
 use RustedSciThe::command_interpreter::task_parser::pretty_print_map;
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};

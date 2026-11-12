@@ -1,0 +1,96 @@
+//! # Reactor Boundary Value Problem (BVP) Module
+//!
+//! This module provides solvers for steady-state gas-phase combustion and plug-flow reactor problems
+//! using boundary value problem formulations with dimensionless variables.
+//!
+//! ## Mathematical Model
+//!
+//! ### Nomenclature
+//!
+//! | Symbol | Description | Units |
+//! |--------|-------------|-------|
+//! | `l` | Length scale | m |
+//! | `dT` | Temperature displacement (dimensionless) | K |
+//! | `Ts` | Temperature scale | K |
+//! | `Tm` | Reference temperature for density/transport closures | K |
+//! | `Cp` | Heat capacity | J/(kg·K) |
+//! | `λ` | Thermal conductivity | W/(m·K) |
+//! | `ρ` | Gas density | kg/m³ |
+//!
+//! ### Model Assumptions
+//!
+//! - Heat capacity, thermal conductivity, and thermal effects are constant.
+//!   Density defaults to the fixed-composition ideal-gas law at constant
+//!   pressure; constant density is an explicit alternative.
+//! - The species transport products `rho*D_i` remain constant in both density
+//!   modes; variable density changes reaction concentrations and source terms.
+//! - Only elementary kinetic expressions are considered (no fall-off, third-body reactions)
+//! - reactor is one-dimensional with coordinate `x`
+//! - Steady-state conditions (front velocity `m` is constant)
+//! - reactions occur in the gas phase only
+//! - reactor is adiabatic (no heat loss to surroundings)
+//! - ideal gas behavior
+//! - no radiation effects
+//! - all reactions are irreversable
+//!
+//! ### Governing Equations
+//!
+//! **Dimensional form:**
+//! ```text
+//! m(dc_i)/dx = d/dx[K_i(dc_i)/dx] + Σ_j[ν_ij w_j], K_i = ρD_i = const
+//! mCp(dT)/dx = d/dx[λ(dT)/dx] + Σ_j[Q_j w_j]
+//! ```
+//!
+//! **Dimensionless form:**
+//!
+//! With dimensionless variables `Θ = (T-dT)/Ts` and `ξ = x/l`:
+//!
+//! ```text
+//! dΘ/dξ = q/λ
+//! dq/dξ = Pe_T·q - a_T·Σ_j[Q_j w_j(Θ)]
+//! dc_i/dξ = j_i/K_i
+//! dj_i/dξ = Pe_c·j_i - a_c·Σ_j[ν_ij w_j]
+//! ```
+//!
+//! Where:
+//! - `Pe_T = lmCp/λ` (thermal Peclet number)
+//! - `Pe_c = ml/K_i` (mass Peclet number)
+//! - `a_T = l²/Ts`, `a_c = l²`
+//!
+//! ### Boundary Conditions
+//!
+//! - At `ξ = 0`: `c_i = c_i0`, `Θ = Θ0 = (T0-dT)/Ts`
+//! - At `ξ = ∞`: `q = j_i = 0` (zero fluxes)
+//!
+//! ## Numerical Solution
+//!
+//! The system forms a boundary value problem with `2n+2` first-order ODEs for `n` substances.
+//! Solutions are obtained using Newton-Raphson methods from the [RustedSciThe](https://crates.io/crates/RustedSciThe)
+//! package.
+
+pub mod SimpleReactorBVP;
+pub mod SimpleReactorBVP2;
+pub mod SimpleReactorBVP3;
+pub mod createBVP;
+#[cfg(test)]
+mod density_model_tests;
+#[cfg(test)]
+mod large_mechanism_refinement_tests;
+pub mod reactor_BVP_utils;
+mod reactor_bvp_matrix_tests;
+mod reactor_bvp_story_tests;
+mod reactor_bvp_test_support;
+#[cfg(test)]
+mod rst_grid_refinement_diagnostics;
+#[cfg(test)]
+mod rst_native_large_bvp_reproducer;
+mod simple_reactor_bvp_tests;
+mod simple_reactor_bvp_tests2;
+pub mod solver_backend;
+pub mod task_parser_reactor_BVP;
+pub(crate) mod task_value_conversion;
+
+#[cfg(test)]
+mod analytical_reaction_diffusion_tests;
+#[cfg(test)]
+mod analytical_transport_tests;

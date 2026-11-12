@@ -1,0 +1,27 @@
+specification = "TW-03"
+version = 1
+scenarios = ["TW-03a", "TW-03b", "TW-03c"]
+species_order = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8", "X9", "X10", "X11"]
+reaction_count = 20
+reference_temperature_K = 400.0
+gas_constant_J_per_mol_K = 8.314
+activation_energy_unit = "J/mol"
+temperature_definition = "T = 300 K + 100 K * Teta"
+solver_coordinate = "z = x/L; 0 <= z <= 1"
+species_state = "mass fractions Y_i"
+thermal_internal_qhat_initial = 5000.0
+thermal_parameters_inherited_from_tw01 = "rho=1000 kg/m^3, Cp=1000 J/(kg K), Lambda=10000 W/(m K), L=0.01 m, m=1 kg/(m^2 s)"
+thermal_profile = "T(z)=400 K + 50 K * expm1(0.001*z)/0.001"
+reaction_heats_J_per_mol = 0.0
+profile_coordinates = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+csv_columns = "scenario,z,Teta,qhat,T_K,X0..X11"
+tw03a_reference = "Pade-13 matrix exponential for constant K at 400 K"
+tw03b_reference = "Composite Simpson quadrature N=1024 of k(T)/k(400), followed by Pade-13 matrix exponential"
+tw03b_quadrature_check = "N=256 versus N=1024; absolute sigma difference 1.684e-12"
+tw03c_reference = "Fourth-order two-node Gauss-Legendre Magnus propagation with Pade-13 matrix exponential; 2560 steps per unit interval"
+tw03c_convergence = "N=640/1280/2560/5120 L2 differences 2.495e-9/1.561e-10/9.758e-12; observed order 3.999"
+tw03c_estimated_reference_error = "N=2560 to N=5120 profile change 9.758e-12 in L2"
+solver_rtol = 1e-11
+solver_atol = 1e-13
+production_reference_generation = "No KiThe/RustedSciThe ODE solver used to construct these profile rows"
+normal_solver_runs_may_overwrite = false

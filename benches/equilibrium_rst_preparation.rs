@@ -1,7 +1,7 @@
 //! PERF-RST-01: detailed preparation/execution baseline for the RST backend.
 //!
 //! This benchmark deliberately uses one fixed RST backend and never enables a
-//! legacy fallback. Criterion measures the solve itself; the tables printed
+//! KiThe-native fallback. Criterion measures the solve itself; the tables printed
 //! before Criterion starts are diagnostic evidence from the same public
 //! `EquilibriumCalculator` facade.
 //!
@@ -1398,7 +1398,7 @@ fn run_frontend(
 }
 
 #[cfg(feature = "equilibrium-benchmark-rst-frontends")]
-fn run_native_legacy_lm(
+fn run_native_native_lm(
     case: Case,
 ) -> Result<
     (Duration, FrontendSignature),
@@ -1407,10 +1407,10 @@ fn run_native_legacy_lm(
     let target = target_for(case);
     let started = Instant::now();
     let builder = builder_for(case, target)
-        .solver_policy(SolverPolicy::Single(SolverBackend::Legacy(
-            LegacyEquilibriumSolver::LM,
+        .solver_policy(SolverPolicy::Single(SolverBackend::Native(
+            NativeEquilibriumSolver::LM,
         )))
-        .expect("single KiThe-native Legacy LM policy must validate");
+        .expect("single KiThe-native LM policy must validate");
     let outcome = builder.solve()?;
     let elapsed = started.elapsed();
     Ok((elapsed, frontend_signature(&outcome)))
@@ -1490,10 +1490,10 @@ fn report_frontend_comparison(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(2));
 
     println!(
-        "\nPERF-RST-FRONTEND matched facade routes; fixed RST solver=Minpack LM, plus KiThe Legacy LM controls"
+        "\nPERF-RST-FRONTEND matched facade routes; fixed RST solver=Minpack LM, plus KiThe-native LM controls"
     );
     println!(
-        "Three passes: accepted full-solve A/B; matched preparation-stage attribution; same-input KiThe Legacy LM control. Criterion timings are emitted only for accepted, output-matched frontend pairs."
+        "Three passes: accepted full-solve A/B; matched preparation-stage attribution; same-input KiThe-native LM control. Criterion timings are emitted only for accepted, output-matched frontend pairs."
     );
     println!(
         "case | frontend | accepted_backend | status | facade_ms | rst_preparation_ms | temperature_K | delta_T_K | phase_count | max_fraction_delta_vs_expr"
@@ -1646,7 +1646,7 @@ fn report_frontend_comparison(c: &mut Criterion) {
             }
         }
 
-        match run_native_legacy_lm(case) {
+        match run_native_native_lm(case) {
             Ok((elapsed, signature)) => {
                 let (status, fraction_delta) = if let Some(expr) = &reference {
                     assert_eq!(
@@ -1699,11 +1699,11 @@ fn report_frontend_comparison(c: &mut Criterion) {
                 if status == "accepted/parity" && !report_only {
                     let case_name = format!("{}_{}", case.universe.label(), case.task.label());
                     group.bench_function(
-                            BenchmarkId::new("ki_the_legacy_lm", &case_name),
+                            BenchmarkId::new("ki_the_native_lm", &case_name),
                             |bencher| {
                                 bencher.iter(|| {
-                                    black_box(run_native_legacy_lm(case).unwrap_or_else(|error| {
-                                        panic!("{case_name} KiThe Legacy LM failed during sampling: {error}")
+                                    black_box(run_native_native_lm(case).unwrap_or_else(|error| {
+                                        panic!("{case_name} KiThe-native LM failed during sampling: {error}")
                                     }));
                                 });
                             },
@@ -1738,7 +1738,7 @@ fn report_frontend_comparison(c: &mut Criterion) {
     }
     if !native_lm_rows.is_empty() {
         println!(
-            "\nPERF-RST-FRONTEND KiThe-native Legacy LM controls (same public facade inputs; no RST preparation)\n{}",
+            "\nPERF-RST-FRONTEND KiThe-native LM controls (same public facade inputs; no RST preparation)\n{}",
             Table::new(native_lm_rows)
         );
     }

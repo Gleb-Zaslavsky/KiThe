@@ -109,6 +109,17 @@ mod tests {
         postprocessing.insert("gui_plot".to_string(), Some(vec![Value::Boolean(enabled)]));
     }
 
+    fn set_return_to_dimension(app: &mut CombustionApp, enabled: bool) {
+        let postprocessing = app
+            .document
+            .get_mut("postprocessing")
+            .expect("postprocessing section must exist in the BVP template");
+        postprocessing.insert(
+            "return_to_dimension".to_string(),
+            Some(vec![Value::Boolean(enabled)]),
+        );
+    }
+
     /// Load the known BVP story document used by the GUI regression suite.
     fn load_problem_test_document(app: &mut CombustionApp) {
         let result =
@@ -183,6 +194,7 @@ mod tests {
             140000.0
         );
         set_gui_plot(&mut editor.borrow_mut(), true);
+        set_return_to_dimension(&mut editor.borrow_mut(), true);
         editor.borrow_mut().sync_document_state_after_edit();
         let gui_config_before_save = editor.borrow().bvp_gui_config.clone();
 
@@ -266,13 +278,40 @@ mod tests {
             140000.0
         );
 
-        let mut direct = crate::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask::new();
+        let mut direct = crate::SimpleReactorsBVP::SimpleReactorBVP::SimpleReactorTask::new();
         direct
             .solve_from_file(edited_path.clone())
             .expect("the saved BVP task should solve through the direct file route");
-        let direct_render = direct
-            .postprocessing_report()
-            .expect("direct file solve should publish postprocessed data");
+        let direct_mesh = direct
+            .solver
+            .x_mesh
+            .as_ref()
+            .expect("direct file solve should publish its converted mesh");
+        let direct_solution = direct
+            .solver
+            .solution
+            .as_ref()
+            .expect("direct file solve should publish its converted solution");
+        let length = direct.characteristic_length();
+        assert!(direct_mesh[0].abs() <= 1e-12);
+        assert!(
+            (direct_mesh[direct_mesh.len() - 1] - length).abs() <= 1e-12,
+            "published endpoint {} should match physical length {}",
+            direct_mesh[direct_mesh.len() - 1],
+            length
+        );
+        let temperature_index = direct
+            .solver
+            .unknowns
+            .iter()
+            .position(|name| name == "Teta")
+            .expect("temperature state should exist");
+        for temperature in direct_solution.column(temperature_index).iter() {
+            assert!(
+                (0.0..3000.0).contains(temperature),
+                "published temperature should be in kelvin, got {temperature}"
+            );
+        }
 
         reopened.request_calculation();
         wait_for_calculation(&mut reopened);
@@ -291,22 +330,17 @@ mod tests {
             .plot_window
             .as_ref()
             .expect("gui_plot=true should hand the completed solution to the plot window");
-        assert_eq!(plot.t_result.len(), direct_render.x_mesh.len());
-        assert_eq!(plot.y_result.shape(), direct_render.solution.shape());
+        assert_eq!(plot.t_result.len(), direct_mesh.len());
+        assert_eq!(plot.y_result.shape(), direct_solution.shape());
         assert_eq!(plot.values.len(), direct.solver.unknowns.len());
-        for (row, (&gui_x, &direct_x)) in plot
-            .t_result
-            .iter()
-            .zip(direct_render.x_mesh.iter())
-            .enumerate()
-        {
+        for (row, (&gui_x, &direct_x)) in plot.t_result.iter().zip(direct_mesh.iter()).enumerate() {
             assert!(
                 (gui_x - direct_x).abs() <= 1e-12,
                 "GUI/direct mesh differs at row {row}: {gui_x} vs {direct_x}"
             );
             for column in 0..plot.y_result.ncols() {
                 let gui_value = plot.y_result[(row, column)];
-                let direct_value = direct_render.solution[(row, column)];
+                let direct_value = direct_solution[(row, column)];
                 let tolerance = 1e-8 * direct_value.abs().max(1.0);
                 assert!(
                     (gui_value - direct_value).abs() <= tolerance,
@@ -318,15 +352,49 @@ mod tests {
             .solver
             .unknowns
             .iter()
-            .map(|name| {
-                if name == "Teta" {
-                    "Temperature (K)".to_string()
-                } else {
-                    name.clone()
-                }
+            .map(|name| match name.as_str() {
+                "Teta" => "Temperature (K)".to_string(),
+                "q" => "q (W/m^2)".to_string(),
+                name if name.starts_with('J') => format!("{name} (kg/(m^2 s))"),
+                name if name.starts_with('C') => format!("{name} (mass fraction)"),
+                _ => name.clone(),
             })
             .collect::<Vec<_>>();
         assert_eq!(plot.values, expected_plot_values);
+
+        set_return_to_dimension(&mut reopened, false);
+        reopened.sync_document_state_after_edit();
+        reopened.request_calculation();
+        wait_for_calculation(&mut reopened);
+        assert_eq!(reopened.calculation_state, CalculationState::Completed);
+        let dimensionless_plot = reopened
+            .plot_window
+            .as_ref()
+            .expect("dimensionless result should also be plotted");
+        assert!(dimensionless_plot.arg.contains("/ L"));
+        assert!(dimensionless_plot.t_result[0].abs() <= 1e-12);
+        assert!(
+            (dimensionless_plot.t_result[dimensionless_plot.t_result.len() - 1] - 1.0).abs()
+                <= 1e-12
+        );
+        assert!(
+            dimensionless_plot
+                .values
+                .iter()
+                .any(|value| value == "Teta (dimensionless)")
+        );
+        assert!(
+            dimensionless_plot
+                .values
+                .iter()
+                .any(|value| value == "q_hat (scaled)")
+        );
+        assert!(
+            dimensionless_plot
+                .values
+                .iter()
+                .any(|value| value == "J_hat0 (scaled)")
+        );
     }
 
     #[test]
@@ -456,6 +524,7 @@ mod tests {
             GuiFileOperationResult::Loaded { .. }
         ));
         set_gui_plot(&mut app, true);
+        set_return_to_dimension(&mut app, true);
         app.document
             .get_mut("solver_settings")
             .expect("solver settings should exist")
@@ -499,7 +568,12 @@ mod tests {
             .values
             .iter()
             .position(|name| name == "Temperature (K)")
-            .expect("recovered result should include physical temperature");
+            .unwrap_or_else(|| {
+                panic!(
+                    "recovered result should include physical temperature; columns={:?}",
+                    plot.values
+                )
+            });
         assert!(
             plot.y_result
                 .column(temperature_index)
@@ -1538,6 +1612,7 @@ mod tests {
         let mut app = CombustionApp::new_with_problem(ProblemsEnum::BVPSimple);
         load_problem_test_document(&mut app);
         set_gui_plot(&mut app, true);
+        set_return_to_dimension(&mut app, true);
 
         app.request_calculation();
         wait_for_calculation_with_limit(&mut app, 2000, Duration::from_millis(5));
@@ -1563,7 +1638,12 @@ mod tests {
             .values
             .iter()
             .position(|name| name == "Temperature (K)")
-            .expect("the GUI plot should label the dimensional temperature in kelvins");
+            .unwrap_or_else(|| {
+                panic!(
+                    "the GUI plot should label the dimensional temperature in kelvins; columns={:?}",
+                    plot_window.values
+                )
+            });
         let temperatures = plot_window.y_result.column(temperature_column);
         assert!(
             temperatures.iter().all(|temperature| temperature.is_finite()

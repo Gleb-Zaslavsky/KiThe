@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use super::super::bvp_gui_config::aot_toolchain_request;
     use super::super::bvp_gui_config::{BvpSolverFamily, set_bvp_solver_family};
     use super::super::combustion::{
         BvpEditorTab, CombustionApp, DocumentDeleteRequest, GuiFileOperationKind,
@@ -7,9 +8,14 @@ mod tests {
         apply_document_deletion, insert_field_if_absent, normalize_bvp_usize_fields,
         sorted_document_section_names, sorted_section_field_names,
     };
-    use crate::ReactorsBVP::task_parser_reactor_BVP::normalize_reactor_physics_task_map;
+    use crate::SimpleReactorsBVP::SimpleReactorBVP::{DensityModel, SimpleReactorTask};
+    use crate::SimpleReactorsBVP::task_parser_reactor_BVP::normalize_reactor_physics_task_map;
     use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser, Value};
     use RustedSciThe::command_interpreter::task_parser_bvp_hybrid::parse_hybrid_bvp_solver_settings_from_document;
+    use RustedSciThe::numerical::BVP_CorrectionNewton::{
+        CorrectionNewtonMatrixLayout, CorrectionNewtonSymbolicExecution,
+        CorrectionNewtonSymbolicFrontend,
+    };
     use RustedSciThe::numerical::BVP_Damp::task_parser_damped;
     use RustedSciThe::numerical::BVP_Damp::telemetry::BvpTelemetryMode;
     use RustedSciThe::numerical::BVP_api::BvpSolverSettings;
@@ -174,6 +180,164 @@ mod tests {
         ] {
             harness.get_by_label(label);
         }
+    }
+
+    #[test]
+    fn bvp_density_model_control_roundtrips_into_the_physics_parser() {
+        let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
+            ProblemsEnum::BVPSimple,
+        )));
+        assert_eq!(
+            as_string(first_value(
+                &app.borrow().document,
+                "process_conditions",
+                "density_model"
+            )),
+            "ideal_gas_fixed_composition"
+        );
+
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 760.0))
+            .build_ui(move |ui| app_for_ui.borrow_mut().show(ui.ctx(), &mut open));
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Density model")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Density model")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Constant density")
+            .click_accesskit();
+        harness.run();
+
+        let document = app.borrow().document.clone();
+        assert_eq!(
+            as_string(first_value(
+                &document,
+                "process_conditions",
+                "density_model"
+            )),
+            "constant"
+        );
+        let mut reactor = SimpleReactorTask::new();
+        reactor
+            .set_reactor_params_from_hashmap(&document)
+            .expect("the GUI-edited task should pass the production physics parser");
+        assert_eq!(reactor.density_model, DensityModel::Constant);
+    }
+
+    #[test]
+    fn correction_newton_family_roundtrips_solver_options_and_aot_request() {
+        let app = Rc::new(RefCell::new(CombustionApp::new_with_problem(
+            ProblemsEnum::BVPSimple,
+        )));
+        prepare_solver_tab(&app);
+        let mut open = true;
+        let app_for_ui = Rc::clone(&app);
+        let mut harness = Harness::new_ui(move |ui| {
+            app_for_ui.borrow_mut().show(ui.ctx(), &mut open);
+        });
+
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Solver family")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "correction_newton")
+            .click();
+        harness.run();
+
+        for label in [
+            "Fixed-mesh CorrectionNewton route",
+            "Symbolic assembly",
+            "Execution",
+            "Matrix layout",
+            "Absolute tolerance",
+            "Default relative tolerance",
+            "Maximum Newton iterations",
+            "Maximum Jacobian age",
+            "Maximum damping trials",
+            "Solver telemetry",
+            "Logging level",
+        ] {
+            harness.get_by_label(label);
+        }
+
+        let parse_settings = || {
+            let app_ref = app.borrow();
+            let normalized = normalize_reactor_physics_task_map(&app_ref.document);
+            let mut solver_document = DocumentMap::new();
+            for section_name in ["solver_settings", "bounds", "rel_tolerance"] {
+                if let Some(section) = normalized.get(section_name) {
+                    solver_document.insert(section_name.to_string(), section.clone());
+                }
+            }
+            parse_hybrid_bvp_solver_settings_from_document(&solver_document)
+        };
+
+        let settings = parse_settings().expect("GUI CorrectionNewton settings should parse");
+        let BvpSolverSettings::CorrectionNewton(options) = settings else {
+            panic!("GUI should select the RST CorrectionNewton route");
+        };
+        assert_eq!(options.matrix_layout, CorrectionNewtonMatrixLayout::Sparse);
+        assert_eq!(options.absolute_tolerance, 1e-5);
+        assert_eq!(options.default_relative_tolerance, 1e-5);
+        assert_eq!(options.max_iterations, 100);
+        assert_eq!(options.max_jacobian_age, 5);
+        assert_eq!(options.max_damping_trials, 7);
+        assert!(options.bounds.contains_key("Teta"));
+        assert!(options.relative_tolerances.contains_key("Teta"));
+        drop(options);
+
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Symbolic assembly")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "atom_view_native")
+            .click();
+        harness.run();
+        assert!(matches!(
+            parse_settings().expect("AtomView CorrectionNewton settings should parse"),
+            BvpSolverSettings::CorrectionNewton(options)
+                if options.symbolic_frontend == CorrectionNewtonSymbolicFrontend::AtomView
+        ));
+
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Execution")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Execution")
+            .click();
+        harness.run();
+        harness.get_by_role_and_label(Role::Button, "aot").click();
+        harness.run();
+        for label in [
+            "AOT codegen backend",
+            "AOT build policy",
+            "AOT build profile",
+        ] {
+            harness.get_by_label(label);
+        }
+        assert!(matches!(
+            parse_settings(),
+            Ok(BvpSolverSettings::CorrectionNewton(options))
+                if options.symbolic_execution == CorrectionNewtonSymbolicExecution::Aot
+        ));
+        let request = aot_toolchain_request(&app.borrow().document)
+            .expect("CorrectionNewton AOT should request explicit toolchain confirmation");
+        assert_eq!(request.generated_backend, "correction_newton_aot");
     }
 
     #[test]
@@ -348,7 +512,7 @@ mod tests {
 
         harness.run();
         for (label, expected_help) in [
-            ("Solver family", "BVP solver family."),
+            ("Solver family", "BVP solver family:"),
             ("scheme", "Spatial discretization scheme."),
             ("Linear algebra backend", "Linear algebra backend."),
             ("Nonlinear strategy", "Convergence strategy."),
@@ -385,7 +549,11 @@ mod tests {
                 "process_conditions",
                 "Main physical and chemical parameters",
             ),
-            ("boundary_condition", "Initial values for all variables"),
+            ("Density model", "rho(T) = rho0*T0/T"),
+            (
+                "boundary_condition",
+                "Physical inlet mass fractions and temperature [K]",
+            ),
             ("diffusion_coefficients", "Molecular diffusion coefficients"),
             (
                 "Reactions",
@@ -449,7 +617,7 @@ mod tests {
             .click();
         harness.run();
         for (label, expected_help) in [
-            ("Solver family", "BVP solver family."),
+            ("Solver family", "BVP solver family:"),
             ("Nonlinear strategy", "Convergence strategy."),
             ("tolerance", "Route-specific convergence tolerance."),
             ("max_iterations", "Maximum solver iterations."),
@@ -502,10 +670,10 @@ mod tests {
             harness.get_by_label(label);
         }
         for (label, expected_help) in [
-            ("Solver family", "BVP solver family."),
+            ("Solver family", "BVP solver family:"),
             ("Execution", "callback execution route."),
-            ("Symbolic assembly", "symbolic expression frontend."),
-            ("Matrix layout", "matrix storage layout."),
+            ("Symbolic assembly", "Symbolic expression frontend."),
+            ("Matrix layout", "Linear-system matrix layout."),
             ("Tolerance", "Route-specific convergence tolerance."),
             ("Boundary tolerance", "boundary residual tolerance."),
             ("Maximum mesh nodes", "Maximum collocation mesh nodes"),

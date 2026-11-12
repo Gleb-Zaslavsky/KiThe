@@ -15,7 +15,7 @@ mod tests {
         CombustionApp, ProblemsEnum, build_bvp_task_preview_snapshot,
         collect_bvp_preview_equation_rows, format_bvp_task_preview,
     };
-    use crate::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
+    use crate::SimpleReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
     use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser};
     use egui::accesskit::Role;
     use egui_kittest::Harness;

@@ -34,11 +34,11 @@
 //! - **BVPSimple**: Gas-phase combustion and plug-flow reactor BVP problems
 //! - **None**: Empty configuration for custom problem setup
 
-use crate::ReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
-use crate::ReactorsBVP::task_parser_reactor_BVP::{
+use crate::SimpleReactorsBVP::SimpleReactorBVP::SimpleReactorTask;
+use crate::SimpleReactorsBVP::task_parser_reactor_BVP::{
     SIMPLE_BVP_TEMPLATE, validate_reactor_bvp_task_map,
 };
-use crate::ReactorsBVP::task_value_conversion::{UsizeConversionError, try_value_as_usize};
+use crate::SimpleReactorsBVP::task_value_conversion::{UsizeConversionError, try_value_as_usize};
 use crate::cli::reactor_help::REACTOR_ENG_HELPER;
 use crate::gui::bvp_gui_config::{
     AotToolchainRequest, BvpGuiConfig, BvpGuiMigrationReport, BvpSolverFamily,
@@ -1194,6 +1194,9 @@ fn ensure_bvp_solver_backend_defaults(document: &mut DocumentMap) {
             }
             let _ = normalize_usize_field(section, "max_nodes");
         }
+        BvpSolverFamily::CorrectionNewton => {
+            // Family changes are normalized by `set_bvp_solver_family` before this helper.
+        }
     }
 }
 
@@ -1872,7 +1875,7 @@ fn render_bvp_solver_backend_panel(
             section,
             "solver_family",
             "Solver family",
-            &["damped", "frozen", "sci"],
+            &["damped", "frozen", "sci", "correction_newton"],
             "damped",
             help_map,
             current_help,
@@ -1896,9 +1899,12 @@ fn render_bvp_solver_backend_panel(
         BvpSolverFamily::Sci => {
             ui.label("Compact HMX physical acceptance: passed for BVP_sci.");
         }
+        BvpSolverFamily::CorrectionNewton => {
+            ui.label("CorrectionNewton is a fixed-mesh route; grid refinement is not available.");
+        }
     }
     let section = ensure_section_mut(document, "solver_settings");
-    if family != BvpSolverFamily::Sci {
+    if matches!(family, BvpSolverFamily::Damped | BvpSolverFamily::Frozen) {
         normalize_bvp_solver_backend_section(section);
     }
 
@@ -1906,11 +1912,16 @@ fn render_bvp_solver_backend_panel(
         render_sci_solver_backend_controls(ui, section, help_map, current_help);
         return;
     }
+    if family == BvpSolverFamily::CorrectionNewton {
+        render_correction_newton_solver_backend_controls(ui, section, help_map, current_help);
+        return;
+    }
 
     ui.label(match family {
         BvpSolverFamily::Damped => "Damped Newton route",
         BvpSolverFamily::Frozen => "Fixed-mesh Frozen/Naive route",
         BvpSolverFamily::Sci => unreachable!(),
+        BvpSolverFamily::CorrectionNewton => unreachable!(),
     });
     ui.label("Residuals and Jacobian backend is exclusive: Lambdify or AOT.");
 
@@ -2239,6 +2250,208 @@ fn render_bvp_solver_backend_panel(
                 current_help,
             );
             let _ = aot_enabled;
+        });
+}
+
+fn render_correction_newton_solver_backend_controls(
+    ui: &mut egui::Ui,
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) {
+    ui.label("Fixed-mesh CorrectionNewton route");
+    ui.label("This route solves on the supplied mesh; adaptive grid refinement is not available.");
+    ui.add_space(6.0);
+
+    egui::Grid::new("bvp_correction_newton_settings_grid")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            for (field, label, choices, default) in [
+                (
+                    "assembly",
+                    "Symbolic assembly",
+                    &["expr_legacy", "atom_view_native"][..],
+                    "expr_legacy",
+                ),
+                (
+                    "execution",
+                    "Execution",
+                    &["lambdify", "aot"][..],
+                    "lambdify",
+                ),
+                (
+                    "matrix_layout",
+                    "Matrix layout",
+                    &["sparse", "banded_auto", "dense"][..],
+                    "sparse",
+                ),
+            ] {
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    field,
+                    label,
+                    choices,
+                    default,
+                    help_map,
+                    current_help,
+                );
+            }
+            for (field, label, value) in [
+                ("absolute_tolerance", "Absolute tolerance", 1e-5),
+                (
+                    "default_relative_tolerance",
+                    "Default relative tolerance",
+                    1e-5,
+                ),
+            ] {
+                render_solver_backend_row(
+                    ui,
+                    section,
+                    field,
+                    label,
+                    Value::Float(value),
+                    help_map,
+                    current_help,
+                );
+            }
+            for (field, label, value) in [
+                ("max_iterations", "Maximum Newton iterations", 100),
+                ("max_jacobian_age", "Maximum Jacobian age", 5),
+                ("max_damping_trials", "Maximum damping trials", 7),
+            ] {
+                render_solver_backend_usize_row(
+                    ui,
+                    section,
+                    field,
+                    label,
+                    value,
+                    help_map,
+                    current_help,
+                );
+            }
+            render_solver_backend_choice_row(
+                ui,
+                section,
+                "telemetry",
+                "Solver telemetry",
+                &["off", "counters", "timings", "detailed"],
+                "off",
+                help_map,
+                current_help,
+            );
+            render_solver_backend_optional_string_choice_row(
+                ui,
+                section,
+                "loglevel",
+                "Logging level",
+                &[
+                    ("off", Some("off")),
+                    ("error", Some("error")),
+                    ("warn", Some("warn")),
+                    ("info", Some("info")),
+                    ("debug", Some("debug")),
+                ],
+                "off",
+                help_map,
+                current_help,
+            );
+
+            let aot_enabled = string_field_value(section, "execution")
+                .is_some_and(|execution| execution.eq_ignore_ascii_case("aot"));
+            if aot_enabled {
+                for (field, default) in [
+                    ("aot_codegen_backend", "C"),
+                    ("aot_build_policy", "build_if_missing"),
+                    ("aot_build_profile", "release"),
+                ] {
+                    if string_field_value(section, field).is_none() {
+                        set_string_field(section, field, default);
+                    }
+                }
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "aot_codegen_backend",
+                    "AOT codegen backend",
+                    &["C", "Zig", "Rust"],
+                    "C",
+                    help_map,
+                    current_help,
+                );
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "aot_build_policy",
+                    "AOT build policy",
+                    &[
+                        "use_if_available",
+                        "build_if_missing",
+                        "require_prebuilt",
+                        "rebuild_always",
+                    ],
+                    "build_if_missing",
+                    help_map,
+                    current_help,
+                );
+                render_solver_backend_choice_row(
+                    ui,
+                    section,
+                    "aot_build_profile",
+                    "AOT build profile",
+                    &["release", "debug"],
+                    "release",
+                    help_map,
+                    current_help,
+                );
+                if string_field_value(section, "aot_codegen_backend")
+                    .is_some_and(|backend| backend.eq_ignore_ascii_case("c"))
+                {
+                    if string_field_value(section, "aot_c_compiler").is_none() {
+                        set_string_field(section, "aot_c_compiler", "tcc");
+                    }
+                    render_solver_backend_choice_row(
+                        ui,
+                        section,
+                        "aot_c_compiler",
+                        "C compiler",
+                        &["tcc", "gcc"],
+                        "tcc",
+                        help_map,
+                        current_help,
+                    );
+                } else {
+                    section.remove("aot_c_compiler");
+                }
+                render_solver_backend_optional_text_row(
+                    ui,
+                    section,
+                    "aot_output_dir",
+                    "AOT output directory",
+                    help_map,
+                    current_help,
+                );
+            } else {
+                for field in [
+                    "aot_codegen_backend",
+                    "aot_c_compiler",
+                    "aot_build_policy",
+                    "aot_build_profile",
+                    "aot_output_dir",
+                    "aot_handoff_path",
+                    "aot_crate_name",
+                    "aot_module_name",
+                    "aot_residual_chunking",
+                    "aot_residual_chunk_size",
+                    "aot_sparse_jacobian_chunking",
+                    "aot_sparse_jacobian_chunk_size",
+                    "aot_banded_jacobian_chunking",
+                    "aot_banded_jacobian_chunk_size",
+                ] {
+                    section.remove(field);
+                }
+            }
         });
 }
 
@@ -2872,6 +3085,50 @@ fn render_bvp_reaction_manager(
     }
 }
 
+fn render_density_model_choice_row(
+    ui: &mut egui::Ui,
+    section: &mut HashMap<String, Option<Vec<Value>>>,
+    help_map: Option<&[(&str, &str)]>,
+    current_help: &mut String,
+) {
+    let selected = string_field_value(section, "density_model")
+        .unwrap_or_else(|| "ideal_gas_fixed_composition".to_string());
+    let label = ui.label("Density model");
+    let mut next = selected.clone();
+    let response = egui::ComboBox::from_id_salt("bvp_density_model")
+        .selected_text(match selected.as_str() {
+            "ideal_gas_fixed_composition" => "Ideal gas, fixed composition (temperature-dependent)",
+            "constant" => "Constant density",
+            _ => "Unsupported density model",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(
+                &mut next,
+                "ideal_gas_fixed_composition".to_string(),
+                "Ideal gas, fixed composition (temperature-dependent)",
+            );
+            ui.selectable_value(&mut next, "constant".to_string(), "Constant density");
+        });
+    let help = help_map
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|(key, _)| *key == "process_conditions.density_model")
+                .map(|(_, help)| *help)
+        })
+        .unwrap_or(
+            "Select whether density varies with temperature or stays frozen at its reference value.",
+        );
+    if response.response.hovered() || label.hovered() {
+        *current_help = help.to_string();
+    }
+    let _ = response.response.labelled_by(label.id);
+    if next != selected {
+        set_string_field(section, "density_model", &next);
+    }
+    ui.label(help).on_hover_text(help);
+}
+
 /// Renders a titled group of BVP sections in the structured screen layout.
 ///
 /// The helper keeps the canonical sections visible up front while staying
@@ -2924,13 +3181,21 @@ fn render_bvp_section_group(
                     } else {
                         let options = if framed_sections {
                             let hidden_fields = if *section_name == "process_conditions" {
-                                &["substances"][..]
+                                &["substances", "density_model"][..]
                             } else {
                                 &[]
                             };
                             SectionRenderOptions::framed_read_only(hidden_fields)
                         } else {
-                            SectionRenderOptions::compatibility(false)
+                            let hidden_fields = if *section_name == "process_conditions" {
+                                &["density_model"][..]
+                            } else {
+                                &[]
+                            };
+                            SectionRenderOptions {
+                                hidden_fields,
+                                ..SectionRenderOptions::compatibility(false)
+                            }
                         };
                         render_section(
                             ui,
@@ -2943,6 +3208,10 @@ fn render_bvp_section_group(
                             options,
                         )
                     };
+
+                if *section_name == "process_conditions" {
+                    render_density_model_choice_row(ui, section, help_map, current_help);
+                }
 
                 if add_field {
                     sections_to_process.push((
@@ -3484,6 +3753,14 @@ fn execute_bvp_calculation(mut document: DocumentMap, problem: ProblemsEnum) -> 
                 .and_then(Value::as_boolean)
                 .unwrap_or(true);
 
+            let return_to_dimension = document
+                .get("postprocessing")
+                .and_then(|postproc| postproc.get("return_to_dimension"))
+                .and_then(|slot| slot.as_ref())
+                .and_then(|values| values.first())
+                .and_then(Value::as_boolean)
+                .unwrap_or(true);
+
             let mut reactor = SimpleReactorTask::new();
             if let Err(error) = reactor.solve_from_parsed(document) {
                 return BvpWorkerOutcome::Failed(format!("Calculation failed: {}", error));
@@ -3492,49 +3769,59 @@ fn execute_bvp_calculation(mut document: DocumentMap, problem: ProblemsEnum) -> 
                 return BvpWorkerOutcome::Completed { plot: None };
             }
 
-            let report = match reactor.postprocessing_report() {
-                Ok(report) => report,
+            let render_data = match reactor.solution_render_data() {
+                Ok(data) => data,
                 Err(error) => {
                     return BvpWorkerOutcome::Failed(format!(
-                        "Calculation completed, but result postprocessing failed: {error}"
+                        "Calculation completed, but result extraction failed: {error}"
                     ));
                 }
             };
-            let solution = report.solution;
-            let x_mesh = report.x_mesh;
-            let values = reactor
-                .solver
+            let values = render_data
                 .unknowns
                 .iter()
-                .map(|name| {
-                    if name == "Teta" {
-                        "Temperature (K)".to_string()
-                    } else {
-                        name.clone()
+                .map(|name| match (name.as_str(), return_to_dimension) {
+                    ("Teta", true) => "Temperature (K)".to_string(),
+                    ("Teta", false) => "Teta (dimensionless)".to_string(),
+                    ("q", true) => "q (W/m^2)".to_string(),
+                    ("q", false) => "q_hat (scaled)".to_string(),
+                    (name, true) if name.starts_with('J') => {
+                        format!("{name} (kg/(m^2 s))")
                     }
+                    (name, false) if name.starts_with('J') => {
+                        format!("J_hat{} (scaled)", &name[1..])
+                    }
+                    (name, _) if name.starts_with('C') => {
+                        format!("{name} (mass fraction)")
+                    }
+                    _ => name.clone(),
                 })
                 .collect::<Vec<_>>();
-            if x_mesh.len() != solution.nrows() {
+            if render_data.x_mesh.len() != render_data.solution.nrows() {
                 return BvpWorkerOutcome::Failed(format!(
                     "Solver result shape mismatch: mesh has {} points but solution has {} rows",
-                    x_mesh.len(),
-                    solution.nrows()
+                    render_data.x_mesh.len(),
+                    render_data.solution.nrows()
                 ));
             }
-            if values.len() != solution.ncols() {
+            if values.len() != render_data.solution.ncols() {
                 return BvpWorkerOutcome::Failed(format!(
                     "Solver result shape mismatch: {} unknowns but solution has {} columns",
                     values.len(),
-                    solution.ncols()
+                    render_data.solution.ncols()
                 ));
             }
 
             BvpWorkerOutcome::Completed {
                 plot: Some(BvpPlotData {
-                    arg: reactor.solver.arg_name.clone(),
+                    arg: if return_to_dimension {
+                        render_data.arg_name
+                    } else {
+                        format!("{} / L", render_data.arg_name)
+                    },
                     values,
-                    x_mesh,
-                    solution,
+                    x_mesh: render_data.x_mesh,
+                    solution: render_data.solution,
                 }),
             }
         }
@@ -3709,6 +3996,7 @@ impl CombustionApp {
             BvpSolverFamily::Damped => BVP_SOLVER_ADVANCED_SECTIONS,
             BvpSolverFamily::Frozen => &["strategy_params"],
             BvpSolverFamily::Sci => &[],
+            BvpSolverFamily::CorrectionNewton => &["rel_tolerance"],
         };
         if !advanced_sections.is_empty() {
             render_bvp_section_group(
@@ -4567,12 +4855,12 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     // Section descriptions
     ("initial_guess", "Initial guess values for the numerical solver. Controls starting values for iterative solution process."),
     ("process_conditions", "Main physical and chemical parameters defining the reactor problem setup."),
-    ("boundary_condition", "Initial values for all variables at the reactor inlet."),
+    ("boundary_condition", "Physical inlet mass fractions and temperature [K]; optional outlet q [W/m^2] and species_flux [kg/(m^2 s)]. Flux inputs are converted to solver coordinates."),
     ("diffusion_coefficients", "Molecular diffusion coefficients for each chemical substance [m²/s]."),
     ("reactions", "Chemical reactions with Arrhenius kinetic parameters [A, n, E, Q]."),
     ("solver_settings", "Structured solver backend controls. Residuals/Jacobian assembly is exclusive: choose Lambdify or AOT, then refine matrix and symbolic backends with explicit dropdowns."),
     ("kithe_settings.symbolic_rhs_assembly_policy", "KiThe symbolic RHS equation assembly policy. Auto selects sequential or parallel construction based on system size; Sequential and Parallel force that policy."),
-    ("solver_settings.solver_family", "BVP solver family. Damped and Frozen use the BVP_api routes; Sci selects the collocation-based BVP_sci route. Each family exposes only its supported settings."),
+    ("solver_settings.solver_family", "BVP solver family: Damped, Frozen/Naive, BVP_sci, or fixed-mesh CorrectionNewton. Each family exposes only its supported settings."),
     ("bounds", "Variable bounds for solver convergence. Format: lower_bound, upper_bound for each variable type."),
     ("rel_tolerance", "Relative convergence tolerances for each variable type in the numerical solver."),
     ("strategy_params", "Advanced solver strategy parameters for damped Newton-Raphson method."),
@@ -4584,11 +4872,12 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     ("initial_guess.C", "Initial guess for concentration variables. Type: Float. Range: 0.0-1.0"),
     ("initial_guess.J", "Initial guess for flux variables. Type: Float."),
     ("initial_guess.Teta", "Initial guess for dimensionless temperature variables. Type: Float."),
-    ("initial_guess.q", "Initial guess for heat flux variables. Type: Float."),
+    ("initial_guess.q", "Initial guess for the solver-coordinate heat-flux state q_hat. Type: Float; not a physical W/m^2 input."),
     // process_conditions fields
     ("process_conditions.problem_name", "Optional problem identifier for documentation. Type: Optional<String>. Example: Some(\"HMX_decomposition\")"),
     ("process_conditions.problem_description", "Optional detailed problem description. Type: Optional<String>. Example: Some(\"HMX thermal decomposition study\")"),
     ("process_conditions.substances", "List of chemical substances in the system. Type: Vec<String>. Example: H2O, CO2, N2"),
+    ("process_conditions.density_model", "Gas-density closure. `ideal_gas_fixed_composition` is the default and varies density as rho(T) = rho0*T0/T at fixed pressure and reference composition. `constant` freezes density at rho0."),
     ("process_conditions.t0", "Start position in dimensionless coordinates. Type: Float. Recommended: 0.0"),
     ("process_conditions.t_end", "End position in dimensionless coordinates. Type: Float. Recommended: 1.0"),
     ("process_conditions.n_steps", "Initial number of grid points for spatial discretization. Type: Usize. Range: 10-1000. Higher = more accurate but slower.
@@ -4603,7 +4892,7 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     ("process_conditions.P", "System pressure [Pa]. Type: Float. Range: 1e3-1e8 Pa. Affects reaction rates and transport"),
     ("process_conditions.Cp", "Specific heat capacity [J/kg/K]. Type: Float. Material property for energy balance"),
     ("process_conditions.Lambda", "Thermal conductivity [W/m/K]. Type: Float. Controls heat conduction"),
-    ("process_conditions.m", "Mass velocity [kg/m²/s]. Type: Float. Range: 1e-6 to 1e3. Flow rate per unit area"),
+    ("process_conditions.m", "Mass flux per unit area [kg/(m²·s)]. Type: Float. Range: 1e-6 to 1e3. This is not total mass flow [kg/s]."),
     ("process_conditions.M", "Average molar mass [kg/mol]. Type: Float.  Used in gas law calculations"),
     ("process_conditions.thermal_effects", "Heat of reaction for each reaction [J/mol]. Type: Vec<Float>. Positive=exothermic, Negative=endothermic"),
     ("process_conditions.groups", "Enable custom atomic group definitions. Type: Boolean. true=use custom groups, false=standard elements"),
@@ -4613,9 +4902,13 @@ pub const FIELD_HELP_MAP_BVP: &[(&str, &str)] = &[
     ("solver_settings.scheme", "Spatial discretization scheme. Type: String. Options: forward, trapezoid. forward remains the lightest-weight route."),
     ("solver_settings.method", "Linear algebra backend. Type: String. Options: Banded, Sparse. This is the canonical matrix-storage selector."),
     ("solver_settings.strategy", "Convergence strategy. Type: String. Options: Damped, Frozen, Naive. Damped remains the robust default."),
-    ("solver_settings.execution", "BVP_sci callback execution route. Options: lambdify or aot. AOT-specific fields are shown only for AOT."),
-    ("solver_settings.assembly", "BVP_sci symbolic expression frontend. Options: atom_view_native or expr_legacy."),
-    ("solver_settings.matrix_layout", "BVP_sci matrix storage layout. Options: dense, sparse, banded, banded_auto."),
+    ("solver_settings.execution", "Symbolic callback execution route. Options: lambdify or aot. AOT-specific fields are shown only for AOT."),
+    ("solver_settings.assembly", "Symbolic expression frontend. Options: atom_view_native or expr_legacy."),
+    ("solver_settings.matrix_layout", "Linear-system matrix layout. Supported options depend on the selected solver family."),
+    ("solver_settings.absolute_tolerance", "CorrectionNewton absolute weighted-correction tolerance."),
+    ("solver_settings.default_relative_tolerance", "CorrectionNewton relative tolerance used for states without an explicit rel_tolerance entry."),
+    ("solver_settings.max_jacobian_age", "Maximum number of Newton steps for which CorrectionNewton reuses the Jacobian."),
+    ("solver_settings.max_damping_trials", "Maximum damping trials per CorrectionNewton iteration."),
     ("solver_settings.banded_lower", "Lower bandwidth for BVP_sci when matrix_layout is banded."),
     ("solver_settings.banded_upper", "Upper bandwidth for BVP_sci when matrix_layout is banded."),
     ("solver_settings.tolerance", "Route-specific convergence tolerance. Used by Frozen and BVP_sci; Damped uses abs_tolerance."),

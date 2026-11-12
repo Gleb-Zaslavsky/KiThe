@@ -1,11 +1,10 @@
-use std::collections::HashMap;
-
+use super::super::solid_state_kinetics_IVP::SolidStateIvpSolverOptions;
 use super::super::solid_state_kinetics_IVP::{IVPSolution, KineticModelIVP, KineticModelNames};
 
 use super::kinetic_methods::{ConversionGridBuilder, ExperimentData, KineticDataView};
 use super::one_experiment_dataset::TGADomainError;
 use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
-use RustedSciThe::numerical::ODE_api2::{SolverParam, SolverType};
+use RustedSciThe::numerical::StiffAPI::StiffSolverKind;
 
 pub fn solution_to_experiment(sol: IVPSolution, heating_rate: f64, id: &str) -> ExperimentData {
     ExperimentData {
@@ -33,39 +32,44 @@ pub fn simulate_tga_dataset(
     t0: f64,
     betas: &[f64],
     t_end: f64,
-    solvertype: SolverType,
+    solvertype: StiffSolverKind,
     params: Vec<f64>,
     id: &str,
 ) -> Result<KineticDataView, TGADomainError> {
     let mut experiments = Vec::with_capacity(betas.len());
 
     for &beta in betas {
-        let mut ivp = KineticModelIVP::new(solvertype.clone());
-
-        // Reduce solver work for unit tests by limiting the number of steps.
-        // This avoids long-running integrations when t_end is large.
+        let mut ivp = KineticModelIVP::new(solvertype);
         let step = (t_end / 2000.0).max(1e-4).min(1.0);
         let max_iter = 500;
-        let mut solver_params: HashMap<String, SolverParam> = HashMap::new();
-        solver_params.insert("step_size".to_string(), SolverParam::Float(step));
-        solver_params.insert("max_step".to_string(), SolverParam::Float(step));
-        solver_params.insert("max_iterations".to_string(), SolverParam::Int(max_iter));
-        solver_params.insert("tolerance".to_string(), SolverParam::Float(1e-3));
-        solver_params.insert("rtol".to_string(), SolverParam::Float(1e-3));
-        solver_params.insert("atol".to_string(), SolverParam::Float(1e-3));
-        solver_params.insert("parallel".to_string(), SolverParam::Bool(true));
-        ivp.set_solver_params(solver_params);
+        let mut options = SolidStateIvpSolverOptions {
+            max_step: step,
+            rtol: 1e-3,
+            atol: 1e-3,
+            max_steps: (solvertype != StiffSolverKind::Lsode2).then_some(max_iter),
+            max_newton_iterations: max_iter,
+            newton_tolerance: 1e-3,
+            ..SolidStateIvpSolverOptions::default()
+        };
+        options.telemetry = RustedSciThe::numerical::SolverTelemetryMode::Off;
+        ivp.set_solver_options(options);
 
-        let _ = ivp.set_model(model.clone(), params.clone());
-        let _ = ivp.set_arrhenius(e, a);
-        let _ = ivp.set_heating_program(t0, beta);
-        let _ = ivp.set_time(t_end);
+        let map_ivp_error = |stage: &str, error: String| {
+            TGADomainError::InvalidOperation(format!("solid-state IVP {stage} failed: {error}"))
+        };
+        ivp.set_model(model, params.clone())
+            .map_err(|error| map_ivp_error("model configuration", error))?;
+        ivp.set_arrhenius(e, a)
+            .map_err(|error| map_ivp_error("Arrhenius configuration", error))?;
+        ivp.set_heating_program(t0, beta)
+            .map_err(|error| map_ivp_error("heating-program configuration", error))?;
+        ivp.set_time(t_end)
+            .map_err(|error| map_ivp_error("time configuration", error))?;
+        ivp.solve().map_err(|error| map_ivp_error("solve", error))?;
 
-        let _ = ivp
-            .solve()
-            .map_err(|s| TGADomainError::InvalidOperation(format!("error solving ivp {}", s)));
-
-        let sol: IVPSolution = ivp.get_solution().unwrap();
+        let sol: IVPSolution = ivp
+            .get_solution()
+            .map_err(|error| map_ivp_error("postprocessing", error))?;
 
         let exp = solution_to_experiment(sol, beta, id);
         println!("problem for beta = {} solved", beta);
@@ -140,7 +144,7 @@ fn test_kas_activation_energy() {
         0.0,
         &[2.0, 5.0, 10.0, 20.0],
         50.0,
-        SolverType::Bdf,
+        StiffSolverKind::Bdf,
         vec![],
         "",
     )

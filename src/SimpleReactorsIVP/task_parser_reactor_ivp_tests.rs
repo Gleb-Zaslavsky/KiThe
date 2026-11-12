@@ -1,0 +1,524 @@
+use super::*;
+use crate::Kinetics::mechfinder_api::ReactionData;
+use crate::SimpleReactorsIVP::SimpleReactorIVP::SimpleReactorTask;
+use RustedSciThe::command_interpreter::task_parser::{DocumentMap, DocumentParser};
+use RustedSciThe::command_interpreter::task_parser_ivp::{IvpMethodSpec, Lsode2TaskExecutionSpec};
+
+fn parse_document_for_ivp(input: &str) -> DocumentMap {
+    let mut parser = DocumentParser::new(input.to_string());
+    parser.parse_document().expect("IVP document should parse");
+    parser
+        .get_result()
+        .expect("IVP document map should exist")
+        .clone()
+}
+
+#[test]
+fn test_parse_reactor_ivp_document_delegates_solver_settings() {
+    let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+process_conditions
+problem_name: CondensedBurn
+problem_description: Condensed-phase test document
+ro: 1800.0
+Cp: 1200.0
+Lambda: 0.35
+m: 0.02
+L: 0.02
+thermal_effects: [125000.0]
+
+scaling
+dT: 100.0
+T_scale: 75.0
+L: 0.02
+
+initial_conditions
+T: 900.0
+q: 0.0
+A: 1.0
+
+solver_options
+lsode2_method_family: auto
+lsode2_symbolic_assembly: AtomView
+lsode2_symbolic_execution: AOT
+lsode2_aot_toolchain: c_tcc
+lsode2_aot_profile: release
+lsode2_linear_structure: sparse
+lsode2_native_execution: faithful_bdf_solve
+"#;
+
+    let spec = parse_reactor_ivp_document_from_str(input)
+        .expect("reactor IVP document should parse successfully");
+
+    assert_eq!(spec.problem_name.as_deref(), Some("CondensedBurn"));
+    assert_eq!(
+        spec.problem_description.as_deref(),
+        Some("Condensed-phase test document")
+    );
+    assert_eq!(spec.physical.ro, 1800.0);
+    assert_eq!(spec.physical.Cp, 1200.0);
+    assert_eq!(spec.physical.Lambda, 0.35);
+    assert_eq!(spec.physical.m, 0.02);
+    assert_eq!(spec.physical.L, 0.02);
+    assert_eq!(spec.scaling.L, 0.02);
+    assert_eq!(spec.scaling.dT, 100.0);
+    assert_eq!(spec.scaling.T_scale, 75.0);
+    assert_eq!(spec.initial_conditions["T"], 900.0);
+    assert_eq!(spec.initial_conditions["q"], 0.0);
+    assert_eq!(spec.initial_conditions["A"], 1.0);
+    assert_eq!(spec.thermal_effects, vec![125000.0]);
+    assert!(!spec.stop_condition.enabled);
+    assert!(spec.stop_condition.species.is_none());
+    assert!(spec.stop_condition.threshold.is_none());
+    assert_eq!(spec.solver_settings.solver.method, IvpMethodSpec::Lsode2);
+
+    let lsode2 = spec
+        .solver_settings
+        .solver_options
+        .lsode2
+        .as_ref()
+        .expect("LSODE2-specific options should be present");
+    assert!(matches!(
+        lsode2.symbolic_execution,
+        Some(Lsode2TaskExecutionSpec::Aot { .. })
+    ));
+}
+
+#[test]
+fn test_canonical_reactor_ivp_template_is_parser_ready() {
+    let template = build_canonical_condensed_reactor_ivp_task_template();
+    let spec = parse_reactor_ivp_document_from_str(&template)
+        .expect("canonical reactor IVP template should parse");
+
+    assert_eq!(spec.problem_name.as_deref(), Some("CondensedBurn"));
+    assert_eq!(
+        spec.problem_description.as_deref(),
+        Some("Canonical condensed-phase IVP template")
+    );
+    assert_eq!(spec.physical.ro, 1800.0);
+    assert_eq!(spec.physical.Cp, 1200.0);
+    assert_eq!(spec.physical.Lambda, 0.35);
+    assert_eq!(spec.physical.m, 0.02);
+    assert_eq!(spec.physical.L, 0.02);
+    assert_eq!(spec.scaling.L, 0.02);
+    assert_eq!(spec.initial_conditions["T"], 900.0);
+    assert_eq!(spec.initial_conditions["q"], 0.0);
+    assert_eq!(spec.initial_conditions["A"], 1.0);
+    assert_eq!(spec.initial_conditions["B"], 0.0);
+    assert_eq!(spec.thermal_effects, vec![125000.0]);
+    assert_eq!(spec.solver_settings.solver.method, IvpMethodSpec::Lsode2);
+    assert!(spec.solver_settings.solver_options.lsode2.is_some());
+}
+
+#[test]
+fn ivp_document_roundtrips_user_mechanism_and_species_order() {
+    let input = build_canonical_condensed_reactor_ivp_task_template();
+    let mut spec = parse_reactor_ivp_document_from_str(&input).unwrap();
+    spec.initial_conditions.insert("H2".to_string(), 0.7);
+    spec.initial_conditions.insert("H".to_string(), 0.3);
+    spec.mechanism = Some(ReactorIvpMechanismSpec {
+        substances: vec!["H2".to_string(), "H".to_string()],
+        reactions: vec![
+            ReactionData::try_new_elementary(
+                "H2=>2H".to_string(),
+                vec![1200.0, 0.25, 18000.0],
+                None,
+            )
+            .unwrap(),
+        ],
+    });
+
+    let serialized = spec.document_to_string();
+    assert!(serialized.contains("substances: H2, H"));
+    assert!(serialized.contains("reaction_000_equation: H2=>2H"));
+    assert!(serialized.contains("reaction_000_arrhenius: [1200, 0.25, 18000]"));
+    assert!(!serialized.contains("mechanism_json"));
+    let restored = parse_reactor_ivp_document_from_str(&serialized).unwrap();
+    let mechanism = restored.mechanism.as_ref().unwrap();
+    assert_eq!(mechanism.substances, vec!["H2", "H"]);
+    assert_eq!(mechanism.reactions.len(), 1);
+    assert_eq!(mechanism.reactions[0].eq, "H2=>2H");
+    assert_eq!(restored.thermal_effects, vec![125000.0]);
+    assert_eq!(serialized, restored.document_to_string());
+}
+
+#[test]
+fn standalone_solver_family_survives_document_roundtrip() {
+    for method in ["BDF", "Radau5"] {
+        let input = format!(
+            "task\nsolver: IVP\nmethod: {method}\n\
+             process_conditions\nro: 1800.0\nCp: 1200.0\nLambda: 0.35\nm: 0.02\nL: 0.02\nthermal_effects: [125000.0]\n\
+             initial_conditions\nT: 900.0\nq: 0.0\nA: 1.0\n\
+             solver_options\nmax_iterations: 17\nrtol: 1e-6\natol: 1e-8\nmax_step: 1e-3\n"
+        );
+        let parsed = parse_reactor_ivp_document_from_str(&input)
+            .expect("standalone solver document should parse");
+        let serialized = parsed.document_to_string();
+        let reparsed = parse_reactor_ivp_document_from_str(&serialized)
+            .expect("serialized standalone solver document should parse");
+
+        assert_eq!(
+            format!("{:?}", reparsed.solver_settings.solver.method),
+            if method == "BDF" { "Bdf" } else { "Radau5" }
+        );
+        assert_eq!(
+            reparsed
+                .hybrid_solver_settings
+                .as_ref()
+                .expect("hybrid solver settings should be retained")
+                .solver_kind(),
+            if method == "BDF" {
+                RustedSciThe::numerical::StiffAPI::StiffSolverKind::Bdf
+            } else {
+                RustedSciThe::numerical::StiffAPI::StiffSolverKind::Radau
+            }
+        );
+        assert_eq!(
+            reparsed.solver_settings.solver_options.max_iterations,
+            Some(17)
+        );
+        assert_eq!(serialized, reparsed.document_to_string());
+    }
+}
+
+#[test]
+fn test_parse_reactor_ivp_document_delegates_integer_and_optional_solver_settings() {
+    let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+process_conditions
+ro: 1800.0
+Cp: 1200.0
+Lambda: 0.35
+m: 0.02
+L: 0.02
+thermal_effects: [125000.0]
+
+initial_conditions
+T: 900.0
+q: 0.0
+A: 1.0
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 1e-3
+first_step: Some(1e-6)
+lsode2_method_family: auto
+lsode2_symbolic_assembly: AtomView
+lsode2_symbolic_execution: LambdifyExpr
+lsode2_linear_structure: sparse
+"#;
+
+    let spec =
+        parse_reactor_ivp_document_from_str(input).expect("typed solver settings should parse");
+
+    assert_eq!(spec.solver_settings.solver_options.max_iterations, None);
+    assert_eq!(spec.solver_settings.solver_options.rtol, Some(1e-6));
+    assert_eq!(spec.solver_settings.solver_options.atol, Some(1e-8));
+    assert_eq!(spec.solver_settings.solver_options.max_step, Some(1e-3));
+    assert_eq!(spec.solver_settings.solver_options.first_step, Some(1e-6));
+    assert_eq!(spec.solver_settings.solver_options.parallel, None);
+    assert!(spec.solver_settings.solver_options.lsode2.is_some());
+}
+
+#[test]
+fn test_parse_reactor_ivp_document_reads_stop_condition_section() {
+    let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+process_conditions
+ro: 1800.0
+Cp: 1200.0
+Lambda: 0.35
+m: 0.02
+L: 0.02
+thermal_effects: [125000.0]
+
+initial_conditions
+T: 900.0
+q: 0.0
+A: 1.0
+B: 0.0
+
+stop_condition
+enabled: true
+species: A
+threshold: 1e-4
+"#;
+
+    let spec = parse_reactor_ivp_document_from_str(input)
+        .expect("stop-condition document should parse successfully");
+
+    assert!(spec.stop_condition.enabled);
+    assert_eq!(spec.stop_condition.species.as_deref(), Some("A"));
+    assert_eq!(spec.stop_condition.threshold, Some(1.0e-4));
+}
+
+#[test]
+fn test_parse_reactor_ivp_document_requires_physics_section() {
+    let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+initial_conditions
+T: 900.0
+q: 0.0
+A: 1.0
+"#;
+
+    let error = parse_reactor_ivp_document_from_str(input)
+        .expect_err("missing physics section should be rejected");
+    assert!(error.to_string().contains("process_conditions"));
+}
+
+#[test]
+fn test_apply_reactor_ivp_document_copies_physics_state() {
+    let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+process_conditions
+ro: 1800.0
+Cp: 1200.0
+Lambda: 0.35
+m: 0.02
+L: 0.02
+thermal_effects: [125000.0]
+
+initial_conditions
+T: 900.0
+q: 0.0
+A: 1.0
+"#;
+
+    let spec = parse_reactor_ivp_document_from_str(input)
+        .expect("reactor IVP document should parse successfully");
+    let mut task = SimpleReactorTask::new();
+
+    spec.apply_to_task(&mut task)
+        .expect("physics contract should apply to the task");
+
+    assert_eq!(task.ro, 1800.0);
+    assert_eq!(task.Cp, 1200.0);
+    assert_eq!(task.Lambda, 0.35);
+    assert_eq!(task.m, 0.02);
+    assert_eq!(task.L, 0.02);
+    assert_eq!(task.thermal_effects, vec![125000.0]);
+    assert_eq!(task.initial_conditions["T"], 900.0);
+    assert_eq!(task.initial_conditions["q"], 0.0);
+    assert_eq!(task.initial_conditions["A"], 1.0);
+}
+
+#[test]
+fn test_validate_against_species_rejects_missing_initial_entries() {
+    let document = parse_document_for_ivp(
+        r#"
+task
+solver: IVP
+method: LSODE2
+
+process_conditions
+ro: 1800.0
+Cp: 1200.0
+Lambda: 0.35
+m: 0.02
+L: 0.02
+thermal_effects: [125000.0]
+
+initial_conditions
+T: 900.0
+q: 0.0
+A: 1.0
+"#,
+    );
+
+    let spec = parse_reactor_ivp_document(&document).expect("document should parse");
+    let error = spec
+        .validate_against_species(&["B".to_string()])
+        .expect_err("missing species should be rejected");
+    assert!(error.to_string().contains("B"));
+}
+
+#[test]
+fn test_validate_against_species_rejects_unknown_stop_condition_species() {
+    let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+process_conditions
+ro: 1800.0
+Cp: 1200.0
+Lambda: 0.35
+m: 0.02
+L: 0.02
+thermal_effects: [125000.0]
+
+initial_conditions
+T: 900.0
+q: 0.0
+A: 1.0
+
+stop_condition
+enabled: true
+species: UnknownFuel
+threshold: 1e-4
+"#;
+
+    let spec = parse_reactor_ivp_document_from_str(input)
+        .expect("stop-condition document should parse successfully");
+
+    let error = spec
+        .validate_against_species(&["A".to_string()])
+        .expect_err("unknown stop-condition species should be rejected");
+    assert!(error.to_string().contains("UnknownFuel"));
+}
+
+#[test]
+fn test_validate_document_is_pure_and_does_not_mutate_task() {
+    let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+process_conditions
+ro: 1800.0
+Cp: 1200.0
+Lambda: 0.35
+m: 0.02
+L: 0.02
+thermal_effects: [125000.0]
+
+initial_conditions
+T: 900.0
+q: 0.0
+A: 1.0
+"#;
+
+    let spec = parse_reactor_ivp_document_from_str(input)
+        .expect("reactor IVP document should parse successfully");
+    let mut task = SimpleReactorTask::new();
+    task.set_density(1550.0)
+        .expect("density should be accepted");
+    task.m = 0.03;
+    task.L = 0.07;
+
+    let snapshot_before = (task.ro, task.m, task.L, task.initial_conditions.clone());
+    let result = spec.validate(&["A".to_string(), "B".to_string()]);
+
+    assert!(result.is_err(), "missing B should make validation fail");
+    assert_eq!(task.ro, snapshot_before.0);
+    assert_eq!(task.m, snapshot_before.1);
+    assert_eq!(task.L, snapshot_before.2);
+    assert_eq!(task.initial_conditions, snapshot_before.3);
+}
+
+#[test]
+fn test_reactor_ivp_document_roundtrip_preserves_solver_and_physics_contract() {
+    let input = r#"
+task
+solver: IVP
+method: LSODE2
+
+process_conditions
+problem_name: RoundTripCondensed
+problem_description: Roundtrip document
+ro: 1800.0
+Cp: 1200.0
+Lambda: 0.35
+m: 0.02
+L: 0.02
+thermal_effects: [125000.0]
+
+scaling
+dT: 100.0
+T_scale: 75.0
+L: 0.02
+
+initial_conditions
+T: 900.0
+q: 0.0
+A: 1.0
+B: 0.0
+
+stop_condition
+enabled: true
+species: A
+threshold: 1e-4
+
+solver_options
+rtol: 1e-6
+atol: 1e-8
+max_step: 1e-3
+first_step: Some(1e-6)
+lsode2_method_family: auto
+lsode2_symbolic_assembly: AtomView
+lsode2_symbolic_execution: AOT
+lsode2_aot_toolchain: c_tcc
+lsode2_aot_profile: debug
+lsode2_aot_output_dir: ./out
+lsode2_linear_structure: banded
+lsode2_banded_kl: 2
+lsode2_banded_ku: 3
+lsode2_linear_solver_policy: dense_lu
+lsode2_native_execution: probe_before_bridge
+lsode2_native_max_step_attempts: 111
+lsode2_native_max_accepted_steps: 222
+"#;
+
+    let spec = parse_reactor_ivp_document_from_str(input)
+        .expect("reactor IVP document should parse successfully");
+    let serialized = spec.document_to_string();
+    let roundtripped = parse_reactor_ivp_document_from_str(&serialized)
+        .expect("serialized reactor IVP document should parse successfully");
+
+    assert_eq!(
+        roundtripped.problem_name.as_deref(),
+        Some("RoundTripCondensed")
+    );
+    assert_eq!(
+        roundtripped.problem_description.as_deref(),
+        Some("Roundtrip document")
+    );
+    assert_eq!(roundtripped.physical.ro, 1800.0);
+    assert_eq!(roundtripped.physical.Cp, 1200.0);
+    assert_eq!(roundtripped.physical.Lambda, 0.35);
+    assert_eq!(roundtripped.physical.m, 0.02);
+    assert_eq!(roundtripped.physical.L, 0.02);
+    assert_eq!(roundtripped.scaling.L, 0.02);
+    assert_eq!(roundtripped.initial_conditions["T"], 900.0);
+    assert_eq!(roundtripped.initial_conditions["q"], 0.0);
+    assert_eq!(roundtripped.initial_conditions["A"], 1.0);
+    assert_eq!(roundtripped.initial_conditions["B"], 0.0);
+    assert_eq!(roundtripped.thermal_effects, vec![125000.0]);
+    assert!(roundtripped.stop_condition.enabled);
+    assert_eq!(roundtripped.stop_condition.species.as_deref(), Some("A"));
+    assert_eq!(roundtripped.stop_condition.threshold, Some(1.0e-4));
+    assert_eq!(
+        roundtripped.solver_settings.solver.method,
+        IvpMethodSpec::Lsode2
+    );
+
+    let lsode2 = roundtripped
+        .solver_settings
+        .solver_options
+        .lsode2
+        .as_ref()
+        .expect("LSODE2-specific options should be preserved");
+    assert!(matches!(
+        lsode2.symbolic_execution,
+        Some(Lsode2TaskExecutionSpec::Aot { .. })
+    ));
+    assert!(serialized.contains("stop_condition"));
+    assert_eq!(serialized, roundtripped.document_to_string());
+}

@@ -1,5 +1,5 @@
 use crate::Kinetics::solid_state_kinetics_IVP::{KineticModelIVP, KineticModelNames};
-use RustedSciThe::numerical::ODE_api2::{NonStiffMethod, SolverType};
+use RustedSciThe::numerical::StiffAPI::StiffSolverKind;
 
 use dialoguer::{Input, Select, theme::ColorfulTheme};
 
@@ -28,7 +28,7 @@ pub fn solid_state_ivp_menu() {
 
 fn run_solver() -> Result<(), String> {
     // Step 1: Choose solver type
-    let solver_type = choose_solver_type()?;
+    let solver_type = choose_solver_kind()?;
 
     // Step 2: Create solver instance
     let mut ivp = KineticModelIVP::new(solver_type);
@@ -52,13 +52,13 @@ fn run_solver() -> Result<(), String> {
     Ok(())
 }
 
-fn choose_solver_type() -> Result<SolverType, String> {
+fn choose_solver_kind() -> Result<StiffSolverKind, String> {
     let theme = ColorfulTheme::default();
     let items = vec![
-        "BDF (recommended for stiff problems!!!OPTION NON PRODUCT READY)",
+        "BDF (recommended for stiff problems)",
         "Radau (high accuracy)",
-        "RK45 (non-stiff problems)",
         "Backward Euler (simple implicit)",
+        "LSODE2 (automatic stiff workflow)",
     ];
     let selection = Select::with_theme(&theme)
         .with_prompt("Choose solver type")
@@ -68,10 +68,10 @@ fn choose_solver_type() -> Result<SolverType, String> {
         .unwrap();
 
     match selection {
-        0 => Ok(SolverType::Bdf),
-        1 => Ok(SolverType::Radau),
-        2 => Ok(SolverType::NonStiff(NonStiffMethod::Rk45)),
-        3 => Ok(SolverType::BackwardEuler),
+        0 => Ok(StiffSolverKind::Bdf),
+        1 => Ok(StiffSolverKind::Radau),
+        2 => Ok(StiffSolverKind::BackwardEuler),
+        3 => Ok(StiffSolverKind::Lsode2),
         _ => Err("Invalid solver choice".to_string()),
     }
 }
