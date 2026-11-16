@@ -116,7 +116,12 @@ impl IsoconversionalMethod {
     pub fn required_columns_by_nature(&self) -> Vec<ColumnNature> {
         match self {
             IsoconversionalMethod::FriedmanIntegral => {
-                vec![ColumnNature::Conversion, ColumnNature::Time]
+                vec![
+                    ColumnNature::Conversion,
+                    ColumnNature::Time,
+                    ColumnNature::Temperature,
+                    ColumnNature::ConversionRate,
+                ]
             }
             IsoconversionalMethod::OFW
             | IsoconversionalMethod::KAS

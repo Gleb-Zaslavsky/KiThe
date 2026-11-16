@@ -1,6 +1,10 @@
 //! Golden Pipeline dialog for configuring and applying the golden pipeline transformation.
 
+use crate::Kinetics::experimental_kinetics::column_provenance::{
+    ColumnTransformKind, QualityStatus,
+};
 use crate::Kinetics::experimental_kinetics::exp_engine_api::GoldenPipelineConfig;
+use crate::Kinetics::experimental_kinetics::math::ndarray_statistics::FilterQualityReport;
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
 use eframe::egui;
 use log::info;
@@ -11,6 +15,8 @@ pub struct GoldenPipelineDialogState {
     pub open: bool,
     pub config: GoldenPipelineConfig,
     pub last_error: Option<String>,
+    pub quality_report: Option<FilterQualityReport>,
+    pub quality_note: Option<String>,
 }
 
 impl Default for GoldenPipelineDialogState {
@@ -19,6 +25,8 @@ impl Default for GoldenPipelineDialogState {
             open: false,
             config: GoldenPipelineConfig::default(),
             last_error: None,
+            quality_report: None,
+            quality_note: None,
         }
     }
 }
@@ -29,6 +37,32 @@ impl GoldenPipelineDialogState {
         self.open = true;
         self.config = GoldenPipelineConfig::default();
         self.last_error = None;
+        self.quality_report = None;
+        self.quality_note = None;
+    }
+
+    fn find_savitzky_golay_report(
+        model: &PlotModel,
+        experiment_id: &str,
+    ) -> Option<FilterQualityReport> {
+        let experiment = model.series.get_experiment_by_id(experiment_id).ok()?;
+        for column in experiment.dataset.list_of_columns() {
+            let Some(provenance) = experiment.dataset.column_provenance(&column) else {
+                continue;
+            };
+            for step in provenance.steps.iter().rev() {
+                if matches!(&step.kind, ColumnTransformKind::SavitzkyGolay { .. }) {
+                    if let Some(quality) = &step.quality {
+                        if matches!(&quality.status, QualityStatus::Computed) {
+                            if let Some(report) = &quality.report {
+                                return Some(report.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Show the dialog window.
@@ -173,8 +207,43 @@ impl GoldenPipelineDialogState {
                     ui.colored_label(egui::Color32::RED, err);
                 }
 
+                if let Some(report) = &self.quality_report {
+                    ui.separator();
+                    ui.strong("Savitzky-Golay mass smoothing quality");
+                    ui.label(format!(
+                        "Compared: {} -> {}",
+                        report.column_raw, report.column_filtered
+                    ));
+                    egui::Grid::new("golden_pipeline_quality_report")
+                        .num_columns(2)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.label("First-difference roughness ratio");
+                            ui.label(format!("{:.6}", report.roughness_ratio_1st));
+                            ui.end_row();
+                            ui.label("Second-difference roughness ratio");
+                            ui.label(format!("{:.6}", report.roughness_ratio_2nd));
+                            ui.end_row();
+                            ui.label("RMSE vs input (mass units)");
+                            ui.label(format!("{:.6}", report.rmse));
+                            ui.end_row();
+                            ui.label("Normalized RMSE");
+                            ui.label(format!("{:.6}", report.normalized_rmse));
+                            ui.end_row();
+                            ui.label("Correlation");
+                            ui.label(format!("{:.6}", report.correlation));
+                            ui.end_row();
+                        });
+                    ui.label(
+                        "Roughness ratios below 1 mean smoother differences; these metrics compare with the input, not with an unknown true signal.",
+                    );
+                }
+                if let Some(note) = &self.quality_note {
+                    ui.label(note);
+                }
+
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button("Close").clicked() {
                         should_close = true;
                     }
                     if ui.button("Calculate").clicked() {
@@ -191,20 +260,44 @@ impl GoldenPipelineDialogState {
 
         if should_apply {
             info!("Applying golden pipeline with config: {:?}", self.config);
+            self.last_error = None;
+            self.quality_report = None;
+            self.quality_note = None;
             // Get selected experiment ID
             match model.get_experiment_by_selected_curve() {
-                Ok(id) => match model.apply_golden_pipeline(&id, self.config.clone()) {
-                    Ok(()) => {
-                        self.last_error = None;
-                        self.open = false;
-                        info!("Golden pipeline applied successfully.");
+                Ok(id) => {
+                    let output_id = if self.config.save_to_new_experiment {
+                        format!("proceeded_{id}")
+                    } else {
+                        id.clone()
+                    };
+                    match model.apply_golden_pipeline(&id, self.config.clone()) {
+                        Ok(()) => {
+                            self.quality_report =
+                                Self::find_savitzky_golay_report(model, &output_id);
+                            if self.quality_report.is_none() {
+                                self.quality_note = Some(
+                                "Pipeline completed, but no comparable SG quality report was recorded."
+                                    .to_string(),
+                            );
+                            }
+                            ctx.request_repaint();
+                            let _ = model.push_message(&format!(
+                                "Golden Pipeline completed for '{output_id}'"
+                            ));
+                            info!("Golden pipeline applied successfully.");
+                        }
+                        Err(e) => {
+                            let message = format!("Golden Pipeline failed: {e:?}");
+                            self.last_error = Some(message.clone());
+                            let _ = model.push_message(&message);
+                        }
                     }
-                    Err(e) => {
-                        self.last_error = Some(format!("Failed to apply golden pipeline: {:?}", e));
-                    }
-                },
+                }
                 Err(e) => {
-                    self.last_error = Some(format!("No selected experiment: {:?}", e));
+                    let message = format!("Golden Pipeline could not start: {e:?}");
+                    self.last_error = Some(message.clone());
+                    let _ = model.push_message(&message);
                 }
             }
         }

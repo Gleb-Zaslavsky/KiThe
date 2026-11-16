@@ -5,10 +5,10 @@
 //! Each step can also carry a quality report when the operation preserves
 //! row alignment and a before/after comparison is meaningful.
 
-use crate::Kinetics::experimental_kinetics::ndarray_statistics::FilterQualityReport;
+use crate::Kinetics::experimental_kinetics::math::ndarray_statistics::FilterQualityReport;
 
 /// Full provenance chain for one column.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ColumnProvenance {
     /// Root columns that ultimately feed this column.
     pub root_columns: Vec<String>,
@@ -17,7 +17,7 @@ pub struct ColumnProvenance {
 }
 
 /// One provenance step together with optional quality metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ColumnTransformStep {
     pub input_columns: Vec<String>,
     pub output_column: String,
@@ -28,7 +28,7 @@ pub struct ColumnTransformStep {
 }
 
 /// Comparison target used by quality reports.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum QualityReference {
     PreviousStep,
     RawRoot,
@@ -36,7 +36,7 @@ pub enum QualityReference {
 }
 
 /// Quality status for a transformation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum QualityStatus {
     Computed,
     NotApplicable(String),
@@ -44,10 +44,10 @@ pub enum QualityStatus {
 }
 
 /// Filter quality together with the comparison target and status.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TransformQuality {
     pub compared_to: QualityReference,
-    pub report: FilterQualityReport,
+    pub report: Option<FilterQualityReport>,
     pub status: QualityStatus,
 }
 
@@ -55,7 +55,7 @@ pub struct TransformQuality {
 ///
 /// This is intentionally compact and human-readable so it can be shown in GUI
 /// tooltips, side panels, or debug logs without extra decoding.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ColumnTransformKind {
     Raw {
         source: String,
@@ -212,11 +212,11 @@ impl ColumnProvenance {
         ));
     }
 
-    /// Update the output column name on all steps.
+    /// Rename the current column without rewriting historical output names.
     pub fn rename_output(&mut self, new_name: impl Into<String>) {
         let new_name = new_name.into();
-        for step in &mut self.steps {
-            step.output_column = new_name.clone();
+        if let Some(last_step) = self.steps.last_mut() {
+            last_step.output_column = new_name;
         }
     }
 
@@ -287,8 +287,16 @@ impl TransformQuality {
     pub fn computed(report: FilterQualityReport, compared_to: QualityReference) -> Self {
         Self {
             compared_to,
-            report,
+            report: Some(report),
             status: QualityStatus::Computed,
+        }
+    }
+
+    pub fn unavailable(compared_to: QualityReference, reason: impl Into<String>) -> Self {
+        Self {
+            compared_to,
+            report: None,
+            status: QualityStatus::Failed(reason.into()),
         }
     }
 
@@ -299,30 +307,30 @@ impl TransformQuality {
             QualityReference::NamedColumn(name) => format!("column {}", name),
         };
         let status = self.status.to_string();
-        vec![
-            format!(
-                "    quality: comparing {} -> {} ({})",
-                self.report.column_raw, self.report.column_filtered, direction
-            ),
-            format!("      status: {}", status),
-            format!("      RMSE: {:.6} (lower is better)", self.report.rmse),
-            format!(
-                "      NRMSE: {:.6} (lower is better)",
-                self.report.normalized_rmse
-            ),
-            format!(
-                "      Corr: {:.6} (higher is better)",
-                self.report.correlation
-            ),
-            format!(
-                "      Roughness 1st: {:.6} (lower is better)",
-                self.report.roughness_ratio_1st
-            ),
-            format!(
-                "      Roughness 2nd: {:.6} (lower is better)",
-                self.report.roughness_ratio_2nd
-            ),
-        ]
+        let mut lines = vec![format!("    quality: {} ({})", status, direction)];
+        if let Some(report) = &self.report {
+            lines.extend([
+                format!(
+                    "      comparing {} -> {}",
+                    report.column_raw, report.column_filtered
+                ),
+                format!("      RMSE: {:.6} (lower is better)", report.rmse),
+                format!(
+                    "      NRMSE: {:.6} (lower is better)",
+                    report.normalized_rmse
+                ),
+                format!("      Corr: {:.6} (higher is better)", report.correlation),
+                format!(
+                    "      Roughness 1st: {:.6} (lower is better)",
+                    report.roughness_ratio_1st
+                ),
+                format!(
+                    "      Roughness 2nd: {:.6} (lower is better)",
+                    report.roughness_ratio_2nd
+                ),
+            ]);
+        }
+        lines
     }
 }
 
@@ -348,18 +356,21 @@ impl std::fmt::Display for QualityStatus {
 
 impl std::fmt::Display for TransformQuality {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "comparing {} vs {} [{}] | RMSE={:.6} | NRMSE={:.6} | Corr={:.6} | Roughness 1st={:.6} | Roughness 2nd={:.6}",
-            self.report.column_raw,
-            self.report.column_filtered,
-            self.status,
-            self.report.rmse,
-            self.report.normalized_rmse,
-            self.report.correlation,
-            self.report.roughness_ratio_1st,
-            self.report.roughness_ratio_2nd
-        )
+        match &self.report {
+            Some(report) => write!(
+                f,
+                "comparing {} vs {} [{}] | RMSE={:.6} | NRMSE={:.6} | Corr={:.6} | Roughness 1st={:.6} | Roughness 2nd={:.6}",
+                report.column_raw,
+                report.column_filtered,
+                self.status,
+                report.rmse,
+                report.normalized_rmse,
+                report.correlation,
+                report.roughness_ratio_1st,
+                report.roughness_ratio_2nd
+            ),
+            None => write!(f, "quality unavailable [{}]", self.status),
+        }
     }
 }
 
@@ -449,7 +460,7 @@ impl std::fmt::Display for ColumnTransformKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Kinetics::experimental_kinetics::ndarray_statistics::FilterQualityReport;
+    use crate::Kinetics::experimental_kinetics::math::ndarray_statistics::FilterQualityReport;
 
     #[test]
     fn transform_quality_display_includes_all_report_metrics() {
@@ -488,12 +499,49 @@ mod tests {
         let quality = TransformQuality::computed(report, QualityReference::PreviousStep);
         let rendered = quality.pretty_lines().join("\n");
 
-        assert!(rendered.contains("quality: comparing mass -> sg_mass"));
-        assert!(rendered.contains("status: computed"));
+        assert!(rendered.contains("quality: computed (previous step)"));
+        assert!(rendered.contains("comparing mass -> sg_mass"));
         assert!(rendered.contains("RMSE: 4.442255"));
         assert!(rendered.contains("NRMSE: 0.114925"));
         assert!(rendered.contains("Corr: 0.993374"));
         assert!(rendered.contains("Roughness 1st: 0.171947"));
         assert!(rendered.contains("Roughness 2nd: 0.122832"));
+    }
+
+    #[test]
+    fn unavailable_quality_has_status_without_fake_numeric_values() {
+        let quality = TransformQuality::unavailable(
+            QualityReference::PreviousStep,
+            "too few aligned samples",
+        );
+        let lines = quality.pretty_lines().join("\n");
+        assert!(lines.contains("failed(too few aligned samples)"));
+        assert!(!lines.contains("RMSE:"));
+        assert!(quality.report.is_none());
+    }
+
+    #[test]
+    fn renaming_current_column_preserves_historical_step_outputs() {
+        let mut provenance = ColumnProvenance::raw("mass");
+        provenance.push_step(
+            vec!["mass".to_string()],
+            "sg_mass",
+            ColumnTransformKind::SavitzkyGolay {
+                window: 11,
+                poly_order: 3,
+                deriv: 0,
+                delta: 1.0,
+                mode: "FirPadding".to_string(),
+            },
+            None,
+            Some(1),
+            true,
+        );
+
+        provenance.rename_output("smoothed_mass");
+
+        assert_eq!(provenance.steps[0].output_column, "mass");
+        assert_eq!(provenance.steps[1].output_column, "smoothed_mass");
+        assert_eq!(provenance.steps[1].input_columns, vec!["mass"]);
     }
 }

@@ -19,18 +19,32 @@ impl TGASeries {
         Ok(())
     }
 
-    pub fn rebuild_index(&mut self) {
-        self.exp_map.clear();
+    pub fn push_from_file_with_meta(
+        &mut self,
+        path: &Path,
+        meta: ExperimentMeta,
+    ) -> Result<(), TGADomainError> {
+        let mut exp = TGAExperiment::from_csv_universal(path)?;
+        exp.meta = meta;
+        self.push(exp)
+    }
+
+    pub(crate) fn rebuild_index(&mut self) -> Result<(), TGADomainError> {
+        let mut new_index = HashMap::with_capacity(self.experiments.len());
         for (idx, exp) in self.experiments.iter().enumerate() {
-            self.exp_map.insert(exp.meta.id.clone(), idx);
+            if new_index.insert(exp.meta.id.clone(), idx).is_some() {
+                return Err(TGADomainError::DuplicateExperimentId(exp.meta.id.clone()));
+            }
         }
+        self.exp_map = new_index;
+        Ok(())
     }
 
     fn has_experiment_id(&self, id: &str) -> bool {
         self.exp_map.contains_key(id)
     }
 
-    fn ensure_experiment_id_is_available(
+    pub(super) fn ensure_experiment_id_is_available(
         &self,
         id: &str,
         current_index: Option<usize>,
@@ -52,7 +66,7 @@ impl TGASeries {
             )));
         }
         self.experiments.remove(idx);
-        self.rebuild_index();
+        self.rebuild_index()?;
         Ok(())
     }
 
@@ -63,14 +77,16 @@ impl TGASeries {
             .copied()
             .ok_or_else(|| TGADomainError::ExperimentNotFound(id.to_string()))?;
         self.experiments.remove(idx);
-        self.rebuild_index();
+        self.rebuild_index()?;
         Ok(())
     }
 
     pub fn push(&mut self, exp: TGAExperiment) -> Result<(), TGADomainError> {
         self.ensure_experiment_id_is_available(&exp.meta.id, None)?;
+        let index = self.experiments.len();
+        let id = exp.meta.id.clone();
         self.experiments.push(exp);
-        self.rebuild_index();
+        self.exp_map.insert(id, index);
         Ok(())
     }
 
@@ -86,32 +102,14 @@ impl TGASeries {
         &self.experiments
     }
 
-    pub fn experiments_mut(&mut self) -> &mut [TGAExperiment] {
-        &mut self.experiments
-    }
-
     pub fn get_experiment(&self, index: usize) -> Option<&TGAExperiment> {
         self.experiments.get(index)
-    }
-
-    pub fn get_experiment_mut(&mut self, index: usize) -> Option<&mut TGAExperiment> {
-        self.experiments.get_mut(index)
     }
 
     pub fn get_experiment_by_id(&self, id: &str) -> Result<&TGAExperiment, TGADomainError> {
         self.exp_map
             .get(id)
             .and_then(|&idx| self.experiments.get(idx))
-            .ok_or_else(|| TGADomainError::ExperimentNotFound(id.to_string()))
-    }
-
-    pub fn get_experiment_by_id_mut(
-        &mut self,
-        id: &str,
-    ) -> Result<&mut TGAExperiment, TGADomainError> {
-        let idx = self.index_by_id(id)?;
-        self.experiments
-            .get_mut(idx)
             .ok_or_else(|| TGADomainError::ExperimentNotFound(id.to_string()))
     }
 
@@ -136,18 +134,23 @@ impl TGASeries {
             )));
         }
         self.ensure_experiment_id_is_available(&new_id, Some(index))?;
+        let old_id = self.experiments[index].meta.id.clone();
+        if old_id == new_id {
+            return Ok(());
+        }
         let exp = self.experiments.get_mut(index).ok_or_else(|| {
             TGADomainError::InvalidOperation(format!("Experiment index '{}' out of range", index))
         })?;
         exp.meta.id = new_id;
-        self.rebuild_index();
+        self.exp_map.remove(&old_id);
+        self.exp_map.insert(exp.meta.id.clone(), index);
         Ok(())
     }
 
     pub fn remove_experiment_by_id(&mut self, id: &str) -> Result<TGAExperiment, TGADomainError> {
         let idx = self.index_by_id(id)?;
         let removed = self.experiments.remove(idx);
-        self.rebuild_index();
+        self.rebuild_index()?;
         Ok(removed)
     }
 

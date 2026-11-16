@@ -2,9 +2,6 @@
 //!
 //! Each menu item opens a dedicated popup window for a kinetic-analysis workflow.
 
-use crate::Kinetics::experimental_kinetics::fitting::{
-    FitColumnRequest, FitColumnResult, FittingModelName,
-};
 use crate::Kinetics::experimental_kinetics::kinetic_methods::KineticMethod;
 use crate::Kinetics::experimental_kinetics::kinetic_methods::Kissinger::Kissinger;
 use crate::Kinetics::experimental_kinetics::kinetic_methods::combined::CombinedKineticAnalysis;
@@ -13,6 +10,10 @@ use crate::Kinetics::experimental_kinetics::kinetic_methods::is_this_a_sublimati
 };
 use crate::Kinetics::experimental_kinetics::kinetic_methods::isoconversion::{
     IsoconversionalKineticMethod, IsoconversionalMethod,
+};
+use crate::Kinetics::experimental_kinetics::math::fitting::{
+    FitColumnRequest, FitColumnResult, FitColumnSession, FitEvaluationMode, FittedEvaluationBatch,
+    FittingModelName, evaluate_fit_batch,
 };
 use crate::gui::experimental_kinetics_gui::model::{PlotModel, TGAGUIError};
 use eframe::egui;
@@ -29,7 +30,6 @@ pub struct KineticMethodsWindowState {
     pub kissinger_status: String,
     pub kissinger_ea_kj: Option<f64>,
     pub kissinger_r2: Option<f64>,
-    pub kissinger_kinetic_expression: String,
     pub combined_kinetics_open: bool,
     pub combined_status: String,
     pub combined_n_min: f64,
@@ -45,7 +45,6 @@ pub struct KineticMethodsWindowState {
     pub combined_result_m: Option<f64>,
     pub combined_result_ea_kj: Option<f64>,
     pub combined_result_r2: Option<f64>,
-    pub criado_master_curve_open: bool,
     pub fit_model_open: bool,
     pub fit_model_experiment_id: String,
     pub fit_model_x_col: String,
@@ -58,12 +57,23 @@ pub struct KineticMethodsWindowState {
     pub fit_model_max_iter: usize,
     pub fit_model_status: String,
     pub fit_model_result: Option<FitColumnResult>,
+    pub fit_sessions: Vec<FitColumnSession>,
+    pub fit_training_range_enabled: bool,
+    pub fit_training_start: f64,
+    pub fit_training_end: f64,
+    pub fit_gap_enabled: bool,
+    pub fit_gap_start: f64,
+    pub fit_gap_end: f64,
+    pub fit_evaluation_start: f64,
+    pub fit_evaluation_end: f64,
+    pub fit_evaluation_points: usize,
+    pub fit_pending_batch: Option<FittedEvaluationBatch>,
+    pub fit_reconstructed_experiment_id: String,
     pub sublimation_check_open: bool,
     pub sublimation_status: String,
     pub sublimation_mean_ea_kj: Option<f64>,
     pub sublimation_mean_k: Option<f64>,
     pub sublimation_verdict: Option<String>,
-    pub methods_golden_pipeline: bool,
 }
 
 impl Default for KineticMethodsWindowState {
@@ -79,7 +89,6 @@ impl Default for KineticMethodsWindowState {
             kissinger_status: String::new(),
             kissinger_ea_kj: None,
             kissinger_r2: None,
-            kissinger_kinetic_expression: String::new(),
             combined_kinetics_open: false,
             combined_status: String::new(),
             combined_n_min: CombinedKineticAnalysis::default().n_min,
@@ -95,7 +104,6 @@ impl Default for KineticMethodsWindowState {
             combined_result_m: None,
             combined_result_ea_kj: None,
             combined_result_r2: None,
-            criado_master_curve_open: false,
             fit_model_open: false,
             fit_model_experiment_id: String::new(),
             fit_model_x_col: String::new(),
@@ -108,41 +116,74 @@ impl Default for KineticMethodsWindowState {
             fit_model_max_iter: 300,
             fit_model_status: String::new(),
             fit_model_result: None,
+            fit_sessions: Vec::new(),
+            fit_training_range_enabled: false,
+            fit_training_start: 0.0,
+            fit_training_end: 1.0,
+            fit_gap_enabled: false,
+            fit_gap_start: 0.0,
+            fit_gap_end: 1.0,
+            fit_evaluation_start: 0.0,
+            fit_evaluation_end: 1.0,
+            fit_evaluation_points: 20,
+            fit_pending_batch: None,
+            fit_reconstructed_experiment_id: String::new(),
             sublimation_check_open: false,
             sublimation_status: String::new(),
             sublimation_mean_ea_kj: None,
             sublimation_mean_k: None,
             sublimation_verdict: None,
-            methods_golden_pipeline: false,
         }
+    }
+}
+
+impl KineticMethodsWindowState {
+    pub(crate) fn close_window_on_layer(&mut self, layer: Option<egui::LayerId>) -> bool {
+        let Some(layer) = layer else { return false };
+        let windows = [
+            ("Isoconversional", &mut self.isoconversional_open),
+            ("Kissinger", &mut self.kissinger_open),
+            (
+                "Combined Kinetics Analysis",
+                &mut self.combined_kinetics_open,
+            ),
+            ("Is this a sublimation?", &mut self.sublimation_check_open),
+            ("Fit Model", &mut self.fit_model_open),
+        ];
+        for (title, is_open) in windows {
+            if layer.id == egui::Id::unique(Some(title)) && *is_open {
+                *is_open = false;
+                return true;
+            }
+        }
+        false
     }
 }
 
 pub struct KineticMethods;
 
 impl KineticMethods {
+    fn publish_status(model: &mut PlotModel, status: &str) {
+        let _ = model.push_message(status);
+    }
+
     /// Render the dropdown menu entries under the "Kinetic Methods" top menu.
     pub fn show_menu(ui: &mut egui::Ui, state: &mut KineticMethodsWindowState) {
-        if ui.button("Isoconversional").clicked() {
+        if ui.button("Isoconversional").on_hover_text("Non-isothermal activation-energy analysis over conversion; can create a result experiment.").clicked() {
             state.isoconversional_open = true;
         }
-        if ui.button("Kissinger").clicked() {
+        if ui.button("Kissinger").on_hover_text("Non-isothermal peak-temperature method for one activation energy; updates results only.").clicked() {
             state.kissinger_open = true;
         }
-        if ui.button("Combined Kinetics Analysis").clicked() {
+        if ui.button("Combined Kinetics Analysis").on_hover_text("Non-isothermal model-parameter search; numeric search ranges are configured in its window.").clicked() {
             state.combined_kinetics_open = true;
         }
-        if ui.button("Criado Master Curve").clicked() {
-            state.criado_master_curve_open = true;
-        }
-        if ui.button("Fit Model").clicked() {
+        ui.label("Criado Master Curve: unavailable pending scientific validation");
+        if ui.button("Fit Model").on_hover_text("General single-experiment curve fitting, not a kinetic method; adds a fitted output column.").clicked() {
             state.fit_model_open = true;
         }
-        if ui.button("Is this a sublimation?").clicked() {
+        if ui.button("Is this a sublimation?").on_hover_text("Non-isothermal diagnostic using conversion rate and temperature; adds fitted-rate columns.").clicked() {
             state.sublimation_check_open = true;
-        }
-        if ui.button("Golden Pipeline").clicked() {
-            state.methods_golden_pipeline = true;
         }
     }
     //===========================================================================================================
@@ -163,9 +204,11 @@ impl KineticMethods {
             .default_size([540.0, 360.0])
             .show(ui.ctx(), |ui| {
                 ui.vertical(|ui| {
+                    ui.label("Non-isothermal method: estimates activation energy versus conversion from experiments run at different heating rates. Choose the method and experiments; Calculate adds a result experiment using the Output ID.");
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.label("Method:");
-                        egui::ComboBox::from_id_salt("isoconv_method")
+                        let label = ui.label("Method:");
+                        let combo = egui::ComboBox::from_id_salt("isoconv_method")
                             .selected_text(state.isoconversional_method.display_name())
                             .show_ui(ui, |ui| {
                                 for method in IsoconversionalMethod::all() {
@@ -176,6 +219,7 @@ impl KineticMethods {
                                     );
                                 }
                             });
+                        let _ = combo.response.labelled_by(label.id);
                     });
 
                     ui.add_space(6.0);
@@ -229,8 +273,9 @@ impl KineticMethods {
                     ui.add_space(6.0);
 
                     ui.horizontal(|ui| {
-                        ui.label("Output ID:");
-                        ui.text_edit_singleline(&mut state.isoconversional_output_id);
+                        let label = ui.label("Output ID:");
+                        let input = ui.text_edit_singleline(&mut state.isoconversional_output_id);
+                        let _ = input.labelled_by(label.id);
                     });
 
                     ui.add_space(6.0);
@@ -243,7 +288,7 @@ impl KineticMethods {
                     ui.add_space(8.0);
 
                     // Run the chosen method and store the result as a new experiment.
-                    if ui.button("Calculate").clicked() {
+                    if ui.button("Calculate").on_hover_text("Requires suitable non-isothermal experiments; optionally select a subset and set the result experiment ID. Adds a result experiment, not a source-data column.").clicked() {
                         let status = (|| -> Result<String, TGAGUIError> {
                             if exp_ids.is_empty() {
                                 return Ok("No experiments to analyze.".to_string());
@@ -282,16 +327,27 @@ impl KineticMethods {
 
                             method.check_input(&view)?;
                             let result = method.compute(&view)?;
+                            let warnings = result.warnings.clone();
 
                             model.push_isoconversional_result(&result, &output_id)?;
 
-                            Ok(format!("Done. Result saved as '{}'.", output_id))
+                            if warnings.is_empty() {
+                                Ok(format!("Done. Result saved as '{}'.", output_id))
+                            } else {
+                                Ok(format!(
+                                    "Result saved as '{}'; {} diagnostic warning(s): {}",
+                                    output_id,
+                                    warnings.len(),
+                                    warnings.join(" | ")
+                                ))
+                            }
                         })();
 
                         state.isoconversional_status = match status {
                             Ok(msg) => msg,
-                            Err(err) => format!("Error: {:?}", err),
+                            Err(err) => format!("Error: {err}"),
                         };
+                        Self::publish_status(model, &state.isoconversional_status);
                     }
                 });
             });
@@ -316,6 +372,8 @@ impl KineticMethods {
             .default_size([520.0, 300.0])
             .show(ui.ctx(), |ui| {
                 ui.vertical(|ui| {
+                    ui.label("Non-isothermal Kissinger peak method: estimates one activation energy from peak temperatures measured at different heating rates. No numeric or text input is required; results appear below and source data is unchanged.");
+                    ui.add_space(4.0);
                     let ea_label = state
                         .kissinger_ea_kj
                         .map(|v| format!("{:.2}", v))
@@ -344,21 +402,8 @@ impl KineticMethods {
 
                     ui.add_space(8.0);
 
-                    // Placeholder for future work on pre-exponential factor estimation.
-                    ui.label("Kinetic expression:");
-                    ui.text_edit_singleline(&mut state.kissinger_kinetic_expression);
-                    if ui.button("Calculate kinetic expression").clicked() {
-                        todo!("Implement pre-exponential factor estimation for Kissinger method.");
-                    }
-
-                    if ui.button("Calculate pre-exponential factor").clicked() {
-                        todo!("Implement pre-exponential factor estimation for Kissinger method.");
-                    }
-
-                    ui.add_space(8.0);
-
                     // Run the Kissinger calculation without creating new series data or curves.
-                    if ui.button("Calculate").clicked() {
+                    if ui.button("Calculate").on_hover_text("Requires multiple non-isothermal experiments with different heating rates. Updates Ea/R2 labels only; no column or experiment is created.").clicked() {
                         let status = (|| -> Result<String, TGAGUIError> {
                             // Kissinger needs the same columns as non-isothermal isoconversional methods.
                             let view = model.create_kinetic_data_view_for_method(
@@ -377,8 +422,9 @@ impl KineticMethods {
 
                         state.kissinger_status = match status {
                             Ok(msg) => msg,
-                            Err(err) => format!("Error: {:?}", err),
+                            Err(err) => format!("Error: {err}"),
                         };
+                        Self::publish_status(model, &state.kissinger_status);
                     }
                 });
             });
@@ -403,6 +449,8 @@ impl KineticMethods {
             .default_size([560.0, 320.0])
             .show(ui.ctx(), |ui| {
                 ui.vertical(|ui| {
+                    ui.label("Non-isothermal diagnostic: evaluates conversion-rate behavior against temperature across experiments and reports whether it is consistent with sublimation. It also adds fitted-rate columns; source columns are retained.");
+                    ui.add_space(4.0);
                     let ea_label = state
                         .sublimation_mean_ea_kj
                         .map(|v| format!("{:.2}", v))
@@ -441,7 +489,7 @@ impl KineticMethods {
                     ui.add_space(8.0);
 
                     // Run the solver, store mean values, and push fitted curves into the series.
-                    if ui.button("Calculate").clicked() {
+                    if ui.button("Calculate").on_hover_text("Requires conversion, conversion rate and temperature data. Updates the verdict and adds fitted-rate columns; no input fields are required.").clicked() {
                         let status = (|| -> Result<String, TGAGUIError> {
                             let method = SublimationMethod::default();
                             let cols = method.required_columns_by_nature();
@@ -474,8 +522,12 @@ impl KineticMethods {
 
                         state.sublimation_status = match status {
                             Ok(msg) => msg,
-                            Err(err) => format!("Error: {:?}", err),
+                            Err(TGAGUIError::PostCommitWarning(warning)) => {
+                                format!("Warning: {warning}")
+                            }
+                            Err(err) => format!("Error: {err}"),
                         };
+                        Self::publish_status(model, &state.sublimation_status);
                     }
                 });
             });
@@ -500,6 +552,8 @@ impl KineticMethods {
             .default_size([560.0, 420.0])
             .show(ui.ctx(), |ui| {
                 ui.vertical(|ui| {
+                    ui.label("Non-isothermal combined analysis: searches model exponents and activation energy using conversion, conversion rate and temperature. Set the numeric search ranges below; calculation updates result labels without adding columns.");
+                    ui.add_space(4.0);
                     // Manual parameter inputs for the analysis grid.
                     ui.horizontal(|ui| {
                         ui.label("n_min:");
@@ -573,7 +627,7 @@ impl KineticMethods {
                     ui.add_space(8.0);
 
                     // Run the analysis and update result labels.
-                    if ui.button("Calculate").clicked() {
+                    if ui.button("Calculate").on_hover_text("Requires non-isothermal temperature, conversion and conversion-rate data. Uses the numeric search settings; updates result labels only, with no new column.").clicked() {
                         let status = (|| -> Result<String, TGAGUIError> {
                             let analysis = CombinedKineticAnalysis {
                                 n_min: state.combined_n_min,
@@ -601,8 +655,9 @@ impl KineticMethods {
 
                         state.combined_status = match status {
                             Ok(msg) => msg,
-                            Err(err) => format!("Error: {:?}", err),
+                            Err(err) => format!("Error: {err}"),
                         };
+                        Self::publish_status(model, &state.combined_status);
                     }
                 });
             });
@@ -625,14 +680,20 @@ impl KineticMethods {
             .default_size([620.0, 430.0])
             .show(ui.ctx(), |ui| {
                 ui.vertical(|ui| {
+                    ui.label("General curve fitting, not a kinetic method (isothermal classification: not applicable). Choose one experiment, X/Y columns, model and optional fit settings. Fit adds a fitted-Y column; an existing output name is replaced.");
+                    ui.add_space(4.0);
                     let exp_ids = model.list_of_experiments();
                     if state.fit_model_experiment_id.is_empty()
                         || !exp_ids
                             .iter()
                             .any(|id| id == &state.fit_model_experiment_id)
                     {
-                        state.fit_model_experiment_id =
-                            exp_ids.first().cloned().unwrap_or_default();
+                        state.fit_model_experiment_id = model
+                            .get_experiment_by_selected_curve()
+                            .ok()
+                            .filter(|id| exp_ids.is_empty() || exp_ids.contains(id))
+                            .or_else(|| exp_ids.first().cloned())
+                            .unwrap_or_default();
                     }
 
                     ui.horizontal(|ui| {
@@ -660,33 +721,52 @@ impl KineticMethods {
                     } else {
                         model.list_of_columns(&state.fit_model_experiment_id)
                     };
+                    let selected_curve_axes = model
+                        .get_experiment_by_selected_curve()
+                        .ok()
+                        .filter(|id| id == &state.fit_model_experiment_id)
+                        .and_then(|_| Some((model.this_is_x().ok()?, model.this_is_y().ok()?)));
 
                     match columns {
                         Ok(columns) => {
                             if state.fit_model_x_col.is_empty()
                                 || !columns.iter().any(|col| col == &state.fit_model_x_col)
                             {
-                                state.fit_model_x_col = columns
-                                    .iter()
-                                    .find(|c| c.as_str() == "time")
+                                state.fit_model_x_col = selected_curve_axes
+                                    .as_ref()
+                                    .map(|(x, _)| x)
+                                    .filter(|x| columns.contains(x))
                                     .cloned()
-                                    .or_else(|| columns.first().cloned())
+                                    .or_else(|| {
+                                        columns.iter().find(|c| c.as_str() == "time").cloned()
+                                    })
+                                    .or_else(|| columns.iter().min().cloned())
                                     .unwrap_or_default();
                             }
                             if state.fit_model_y_col.is_empty()
                                 || !columns.iter().any(|col| col == &state.fit_model_y_col)
                             {
-                                state.fit_model_y_col = columns
-                                    .iter()
-                                    .find(|c| c.as_str() == "mass")
+                                state.fit_model_y_col = selected_curve_axes
+                                    .as_ref()
+                                    .map(|(_, y)| y)
+                                    .filter(|y| **y != state.fit_model_x_col && columns.contains(y))
                                     .cloned()
                                     .or_else(|| {
                                         columns
                                             .iter()
-                                            .find(|c| c.as_str() != state.fit_model_x_col)
+                                            .find(|c| {
+                                                c.as_str() == "mass" && **c != state.fit_model_x_col
+                                            })
                                             .cloned()
                                     })
-                                    .or_else(|| columns.first().cloned())
+                                    .or_else(|| {
+                                        columns
+                                            .iter()
+                                            .filter(|c| c.as_str() != state.fit_model_x_col)
+                                            .min()
+                                            .cloned()
+                                    })
+                                    .or_else(|| columns.iter().min().cloned())
                                     .unwrap_or_default();
                             }
 
@@ -780,7 +860,7 @@ impl KineticMethods {
                             });
 
                             egui::CollapsingHeader::new("Model equations")
-                                .default_open(true)
+                                .default_open(false)
                                 .show(ui, |ui| {
                                     egui::Grid::new("fit_model_equation_table")
                                         .striped(true)
@@ -839,7 +919,7 @@ impl KineticMethods {
                             });
 
                             ui.add_space(8.0);
-                            if ui.button("Fit").clicked() {
+                            if ui.button("Fit").on_hover_text("Requires an experiment and X/Y columns. Polynomial degree is required for polynomial models; initial guess is optional. Fits and stores a reusable model; it does not change any experiment or add a column.").clicked() {
                                 let status = (|| -> Result<String, TGAGUIError> {
                                     if state.fit_model_experiment_id.is_empty()
                                         || state.fit_model_x_col.is_empty()
@@ -859,6 +939,20 @@ impl KineticMethods {
                                     .with_tolerance(state.fit_model_tolerance)
                                     .with_max_iterations(state.fit_model_max_iter);
 
+                                    if state.fit_training_range_enabled {
+                                        request = request.with_training_range(
+                                            state.fit_training_start,
+                                            state.fit_training_end,
+                                        );
+                                    }
+
+                                    if state.fit_gap_enabled {
+                                        request = request.excluding_range(
+                                            state.fit_gap_start,
+                                            state.fit_gap_end,
+                                        );
+                                    }
+
                                     let output = state.fit_model_output_col.trim();
                                     if !output.is_empty() {
                                         request = request.with_output_col(output.to_string());
@@ -870,45 +964,129 @@ impl KineticMethods {
                                         request = request.with_initial_guess(initial_guess);
                                     }
 
-                                    let result = model.fit_column_and_plot(request)?;
-                                    let output_col = result.output_col.clone();
-                                    state.fit_model_result = Some(result);
-                                    Ok(format!("Done. Added '{}'.", output_col))
+                                    let session = model.fit_column_for_evaluation(request)?;
+                                    let result = session.result.clone();
+                                    state.fit_model_result = Some(result.clone());
+                                    state.fit_sessions.retain(|existing| {
+                                        existing.result.y_col != result.y_col
+                                            || existing.result.x_col != result.x_col
+                                    });
+                                    state.fit_sessions.push(session);
+                                    state.fit_pending_batch = None;
+                                    Ok(format!("Fit stored. R2={:.6}; no source data changed.", result.r2))
                                 })();
 
                                 state.fit_model_status = match status {
                                     Ok(msg) => msg,
-                                    Err(err) => format!("Error: {:?}", err),
+                                    Err(err) => format!("Error: {err}"),
                                 };
+                                Self::publish_status(model, &state.fit_model_status);
                             }
 
-                            if let Some(result) = &state.fit_model_result {
+                            if !state.fit_sessions.is_empty() {
                                 ui.separator();
-                                ui.horizontal(|ui| {
-                                    ui.label("Backend:");
-                                    ui.label(&result.method);
-                                    ui.label("R2:");
-                                    ui.label(format!("{:.6}", result.r2));
-                                    ui.label("Output:");
-                                    ui.label(&result.output_col);
-                                });
-
-                                egui::Grid::new("fit_model_coefficients")
+                                ui.strong("Stored fits");
+                                egui::Grid::new("fit_model_session_results")
                                     .striped(true)
                                     .show(ui, |ui| {
-                                        ui.label("Coefficient");
-                                        ui.label("Value");
+                                        ui.strong("Y");
+                                        ui.strong("Model");
+                                        ui.strong("R2");
+                                        ui.strong("Coefficients");
+                                        ui.strong("Side RMSE");
                                         ui.end_row();
-                                        for (name, value) in &result.coefficients {
-                                            ui.label(name);
-                                            ui.label(format!("{:.8e}", value));
+                                        for session in &state.fit_sessions {
+                                            let result = &session.result;
+                                            let coefficients = result.coefficients.iter()
+                                                .map(|(name, value)| format!("{name}={value:.5e}"))
+                                                .collect::<Vec<_>>().join(", ");
+                                            let residuals = match (session.left_rmse, session.right_rmse) {
+                                                (Some(left), Some(right)) => format!("{left:.3e} / {right:.3e}"),
+                                                _ => "-".to_string(),
+                                            };
+                                            ui.label(&result.y_col);
+                                            ui.label(result.kinetic_model.display_name());
+                                            ui.label(format!("{:.6}", result.r2));
+                                            ui.monospace(coefficients);
+                                            ui.label(residuals);
                                             ui.end_row();
                                         }
                                     });
                             }
+
+                            ui.separator();
+                            ui.strong("Evaluation");
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut state.fit_training_range_enabled, "Limit fit range");
+                                if state.fit_training_range_enabled {
+                                    let label = ui.label("Fit X start:");
+                                    let response = ui.add(egui::DragValue::new(&mut state.fit_training_start).speed(0.1));
+                                    let _ = response.labelled_by(label.id);
+                                    let label = ui.label("end:");
+                                    let response = ui.add(egui::DragValue::new(&mut state.fit_training_end).speed(0.1));
+                                    let _ = response.labelled_by(label.id);
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut state.fit_gap_enabled, "Reconstruct an internal gap");
+                                if state.fit_gap_enabled {
+                                    let label = ui.label("Gap start:");
+                                    let response = ui.add(egui::DragValue::new(&mut state.fit_gap_start).speed(0.1));
+                                    let _ = response.labelled_by(label.id);
+                                    let label = ui.label("end:");
+                                    let response = ui.add(egui::DragValue::new(&mut state.fit_gap_end).speed(0.1));
+                                    let _ = response.labelled_by(label.id);
+                                } else {
+                                    let label = ui.label("Extrapolation X start:");
+                                    let response = ui.add(egui::DragValue::new(&mut state.fit_evaluation_start).speed(0.1));
+                                    let _ = response.labelled_by(label.id);
+                                    let label = ui.label("end:");
+                                    let response = ui.add(egui::DragValue::new(&mut state.fit_evaluation_end).speed(0.1));
+                                    let _ = response.labelled_by(label.id);
+                                }
+                                let label = ui.label("Points:");
+                                let response = ui.add(egui::DragValue::new(&mut state.fit_evaluation_points).range(1..=100_000));
+                                let _ = response.labelled_by(label.id);
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.button("Evaluate fitted columns")
+                                    .on_hover_text("Evaluates every stored fit on one shared X grid. The result remains a preview until explicitly added from Column Manager.")
+                                    .clicked()
+                                {
+                                    let mode = if state.fit_gap_enabled {
+                                        FitEvaluationMode::FillGap {
+                                            start: state.fit_gap_start,
+                                            end: state.fit_gap_end,
+                                            missing_points: state.fit_evaluation_points,
+                                        }
+                                    } else {
+                                        FitEvaluationMode::Extrapolate {
+                                            start: state.fit_evaluation_start,
+                                            end: state.fit_evaluation_end,
+                                            points: state.fit_evaluation_points,
+                                        }
+                                    };
+                                    match evaluate_fit_batch(&state.fit_sessions, mode) {
+                                        Ok(batch) => {
+                                            state.fit_reconstructed_experiment_id = format!(
+                                                "{}_reconstructed", batch.source_experiment_id
+                                            );
+                                            state.fit_pending_batch = Some(batch);
+                                            state.fit_model_status = "Evaluation ready. Review and commit it in Column Manager.".to_string();
+                                        }
+                                        Err(error) => state.fit_model_status = format!("Evaluation failed: {error}"),
+                                    }
+                                }
+                                if ui.button("Clear fit sessions").clicked() {
+                                    state.fit_sessions.clear();
+                                    state.fit_model_result = None;
+                                    state.fit_pending_batch = None;
+                                }
+                                ui.label(format!("{} fitted column(s)", state.fit_sessions.len()));
+                            });
                         }
                         Err(err) => {
-                            ui.label(format!("Cannot read columns: {:?}", err));
+                            ui.label(format!("Cannot read columns: {err}"));
                         }
                     }
                 });
@@ -934,15 +1112,6 @@ impl KineticMethods {
         Self::show_combined_kinetics_window(ui, model, state)?;
         Self::show_sublimation_window(ui, model, state)?;
         Self::show_fit_model_window(ui, model, state)?;
-
-        if state.criado_master_curve_open {
-            egui::Window::new("Criado Master Curve")
-                .open(&mut state.criado_master_curve_open)
-                .default_size([520.0, 340.0])
-                .show(ui.ctx(), |ui| {
-                    ui.label("TODO: Implement Criado master curve analysis.");
-                });
-        }
 
         Ok(())
     }

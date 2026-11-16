@@ -14,7 +14,7 @@ impl TGAExperiment {
     pub fn smooth_columns(
         self,
         cols: &[&str],
-        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::SmoothStrategy,
+        strategy: crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::SmoothStrategy,
     ) -> Result<Self, TGADomainError> {
         let dataset = self.dataset.smooth_columns(cols, strategy)?;
         Ok(Self {
@@ -23,20 +23,25 @@ impl TGAExperiment {
         })
     }
 
-    pub fn rolling_mean(self, col_name: &str, window: usize) -> Self {
-        let dataset = self.dataset.rolling_mean(col_name, window);
-        Self {
+    pub fn rolling_mean(self, col_name: &str, window: usize) -> Result<Self, TGADomainError> {
+        let dataset = self.dataset.rolling_mean(col_name, window)?;
+        Ok(Self {
             dataset,
             meta: self.meta,
-        }
+        })
     }
 
-    pub fn rolling_mean_as(self, col_name: &str, window: usize, out_col: Option<&str>) -> Self {
-        let dataset = self.dataset.rolling_mean_as(col_name, window, out_col);
-        Self {
+    pub fn rolling_mean_as(
+        self,
+        col_name: &str,
+        window: usize,
+        out_col: Option<&str>,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self.dataset.rolling_mean_as(col_name, window, out_col)?;
+        Ok(Self {
             dataset,
             meta: self.meta,
-        }
+        })
     }
 
     pub fn hampel_filter(
@@ -44,7 +49,7 @@ impl TGAExperiment {
         col: &str,
         window: usize,
         n_sigma: f64,
-        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy,
+        strategy: crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::HampelStrategy,
     ) -> Result<Self, TGADomainError> {
         let dataset = self.dataset.hampel_filter(col, window, n_sigma, strategy)?;
         Ok(Self {
@@ -58,7 +63,7 @@ impl TGAExperiment {
         col: &str,
         window: usize,
         n_sigma: f64,
-        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy,
+        strategy: crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::HampelStrategy,
         out_col: Option<&str>,
     ) -> Result<Self, TGADomainError> {
         let dataset = self
@@ -75,7 +80,7 @@ impl TGAExperiment {
         col: &str,
         window: usize,
         n_sigma: f64,
-        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy,
+        strategy: crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::HampelStrategy,
     ) -> Result<Self, TGADomainError> {
         let dataset = self
             .dataset
@@ -91,7 +96,7 @@ impl TGAExperiment {
         col: &str,
         window: usize,
         n_sigma: f64,
-        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy,
+        strategy: crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::HampelStrategy,
         out_col: Option<&str>,
     ) -> Result<Self, TGADomainError> {
         let dataset = self
@@ -523,11 +528,17 @@ impl TGAExperiment {
         Ok((exp, vec_of_new))
     }
 
-    pub fn get_column_by_nature(&self, nature: ColumnNature) -> Option<String> {
+    pub fn get_column_by_nature(
+        &self,
+        nature: ColumnNature,
+    ) -> Result<Option<String>, TGADomainError> {
         self.dataset.get_column_by_nature(nature)
     }
 
-    pub fn get_columns_by_nature(&self, nature: Vec<ColumnNature>) -> Vec<Option<String>> {
+    pub fn get_columns_by_nature(
+        &self,
+        nature: Vec<ColumnNature>,
+    ) -> Result<Vec<Option<String>>, TGADomainError> {
         self.dataset.get_columns_by_nature(nature)
     }
 

@@ -128,6 +128,8 @@ pub struct IsoconversionalResult {
     pub method: &'static str,
     /// One result entry per α layer, ordered by increasing α.
     pub layers: Vec<IsoLayerResult>,
+    /// Conversion layers omitted because their regression inputs were insufficient or degenerate.
+    pub warnings: Vec<String>,
 }
 
 impl IsoconversionalResult {
@@ -217,17 +219,10 @@ impl IsoconversionalResult {
 
         let schema = TGASchema {
             columns,
-            time: None,
-            temperature: None,
-            mass: None,
-            alpha: None,
-            dm_dt: None,
             eta: Some("eta".to_string()),
-            deta_dt: None,
-            dalpha_dt: None,
-            dT_dt: None,
             E: Some("Ea".to_string()),
             R2: Some("R2".to_string()),
+            ..TGASchema::default()
         };
 
         let mut dataset = TGADataset {
@@ -235,7 +230,7 @@ impl IsoconversionalResult {
             schema,
             oneframeplot: None,
             history_of_operations: History::new(),
-            undo_stack: Vec::new(),
+            undo_stack: Default::default(),
             undo_snapshot_latch: false,
         };
         dataset.initialize_column_provenance();
@@ -407,6 +402,7 @@ impl IntegralIsoconversionalSolver {
         let n_eta = grid.eta.len();
 
         let mut layers = Vec::with_capacity(n_eta);
+        let mut warnings = Vec::new();
 
         for j in 0..n_eta {
             let eta = grid.eta[j];
@@ -428,11 +424,11 @@ impl IntegralIsoconversionalSolver {
                 }
             }
 
-            let x = inv_t.to_owned();
-
-            let mut y = Array1::<f64>::zeros(beta.len());
+            let mut x = Vec::with_capacity(beta.len());
+            let mut y = Vec::with_capacity(beta.len());
 
             for (i, b) in beta.iter().enumerate() {
+                let inv_temperature = inv_t[i];
                 let t = temp[i];
                 if !t.is_finite() || t <= 0.0 {
                     return Err(TGADomainError::InvalidOperation(
@@ -457,7 +453,11 @@ impl IntegralIsoconversionalSolver {
                     ));
                 }
 
-                y[i] = logv;
+                if !inv_temperature.is_finite() || inv_temperature <= 0.0 {
+                    continue;
+                }
+                x.push(inv_temperature);
+                y.push(logv);
             }
 
             // y = ln(beta/T^b)
@@ -465,7 +465,17 @@ impl IntegralIsoconversionalSolver {
             // y = k*x + b
             // k = -C*E/R
             // E = k*(-R/C)
-            let reg = linear_regression(&x, &y);
+            let reg = match linear_regression(&Array1::from_vec(x), &Array1::from_vec(y)) {
+                Ok(regression) => regression,
+                Err(error) => {
+                    let message = format!(
+                        "Skipped conversion eta={eta:.6}: regression unavailable ({error:?})"
+                    );
+                    log::warn!("{}", message);
+                    warnings.push(message);
+                    continue;
+                }
+            };
 
             let ea = reg.slope * self.config.slope_factor;
 
@@ -479,10 +489,19 @@ impl IntegralIsoconversionalSolver {
             });
         }
 
+        if layers.is_empty() {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "{} could not fit any conversion layer: {}",
+                self.method_name(),
+                warnings.join(" | ")
+            )));
+        }
+
         Ok(IsoconversionalResult {
             method: self.method_name(),
 
             layers,
+            warnings,
         })
     }
 

@@ -1,19 +1,16 @@
 use crate::Kinetics::experimental_kinetics::exp_engine_api::GoldenPipelineConfig;
 use crate::Kinetics::experimental_kinetics::exp_engine_api::{PlotSeries, Ranges, ViewRange, XY};
-use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy;
 use crate::Kinetics::experimental_kinetics::experiment_series_main::{
     ExperimentMeta, TGAExperiment, TGASeries,
 };
 use crate::Kinetics::experimental_kinetics::experiment_series2::SampledColumns;
-use crate::Kinetics::experimental_kinetics::fitting::{FitColumnRequest, FitColumnResult};
 use crate::Kinetics::experimental_kinetics::kinetic_methods::KineticDataView;
 use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::IsoconversionalResult;
-use crate::Kinetics::experimental_kinetics::kinetic_methods::is_this_a_sublimation::{
-    SublimationMethod, SublimationResult,
-};
 use crate::Kinetics::experimental_kinetics::kinetic_methods::isoconversion::IsoconversionalMethod;
+use crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::HampelStrategy;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    ColumnHistory, ColumnNature, OperationRecord, TGADomainError, TimeMonotonicityReport, Unit,
+    ColumnHistory, ColumnNature, OperationRecord, PreviewRows, TGADomainError,
+    TimeMonotonicityReport, Unit,
 };
 use RustedSciThe::numerical::data_processing::LSQSplines::SolverKind;
 use RustedSciThe::numerical::data_processing::lowess_wrapper::LowessConfig;
@@ -24,6 +21,8 @@ use RustedSciThe::numerical::data_processing::splines::SplineKind;
 use log::{debug, info};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+mod model_handler_results;
 
 //=========================================================================================
 #[derive(Debug, Clone)]
@@ -150,6 +149,15 @@ impl PlotModel {
         self.series.push_from_file(path)?;
         Ok(())
     }
+
+    pub fn push_from_file_with_meta(
+        &mut self,
+        path: &Path,
+        meta: ExperimentMeta,
+    ) -> Result<(), TGAGUIError> {
+        self.series.push_from_file_with_meta(path, meta)?;
+        Ok(())
+    }
     pub fn to_csv_series(&self, path: &Path) -> Result<(), TGAGUIError> {
         self.series.to_csv_series(path)?;
         Ok(())
@@ -185,15 +193,35 @@ impl PlotModel {
             })
             .collect();
 
+        let experiment_indices: HashMap<String, usize> = self
+            .list_of_experiments()
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect();
+
         let original_len = self.plots.len();
-        self.plots.retain(|curve| {
-            valid_columns_by_experiment
+        let mut changed = false;
+        self.plots.retain_mut(|curve| {
+            let is_valid = valid_columns_by_experiment
                 .get(&curve.experiment_id)
-                .map(|columns| columns.contains(&curve.x_name) && columns.contains(&curve.y_name))
-                .unwrap_or(false)
+                .is_some_and(|columns| {
+                    columns.contains(&curve.x_name) && columns.contains(&curve.y_name)
+                });
+            if !is_valid {
+                changed = true;
+                return false;
+            }
+            if let Some(&index) = experiment_indices.get(&curve.experiment_id) {
+                if curve.experiment_index != index {
+                    curve.experiment_index = index;
+                    changed = true;
+                }
+            }
+            true
         });
 
-        let changed = self.plots.len() != original_len;
+        changed |= self.plots.len() != original_len;
         if !changed {
             return false;
         }
@@ -240,14 +268,6 @@ impl PlotModel {
 
     pub fn get_list_of_complex_id(&self) -> Vec<String> {
         self.series.get_list_of_complex_id()
-    }
-
-    pub fn get_experiment_by_id_mut(
-        &mut self,
-        id: &str,
-    ) -> Result<&mut TGAExperiment, TGAGUIError> {
-        let exp = self.series.get_experiment_by_id_mut(id)?;
-        Ok(exp)
     }
 
     pub fn bind_time_of_experiment(
@@ -319,12 +339,7 @@ impl PlotModel {
         &mut self,
         config: &AdvancedTGAConfig,
     ) -> Result<(), TGAGUIError> {
-        let simulated = VirtualTGA::generate_series(config);
-        for exp in simulated {
-            let meta = exp.meta;
-            let vtga = exp.virtual_tga;
-            self.series.create_from_synthetic_data(&vtga, meta)?;
-        }
+        self.series.create_series_from_synthetic_data(config)?;
         Ok(())
     }
 
@@ -367,7 +382,17 @@ impl PlotModel {
             }
             self.set_y(id, &col)?;
             self.create_points_for_curve_with_builder(id, Colours::Red)?;
-            self.plots.last_mut().unwrap().shown = true;
+            let short_name = self.create_plot_short_name(id, &x_col, &col);
+            let curve = self
+                .plots
+                .iter_mut()
+                .find(|curve| curve.plot_short_name == short_name)
+                .ok_or_else(|| {
+                    TGAGUIError::BindingError(format!(
+                        "created plot curve '{short_name}' could not be found"
+                    ))
+                })?;
+            curve.shown = true;
             info!("created plot for column {}", col);
         }
         Ok(())
@@ -381,7 +406,32 @@ impl PlotModel {
     ) -> Result<(), TGAGUIError> {
         let new_list = self.compare_new_and_old_list_of_columns(id, old_list)?;
         info!("new columns: {:?}", new_list);
-        self.create_plots_with_columns(id, new_list, preferred_x)?;
+        let old_plot_names = self
+            .plots
+            .iter()
+            .filter(|plot| plot.experiment_id == id)
+            .map(|plot| plot.plot_short_name.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let old_axes = self
+            .plots
+            .iter()
+            .find(|plot| plot.experiment_id == id)
+            .map(|plot| (plot.x_name.clone(), plot.y_name.clone()));
+        let old_view = (self.interaction.view_range, self.interaction.view_y_range);
+        if let Err(error) = self.create_plots_with_columns(id, new_list, preferred_x) {
+            self.plots.retain(|plot| {
+                plot.experiment_id != id || old_plot_names.contains(&plot.plot_short_name)
+            });
+            if let Some((x_col, y_col)) = old_axes {
+                let _ = self.set_x(id, &x_col);
+                let _ = self.set_y(id, &y_col);
+            }
+            self.interaction.view_range = old_view.0;
+            self.interaction.view_y_range = old_view.1;
+            return Err(TGAGUIError::post_commit_warning(format!(
+                "experiment '{id}' was updated; new columns remain available, but their curves could not be created ({error})"
+            )));
+        }
         self.reset_view();
         Ok(())
     }
@@ -413,16 +463,29 @@ impl PlotModel {
     ) -> Result<(), TGAGUIError> {
         let id = experiment.meta.id.clone();
         self.series.push(experiment)?;
-        // IVP output is standardized to time/conversion, so wire the axes
-        // immediately and let the newly created curve appear without forcing
-        // the user through Manage Plot first.
-        self.series.set_oneframeplot_x(&id, "time")?;
-        self.series.set_oneframeplot_y(&id, "conversion")?;
-        self.create_points_for_curve_with_builder(&id, colour)?;
-        if let Some(index) = self.plots.len().checked_sub(1) {
-            self.select_curve(index);
+        let plot_result = (|| -> Result<(), TGAGUIError> {
+            // IVP output is standardized to time/conversion, so wire the axes
+            // immediately and show the curve without requiring Manage Plot.
+            self.series.set_oneframeplot_x(&id, "time")?;
+            self.series.set_oneframeplot_y(&id, "conversion")?;
+            self.create_points_for_curve_with_builder(&id, colour)?;
+            if let Some(index) = self
+                .plots
+                .iter()
+                .position(|curve| curve.experiment_id == id && curve.y_name == "conversion")
+            {
+                self.select_curve(index);
+            }
+            self.reset_view();
+            Ok(())
+        })();
+        if let Err(error) = plot_result {
+            self.plots.retain(|curve| curve.experiment_id != id);
+            self.reset_view();
+            return Err(TGAGUIError::post_commit_warning(format!(
+                "IVP experiment '{id}' was added to the series, but its plot could not be created; the data remain available ({error})"
+            )));
         }
-        self.reset_view();
         Ok(())
     }
 
@@ -525,6 +588,8 @@ impl PlotModel {
         let id = self.get_experiment_by_selected_curve()?;
         self.series.undo_last(&id)?;
         self.prune_stale_plots();
+        self.select_first_curve_for_experiment_if_needed(&id);
+        self.rebuild_plots_for_experiment(&id)?;
         Ok(())
     }
 
@@ -532,7 +597,22 @@ impl PlotModel {
     pub fn reverse_experiment(&mut self, id: &str) -> Result<(), TGAGUIError> {
         self.series.undo_last(id)?;
         self.prune_stale_plots();
+        self.select_first_curve_for_experiment_if_needed(id);
+        self.rebuild_plots_for_experiment(id)?;
         Ok(())
+    }
+
+    fn select_first_curve_for_experiment_if_needed(&mut self, id: &str) {
+        if self.get_selected_curve_index().is_some() {
+            return;
+        }
+        if let Some(index) = self
+            .plots
+            .iter()
+            .position(|curve| curve.experiment_id == id && curve.shown)
+        {
+            self.select_curve(index);
+        }
     }
 
     pub fn operations_on_column_for_experiment(
@@ -610,7 +690,7 @@ impl PlotModel {
     pub fn column_samples_for_all_experiments(
         &mut self,
         n_points: usize,
-    ) -> Result<HashMap<String, HashMap<String, SampledColumn>>, TGAGUIError> {
+    ) -> Result<HashMap<String, PreviewRows>, TGAGUIError> {
         let mut data_map = HashMap::new();
         for id in self.list_of_experiments() {
             let list_of_columns_to_recalc = &self.list_of_columns_to_recalc(&id)?;
@@ -618,21 +698,20 @@ impl PlotModel {
                 "this columns will be resampled {:?}",
                 list_of_columns_to_recalc
             );
-            let mut exp_columns = HashMap::new();
-            for col in list_of_columns_to_recalc {
-                let sampled_col = self.sample_column(&id, &col, None, n_points)?;
+            if !list_of_columns_to_recalc.is_empty() {
+                let experiment = self.series.get_experiment_by_id(&id)?;
+                let columns = self.list_of_columns(&id)?;
+                let names: Vec<_> = columns.iter().map(String::as_str).collect();
+                let preview = experiment
+                    .dataset
+                    .preview_rows(&names, n_points)
+                    .map_err(|error| TGAGUIError::BindingError(error.to_string()))?;
                 info!(
-                    "for column {} created sample of length {}",
-                    col,
-                    sampled_col.len()
+                    "created aligned preview for {id}: {} rows",
+                    preview.row_indices.len()
                 );
-                let sampled_col_struct = SampledColumn {
-                    name: col.clone(),
-                    col: sampled_col,
-                };
-                exp_columns.insert(col.clone(), sampled_col_struct);
+                data_map.insert(id, preview);
             }
-            data_map.insert(id, exp_columns);
         }
         Ok(data_map)
     }
@@ -750,9 +829,16 @@ impl PlotModel {
                 t_max: x_range[1],
             }
         });
-        let plot = self
-            .series
-            .sample_oneframeplot(id, range, self.settings.n_points().unwrap())?;
+        let n_points = self
+            .settings
+            .n_points()
+            .filter(|&count| count > 0)
+            .ok_or_else(|| {
+                TGAGUIError::SettingsErrors(
+                    "Plot sample count must be a positive integer.".to_string(),
+                )
+            })?;
+        let plot = self.series.sample_oneframeplot(id, range, n_points)?;
         Ok(plot)
     }
     /// get number of plot by itd String id
@@ -780,7 +866,7 @@ impl PlotModel {
     /// Rebuild all visible curves belonging to one experiment after the
     /// underlying data changed. This is stricter than updating a single curve
     /// and keeps cut/undo-style operations visually honest.
-    fn rebuild_plots_for_experiment(&mut self, id: &str) -> Result<(), TGAGUIError> {
+    pub(crate) fn rebuild_plots_for_experiment(&mut self, id: &str) -> Result<(), TGAGUIError> {
         let selected_plot = self
             .get_selected_curve_index()
             .and_then(|idx| self.plots.get(idx))
@@ -807,30 +893,56 @@ impl PlotModel {
             return Ok(());
         }
 
+        let previous_axes = preserved_curves
+            .first()
+            .map(|(x, y, ..)| (x.clone(), y.clone()));
         self.plots.retain(|curve| curve.experiment_id != id);
 
         let mut selected_index = None;
-        for (x_name, y_name, color, selected, highlighted, shown) in preserved_curves {
-            self.set_x(id, &x_name)?;
-            self.set_y(id, &y_name)?;
-            self.create_points_for_curve(id)?;
+        let rebuild_result = (|| -> Result<(), TGAGUIError> {
+            for (x_name, y_name, color, selected, highlighted, shown) in preserved_curves {
+                self.set_x(id, &x_name)?;
+                self.set_y(id, &y_name)?;
+                self.create_points_for_curve(id)?;
 
-            let curve_index = self.plots.len().checked_sub(1).ok_or_else(|| {
-                TGAGUIError::BindingError("Failed to rebuild plot curve".to_string())
-            })?;
-            if let Some(curve) = self.plots.get_mut(curve_index) {
+                let short_name = format!("{id}_{x_name}_{y_name}");
+                let curve_index = self
+                    .plots
+                    .iter()
+                    .position(|curve| curve.plot_short_name == short_name)
+                    .ok_or_else(|| {
+                        TGAGUIError::BindingError("Failed to rebuild plot curve".to_string())
+                    })?;
+                let curve = &mut self.plots[curve_index];
                 curve.color = color;
                 curve.selected = selected;
                 curve.highlighted = highlighted;
                 curve.shown = shown;
-                if selected_plot
-                    .as_ref()
-                    .map(|name| name == &curve.plot_short_name)
-                    .unwrap_or(false)
+                if selected
+                    && selected_plot
+                        .as_ref()
+                        .is_some_and(|name| name == &curve.plot_short_name)
                 {
                     selected_index = Some(curve_index);
                 }
             }
+            Ok(())
+        })();
+
+        if let Err(error) = rebuild_result {
+            self.plots.retain(|curve| curve.experiment_id != id);
+            if let Some((previous_x, previous_y)) = previous_axes {
+                let _ = self.set_x(id, &previous_x);
+                let _ = self.set_y(id, &previous_y);
+            }
+            if selected_plot.is_some() {
+                self.clear_selection();
+                self.clear_selection_rect();
+            }
+            self.reset_view();
+            return Err(TGAGUIError::post_commit_warning(format!(
+                "experiment '{id}' was updated and remains in the series; stale curves were removed ({error})"
+            )));
         }
 
         if let Some(index) = selected_index {
@@ -967,8 +1079,20 @@ impl PlotModel {
     ) -> Result<(), TGAGUIError> {
         self.series.rename_column(id, col_name, new_name)?;
         self.remap_active_sources_for_experiment(id, col_name, new_name);
-        self.prune_stale_plots();
-        self.reset_view();
+        for curve in self
+            .plots
+            .iter_mut()
+            .filter(|curve| curve.experiment_id == id)
+        {
+            if curve.x_name == col_name {
+                curve.x_name = new_name.to_string();
+            }
+            if curve.y_name == col_name {
+                curve.y_name = new_name.to_string();
+            }
+            curve.plot_short_name = format!("{id}_{}_{}", curve.x_name, curve.y_name);
+        }
+        self.rebuild_plots_for_experiment(id)?;
         Ok(())
     }
     pub fn drop_column_for_experiment(
@@ -978,6 +1102,20 @@ impl PlotModel {
     ) -> Result<(), TGAGUIError> {
         self.series.drop_column(id, col_name)?;
         self.clear_active_sources_if_column_dropped(id, col_name);
+        self.prune_stale_plots();
+        self.reset_view();
+        Ok(())
+    }
+
+    pub fn drop_columns_for_experiment(
+        &mut self,
+        id: &str,
+        col_names: &[String],
+    ) -> Result<(), TGAGUIError> {
+        self.series.drop_columns(id, col_names)?;
+        for col_name in col_names {
+            self.clear_active_sources_if_column_dropped(id, col_name);
+        }
         self.prune_stale_plots();
         self.reset_view();
         Ok(())
@@ -1229,7 +1367,9 @@ impl PlotModel {
             let _ = self.push_message("Mass is already in milligrams; conversion skipped.");
             return Ok(());
         }
-        let set = self.settings.calibration_line().unwrap();
+        let set = self.settings.calibration_line().ok_or_else(|| {
+            TGAGUIError::BindingError("Mass calibration is not configured".to_string())
+        })?;
         let k = set.k();
         let b = set.b();
         info!(
@@ -1260,7 +1400,9 @@ impl PlotModel {
             let _ = self.push_message("Mass is already in milligrams; conversion skipped.");
             return Ok(());
         }
-        let set = self.settings.calibration_line().unwrap();
+        let set = self.settings.calibration_line().ok_or_else(|| {
+            TGAGUIError::BindingError("Mass calibration is not configured".to_string())
+        })?;
         let k = set.k();
         let b = set.b();
         self.series.calibrate_mass(id, k, b, col)?;
@@ -1292,20 +1434,35 @@ impl PlotModel {
     //===================================================================================
     //  X or Y column operations
     //===================================================================================
+    fn selected_curve_axis_name(&self, axis: XY) -> Result<String, TGAGUIError> {
+        let selected_index = self.get_selected_curve_index().or_else(|| {
+            if self.is_only_one_shown() {
+                self.plots.iter().position(|curve| curve.is_shown())
+            } else {
+                None
+            }
+        });
+        let curve = selected_index
+            .and_then(|index| self.plots.get(index))
+            .ok_or_else(|| {
+                TGAGUIError::BindingError(
+                    "No selected curve. Select a curve before choosing its X/Y column.".into(),
+                )
+            })?;
+        Ok(match axis {
+            XY::X => curve.x_name.clone(),
+            XY::Y => curve.y_name.clone(),
+        })
+    }
+
     pub fn this_is_x_or_y(&self, xy: XY) -> Result<String, TGAGUIError> {
-        let id = self.get_experiment_by_selected_curve()?;
-        let x_name = self.series.oneframeplot_axis_name(&id, xy)?;
-        Ok(x_name)
+        self.selected_curve_axis_name(xy)
     }
     pub fn this_is_x(&self) -> Result<String, TGAGUIError> {
-        let id = self.get_experiment_by_selected_curve()?;
-        let x_name = self.series.oneframeplot_axis_name(&id, XY::X)?;
-        Ok(x_name)
+        self.selected_curve_axis_name(XY::X)
     }
     pub fn this_is_y(&self) -> Result<String, TGAGUIError> {
-        let id = self.get_experiment_by_selected_curve()?;
-        let x_name = self.series.oneframeplot_axis_name(&id, XY::Y)?;
-        Ok(x_name)
+        self.selected_curve_axis_name(XY::Y)
     }
 
     // + AND -
@@ -1330,8 +1487,7 @@ impl PlotModel {
         let id = self.get_experiment_by_selected_curve()?;
         debug!("for selected experiment {}", id);
         self.series.offset_column(&id, column, offset)?;
-        self.create_points_for_curve(&id)?;
-        self.reset_view();
+        self.rebuild_plots_for_experiment(&id)?;
         Ok(())
     }
 
@@ -1376,11 +1532,10 @@ impl PlotModel {
 
             let x_min = bounds.0;
             let x_max = bounds.1;
-            let x_col = self.series.oneframeplot_axis_name(&id, XY::X)?;
+            let x_col = self.selected_curve_axis_name(XY::X)?;
             self.series
                 .offset_column_in_range_by_reference(&id, colmn, &x_col, offset, x_min, x_max)?;
-            self.create_points_for_curve(&id)?;
-            self.reset_view();
+            self.rebuild_plots_for_experiment(&id)?;
         } else {
             return Err(TGAGUIError::BindingError(
                 "No selection rectangle. Drag-select a region on the plot first.".to_string(),
@@ -1428,9 +1583,10 @@ impl PlotModel {
 
             let y_min = bounds.2;
             let y_max = bounds.3;
-            self.offset_y_column_in_its_range_for_experiment(&id, offset, y_min, y_max)?;
-            self.create_points_for_curve(&id)?;
-            self.reset_view();
+            let y_col = self.selected_curve_axis_name(XY::Y)?;
+            self.series
+                .offset_column_in_range_by_reference(&id, &y_col, &y_col, offset, y_min, y_max)?;
+            self.rebuild_plots_for_experiment(&id)?;
         } else {
             return Err(TGAGUIError::BindingError(
                 "No selection rectangle. Drag-select a region on the plot first.".to_string(),
@@ -1462,8 +1618,7 @@ impl PlotModel {
         factor: f64,
     ) -> Result<(), TGAGUIError> {
         self.series.scale_columns(id, cols, factor)?;
-        self.create_points_for_curve(&id)?;
-        self.reset_view();
+        self.rebuild_plots_for_experiment(id)?;
         Ok(())
     }
 
@@ -1514,11 +1669,10 @@ impl PlotModel {
 
             let x_min = bounds.0;
             let x_max = bounds.1;
-            let x_col = self.series.oneframeplot_axis_name(&id, XY::X)?;
+            let x_col = self.selected_curve_axis_name(XY::X)?;
             self.series
                 .scale_column_in_range_by_reference(&id, colmn, &x_col, scale, x_min, x_max)?;
-            self.create_points_for_curve(&id)?;
-            self.reset_view();
+            self.rebuild_plots_for_experiment(&id)?;
         } else {
             return Err(TGAGUIError::BindingError(
                 "No selection rectangle. Drag-select a region on the plot first.".to_string(),
@@ -1566,9 +1720,10 @@ impl PlotModel {
 
             let y_min = bounds.2;
             let y_max = bounds.3;
-            self.scale_y_column_in_its_range_for_experiment(&id, scale, y_min, y_max)?;
-            self.create_points_for_curve(&id)?;
-            self.reset_view();
+            let y_col = self.selected_curve_axis_name(XY::Y)?;
+            self.series
+                .scale_column_in_range_by_reference(&id, &y_col, &y_col, scale, y_min, y_max)?;
+            self.rebuild_plots_for_experiment(&id)?;
         } else {
             return Err(TGAGUIError::BindingError(
                 "No selection rectangle. Drag-select a region on the plot first.".to_string(),
@@ -1594,8 +1749,7 @@ impl PlotModel {
     //===========================================================================================
     pub fn exp_column(&mut self, id: &str, col_name: &str) -> Result<(), TGAGUIError> {
         self.series.exp_column(id, col_name)?;
-        self.create_points_for_curve(&id)?;
-        self.reset_view();
+        self.rebuild_plots_for_experiment(id)?;
         Ok(())
     }
 
@@ -1609,8 +1763,7 @@ impl PlotModel {
 
     pub fn ln_column(&mut self, id: &str, col_name: &str) -> Result<(), TGAGUIError> {
         self.series.ln_column(id, col_name)?;
-        self.create_points_for_curve(&id)?;
-        self.reset_view();
+        self.rebuild_plots_for_experiment(id)?;
         Ok(())
     }
 
@@ -1624,6 +1777,26 @@ impl PlotModel {
     //===========================================================================
     // SMOOTHING, SPLINING, FILTERING
     //==========================================================================
+    fn remap_active_sources_to_new_column(
+        &mut self,
+        id: &str,
+        source_col: &str,
+        old_columns: &[String],
+    ) {
+        let Ok(current_columns) = self.list_of_columns(id) else {
+            return;
+        };
+        let mut added = current_columns
+            .iter()
+            .filter(|column| !old_columns.contains(column));
+        let Some(output_column) = added.next() else {
+            return;
+        };
+        if added.next().is_none() {
+            self.remap_active_sources_for_experiment(id, source_col, output_column);
+        }
+    }
+
     // Hampel filter
     pub fn hampel_filter_for_selected(
         &mut self,
@@ -1663,6 +1836,7 @@ impl PlotModel {
                 self.create_plots_with_new_columns(&id, old_cols, None)?;
             }
         } else {
+            self.remap_active_sources_to_new_column(&id, col_name, &old_cols);
             self.create_plots_with_new_columns(&id, old_cols, None)?;
         }
         Ok(())
@@ -1709,6 +1883,7 @@ impl PlotModel {
                 self.create_plots_with_new_columns(&id, old_cols, None)?;
             }
         } else {
+            self.remap_active_sources_to_new_column(&id, col, &old_cols);
             self.create_plots_with_new_columns(&id, old_cols, None)?;
         }
         Ok(())
@@ -1749,6 +1924,7 @@ impl PlotModel {
             self.create_plots_with_new_columns(&id, old_cols, None)?;
             self.refresh_plots_after_in_place_mutation(&id)?;
         } else {
+            self.remap_active_sources_to_new_column(&id, col_name, &old_cols);
             self.create_plots_with_new_columns(&id, old_cols, None)?;
             self.refresh_plots_after_in_place_mutation(&id)?;
         }
@@ -2038,7 +2214,7 @@ impl PlotModel {
 
             let y_min = bounds.2;
             let y_max = bounds.3;
-            let y_col = self.series.oneframeplot_axis_name(&id, XY::Y)?;
+            let y_col = self.selected_curve_axis_name(XY::Y)?;
             let r = self.mean_on_interval_on_own_range(&id, &y_col, y_min, y_max)?;
             r
         } else {
@@ -2055,7 +2231,7 @@ impl PlotModel {
     }
     pub fn mean_on_column_for_selected(&self) -> Result<f64, TGAGUIError> {
         let id = self.get_experiment_by_selected_curve()?;
-        let y_col = self.series.oneframeplot_axis_name(&id, XY::Y)?;
+        let y_col = self.selected_curve_axis_name(XY::Y)?;
         let r = self.mean_on_column(&id, &y_col)?;
         Ok(r)
     }
@@ -2067,25 +2243,41 @@ impl PlotModel {
     ) -> Result<(), TGAGUIError> {
         let mut config = config;
         let do_we_need_new_exp = config.save_to_new_experiment;
-        let line = self.settings.calibration_line().unwrap();
+        let line = self.settings.calibration_line().ok_or_else(|| {
+            TGAGUIError::BindingError("Mass calibration is not configured".to_string())
+        })?;
         let k = line.k();
         let b = line.b();
         config.b = b;
         config.k = k;
-        self.series.apply_golden_pipeline(id, config)?;
+        let mut candidate = self.clone();
+        candidate.series.apply_golden_pipeline(id, config)?;
 
         if do_we_need_new_exp {
-            self.delete_all_plots()?;
+            candidate.delete_all_plots()?;
 
-            let last_exp = &self.series.experiments.last().unwrap();
+            let last_exp = candidate.series.experiments().last().ok_or_else(|| {
+                TGAGUIError::BindingError(
+                    "Golden Pipeline created no output experiment".to_string(),
+                )
+            })?;
             let new_id = last_exp.meta.id.clone();
-            let deta_dt = &last_exp.dataset.schema.deta_dt.clone().unwrap();
-            let eta = &last_exp.dataset.schema.eta.clone().unwrap();
-            self.set_x(&new_id, &eta)?;
-            self.set_y(&new_id, &deta_dt)?;
-            self.create_points_for_curve(&new_id)?;
+            let deta_dt = last_exp.dataset.schema.deta_dt.clone().ok_or_else(|| {
+                TGAGUIError::BindingError(
+                    "Golden Pipeline output has no conversion rate".to_string(),
+                )
+            })?;
+            let eta = last_exp.dataset.schema.eta.clone().ok_or_else(|| {
+                TGAGUIError::BindingError(
+                    "Golden Pipeline output has no conversion column".to_string(),
+                )
+            })?;
+            candidate.set_x(&new_id, &eta)?;
+            candidate.set_y(&new_id, &deta_dt)?;
+            candidate.create_points_for_curve(&new_id)?;
             info!("new experiment created");
         }
+        *self = candidate;
         Ok(())
     }
     //===========================================================================================
@@ -2175,69 +2367,15 @@ impl PlotModel {
             .add_column_from_vec(id, name, unit, nature, data)?;
         Ok(())
     }
-
-    /// Fit one `(x, y)` column pair, publish fitted y, and create its plot.
-    ///
-    /// The domain layer owns fitting semantics and provenance. The GUI layer only
-    /// asks for the operation, then wires `x` vs `fitted_y` into the normal plot
-    /// machinery so the result is immediately visible.
-    pub fn fit_column_and_plot(
-        &mut self,
-        request: FitColumnRequest,
-    ) -> Result<FitColumnResult, TGAGUIError> {
-        let result = self.series.fit_column(request)?;
-        self.set_x(&result.experiment_id, &result.x_col)?;
-        self.set_y(&result.experiment_id, &result.output_col)?;
-        self.create_points_for_curve_with_builder(&result.experiment_id, Colours::Red)?;
-
-        let short_name =
-            self.create_plot_short_name(&result.experiment_id, &result.x_col, &result.output_col);
-        if let Some(curve) = self
-            .plots
-            .iter_mut()
-            .find(|curve| curve.plot_short_name == short_name)
-        {
-            curve.shown = true;
-        }
-        self.reset_view();
-        Ok(result)
-    }
-
-    /// Push fitted sublimation rates into the series and build plots for each experiment.
-    ///
-    /// For every `(conversion, fitted_conversion_rate)` pair we create a new curve:
-    /// X = conversion column, Y = fitted rate column.
-    pub fn push_sublimation_fitted_rates(
-        &mut self,
-        results: &[SublimationResult],
-    ) -> Result<(), TGAGUIError> {
-        SublimationMethod::push_fitted_rates_to_series(results, &mut self.series)?;
-
-        for res in results {
-            let conv_col = self
-                .series
-                .get_column_by_nature(&res.experiment_id, ColumnNature::Conversion)?
-                .ok_or_else(|| {
-                    TGAGUIError::BindingError(format!(
-                        "Conversion column not found for experiment '{}'",
-                        res.experiment_id
-                    ))
-                })?;
-
-            self.set_x(&res.experiment_id, &conv_col)?;
-            self.set_y(&res.experiment_id, "fitted_sublim_rate")?;
-            self.create_points_for_curve_with_builder(&res.experiment_id, Colours::Red)?;
-        }
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod fitting_gui_model_tests {
     use super::*;
     use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
-    use crate::Kinetics::experimental_kinetics::fitting::FittingModelName;
+    use crate::Kinetics::experimental_kinetics::math::fitting::{
+        FitColumnRequest, FittingModelName,
+    };
     use crate::Kinetics::experimental_kinetics::testing_mod::VirtualTGA;
 
     fn linspace(start: f64, end: f64, len: usize) -> Vec<f64> {

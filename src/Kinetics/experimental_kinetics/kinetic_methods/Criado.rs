@@ -69,24 +69,44 @@ impl CriadoSolver {
     //=========================================================================
     // ISOTHERMAL CASE
     //=========================================================================
-    pub fn precompute_master_curves(&mut self) {
+    pub fn precompute_master_curves(&mut self) -> Result<(), TGADomainError> {
         self.master_curves.clear();
 
         for model in &self.models {
             let g = integrate_g2(model, &self.alpha_grid);
 
-            let g_ref = interpolate(&self.alpha_grid, &g, self.reference_alpha);
+            let g_ref = interpolate(&self.alpha_grid, &g, self.reference_alpha)?;
+            if !g_ref.is_finite() || g_ref == 0.0 {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Criado reference integral is invalid for model {model:?}"
+                )));
+            }
 
             let curve: Vec<f64> = g.iter().map(|v| v / g_ref).collect();
+            if curve.iter().any(|value| !value.is_finite()) {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Criado produced non-finite master-curve values for model {model:?}"
+                )));
+            }
 
             self.master_curves.push(curve);
         }
+        Ok(())
     }
-    fn experimental_curve_isothermal(&self, exp: &ExperimentData) -> Vec<(f64, f64)> {
+    fn experimental_curve_isothermal(
+        &self,
+        exp: &ExperimentData,
+    ) -> Result<Vec<(f64, f64)>, TGADomainError> {
         let alpha = &exp.conversion;
         let time = &exp.time;
         let ref_alpha = self.reference_alpha;
-        let t_ref = interpolate(alpha, time, ref_alpha);
+        let t_ref = interpolate(alpha, time, ref_alpha)?;
+        if t_ref == 0.0 {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "Criado reference time is zero for experiment '{}'",
+                exp.meta.id
+            )));
+        }
 
         let mut curve = Vec::new();
 
@@ -95,24 +115,35 @@ impl CriadoSolver {
                 continue;
             }
 
-            curve.push((a, t / t_ref));
+            let normalized_time = t / t_ref;
+            if !normalized_time.is_finite() {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Criado produced a non-finite normalized time for experiment '{}'",
+                    exp.meta.id
+                )));
+            }
+            curve.push((a, normalized_time));
         }
 
-        curve
+        Ok(curve)
     }
 
-    fn solve_experiment_isothermal(&self, exp: &ExperimentData) -> Vec<CriadoModelScore> {
-        let exp_curve = self.experimental_curve_isothermal(exp);
+    fn solve_experiment_isothermal(
+        &self,
+        exp: &ExperimentData,
+    ) -> Result<Vec<CriadoModelScore>, TGADomainError> {
+        let exp_curve = self.experimental_curve_isothermal(exp)?;
+        if exp_curve.is_empty() {
+            return Err(TGADomainError::InvalidConversionRange);
+        }
 
         let alpha: Vec<f64> = exp_curve.iter().map(|(a, _)| *a).collect();
 
-        let projected = project_models_to_experiment(self, &alpha);
+        let projected = project_models_to_experiment(self, &alpha)?;
 
         let mut scores = evaluate_models_fast(&exp_curve, &projected, &self.models);
-
-        scores.sort_by(|a, b| a.error.partial_cmp(&b.error).unwrap());
-
-        scores
+        sort_model_scores(&mut scores, &exp.meta.id)?;
+        Ok(scores)
     }
 
     pub fn solve_integral_isothermal(
@@ -120,13 +151,13 @@ impl CriadoSolver {
         data: &KineticDataView,
     ) -> Result<Vec<CriadoResult>, TGADomainError> {
         if self.master_curves.is_empty() {
-            self.precompute_master_curves();
+            self.precompute_master_curves()?;
         }
 
         let mut results = Vec::new();
 
         for exp in &data.experiments {
-            let ranking = self.solve_experiment_isothermal(exp);
+            let ranking = self.solve_experiment_isothermal(exp)?;
 
             results.push(CriadoResult {
                 experiment_id: exp.meta.id.clone(),
@@ -139,7 +170,7 @@ impl CriadoSolver {
     //===========================================================================================
     // INTEGRAL NONISOTHERMAL
     //==============================================================================================
-    pub fn precompute_nonisothermal_curves(&mut self) {
+    pub fn precompute_nonisothermal_curves(&mut self) -> Result<(), TGADomainError> {
         self.master_curves_noniso.clear();
 
         for model in &self.models {
@@ -150,13 +181,20 @@ impl CriadoSolver {
             let model_fn = model.get_fn();
             let model_fn = |a: f64| model_fn(a, vec![]);
 
+            // The normalized Criado product g(a)*f(a) is identical for F1 and
+            // the A2-A4 Avrami models, so this method cannot distinguish them.
             for (i, a) in self.alpha_grid.iter().enumerate() {
                 let val = g[i] * model_fn(*a);
 
                 z.push(val);
             }
 
-            let z_ref = interpolate(&self.alpha_grid, &z, self.reference_alpha);
+            let z_ref = interpolate(&self.alpha_grid, &z, self.reference_alpha)?;
+            if !z_ref.is_finite() || z_ref == 0.0 {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Criado reference value is invalid for model {model:?}"
+                )));
+            }
 
             for v in &mut z {
                 *v /= z_ref;
@@ -164,15 +202,22 @@ impl CriadoSolver {
 
             self.master_curves_noniso.push(z);
         }
+        Ok(())
     }
 
-    fn solve_experiment_nonisothermal(&self, exp: &ExperimentData) -> Vec<CriadoModelScore> {
-        let exp_curve = experimental_z_curve(exp, self);
+    fn solve_experiment_nonisothermal(
+        &self,
+        exp: &ExperimentData,
+    ) -> Result<Vec<CriadoModelScore>, TGADomainError> {
+        let exp_curve = experimental_z_curve(exp, self)?;
+        if exp_curve.is_empty() {
+            return Err(TGADomainError::InvalidConversionRange);
+        }
 
         let mut scores = Vec::new();
 
         for (i, model) in self.models.iter().enumerate() {
-            let err = evaluate_model_noniso(&exp_curve, self, i);
+            let err = evaluate_model_noniso(&exp_curve, self, i)?;
 
             scores.push(CriadoModelScore {
                 model: model.clone(),
@@ -180,9 +225,15 @@ impl CriadoSolver {
             });
         }
 
-        scores.sort_by(|a, b| a.error.partial_cmp(&b.error).unwrap());
+        if scores.iter().any(|score| !score.error.is_finite()) {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "Criado produced a non-finite model score for experiment '{}'",
+                exp.meta.id
+            )));
+        }
+        scores.sort_by(|a, b| a.error.total_cmp(&b.error));
 
-        scores
+        Ok(scores)
     }
 
     fn solve_integral_nonisothermal(
@@ -190,13 +241,13 @@ impl CriadoSolver {
         data: &KineticDataView,
     ) -> Result<Vec<CriadoResult>, TGADomainError> {
         if self.master_curves_noniso.is_empty() {
-            self.precompute_nonisothermal_curves();
+            self.precompute_nonisothermal_curves()?;
         }
 
         let mut results = Vec::new();
 
         for exp in &data.experiments {
-            let ranking = self.solve_experiment_nonisothermal(exp);
+            let ranking = self.solve_experiment_nonisothermal(exp)?;
 
             results.push(CriadoResult {
                 experiment_id: exp.meta.id.clone(),
@@ -385,17 +436,36 @@ fn evaluate_models_fast(
 
     scores
 }
-pub fn interpolate(x: &[f64], y: &[f64], xq: f64) -> f64 {
-    assert!(x.len() == y.len());
-    assert!(x.len() >= 2);
+pub fn interpolate(x: &[f64], y: &[f64], xq: f64) -> Result<f64, TGADomainError> {
+    if x.len() != y.len() || x.len() < 2 {
+        return Err(TGADomainError::InvalidOperation(format!(
+            "Criado interpolation requires equally sized arrays with at least two points (x={}, y={})",
+            x.len(),
+            y.len()
+        )));
+    }
+    if !xq.is_finite() || x.iter().chain(y.iter()).any(|value| !value.is_finite()) {
+        return Err(TGADomainError::InvalidOperation(
+            "Criado interpolation requires finite values".into(),
+        ));
+    }
+    if let Some((index, pair)) = x.windows(2).enumerate().find(|(_, pair)| pair[0] > pair[1]) {
+        return Err(TGADomainError::InvalidOperation(format!(
+            "Criado interpolation requires non-decreasing X; x[{}]={} and x[{}]={}",
+            index,
+            pair[0],
+            index + 1,
+            pair[1]
+        )));
+    }
 
     // bounds
     if xq <= x[0] {
-        return y[0];
+        return Ok(y[0]);
     }
 
     if xq >= x[x.len() - 1] {
-        return y[y.len() - 1];
+        return Ok(y[y.len() - 1]);
     }
 
     // binary search
@@ -420,7 +490,13 @@ pub fn interpolate(x: &[f64], y: &[f64], xq: f64) -> f64 {
 
     let w = (xq - x0) / (x1 - x0);
 
-    y0 + w * (y1 - y0)
+    let value = y0 + w * (y1 - y0);
+    if !value.is_finite() {
+        return Err(TGADomainError::InvalidOperation(
+            "Criado interpolation produced a non-finite value".into(),
+        ));
+    }
+    Ok(value)
 }
 
 pub fn find_alpha_index(alpha: &[f64], a: f64) -> usize {
@@ -430,14 +506,17 @@ pub fn find_alpha_index(alpha: &[f64], a: f64) -> usize {
         .unwrap_or(alpha.len() - 2)
 }
 
-fn project_models_to_experiment(solver: &CriadoSolver, exp_alpha: &[f64]) -> Vec<Vec<f64>> {
+fn project_models_to_experiment(
+    solver: &CriadoSolver,
+    exp_alpha: &[f64],
+) -> Result<Vec<Vec<f64>>, TGADomainError> {
     let mut projected = Vec::new();
 
     for curve in &solver.master_curves {
         let mut v = Vec::with_capacity(exp_alpha.len());
 
         for &a in exp_alpha {
-            let m = interpolate(&solver.alpha_grid, curve, a);
+            let m = interpolate(&solver.alpha_grid, curve, a)?;
 
             v.push(m);
         }
@@ -445,23 +524,33 @@ fn project_models_to_experiment(solver: &CriadoSolver, exp_alpha: &[f64]) -> Vec
         projected.push(v);
     }
 
-    projected
+    Ok(projected)
 }
 
-fn evaluate_model_noniso(exp_curve: &[(f64, f64)], solver: &CriadoSolver, model_idx: usize) -> f64 {
+fn evaluate_model_noniso(
+    exp_curve: &[(f64, f64)],
+    solver: &CriadoSolver,
+    model_idx: usize,
+) -> Result<f64, TGADomainError> {
     let model_curve = &solver.master_curves_noniso[model_idx];
 
     let mut err = 0.0;
 
     for (a, z_exp) in exp_curve {
-        let z_model = interpolate(&solver.alpha_grid, model_curve, *a);
+        let z_model = interpolate(&solver.alpha_grid, model_curve, *a)?;
 
         let d = z_exp - z_model;
 
         err += d * d;
     }
 
-    err.sqrt()
+    let score = err.sqrt();
+    if !score.is_finite() {
+        return Err(TGADomainError::InvalidOperation(
+            "Criado produced a non-finite model score".into(),
+        ));
+    }
+    Ok(score)
 }
 
 //=======================================================================================================================
@@ -470,17 +559,20 @@ fn evaluate_model_noniso(exp_curve: &[(f64, f64)], solver: &CriadoSolver, model_
 
 //Экспериментальный master plot
 
-fn experimental_z_curve(exp: &ExperimentData, solver: &CriadoSolver) -> Vec<(f64, f64)> {
+fn experimental_z_curve(
+    exp: &ExperimentData,
+    solver: &CriadoSolver,
+) -> Result<Vec<(f64, f64)>, TGADomainError> {
     let alpha = &exp.conversion;
     if alpha.is_empty() {
-        return Vec::new();
+        return Err(TGADomainError::EmptyColumn("conversion".into()));
     }
 
     let exp_min = alpha[0];
     let exp_max = alpha[alpha.len() - 1];
 
     if solver.reference_alpha < exp_min || solver.reference_alpha > exp_max {
-        return Vec::new();
+        return Err(TGADomainError::InvalidConversionRange);
     }
 
     let eta_grid: Vec<f64> = solver
@@ -491,32 +583,41 @@ fn experimental_z_curve(exp: &ExperimentData, solver: &CriadoSolver) -> Vec<(f64
         .collect();
 
     if eta_grid.is_empty() {
-        return Vec::new();
+        return Err(TGADomainError::InvalidConversionRange);
     }
 
-    let (_, temp, rate) = match interpolate_linear(exp, &eta_grid) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
+    let (_, temp, rate) = interpolate_linear(exp, &eta_grid).map_err(|error| {
+        TGADomainError::InvalidOperation(format!(
+            "Criado interpolation failed for experiment '{}': {error}",
+            exp.meta.id
+        ))
+    })?;
 
-    let ref_rate = interpolate(alpha, &exp.conversion_rate, solver.reference_alpha);
-    let ref_temp = interpolate(alpha, &exp.temperature, solver.reference_alpha);
+    let ref_rate = interpolate(alpha, &exp.conversion_rate, solver.reference_alpha)?;
+    let ref_temp = interpolate(alpha, &exp.temperature, solver.reference_alpha)?;
     let z_ref = ref_rate * ref_temp * ref_temp;
 
     if !z_ref.is_finite() || z_ref == 0.0 {
-        return Vec::new();
+        return Err(TGADomainError::InvalidOperation(format!(
+            "Criado reference rate/temperature is invalid for experiment '{}'",
+            exp.meta.id
+        )));
     }
 
     let mut curve = Vec::with_capacity(eta_grid.len());
 
     for i in 0..eta_grid.len() {
         let z = rate[i] * temp[i] * temp[i] / z_ref;
-        if z.is_finite() {
-            curve.push((eta_grid[i], z));
+        if !z.is_finite() {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "Criado produced a non-finite point for experiment '{}' at conversion {}",
+                exp.meta.id, eta_grid[i]
+            )));
         }
+        curve.push((eta_grid[i], z));
     }
 
-    curve
+    Ok(curve)
 }
 
 //=======================================================================================================================
@@ -586,7 +687,10 @@ pub fn best_model_frequency(results: &[CriadoResult]) -> Vec<(KineticModelNames,
     let mut counts = HashMap::new();
 
     for r in results {
-        let m = r.ranking[0].model.clone();
+        let Some(best) = r.ranking.first() else {
+            continue;
+        };
+        let m = best.model.clone();
 
         *counts.entry(m).or_insert(0) += 1;
     }
@@ -596,6 +700,24 @@ pub fn best_model_frequency(results: &[CriadoResult]) -> Vec<(KineticModelNames,
     v.sort_by(|a, b| b.1.cmp(&a.1));
 
     v
+}
+
+fn sort_model_scores(
+    scores: &mut [CriadoModelScore],
+    experiment_id: &str,
+) -> Result<(), TGADomainError> {
+    if scores.is_empty() {
+        return Err(TGADomainError::InvalidOperation(format!(
+            "Criado produced no model scores for experiment '{experiment_id}'"
+        )));
+    }
+    if scores.iter().any(|score| !score.error.is_finite()) {
+        return Err(TGADomainError::InvalidOperation(format!(
+            "Criado produced a non-finite model score for experiment '{experiment_id}'"
+        )));
+    }
+    scores.sort_by(|a, b| a.error.total_cmp(&b.error));
+    Ok(())
 }
 /*
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -729,6 +851,33 @@ pub fn interpret_criado_robust(ranking: &[CriadoModelScore]) -> CriadoInterpreta
 mod tests {
     use super::*;
 
+    #[test]
+    fn criado_score_sort_rejects_non_finite_scores_without_panicking() {
+        let mut scores = vec![CriadoModelScore {
+            model: KineticModelNames::F1,
+            error: f64::NAN,
+        }];
+        assert!(sort_model_scores(&mut scores, "invalid").is_err());
+    }
+
+    #[test]
+    fn best_model_frequency_ignores_empty_rankings() {
+        let results = vec![CriadoResult {
+            experiment_id: "empty".to_string(),
+            ranking: Vec::new(),
+        }];
+        assert!(best_model_frequency(&results).is_empty());
+    }
+
+    #[test]
+    fn criado_interpolation_validates_inputs_and_preserves_clamped_bounds() {
+        assert_eq!(interpolate(&[0.0, 1.0], &[2.0, 4.0], 0.5).unwrap(), 3.0);
+        assert_eq!(interpolate(&[0.0, 1.0], &[2.0, 4.0], -1.0).unwrap(), 2.0);
+        assert!(interpolate(&[0.0], &[2.0], 0.5).is_err());
+        assert_eq!(interpolate(&[0.0, 0.0], &[2.0, 4.0], 0.5).unwrap(), 4.0);
+        assert!(interpolate(&[0.0, 1.0], &[2.0, f64::INFINITY], 0.5).is_err());
+    }
+
     use crate::Kinetics::experimental_kinetics::kinetic_methods_tests::tests::build_view_from_cfg_exact_m0;
     use crate::Kinetics::experimental_kinetics::testing_mod::tests_afvanced_config::base_advanced_config_isothermal;
     use crate::Kinetics::experimental_kinetics::testing_mod::tests_afvanced_config::base_advanced_config_non_isothermal;
@@ -739,6 +888,36 @@ mod tests {
     /// Temperatures used across most tests (K).
     fn iso_temps() -> Vec<f64> {
         vec![520.0, 540.0, 560.0, 580.0, 600.0, 620.0]
+    }
+
+    fn assert_f1_in_nonisothermal_best_tie(ranking: &[CriadoModelScore]) {
+        let best_error = ranking.first().expect("ranking must not be empty").error;
+        let f1_error = ranking
+            .iter()
+            .find(|score| score.model == KineticModelNames::F1)
+            .expect("F1 must be included in Criado candidates")
+            .error;
+        let tolerance = 1e-10 * best_error.abs().max(f1_error.abs()).max(1e-12) + 1e-14;
+
+        assert!(
+            f1_error <= best_error + tolerance,
+            "F1 should be tied with the best non-isothermal model: best={best_error:.16e}, F1={f1_error:.16e}"
+        );
+        for equivalent_model in [
+            KineticModelNames::A2,
+            KineticModelNames::A3,
+            KineticModelNames::A4,
+        ] {
+            let error = ranking
+                .iter()
+                .find(|score| score.model == equivalent_model)
+                .expect("all Avrami candidates must be included")
+                .error;
+            assert!(
+                (error - f1_error).abs() <= tolerance,
+                "{equivalent_model:?} should be indistinguishable from F1 in the normalized non-isothermal Criado plot: F1={f1_error:.16e}, model={error:.16e}"
+            );
+        }
     }
 
     #[test]
@@ -849,8 +1028,7 @@ mod tests {
     // NON-ISOTHERMAL
     //=================================================================================
     #[test]
-    fn criado_compute_with_mock_non_isothermal_data() {
-        let now = Instant::now();
+    fn criado_reports_experiment_outside_reference_conversion_range() {
         let cfg = base_advanced_config_non_isothermal(
             700.0,
             1e5,
@@ -862,28 +1040,11 @@ mod tests {
         let view = build_view_from_cfg_exact_m0(&cfg).unwrap();
 
         let mut solver = CriadoSolver::new();
-        let result = solver.solve_integral_nonisothermal(&view).unwrap();
-        println!("Time elapsed: {:?}", now.elapsed());
-        println!("{:#?}", result);
-        for res in &result {
-            let winner = res.ranking.first().unwrap();
-            let winner = winner.model.clone();
-            let expected_winner = KineticModelNames::F1;
-            assert!(
-                winner == expected_winner,
-                "Expected winner: {:?}, got: {:?}",
-                expected_winner,
-                winner
-            );
-
-            let interp = interpret_criado(&res.ranking);
-
-            println!(
-                "Best model: {:?}, mechanism: {:?}, confidence: {:.2}",
-                interp.best_model, interp.mechanism, interp.confidence,
-            );
-        }
-        // let interp = solver.global_criado_interpretation().unwrap();
+        let result = solver.solve_integral_nonisothermal(&view);
+        assert!(matches!(
+            result,
+            Err(TGADomainError::InvalidConversionRange)
+        ));
     }
 
     #[test]
@@ -903,15 +1064,7 @@ mod tests {
         println!("Time elapsed: {:?}", now.elapsed());
         println!("{:#?}", result);
         for res in &result {
-            let winner = res.ranking.first().unwrap();
-            let winner = winner.model.clone();
-            let expected_winner = KineticModelNames::F1;
-            assert!(
-                winner == expected_winner,
-                "Expected winner: {:?}, got: {:?}",
-                expected_winner,
-                winner
-            );
+            assert_f1_in_nonisothermal_best_tie(&res.ranking);
 
             let interp = interpret_criado(&res.ranking);
 
@@ -941,15 +1094,7 @@ mod tests {
         println!("Time elapsed: {:?}", now.elapsed());
         println!("{:#?}", result);
         for res in &result {
-            let winner = res.ranking.first().unwrap();
-            let winner = winner.model.clone();
-            let expected_winner = KineticModelNames::F1;
-            assert!(
-                winner == expected_winner,
-                "Expected winner: {:?}, got: {:?}",
-                expected_winner,
-                winner
-            );
+            assert_f1_in_nonisothermal_best_tie(&res.ranking);
 
             let interp = interpret_criado(&res.ranking);
 

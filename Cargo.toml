@@ -1,6 +1,6 @@
 [package]
 name = "KiThe"
-version = "0.3.16"
+version = "0.3.17"
 edition = "2024"
 author = "Gleb Zaslavsky"
 license = "MIT"
@@ -57,7 +57,7 @@ strum_macros = "0.28.0"
 serde_json = "1.0.151"
 sha2 = "0.10.8"
 loc = "0.5.0"
-RustedSciThe = "0.4.35"   
+RustedSciThe = "0.5.0"   
 rayon = "1.11.0"
 nalgebra = { version = "0.35.0", features = ["serde"] }
 prettytable-rs = "0.10.0"
@@ -99,6 +99,7 @@ winres = "0.1"
 
 [dev-dependencies]
 criterion = "0.5"
+proptest = "1.9"
 
 [[bench]]
 name = "equilibrium_baseline"

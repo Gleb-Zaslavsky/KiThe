@@ -90,7 +90,7 @@ impl KissingerSolver {
             y.push((beta / (Tm * Tm)).ln());
         }
 
-        let reg = linear_regression(&Array1::from_vec(x), &Array1::from_vec(y));
+        let reg = linear_regression(&Array1::from_vec(x), &Array1::from_vec(y))?;
 
         let ea = -reg.slope * r;
 
@@ -358,7 +358,12 @@ pub struct ReactionPeak2 {
     pub window: PeakWindow,
 }
 
-pub fn detect_peak_window(rate: &[f64]) -> PeakWindow {
+pub fn detect_peak_window(rate: &[f64]) -> Result<PeakWindow, TGADomainError> {
+    if rate.is_empty() || rate.iter().any(|value| !value.is_finite()) {
+        return Err(TGADomainError::InvalidOperation(
+            "Peak-window detection requires non-empty finite rates".into(),
+        ));
+    }
     let mut peak_idx = 0;
     let mut peak_val = rate[0];
 
@@ -367,6 +372,12 @@ pub fn detect_peak_window(rate: &[f64]) -> PeakWindow {
             peak_val = rate[i];
             peak_idx = i;
         }
+    }
+
+    if peak_val <= 0.0 {
+        return Err(TGADomainError::InvalidOperation(
+            "Peak-window detection requires a positive rate peak".into(),
+        ));
     }
 
     let threshold = 0.01 * peak_val;
@@ -383,16 +394,25 @@ pub fn detect_peak_window(rate: &[f64]) -> PeakWindow {
         end += 1;
     }
 
-    PeakWindow {
+    Ok(PeakWindow {
         start_idx: start,
 
         peak_idx,
 
         end_idx: end,
-    }
+    })
 }
 
-pub fn extract_reaction_peaks2(grid: &ConversionGrid) -> Vec<ReactionPeak2> {
+pub fn extract_reaction_peaks2(
+    grid: &ConversionGrid,
+) -> Result<Vec<ReactionPeak2>, TGADomainError> {
+    let shape = grid.conversion_rate.dim();
+    if grid.temperature.dim() != shape || grid.time.dim() != shape || grid.eta.len() != shape.1 {
+        return Err(TGADomainError::InvalidOperation(
+            "Peak extraction requires aligned temperature, time, rate, and conversion grids".into(),
+        ));
+    }
+
     let n_exp = grid.temperature.nrows();
 
     let mut peaks = Vec::with_capacity(n_exp);
@@ -400,7 +420,10 @@ pub fn extract_reaction_peaks2(grid: &ConversionGrid) -> Vec<ReactionPeak2> {
     for i in 0..n_exp {
         let rate = grid.conversion_rate.row(i);
 
-        let window = detect_peak_window(rate.as_slice().unwrap());
+        let rate_values = rate.as_slice().ok_or_else(|| {
+            TGADomainError::InvalidOperation("Peak extraction requires contiguous rate rows".into())
+        })?;
+        let window = detect_peak_window(rate_values)?;
 
         let idx = window.peak_idx;
 
@@ -417,7 +440,7 @@ pub fn extract_reaction_peaks2(grid: &ConversionGrid) -> Vec<ReactionPeak2> {
         });
     }
 
-    peaks
+    Ok(peaks)
 }
 
 #[cfg(test)]
@@ -427,6 +450,14 @@ mod tests {
     use crate::Kinetics::experimental_kinetics::kinetic_methods_tests::tests::build_view_from_cfg_exact_m0;
     use crate::Kinetics::experimental_kinetics::testing_mod::tests_afvanced_config::base_advanced_config_non_isothermal;
     use std::time::Instant;
+
+    #[test]
+    fn peak_window_rejects_empty_non_finite_and_non_positive_rates() {
+        assert!(detect_peak_window(&[]).is_err());
+        assert!(detect_peak_window(&[0.0, f64::NAN]).is_err());
+        assert!(detect_peak_window(&[0.0, 0.0]).is_err());
+        assert!(detect_peak_window(&[0.1, 1.0, 0.2]).is_ok());
+    }
 
     // ── grid-level tests (simulate_tga_first_order2) ─────────────────────────
 

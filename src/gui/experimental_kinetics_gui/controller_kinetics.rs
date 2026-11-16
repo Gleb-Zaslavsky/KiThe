@@ -17,6 +17,16 @@ impl Default for DirectProblemDialogState {
 }
 
 impl DirectProblemDialogState {
+    pub(crate) fn close_window_on_layer(&mut self, layer: Option<egui::LayerId>) -> bool {
+        if self.open
+            && layer.is_some_and(|layer| layer.id == egui::Id::unique(Some("Direct Problem")))
+        {
+            self.open = false;
+            return true;
+        }
+        false
+    }
+
     pub fn new() -> Self {
         Self {
             open: false,
@@ -74,8 +84,9 @@ impl DirectProblemDialogState {
                 ui.separator();
 
                 ui.horizontal(|ui| {
-                    ui.label("output experiment:");
-                    ui.text_edit_singleline(&mut self.output_experiment_id);
+                    let label = ui.label("Output experiment:");
+                    let input = ui.text_edit_singleline(&mut self.output_experiment_id);
+                    let _ = input.labelled_by(label.id);
                 });
 
                 self.task.show_summary(ui);
@@ -91,20 +102,33 @@ impl DirectProblemDialogState {
                                 {
                                     Ok(()) => {
                                         self.last_error = None;
-                                        self.last_success =
-                                            Some(format!("Created experiment '{}'", experiment_id));
+                                        let message = format!("Created experiment '{experiment_id}'");
+                                        self.last_success = Some(message.clone());
+                                        let _ = model.push_message(&message);
+                                    }
+                                    Err(crate::gui::experimental_kinetics_gui::model::TGAGUIError::PostCommitWarning(warning)) => {
+                                        self.last_error = None;
+                                        let message = format!("Warning: {warning}");
+                                        self.last_success = Some(message.clone());
+                                        let _ = model.push_message(&message);
                                     }
                                     Err(err) => {
-                                        self.last_error = Some(format!("{:?}", err));
+                                        let message = format!("Error: {err}");
+                                        self.last_error = Some(message.clone());
+                                        let _ = model.push_message(&message);
                                     }
                                 },
                                 Err(err) => {
-                                    self.last_error = Some(format!("{:?}", err));
+                                    let message = format!("Error: {err}");
+                                    self.last_error = Some(message.clone());
+                                    let _ = model.push_message(&message);
                                 }
                             }
                         }
                         Err(err) => {
-                            self.last_error = Some(err);
+                            let message = format!("Error: {err}");
+                            self.last_error = Some(message.clone());
+                            let _ = model.push_message(&message);
                         }
                     }
                 }

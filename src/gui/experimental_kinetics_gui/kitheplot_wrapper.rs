@@ -5,6 +5,9 @@ use kithe_plot::controller::PlotController;
 use kithe_plot::model::DataSource;
 use kithe_plot::view::PlotEditorView;
 
+// This window prepares publication/export figures. The live workflow plots are
+// owned by PlotModel and rendered separately by the interactive egui plot view.
+
 impl DataSource for SampledColumns {
     fn column(&self, name: &str) -> Option<Vec<f64>> {
         SampledColumns::column(self, name)
@@ -27,6 +30,16 @@ pub struct KiThePlotWindowState {
 }
 
 impl KiThePlotWindowState {
+    pub(crate) fn close_window_on_layer(&mut self, layer: Option<egui::LayerId>) -> bool {
+        if self.open
+            && layer.is_some_and(|layer| layer.id == egui::Id::unique(Some("KiThe Plot Redactor")))
+        {
+            self.open = false;
+            return true;
+        }
+        false
+    }
+
     const VIEWPORT_ID: &'static str = "kithe_plot_redactor_viewport";
 
     pub fn open_from_model(&mut self, model: &mut PlotModel) -> Result<(), TGAGUIError> {

@@ -742,19 +742,19 @@ impl TGADataset {
         let ds = ds.calibrate_mass(k, b, &mass_col)?; // calibration
         // trim startup
         let ds = if let Some(time_cut_before) = time_cut_before {
-            ds.cut_before_time(time_cut_before)
+            ds.cut_before_time(time_cut_before)?
         } else {
             ds
         };
         let ds = if let Some(time_cut_after) = time_cut_after {
-            ds.cut_after_time(time_cut_after)
+            ds.cut_after_time(time_cut_after)?
         } else {
             ds
         };
 
         let ds = ds
-            .celsius_to_kelvin() // units
-            .seconds_to_hours()
+            .celsius_to_kelvin()? // units
+            .seconds_to_hours()?
             .move_time_to_zero()? // time moved to zero
             .sg_filter_column(&mass_col, window_size, poly_degree, deriv, delta)? // smoothing
             .dimensionless_mass(0.0, averaging_time / 3600.0, "alpha")?
@@ -769,7 +769,7 @@ impl TGADataset {
                 n_internal_points,
                 SolverKind::Banded,
             )?
-            .trim_null_edges()
+            .trim_null_edges()?
             .derive_temperature_rate("dT/dt")?
             .derive_dalpha_dt("dalpha_dt")?
             .derive_deta_dt("deta_dt")?;

@@ -41,13 +41,14 @@ pub fn simulate_tga_dataset(
     for &beta in betas {
         let mut ivp = KineticModelIVP::new(solvertype);
         let step = (t_end / 2000.0).max(1e-4).min(1.0);
-        let max_iter = 500;
+        let max_steps = 10_000;
+        let max_newton_iterations = 500;
         let mut options = SolidStateIvpSolverOptions {
             max_step: step,
             rtol: 1e-3,
             atol: 1e-3,
-            max_steps: (solvertype != StiffSolverKind::Lsode2).then_some(max_iter),
-            max_newton_iterations: max_iter,
+            max_steps: (solvertype != StiffSolverKind::Lsode2).then_some(max_steps),
+            max_newton_iterations,
             newton_tolerance: 1e-3,
             ..SolidStateIvpSolverOptions::default()
         };
@@ -141,7 +142,7 @@ fn test_kas_activation_energy() {
         KineticModelNames::F1,
         true_e,
         1e6,
-        0.0,
+        300.0,
         &[2.0, 5.0, 10.0, 20.0],
         50.0,
         StiffSolverKind::Bdf,
@@ -152,7 +153,7 @@ fn test_kas_activation_energy() {
     println!("tga simulated {:?}", now.elapsed());
     let grid = ConversionGridBuilder::new()
         .segments(80)
-        .build_isothermal(&data)
+        .build_nonisothermal(&data)
         .unwrap();
 
     let solver = IntegralIsoconversionalSolver::kas();

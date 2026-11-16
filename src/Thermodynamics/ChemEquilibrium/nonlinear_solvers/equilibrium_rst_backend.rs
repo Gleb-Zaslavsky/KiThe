@@ -1472,6 +1472,7 @@ impl RustedSciTheSolver {
                 kind: BackendFailureKind::NumericalBreakdown,
                 message,
             },
+            RstSolveError::Cancelled { .. } => ReactionExtentError::Cancelled,
         }
     }
 }
@@ -1559,6 +1560,27 @@ mod error_mapping_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn cancelled_rst_solve_stays_a_cancellation_instead_of_backend_failure() {
+        let error =
+            RustedSciTheSolver::LevenbergMarquardt.map_solve_error(RstSolveError::Cancelled {
+                snapshot: Box::new(
+                    RustedSciThe::numerical::Nonlinear_systems::error::CancelledSolveSnapshot {
+                        completed_iterations: 2,
+                        current_state: vec![0.0],
+                        current_residual: None,
+                        residual_norm: None,
+                        residual_evaluations: None,
+                        jacobian_evaluations: None,
+                        linear_solves: None,
+                        elapsed: None,
+                    },
+                ),
+            });
+
+        assert!(matches!(error, ReactionExtentError::Cancelled));
     }
 }
 

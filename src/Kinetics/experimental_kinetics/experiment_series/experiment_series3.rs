@@ -19,19 +19,8 @@ impl TGASeries {
         what_exp_to_take: Option<&[&str]>,
     ) -> Result<Vec<&'a TGAExperiment>, TGADomainError> {
         match what_exp_to_take {
-            Some(ids) => ids
-                .iter()
-                .map(|id| {
-                    let idx = self.exp_map.get(*id).ok_or_else(|| {
-                        TGADomainError::InvalidOperation(format!(
-                            "Experiment with id '{}' was not found",
-                            id
-                        ))
-                    })?;
-                    Ok(&self.experiments[*idx])
-                })
-                .collect(),
-            None => Ok(self.experiments.iter().collect()),
+            Some(ids) => ids.iter().map(|id| self.get_experiment_by_id(id)).collect(),
+            None => Ok(self.experiments().iter().collect()),
         }
     }
 
@@ -66,17 +55,43 @@ impl TGASeries {
 
         let mut frames = Vec::with_capacity(experiments.len());
         let mut meta = Vec::with_capacity(experiments.len());
+        let mut units = std::collections::HashMap::with_capacity(experiments.len());
+        let mut common_units: Vec<(ColumnNature, Unit)> = Vec::with_capacity(what_cols_take.len());
 
         for exp in experiments {
             let mut select_exprs = Vec::with_capacity(what_cols_take.len());
 
             for nature in &what_cols_take {
-                let source_col = exp.dataset.get_column_by_nature(*nature).ok_or_else(|| {
+                let source_col = exp.dataset.get_column_by_nature(*nature)?.ok_or_else(|| {
                     TGADomainError::InvalidOperation(format!(
                         "Experiment '{}' has no column with nature {:?}",
                         exp.meta.id, nature
                     ))
                 })?;
+                let unit = exp
+                    .dataset
+                    .schema
+                    .columns
+                    .get(&source_col)
+                    .map(|column| column.unit)
+                    .ok_or_else(|| {
+                        TGADomainError::InvalidOperation(format!(
+                            "Experiment '{}' has no unit metadata for column '{}'",
+                            exp.meta.id, source_col
+                        ))
+                    })?;
+
+                if let Some((_, expected)) = common_units.iter().find(|(role, _)| role == nature) {
+                    if *expected != unit {
+                        return Err(TGADomainError::IncompatibleUnits {
+                            operation: "concat_into_vertical_stack".to_string(),
+                            expected: format!("{} for {:?}", expected, nature),
+                            actual: unit,
+                        });
+                    }
+                } else {
+                    common_units.push((*nature, unit));
+                }
 
                 select_exprs
                     .push(col(source_col).alias(UnitedDataset::canonical_column_name(*nature)));
@@ -91,10 +106,14 @@ impl TGASeries {
 
             frames.push(selected);
             meta.push(exp.meta.clone());
+            units.insert(
+                exp.meta.id.clone(),
+                super::experiment_series2::KineticColumnUnits::from_dataset(&exp.dataset),
+            );
         }
 
         let combined = concat(frames, UnionArgs::default())?;
-        Ok(UnitedDataset::new(combined, meta))
+        Ok(UnitedDataset::new(combined, meta).with_units(units))
     }
 
     /// Build a united dataset in "Polars Struct" layout.
@@ -133,7 +152,7 @@ impl TGASeries {
             .group_by([col("exp_id")])
             .agg([as_struct(struct_fields).alias("data")]);
 
-        Ok(UnitedDataset::new(aggregated, stacked.meta))
+        Ok(UnitedDataset::new(aggregated, stacked.meta).with_units(stacked.units))
     }
     //==============================================================================================
     /// OUTPUT
@@ -170,7 +189,6 @@ impl TGASeries {
         let dataset = result.to_tga_dataset()?;
         let exp = TGAExperiment::new(dataset).with_id(id);
         self.push(exp)?;
-        self.rebuild_index();
         info!("Isoconversional method results added!");
         Ok(())
     }
@@ -242,6 +260,80 @@ mod tests {
         assert!(df.column("mass").is_ok());
         assert!(df.column("exp_id").is_ok());
         assert_eq!(united.meta.len(), 2);
+    }
+
+    #[test]
+    fn vertical_stack_allows_different_experiment_lengths() {
+        let mut series = TGASeries::new();
+        let long = VirtualTGA {
+            time: vec![0.0, 1.0, 2.0],
+            temperature: vec![300.0, 301.0, 302.0],
+            mass: vec![10.0, 9.8, 9.6],
+        };
+        let short = VirtualTGA {
+            time: vec![0.0, 1.0],
+            temperature: vec![310.0, 311.0],
+            mass: vec![8.0, 7.9],
+        };
+        for (id, data) in [("long", &long), ("short", &short)] {
+            let dataset = crate::Kinetics::experimental_kinetics::one_experiment_dataset::TGADataset::create_from_synthetic_data(data).unwrap();
+            series
+                .push(TGAExperiment::new(dataset).with_id(id))
+                .unwrap();
+        }
+
+        let united = series
+            .concat_into_vertical_stack(None, vec![ColumnNature::Time, ColumnNature::Mass])
+            .unwrap();
+        assert_eq!(united.frame.collect().unwrap().height(), 5);
+    }
+
+    #[test]
+    fn vertical_stack_rejects_mixed_units_for_requested_role() {
+        let mut series = build_series();
+        series.bind_time("exp_2", "time", Unit::Minute).unwrap();
+
+        let error = match series
+            .concat_into_vertical_stack(None, vec![ColumnNature::Time, ColumnNature::Mass])
+        {
+            Err(error) => error,
+            Ok(_) => panic!("mixed time units must be rejected"),
+        };
+
+        assert!(matches!(
+            error,
+            TGADomainError::IncompatibleUnits {
+                operation,
+                expected,
+                actual: Unit::Minute,
+            } if operation == "concat_into_vertical_stack" && expected == "s for Time"
+        ));
+    }
+
+    #[test]
+    fn vertical_stack_uses_each_experiments_active_mass_binding() {
+        let mut series = build_series();
+        series
+            .add_column_from_vec(
+                "exp_1",
+                "mass_smooth",
+                Unit::Milligram,
+                ColumnNature::Mass,
+                vec![7.0, 6.0, 5.0],
+            )
+            .unwrap();
+        series
+            .bind_mass("exp_1", "mass_smooth", Unit::Milligram)
+            .unwrap();
+
+        let united = series
+            .concat_into_vertical_stack(None, vec![ColumnNature::Time, ColumnNature::Mass])
+            .unwrap();
+        let mass = united
+            .materialize_vertical_column_by_nature("exp_1", ColumnNature::Mass)
+            .unwrap();
+
+        assert_eq!(mass, vec![7.0, 6.0, 5.0]);
     }
 
     #[test]

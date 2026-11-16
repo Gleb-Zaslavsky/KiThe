@@ -6,9 +6,12 @@
 pub mod tests {
 
     use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
+    use crate::Kinetics::experimental_kinetics::experiment_series2::{
+        KineticColumnUnits, UnitedDataset,
+    };
     use crate::Kinetics::experimental_kinetics::kinetic_methods::*;
     use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-        ColumnNature, TGADomainError,
+        ColumnNature, TGADomainError, Unit,
     };
 
     use crate::Kinetics::experimental_kinetics::testing_mod::tests_afvanced_config::{
@@ -17,6 +20,8 @@ pub mod tests {
     };
     use crate::Kinetics::experimental_kinetics::testing_mod::{AdvancedTGAConfig, KineticModel};
     use approx::assert_relative_eq;
+    use polars::df;
+    use polars::prelude::IntoLazy;
 
     fn mock_experiment() -> ExperimentData {
         ExperimentData {
@@ -28,6 +33,225 @@ pub mod tests {
             mass: None,
             mass_rate: None,
         }
+    }
+
+    #[test]
+    fn dt_matrix_keeps_forward_intervals_for_nonuniform_grid() {
+        let time = ndarray::array![[0.0, 1.0, 4.0, 10.0]];
+        let dt = ConversionGridBuilder::compute_dt_matrix(&time).unwrap();
+        assert_eq!(dt.row(0).to_vec(), vec![1.0, 3.0, 6.0, 6.0]);
+        // A solver evaluating conversion layer k must consume dt[k - 1].
+        assert_eq!(dt[[0, 0]], time[[0, 1]] - time[[0, 0]]);
+        assert_eq!(dt[[0, 1]], time[[0, 2]] - time[[0, 1]]);
+    }
+
+    #[test]
+    fn dt_matrix_rejects_short_or_non_increasing_time_grids() {
+        for time in [
+            ndarray::array![[0.0]],
+            ndarray::array![[0.0, 0.0]],
+            ndarray::array![[1.0, 0.0]],
+            ndarray::array![[0.0, f64::NAN]],
+        ] {
+            assert!(ConversionGridBuilder::compute_dt_matrix(&time).is_err());
+        }
+    }
+
+    #[test]
+    fn conversion_grid_rejects_invalid_conversion_data_and_ranges() {
+        let mut cases = Vec::new();
+
+        let mut duplicate = mock_experiment();
+        duplicate.conversion = vec![0.0, 0.5, 0.5];
+        duplicate.time.truncate(3);
+        duplicate.temperature.truncate(3);
+        duplicate.conversion_rate.truncate(3);
+        cases.push(duplicate);
+
+        let mut decreasing = mock_experiment();
+        decreasing.conversion = vec![0.0, 0.7, 0.6];
+        decreasing.time.truncate(3);
+        decreasing.temperature.truncate(3);
+        decreasing.conversion_rate.truncate(3);
+        cases.push(decreasing);
+
+        let mut not_finite = mock_experiment();
+        not_finite.conversion[1] = f64::NAN;
+        cases.push(not_finite);
+
+        let mut misaligned = mock_experiment();
+        misaligned.time.pop();
+        cases.push(misaligned);
+
+        for experiment in cases {
+            let data = KineticDataView {
+                experiments: vec![experiment],
+            };
+            assert!(
+                ConversionGridBuilder::new()
+                    .segments(10)
+                    .build_nonisothermal(&data)
+                    .is_err()
+            );
+            assert!(
+                ConversionGridBuilder::new()
+                    .calc_auto_eta_range(&data)
+                    .is_err()
+            );
+        }
+
+        let data = KineticDataView {
+            experiments: vec![mock_experiment()],
+        };
+        for (min, max) in [(-0.1, 0.8), (0.2, 1.1), (0.7, 0.6), (f64::NAN, 0.8)] {
+            assert!(matches!(
+                ConversionGridBuilder::new()
+                    .eta_range(min, max)
+                    .segments(10)
+                    .build_nonisothermal(&data),
+                Err(TGADomainError::InvalidConversionRange)
+            ));
+        }
+        assert!(
+            ConversionGridBuilder::new()
+                .safety_margin(-0.01, 0.0)
+                .segments(10)
+                .build_nonisothermal(&data)
+                .is_err()
+        );
+
+        let mut noisy_conversion = mock_experiment();
+        noisy_conversion.conversion = vec![-0.01, 0.5, 1.01];
+        let noisy_data = KineticDataView {
+            experiments: vec![noisy_conversion],
+        };
+        let grid = ConversionGridBuilder::new()
+            .segments(10)
+            .build_nonisothermal(&noisy_data)
+            .expect("small measured overshoots should not make the physical grid invalid");
+        assert!(grid.eta.iter().all(|&eta| (0.0..=1.0).contains(&eta)));
+    }
+
+    #[test]
+    fn kinetic_view_normalizes_minute_celsius_and_rate_units() {
+        let frame = df!(
+            "exp_id" => ["sample", "sample"],
+            "time" => [0.0, 1.0],
+            "temperature" => [25.0, 35.0],
+            "conversion" => [0.1, 0.2],
+            "conversion_rate" => [6.0, 12.0],
+            "mass" => [0.01, 0.02],
+            "mass_rate" => [0.6, 1.2]
+        )
+        .unwrap()
+        .lazy();
+        let meta = ExperimentMeta {
+            id: "sample".into(),
+            isothermal_temperature: Some(298.15),
+            ..ExperimentMeta::default()
+        };
+        let units = KineticColumnUnits {
+            time: Unit::Minute,
+            temperature: Unit::Celsius,
+            conversion_rate: Unit::PerMinute,
+            mass: Unit::Gram,
+            mass_rate: Unit::MilligramPerMinute,
+        };
+        let united = UnitedDataset::new(frame, vec![meta])
+            .with_units(std::collections::HashMap::from([("sample".into(), units)]));
+
+        let view = KineticDataView::from_united_dataset_by_nature(
+            &united,
+            vec![
+                ColumnNature::Time,
+                ColumnNature::Temperature,
+                ColumnNature::Conversion,
+                ColumnNature::ConversionRate,
+                ColumnNature::Mass,
+                ColumnNature::MassRate,
+            ],
+        )
+        .unwrap();
+        let exp = &view.experiments[0];
+        assert_eq!(exp.time, vec![0.0, 60.0]);
+        assert_eq!(exp.temperature, vec![298.15, 308.15]);
+        assert_eq!(exp.conversion_rate, vec![0.1, 0.2]);
+        assert_eq!(exp.mass.as_deref(), Some(&[10.0, 20.0][..]));
+        assert_eq!(exp.mass_rate.as_deref(), Some(&[0.01, 0.02][..]));
+        assert!((exp.meta.isothermal_temperature.unwrap() - 298.15).abs() < 1e-12);
+
+        let required_view = KineticDataView::from_united_dataset(&united).unwrap();
+        assert_eq!(required_view.experiments[0].time, vec![0.0, 60.0]);
+        assert_eq!(
+            required_view.experiments[0].temperature,
+            vec![298.15, 308.15]
+        );
+        assert_eq!(required_view.experiments[0].conversion_rate, vec![0.1, 0.2]);
+    }
+
+    #[test]
+    fn kinetic_view_normalizes_each_experiment_using_its_own_units() {
+        let frame = df!(
+            "exp_id" => ["minutes", "minutes", "seconds", "seconds"],
+            "time" => [0.0, 1.0, 0.0, 60.0],
+            "temperature" => [25.0, 35.0, 298.15, 308.15],
+            "conversion" => [0.1, 0.2, 0.1, 0.2],
+            "conversion_rate" => [6.0, 12.0, 0.1, 0.2],
+            "mass" => [0.01, 0.02, 10.0, 20.0],
+            "mass_rate" => [0.6, 1.2, 0.01, 0.02]
+        )
+        .unwrap()
+        .lazy();
+        let metas = ["minutes", "seconds"]
+            .into_iter()
+            .map(|id| ExperimentMeta {
+                id: id.into(),
+                ..ExperimentMeta::default()
+            })
+            .collect();
+        let minute_units = KineticColumnUnits {
+            time: Unit::Minute,
+            temperature: Unit::Celsius,
+            conversion_rate: Unit::PerMinute,
+            mass: Unit::Gram,
+            mass_rate: Unit::MilligramPerMinute,
+        };
+        let second_units = KineticColumnUnits {
+            time: Unit::Second,
+            temperature: Unit::Kelvin,
+            conversion_rate: Unit::PerSecond,
+            mass: Unit::Milligram,
+            mass_rate: Unit::MilligramPerSecond,
+        };
+        let united =
+            UnitedDataset::new(frame, metas).with_units(std::collections::HashMap::from([
+                ("minutes".into(), minute_units),
+                ("seconds".into(), second_units),
+            ]));
+        let view = KineticDataView::from_united_dataset_by_nature(
+            &united,
+            vec![
+                ColumnNature::Time,
+                ColumnNature::Temperature,
+                ColumnNature::Conversion,
+                ColumnNature::ConversionRate,
+                ColumnNature::Mass,
+                ColumnNature::MassRate,
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(view.experiments[0].time, view.experiments[1].time);
+        assert_eq!(
+            view.experiments[0].temperature,
+            view.experiments[1].temperature
+        );
+        assert_eq!(
+            view.experiments[0].conversion_rate,
+            view.experiments[1].conversion_rate
+        );
+        assert_eq!(view.experiments[0].mass, view.experiments[1].mass);
+        assert_eq!(view.experiments[0].mass_rate, view.experiments[1].mass_rate);
     }
 
     #[test]
@@ -75,7 +299,22 @@ pub mod tests {
             )
             .unwrap();
 
-        KineticDataView::from_united_dataset(&united)
+        let mut view = KineticDataView::from_united_dataset(&united)?;
+        for exp in &mut view.experiments {
+            while exp.conversion.len() > 2 {
+                let n = exp.conversion.len();
+                let saturated_tail =
+                    exp.conversion[n - 1] >= 1.0 - 1e-12 && exp.conversion[n - 2] >= 1.0 - 1e-12;
+                if !saturated_tail {
+                    break;
+                }
+                exp.conversion.pop();
+                exp.time.pop();
+                exp.temperature.pop();
+                exp.conversion_rate.pop();
+            }
+        }
+        Ok(view)
     }
 
     pub fn build_view_from_cfg_exact_m0(
@@ -121,6 +360,40 @@ pub mod tests {
                 assert!(w[1] > w[0]);
             }
         }
+    }
+
+    #[test]
+    fn kinetic_view_rejects_misaligned_optional_series_before_method_checks() {
+        let mut experiment = mock_experiment();
+        experiment.meta.id = "misaligned-run".to_string();
+        experiment.mass_rate = Some(vec![0.1, 0.2]);
+        let view = KineticDataView {
+            experiments: vec![experiment],
+        };
+
+        let err = view.validate_lengths().unwrap_err();
+        assert!(matches!(
+            err,
+            TGADomainError::ExperimentDataLengthMismatch {
+                experiment_id,
+                column,
+                expected: 3,
+                actual: 2,
+            } if experiment_id == "misaligned-run" && column == "mass_rate"
+        ));
+
+        assert!(matches!(
+            check_requirements(&view, &KineticRequirements::default()),
+            Err(TGADomainError::ExperimentDataLengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn kinetic_view_allows_omitted_optional_columns() {
+        let view = KineticDataView {
+            experiments: vec![mock_experiment()],
+        };
+        assert!(view.validate_lengths().is_ok());
     }
 
     #[test]

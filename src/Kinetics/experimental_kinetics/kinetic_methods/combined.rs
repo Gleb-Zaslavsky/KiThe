@@ -65,7 +65,7 @@ impl CombinedKineticAnalysis {
 
         let (n, m) = self.refine_nm(&pc, n0, m0);
 
-        let reg = final_regression(&x, &a, &b, &c, n, m);
+        let reg = final_regression(&x, &a, &b, &c, n, m)?;
 
         let ea = -reg.slope * r;
 
@@ -237,7 +237,7 @@ fn final_regression(
     c: &[f64],
     n: f64,
     m: f64,
-) -> LinearRegressionResult {
+) -> Result<LinearRegressionResult, TGADomainError> {
     let mut y = Vec::with_capacity(x.len());
 
     for i in 0..x.len() {

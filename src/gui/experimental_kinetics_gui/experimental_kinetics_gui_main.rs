@@ -92,9 +92,36 @@ pub struct PlotApp {
     pub column_manager_state: ColumnManagerState,
     pub kithe_plot_window: KiThePlotWindowState,
     pub direct_problem_state: DirectProblemDialogState,
+    pub(crate) keyboard_input_focused_last_frame: bool,
 }
 
 impl PlotApp {
+    fn handle_escape(&mut self, ctx: &egui::Context) {
+        if self.keyboard_input_focused_last_frame
+            || ctx.egui_wants_keyboard_input()
+            || egui::Popup::is_any_open(ctx)
+        {
+            return;
+        }
+        let escape =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if !escape {
+            return;
+        }
+
+        let top_layer = ctx.top_layer_id();
+        let closed = self.new_experiment_dialog.close_window_on_layer(top_layer)
+            || self.column_manager_state.close_window_on_layer(top_layer)
+            || self.mathematics.close_window_on_layer(top_layer)
+            || self.kinetic_methods_state.close_window_on_layer(top_layer)
+            || self.test_options.close_window_on_layer(top_layer)
+            || self.direct_problem_state.close_window_on_layer(top_layer)
+            || self.kithe_plot_window.close_window_on_layer(top_layer);
+        if closed {
+            ctx.request_repaint();
+        }
+    }
+
     /// Создает новое приложение с моделью данных по умолчанию
     pub fn new() -> Self {
         Self {
@@ -107,6 +134,7 @@ impl PlotApp {
             column_manager_state: ColumnManagerState::new(),
             kithe_plot_window: KiThePlotWindowState::default(),
             direct_problem_state: DirectProblemDialogState::new(),
+            keyboard_input_focused_last_frame: false,
         }
     }
 
@@ -124,6 +152,7 @@ impl PlotApp {
 
     /// Отрисовка пользовательского интерфейса
     fn render_ui(&mut self, ui: &mut egui::Ui) {
+        self.handle_escape(ui.ctx());
         // Top drop-down menus (File Manager, Math, Kinetic Methods, ...)
         TopDropDownMenues::top_menus(
             ui,
@@ -145,6 +174,7 @@ impl PlotApp {
             ui.ctx(),
             &mut self.model,
             &mut self.column_manager_state,
+            &mut self.kinetic_methods_state,
             &mut self.new_experiment_dialog.column_manager_open,
         );
 
@@ -210,5 +240,6 @@ impl PlotApp {
 
         self.kithe_plot_window.show(ui.ctx());
         self.direct_problem_state.show(ui.ctx(), &mut self.model);
+        self.keyboard_input_focused_last_frame = ui.ctx().egui_wants_keyboard_input();
     }
 }

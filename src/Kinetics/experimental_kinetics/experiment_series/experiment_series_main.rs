@@ -1,4 +1,4 @@
-﻿//! Публичный фасад и основная точка сборки для `TGASeries` и связанных оберток.
+//! Публичный фасад и основная точка сборки для `TGASeries` и связанных оберток.
 //!
 //! Здесь остаются только общие экспорты, макросы-генераторы и high-level wrappers.
 //! Более узкие блоки вынесены в `experiment_series_core.rs`, `experiment_series_io.rs`,
@@ -14,16 +14,15 @@ use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     TGADomainError, TGASchema, UnaryOp, Unit,
 };
 use crate::Kinetics::experimental_kinetics::testing_mod::VirtualTGA;
-use RustedSciThe::numerical::data_processing::LSQSplines::SolverKind;
-use RustedSciThe::numerical::data_processing::lowess_wrapper::LowessConfig;
-use RustedSciThe::numerical::data_processing::splines::SplineKind;
 use polars::prelude::{
-    Column, CsvWriter, DataFrame, DataType, IntoLazy, LazyCsvReader, LazyFileListReader, NamedFrom,
-    PlRefPath, SerWriter, Series,
+    Column, CsvWriter, DataFrame, DataType, IntoLazy, NamedFrom, SerWriter, Series,
 };
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
+use RustedSciThe::numerical::data_processing::lowess_wrapper::LowessConfig;
+use RustedSciThe::numerical::data_processing::splines::SplineKind;
+use RustedSciThe::numerical::data_processing::LSQSplines::SolverKind;
 
 #[path = "experiment_series_core.rs"]
 mod experiment_series_core;
@@ -75,18 +74,6 @@ macro_rules! tgaexperiment_forward_self {
                     dataset,
                     meta: self.meta,
                 })
-            }
-        )+
-    };
-}
-
-// Series wrapper for fallible in-place mutable operations selected by experiment id.
-// It routes to `try_mutate_by_id`, which expects `FnOnce(&mut TGAExperiment) -> Result<_, TGADomainError>`.
-macro_rules! tgaseries_forward_try_mutate {
-    ($(pub fn $name:ident(&mut self, id: &str $(, $arg:ident : $ty:ty)* $(,)?) -> Result<(), TGADomainError> => $target:ident;)+) => {
-        $(
-            pub fn $name(&mut self, id: &str $(, $arg: $ty)*) -> Result<(), TGADomainError> {
-                self.try_mutate_by_id(id, |exp| exp.$target($($arg),*))
             }
         )+
     };
@@ -342,6 +329,7 @@ impl TGAExperiment {
         pub fn bind_column(self, role: ColumnRole, name: &str, unit: Unit) -> Result<Self, TGADomainError> => bind_column;
         pub fn rename_column(self, old: &str, new: &str) -> Result<Self, TGADomainError> => rename_column;
         pub fn drop_column(self, col_name: &str) -> Result<Self, TGADomainError> => drop_column;
+        pub fn drop_columns(self, col_names: &[String]) -> Result<Self, TGADomainError> => drop_columns;
         pub fn move_time_to_zero(self) -> Result<Self, TGADomainError> => move_time_to_zero;
         pub fn sort_by_bound_time(self) -> Result<Self, TGADomainError> => sort_by_bound_time;
         pub fn calibrate_mass(self, k: f64, b: f64, new_col: &str) -> Result<Self, TGADomainError> => calibrate_mass;
@@ -355,16 +343,27 @@ impl TGAExperiment {
         pub fn filter_rows(self, predicate: polars::prelude::Expr) -> Self => filter_rows;
         pub fn filter_by_mask(self, mask: polars::prelude::Expr) -> Self => filter_by_mask;
         pub fn cut_interval(self, colmn: &str, from: f64, to: f64) -> Self => cut_interval;
-        pub fn cut_time_interval(self, from: f64, to: f64) -> Self => cut_time_interval;
-        pub fn cut_temperature_interval(self, from: f64, to: f64) -> Self => cut_temperature_interval;
-        pub fn cut_mass_interval(self, from: f64, to: f64) -> Self => cut_mass_interval;
-        pub fn cut_before_time(self, t_start: f64) -> Self => cut_before_time;
         pub fn trim_range(self, column: &str, from: f64, to: f64) -> Self => trim_range;
-        pub fn trim_edges(self, left: usize, right: usize) -> Self => trim_edges;
-        pub fn trim_null_edges(self) -> Self => trim_null_edges;
-        pub fn trim_null_edges_for_columns(self, cols_to_trim: &[&str]) -> Self => trim_null_edges_for_columns;
-        pub fn celsius_to_kelvin(self) -> Self => celsius_to_kelvin;
-        pub fn seconds_to_hours(self) -> Self => seconds_to_hours;
+    }
+
+    tgaexperiment_forward_result! {
+        pub fn cut_time_interval(self, from: f64, to: f64) -> Result<Self, TGADomainError> => cut_time_interval;
+        pub fn cut_temperature_interval(self, from: f64, to: f64) -> Result<Self, TGADomainError> => cut_temperature_interval;
+        pub fn cut_mass_interval(self, from: f64, to: f64) -> Result<Self, TGADomainError> => cut_mass_interval;
+        pub fn cut_after_time(self, t_after: f64) -> Result<Self, TGADomainError> => cut_after_time;
+        pub fn celsius_to_kelvin(self) -> Result<Self, TGADomainError> => celsius_to_kelvin;
+        pub fn seconds_to_hours(self) -> Result<Self, TGADomainError> => seconds_to_hours;
+        pub fn trim_edges(self, left: usize, right: usize) -> Result<Self, TGADomainError> => trim_edges;
+        pub fn trim_null_edges(self) -> Result<Self, TGADomainError> => trim_null_edges;
+        pub fn trim_null_edges_for_columns(self, cols_to_trim: &[&str]) -> Result<Self, TGADomainError> => trim_null_edges_for_columns;
+    }
+
+    pub fn cut_before_time(self, t_start: f64) -> Result<Self, TGADomainError> {
+        let dataset = self.dataset.cut_before_time(t_start)?;
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
     }
 
     //================================================================================================
@@ -380,13 +379,16 @@ impl TGAExperiment {
     // check_nulls API method in the experiment/series facade.
     // It keeps call-sites ergonomic while delegating core logic
     // to dataset and engine modules in experimental kinetics.
-    tgaexperiment_forward_self! {
-        pub fn check_nulls(self) -> Self => check_nulls;
-        pub fn check_nulls_for_operation(self, operation: &str) -> Self => check_nulls_for_operation;
+    tgaexperiment_forward_result! {
+        pub fn check_nulls(self) -> Result<Self, TGADomainError> => check_nulls;
+        pub fn check_nulls_for_operation(self, operation: &str) -> Result<Self, TGADomainError> => check_nulls_for_operation;
     }
 
-    pub fn check_nulls_for_operation_borrowed(&self, operation: &str) {
-        self.dataset.check_nulls_for_operation_borrowed(operation);
+    pub fn check_nulls_for_operation_borrowed(
+        &self,
+        operation: &str,
+    ) -> Result<(), TGADomainError> {
+        self.dataset.check_nulls_for_operation_borrowed(operation)
     }
     // assert_no_nulls API method in the experiment/series facade.
     // It keeps call-sites ergonomic while delegating core logic
@@ -430,10 +432,26 @@ impl TGAExperiment {
 /// It groups domain data and exposes a stable facade over
 /// dataset-level processing modules used throughout KiThe.
 pub struct TGASeries {
-    pub experiments: Vec<TGAExperiment>,
-    pub exp_map: HashMap<String, usize>,
+    experiments: Vec<TGAExperiment>,
+    exp_map: HashMap<String, usize>,
 }
 impl TGASeries {
+    /// Applies a narrowly scoped in-place operation whose implementation validates
+    /// all fallible inputs before mutating the experiment. Unlike the general
+    /// `try_mutate_by_id`, this helper intentionally avoids cloning the dataset
+    /// and must only be used for operations with that failure-atomicity contract.
+    pub(crate) fn try_mutate_by_id_in_place<R, F>(
+        &mut self,
+        id: &str,
+        op: F,
+    ) -> Result<R, TGADomainError>
+    where
+        F: FnOnce(&mut TGAExperiment) -> Result<R, TGADomainError>,
+    {
+        let idx = self.index_by_id(id)?;
+        op(&mut self.experiments[idx])
+    }
+
     // core/index helpers live in experiment_series_core.rs
 
     //==========================================================================
@@ -481,62 +499,99 @@ impl TGASeries {
 
     /// mutate_by_id API method in the experiment/series facade.
     /// Calls an infallible mutable operation on one experiment selected by id.
+    /// The candidate clone preserves the original experiment if the closure or
+    /// subsequent ID validation fails; the clone is intentional until a cheaper
+    /// transaction mechanism can preserve the same rollback guarantee.
     ///  generic argument:  FnOnce(&mut TGAExperiment) -> R,
     pub fn mutate_by_id<R, F>(&mut self, id: &str, op: F) -> Result<R, TGADomainError>
     where
         F: FnOnce(&mut TGAExperiment) -> R,
     {
         let idx = self.index_by_id(id)?;
-        Ok(op(&mut self.experiments[idx]))
+        let mut candidate = self.experiments[idx].clone();
+        let result = op(&mut candidate);
+        self.commit_experiment_update(idx, candidate)?;
+        Ok(result)
     }
 
     /// try_mutate_by_id API method in the experiment/series facade.
     /// Calls a fallible mutable operation on one experiment selected by id.
+    /// The candidate clone ensures an error cannot commit partial closure changes.
     ///generic argument:  FnOnce(&mut TGAExperiment) -> Result<R, TGADomainError>,
     pub fn try_mutate_by_id<R, F>(&mut self, id: &str, op: F) -> Result<R, TGADomainError>
     where
         F: FnOnce(&mut TGAExperiment) -> Result<R, TGADomainError>,
     {
         let idx = self.index_by_id(id)?;
-        op(&mut self.experiments[idx])
+        let mut candidate = self.experiments[idx].clone();
+        let result = op(&mut candidate)?;
+        self.commit_experiment_update(idx, candidate)?;
+        Ok(result)
+    }
+
+    pub(super) fn commit_experiment_update(
+        &mut self,
+        index: usize,
+        updated: TGAExperiment,
+    ) -> Result<(), TGADomainError> {
+        let previous_id = self
+            .experiments
+            .get(index)
+            .ok_or_else(|| {
+                TGADomainError::InvalidOperation(format!(
+                    "Experiment index '{}' out of range",
+                    index
+                ))
+            })?
+            .meta
+            .id
+            .clone();
+        let next_id = updated.meta.id.clone();
+
+        let next_index = if next_id == previous_id {
+            None
+        } else {
+            self.ensure_experiment_id_is_available(&next_id, Some(index))?;
+            let mut index_map = self.exp_map.clone();
+            index_map.remove(&previous_id);
+            index_map.insert(next_id.clone(), index);
+            Some(index_map)
+        };
+
+        self.experiments[index] = updated;
+        if let Some(index_map) = next_index {
+            self.exp_map = index_map;
+        }
+        Ok(())
     }
 
     /// transform_by_id API method in the experiment/series facade.
     /// Applies an infallible consuming transformation (`TGAExperiment -> TGAExperiment`)
     /// to one experiment selected by id.
+    /// The candidate clone keeps a failed ID update from changing series state.
     /// generic argument: FnOnce(TGAExperiment) -> TGAExperiment,
     pub fn transform_by_id<F>(&mut self, id: &str, op: F) -> Result<(), TGADomainError>
     where
         F: FnOnce(TGAExperiment) -> TGAExperiment,
     {
         let idx = self.index_by_id(id)?;
-        let prev_id = self.experiments[idx].meta.id.clone();
-        let experiment = std::mem::take(&mut self.experiments[idx]);
-        let updated = op(experiment);
-        self.experiments[idx] = updated;
-        if self.experiments[idx].meta.id != prev_id {
-            self.rebuild_index();
-        }
-        Ok(())
+        let updated = op(self.experiments[idx].clone());
+        self.commit_experiment_update(idx, updated)
     }
 
     /// try_transform_by_id API method in the experiment/series facade.
     /// Applies a fallible consuming transformation
     /// (`TGAExperiment -> Result<TGAExperiment, TGADomainError>`)
     /// to one experiment selected by id.
+    /// The candidate clone is required for rollback when a multi-step closure fails.
     /// generic argument: FnOnce(TGAExperiment) -> Result<TGAExperiment, TGADomainError>,
     pub fn try_transform_by_id<F>(&mut self, id: &str, op: F) -> Result<(), TGADomainError>
     where
         F: FnOnce(TGAExperiment) -> Result<TGAExperiment, TGADomainError>,
     {
         let idx = self.index_by_id(id)?;
-        let prev_id = self.experiments[idx].meta.id.clone();
         let updated = op(self.experiments[idx].clone())?;
-        self.experiments[idx] = updated;
-        if self.experiments[idx].meta.id != prev_id {
-            self.rebuild_index();
-        }
-        Ok(())
+        self.commit_experiment_update(idx, updated)
     }
     //========================================================================
 
@@ -549,29 +604,40 @@ impl TGASeries {
     // bind_time API method in the experiment/series facade.
     // It keeps call-sites ergonomic while delegating core logic
     // to dataset and engine modules in experimental kinetics.
-    tgaseries_forward_try_mutate! {
-        pub fn bind_time(&mut self, id: &str, col: &str, unit: Unit) -> Result<(), TGADomainError> => bind_time_inplace;
+    pub fn bind_time(&mut self, id: &str, col: &str, unit: Unit) -> Result<(), TGADomainError> {
+        self.try_mutate_by_id_in_place(id, |exp| exp.bind_time_inplace(col, unit))
     }
 
     // bind_temperature API method in the experiment/series facade.
     // It keeps call-sites ergonomic while delegating core logic
     // to dataset and engine modules in experimental kinetics.
-    tgaseries_forward_try_mutate! {
-        pub fn bind_temperature(&mut self, id: &str, col: &str, unit: Unit) -> Result<(), TGADomainError> => bind_temperature_inplace;
+    pub fn bind_temperature(
+        &mut self,
+        id: &str,
+        col: &str,
+        unit: Unit,
+    ) -> Result<(), TGADomainError> {
+        self.try_mutate_by_id_in_place(id, |exp| exp.bind_temperature_inplace(col, unit))
     }
 
     // bind_mass API method in the experiment/series facade.
     // It keeps call-sites ergonomic while delegating core logic
     // to dataset and engine modules in experimental kinetics.
-    tgaseries_forward_try_mutate! {
-        pub fn bind_mass(&mut self, id: &str, col: &str, unit: Unit) -> Result<(), TGADomainError> => bind_mass_inplace;
+    pub fn bind_mass(&mut self, id: &str, col: &str, unit: Unit) -> Result<(), TGADomainError> {
+        self.try_mutate_by_id_in_place(id, |exp| exp.bind_mass_inplace(col, unit))
     }
 
     // bind_column API method in the experiment/series facade.
     // It keeps call-sites ergonomic while delegating core logic
     // to dataset and engine modules in experimental kinetics.
-    tgaseries_forward_try_mutate! {
-        pub fn bind_column(&mut self, id: &str, role: ColumnRole, name: &str, unit: Unit) -> Result<(), TGADomainError> => bind_column_inplace;
+    pub fn bind_column(
+        &mut self,
+        id: &str,
+        role: ColumnRole,
+        name: &str,
+        unit: Unit,
+    ) -> Result<(), TGADomainError> {
+        self.try_mutate_by_id_in_place(id, |exp| exp.bind_column_inplace(role, name, unit))
     }
 
     // to_csv_with_units API method in the experiment/series facade.
@@ -605,7 +671,10 @@ impl TGASeries {
         id: &str,
         predicate: polars::prelude::Expr,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.filter_rows(predicate))
+        self.try_mutate_by_id_in_place(id, |exp| {
+            exp.dataset.filter_rows_inplace(predicate);
+            Ok(())
+        })
     }
 
     /// filter_by_mask API method in the experiment/series facade.
@@ -616,7 +685,10 @@ impl TGASeries {
         id: &str,
         mask: polars::prelude::Expr,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.filter_by_mask(mask))
+        self.try_mutate_by_id_in_place(id, |exp| {
+            exp.dataset.filter_by_mask_inplace(mask);
+            Ok(())
+        })
     }
 
     /// cut_interval API method in the experiment/series facade.
@@ -629,7 +701,10 @@ impl TGASeries {
         from: f64,
         to: f64,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.cut_interval(colmn, from, to))
+        self.try_mutate_by_id_in_place(id, |exp| {
+            exp.dataset.cut_interval_inplace(colmn, from, to);
+            Ok(())
+        })
     }
 
     /// cut_time_interval API method in the experiment/series facade.
@@ -641,7 +716,7 @@ impl TGASeries {
         from: f64,
         to: f64,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.cut_time_interval(from, to))
+        self.try_transform_by_id(id, |exp| exp.cut_time_interval(from, to))
     }
 
     /// cut_temperature_interval API method in the experiment/series facade.
@@ -653,7 +728,7 @@ impl TGASeries {
         from: f64,
         to: f64,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.cut_temperature_interval(from, to))
+        self.try_transform_by_id(id, |exp| exp.cut_temperature_interval(from, to))
     }
 
     /// cut_mass_interval API method in the experiment/series facade.
@@ -665,13 +740,13 @@ impl TGASeries {
         from: f64,
         to: f64,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.cut_mass_interval(from, to))
+        self.try_transform_by_id(id, |exp| exp.cut_mass_interval(from, to))
     }
 
     // cut_before_time API method in the experiment/series facade.
     // It keeps call-sites ergonomic while delegating core logic
     // to dataset and engine modules in experimental kinetics.
-    tgaseries_forward_transform! {
+    tgaseries_forward_try_transform! {
         pub fn cut_before_time(&mut self, id: &str, t_start: f64) -> Result<(), TGADomainError> => cut_before_time;
     }
 
@@ -685,7 +760,10 @@ impl TGASeries {
         from: f64,
         to: f64,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.trim_range(column, from, to))
+        self.try_mutate_by_id_in_place(id, |exp| {
+            exp.dataset.trim_range_inplace(column, from, to);
+            Ok(())
+        })
     }
 
     /// trim_edges API method in the experiment/series facade.
@@ -697,13 +775,13 @@ impl TGASeries {
         left: usize,
         right: usize,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.trim_edges(left, right))
+        self.try_transform_by_id(id, |exp| exp.trim_edges(left, right))
     }
 
     // trim_null_edges API method in the experiment/series facade.
     // It keeps call-sites ergonomic while delegating core logic
     // to dataset and engine modules in experimental kinetics.
-    tgaseries_forward_transform! {
+    tgaseries_forward_try_transform! {
         pub fn trim_null_edges(&mut self, id: &str) -> Result<(), TGADomainError> => trim_null_edges;
     }
 
@@ -715,7 +793,7 @@ impl TGASeries {
         id: &str,
         cols_to_trim: &[&str],
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.trim_null_edges_for_columns(cols_to_trim))
+        self.try_transform_by_id(id, |exp| exp.trim_null_edges_for_columns(cols_to_trim))
     }
 
     // rename_column API method in the experiment/series facade.
@@ -732,19 +810,24 @@ impl TGASeries {
         pub fn drop_column(&mut self, id: &str, col_name: &str) -> Result<(), TGADomainError> => drop_column;
     }
 
+    /// Drop a batch of columns with one dataset transaction and undo snapshot.
+    pub fn drop_columns(&mut self, id: &str, col_names: &[String]) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |experiment| experiment.drop_columns(col_names))
+    }
+
     //======================================================================
     // UNIT TRANSFORMATIONS
     // celsius_to_kelvin API method in the experiment/series facade.
     // It keeps call-sites ergonomic while delegating core logic
     // to dataset and engine modules in experimental kinetics.
-    tgaseries_forward_transform! {
+    tgaseries_forward_try_transform! {
         pub fn celsius_to_kelvin(&mut self, id: &str) -> Result<(), TGADomainError> => celsius_to_kelvin;
     }
 
     // seconds_to_hours API method in the experiment/series facade.
     // It keeps call-sites ergonomic while delegating core logic
     // to dataset and engine modules in experimental kinetics.
-    tgaseries_forward_transform! {
+    tgaseries_forward_try_transform! {
         pub fn seconds_to_hours(&mut self, id: &str) -> Result<(), TGADomainError> => seconds_to_hours;
     }
 
@@ -759,11 +842,17 @@ impl TGASeries {
         cols: &[&str],
         factor: f64,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.scale_columns(cols, factor))
+        self.try_mutate_by_id_in_place(id, |exp| {
+            exp.dataset.scale_columns_inplace(cols, factor);
+            Ok(())
+        })
     }
 
     pub fn scale_column(&mut self, id: &str, col: &str, factor: f64) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.scale_column(col, factor))
+        self.try_mutate_by_id_in_place(id, |exp| {
+            exp.dataset.scale_column_inplace(col, factor);
+            Ok(())
+        })
     }
 
     pub fn scale_column_in_its_range(
@@ -774,8 +863,10 @@ impl TGASeries {
         from: f64,
         to: f64,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| {
-            exp.scale_column_in_its_range(colmn, scale, from, to)
+        self.try_mutate_by_id_in_place(id, |exp| {
+            exp.dataset
+                .scale_column_in_its_range_inplace(colmn, scale, from, to);
+            Ok(())
         })
     }
 
@@ -788,8 +879,15 @@ impl TGASeries {
         from: f64,
         to: f64,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| {
-            exp.scale_column_in_range_by_reference(target_col, reference_col, scale, from, to)
+        self.try_mutate_by_id_in_place(id, |exp| {
+            exp.dataset.scale_column_in_range_by_reference_inplace(
+                target_col,
+                reference_col,
+                scale,
+                from,
+                to,
+            );
+            Ok(())
         })
     }
     // move_time_to_zero API method in the experiment/series facade.
@@ -808,7 +906,10 @@ impl TGASeries {
         colmn: &str,
         offset: f64,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.offset_column(colmn, offset))
+        self.try_mutate_by_id_in_place(id, |exp| {
+            exp.dataset.offset_column_inplace(colmn, offset);
+            Ok(())
+        })
     }
 
     pub fn offset_column_in_its_range(
@@ -819,8 +920,10 @@ impl TGASeries {
         from: f64,
         to: f64,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| {
-            exp.offset_column_in_its_range(colmn, offset, from, to)
+        self.try_mutate_by_id_in_place(id, |exp| {
+            exp.dataset
+                .offset_column_in_its_range_inplace(colmn, offset, from, to);
+            Ok(())
         })
     }
 
@@ -833,8 +936,15 @@ impl TGASeries {
         from: f64,
         to: f64,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| {
-            exp.offset_column_in_range_by_reference(target_col, reference_col, offset, from, to)
+        self.try_mutate_by_id_in_place(id, |exp| {
+            exp.dataset.offset_column_in_range_by_reference_inplace(
+                target_col,
+                reference_col,
+                offset,
+                from,
+                to,
+            );
+            Ok(())
         })
     }
 
@@ -847,7 +957,7 @@ impl TGASeries {
         k: f64,
         b: f64,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.calibrate_mass_from_voltage(k, b))
+        self.try_transform_by_id(id, |exp| exp.calibrate_mass_from_voltage(k, b))
     }
 
     // calibrate_mass API method in the experiment/series facade.
@@ -979,7 +1089,6 @@ impl TGASeries {
     ) -> Result<(), TGADomainError> {
         let exp = TGAExperiment::create_from_synthetic_data(virtga, meta)?;
         self.push(exp)?;
-        self.rebuild_index();
         Ok(())
     }
 
@@ -987,7 +1096,7 @@ impl TGASeries {
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
     pub fn check_nulls(&mut self, id: &str) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.check_nulls())
+        self.try_transform_by_id(id, |exp| exp.check_nulls())
     }
 
     /// check_nulls_for_operation API method in the experiment/series facade.
@@ -998,7 +1107,7 @@ impl TGASeries {
         id: &str,
         operation: &str,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.check_nulls_for_operation(operation))
+        self.try_transform_by_id(id, |exp| exp.check_nulls_for_operation(operation))
     }
 
     /// assert_no_nulls API method in the experiment/series facade.
@@ -1128,7 +1237,7 @@ impl TGASeries {
         &mut self,
         id: &str,
         cols: &[&str],
-        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::SmoothStrategy,
+        strategy: crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::SmoothStrategy,
     ) -> Result<(), TGADomainError> {
         self.try_transform_by_id(id, |exp| exp.smooth_columns(cols, strategy))
     }
@@ -1142,7 +1251,7 @@ impl TGASeries {
         col_name: &str,
         window: usize,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.rolling_mean(col_name, window))
+        self.try_transform_by_id(id, |exp| exp.rolling_mean(col_name, window))
     }
     pub fn rolling_mean_as(
         &mut self,
@@ -1151,7 +1260,7 @@ impl TGASeries {
         window: usize,
         out_col: Option<&str>,
     ) -> Result<(), TGADomainError> {
-        self.transform_by_id(id, |exp| exp.rolling_mean_as(col_name, window, out_col))
+        self.try_transform_by_id(id, |exp| exp.rolling_mean_as(col_name, window, out_col))
     }
 
     /// hampel_filter API method in the experiment/series facade.
@@ -1163,7 +1272,7 @@ impl TGASeries {
         col: &str,
         window: usize,
         n_sigma: f64,
-        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy,
+        strategy: crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::HampelStrategy,
     ) -> Result<(), TGADomainError> {
         self.try_transform_by_id(id, |exp| exp.hampel_filter(col, window, n_sigma, strategy))
     }
@@ -1173,7 +1282,7 @@ impl TGASeries {
         col: &str,
         window: usize,
         n_sigma: f64,
-        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy,
+        strategy: crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::HampelStrategy,
         out_col: Option<&str>,
     ) -> Result<(), TGADomainError> {
         self.try_transform_by_id(id, |exp| {
@@ -1190,7 +1299,7 @@ impl TGASeries {
         col: &str,
         window: usize,
         n_sigma: f64,
-        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy,
+        strategy: crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::HampelStrategy,
     ) -> Result<(), TGADomainError> {
         self.try_transform_by_id(id, |exp| {
             exp.hampel_filter_null_safe(col, window, n_sigma, strategy)
@@ -1203,7 +1312,7 @@ impl TGASeries {
         col: &str,
         window: usize,
         n_sigma: f64,
-        strategy: crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy,
+        strategy: crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::HampelStrategy,
         out_col: Option<&str>,
     ) -> Result<(), TGADomainError> {
         self.try_transform_by_id(id, |exp| {
@@ -1577,7 +1686,7 @@ impl TGASeries {
         self.try_transform_by_id(id, |exp| exp.undo_last())
     }
 
-    tgaseries_forward_apply! {
+    tgaseries_forward_try_apply! {
         pub fn get_column_by_nature(&self, id: &str, nature: ColumnNature) -> Result<Option<String>, TGADomainError> => get_column_by_nature;
         pub fn get_columns_by_nature(&self, id: &str, nature: Vec<ColumnNature>) -> Result<Vec<Option<String>>, TGADomainError> => get_columns_by_nature;
     }

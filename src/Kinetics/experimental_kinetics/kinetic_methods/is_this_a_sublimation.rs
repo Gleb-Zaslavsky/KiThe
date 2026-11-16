@@ -179,7 +179,7 @@ impl SublimationMethod {
                 )));
             }
 
-            let reg = linear_regression(&Array1::from(xs), &Array1::from(ys));
+            let reg = linear_regression(&Array1::from(xs), &Array1::from(ys))?;
 
             // ln(rate) = intercept + slope/T  →  slope = -E/R, intercept = ln(k)
             let ea = -R * reg.slope;
@@ -484,6 +484,34 @@ mod tests {
                 cols.contains(&"fitted_sublim_rate".to_string()),
                 "column missing for {id}"
             );
+            let exp = series.get_experiment_by_id(id).unwrap();
+            assert_eq!(
+                exp.dataset
+                    .schema
+                    .columns
+                    .get("fitted_sublim_rate")
+                    .unwrap()
+                    .unit,
+                Unit::PerSecond
+            );
         }
+        let first = series.get_experiment_by_id(ids[0]).unwrap();
+        let actual = first
+            .dataset
+            .frame
+            .clone()
+            .collect()
+            .unwrap()
+            .column("fitted_sublim_rate")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_relative_eq!(
+            actual,
+            results[0].fitted_conversion_rate[0],
+            epsilon = 1e-12
+        );
     }
 }

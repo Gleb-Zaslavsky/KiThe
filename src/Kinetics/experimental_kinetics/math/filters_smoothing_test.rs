@@ -5,11 +5,13 @@ mod tests {
         GoldenPipelineConfig, SavGolConfig, SplineConfig,
     };
     use crate::Kinetics::experimental_kinetics::exp_kinetics_column_manipulation::column_stats;
-    use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::*;
-    use crate::Kinetics::experimental_kinetics::ndarray_statistics::{
+    use crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::*;
+    use crate::Kinetics::experimental_kinetics::math::ndarray_statistics::{
         FilterQualityReport, filter_quality_from_arrays,
     };
-    use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{TGADataset, Unit};
+    use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
+        ColumnOrigin, TGADataset, TGADomainError, Unit,
+    };
     use crate::Kinetics::experimental_kinetics::one_experiment_dataset_test::tests::{
         ds_from_csv, make_csv,
     };
@@ -47,13 +49,13 @@ mod tests {
             seed,
         };
 
-        let clean_simulated = VirtualTGA::generate_series(&base_cfg);
+        let clean_simulated = VirtualTGA::generate_series(&base_cfg).unwrap();
         let mut noisy_cfg = base_cfg.clone();
         noisy_cfg.mass_noise = mass_noise;
         noisy_cfg.temp_noise = temp_noise;
         noisy_cfg.spikes = spikes;
 
-        let noisy_simulated = VirtualTGA::generate_series(&noisy_cfg);
+        let noisy_simulated = VirtualTGA::generate_series(&noisy_cfg).unwrap();
 
         let clean =
             TGADataset::create_from_synthetic_data(&clean_simulated[0].virtual_tga).unwrap();
@@ -100,6 +102,110 @@ mod tests {
             + report.roughness_ratio_1st
             + report.roughness_ratio_2nd
             + (1.0 - report.correlation)
+    }
+
+    #[derive(Debug)]
+    struct SignalFidelity {
+        peak_height_error: f64,
+        peak_time_error: f64,
+        integrated_area_error: f64,
+        derivative_rmse: f64,
+    }
+
+    fn signal_fidelity(
+        reference: &TGADataset,
+        candidate: &TGADataset,
+        reference_col: &str,
+        candidate_col: &str,
+    ) -> SignalFidelity {
+        let reference_df = reference.frame.clone().collect().unwrap();
+        let candidate_df = candidate.frame.clone().collect().unwrap();
+        let time = reference_df.column("time").unwrap().f64().unwrap();
+        let reference_values = reference_df.column(reference_col).unwrap().f64().unwrap();
+        let candidate_time = candidate_df.column("time").unwrap().f64().unwrap();
+        let candidate_values = candidate_df.column(candidate_col).unwrap().f64().unwrap();
+
+        assert_eq!(time.len(), candidate_time.len());
+        let mut samples = Vec::new();
+        for row in 0..time.len() {
+            if let (Some(t), Some(candidate_t), Some(expected), Some(actual)) = (
+                time.get(row),
+                candidate_time.get(row),
+                reference_values.get(row),
+                candidate_values.get(row),
+            ) && t == candidate_t
+                && t.is_finite()
+                && expected.is_finite()
+                && actual.is_finite()
+            {
+                samples.push((row, t, expected, actual));
+            }
+        }
+        assert!(samples.len() > 2, "too few aligned finite samples");
+
+        let mut expected_area = 0.0;
+        let mut actual_area = 0.0;
+        let mut squared_derivative_error = 0.0;
+        let mut derivative_count = 0usize;
+        let mut derivative_samples = Vec::new();
+        for pair in samples.windows(2) {
+            if pair[1].0 != pair[0].0 + 1 {
+                continue;
+            }
+            let dt = pair[1].1 - pair[0].1;
+            assert!(dt > 0.0 && dt.is_finite());
+            expected_area += (pair[0].2 + pair[1].2) * 0.5 * dt;
+            actual_area += (pair[0].3 + pair[1].3) * 0.5 * dt;
+            let expected_rate = (pair[1].2 - pair[0].2) / dt;
+            let actual_rate = (pair[1].3 - pair[0].3) / dt;
+            squared_derivative_error += (expected_rate - actual_rate).powi(2);
+            derivative_count += 1;
+            derivative_samples.push(((pair[0].1 + pair[1].1) * 0.5, expected_rate, actual_rate));
+        }
+        assert!(derivative_count > 0);
+        let expected_rate_peak = derivative_samples
+            .iter()
+            .max_by(|left, right| left.1.abs().total_cmp(&right.1.abs()))
+            .unwrap();
+        let actual_rate_peak = derivative_samples
+            .iter()
+            .max_by(|left, right| left.2.abs().total_cmp(&right.2.abs()))
+            .unwrap();
+
+        SignalFidelity {
+            peak_height_error: (expected_rate_peak.1.abs() - actual_rate_peak.2.abs()).abs(),
+            peak_time_error: (expected_rate_peak.0 - actual_rate_peak.0).abs(),
+            integrated_area_error: (expected_area - actual_area).abs()
+                / expected_area.abs().max(1.0),
+            derivative_rmse: (squared_derivative_error / derivative_count as f64).sqrt(),
+        }
+    }
+
+    fn known_peak_pair(noise: impl Fn(usize) -> f64) -> (TGADataset, TGADataset) {
+        let time: Vec<f64> = (0..1201).map(|index| index as f64 * 0.5).collect();
+        let clean_mass: Vec<f64> = time
+            .iter()
+            .map(|time| 100.0 - 35.0 / (1.0 + (-(*time - 300.0) / 35.0).exp()))
+            .collect();
+        let temperature: Vec<f64> = time.iter().map(|time| 350.0 + 0.1 * time).collect();
+        let noisy_mass: Vec<f64> = clean_mass
+            .iter()
+            .enumerate()
+            .map(|(index, mass)| mass + noise(index))
+            .collect();
+        let clean = TGADataset::create_from_synthetic_data(&VirtualTGA {
+            time: time.clone(),
+            temperature: temperature.clone(),
+            mass: clean_mass,
+        })
+        .unwrap();
+        let noisy = TGADataset::create_from_synthetic_data(&VirtualTGA {
+            time,
+            temperature,
+            mass: noisy_mass,
+        })
+        .unwrap();
+        (clean, noisy)
     }
 
     fn shuffled_csv_from_make_csv(n_points: usize, seed: u64) -> tempfile::NamedTempFile {
@@ -174,7 +280,7 @@ mod tests {
         let csv = make_csv(100_000, 9876);
         let ds = ds_from_csv(&csv);
         // Use a relatively large window to ensure smoothing effect
-        let ds_sm = ds.clone().rolling_mean("mass", 125);
+        let ds_sm = ds.clone().rolling_mean("mass", 125).unwrap();
         let df0 = ds.frame.collect().unwrap();
         let df_smooth = ds_sm.frame.collect().unwrap();
 
@@ -211,6 +317,46 @@ mod tests {
     }
 
     #[test]
+    fn rolling_mean_reports_invalid_input_without_recording_a_mutation() {
+        let csv = make_csv(80, 7319);
+        let ds = ds_from_csv(&csv);
+        let history_len = ds.history_of_operations.vector_of_operations.len();
+        let result = ds.clone().rolling_mean("missing_column", 5);
+        assert!(result.is_err());
+
+        let invalid_csv = make_csv(80, 7320);
+        let invalid_window = ds_from_csv(&invalid_csv).rolling_mean("mass", 0);
+        assert!(matches!(
+            invalid_window,
+            Err(TGADomainError::InvalidFilterParameters { .. })
+        ));
+        assert_eq!(
+            ds.history_of_operations.vector_of_operations.len(),
+            history_len
+        );
+    }
+
+    #[test]
+    fn null_edge_trim_rejects_unknown_columns_without_mutating_history() {
+        let csv = make_csv(80, 7321);
+        let ds = ds_from_csv(&csv);
+        let history_len = ds.history_of_operations.vector_of_operations.len();
+        let result = ds.clone().trim_null_edges_for_columns(&["missing_column"]);
+        assert!(
+            matches!(&result, Err(TGADomainError::ColumnNotFound(name)) if name == "missing_column"),
+            "unexpected trim error: {:?}",
+            result.as_ref().err()
+        );
+        assert_eq!(
+            ds.history_of_operations.vector_of_operations.len(),
+            history_len
+        );
+
+        let empty = ds.trim_null_edges_for_columns(&[]);
+        assert!(matches!(empty, Err(TGADomainError::InvalidOperation(_))));
+    }
+
+    #[test]
     fn smooth_columns_defaults_to_new_column_and_records_provenance() {
         let csv = make_csv(1200, 2024);
         let ds = ds_from_csv(&csv);
@@ -236,7 +382,8 @@ mod tests {
         let ds2 = ds
             .smooth_columns(&["mass"], SmoothStrategy::RollingMean { window: 15 })
             .unwrap()
-            .trim_null_edges();
+            .trim_null_edges()
+            .unwrap();
         let ds3 = ds2
             .lowess_filter_column_as("rolling_mass", 0.2, Some("mass_lowess"))
             .unwrap();
@@ -250,7 +397,7 @@ mod tests {
     //              HAMPEL/MAD
     #[test]
     fn hampel_filter_replace_with_median() {
-        use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy;
+        use crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::HampelStrategy;
         let csv = make_csv(1000, 777);
         let mut ds = ds_from_csv(&csv);
 
@@ -278,8 +425,467 @@ mod tests {
     }
 
     #[test]
+    fn sg_filter_records_history_and_can_be_undone() {
+        let csv = make_csv(200, 991);
+        let ds = ds_from_csv(&csv);
+        let before = ds.frame.clone().collect().unwrap();
+        let mut filtered = ds
+            .sg_filter_column_as("mass", 11, 3, 0, 1.0, Some("sg_mass_audit"))
+            .unwrap();
+
+        assert!(
+            filtered
+                .list_of_columns()
+                .contains(&"sg_mass_audit".to_string())
+        );
+        assert!(
+            filtered
+                .history_of_operations
+                .vector_of_operations
+                .iter()
+                .any(|op| { op.operation_name == "sg_filter_column" })
+        );
+        filtered.undo_last().unwrap();
+        let after_undo = filtered.frame.clone().collect().unwrap();
+        assert!(
+            !filtered
+                .list_of_columns()
+                .contains(&"sg_mass_audit".to_string())
+        );
+        assert_eq!(before.shape(), after_undo.shape());
+    }
+
+    #[test]
+    fn other_smoothing_and_resampling_paths_record_history_and_support_undo() {
+        let csv = make_csv(240, 994);
+        let mut ds = ds_from_csv(&csv);
+        ds.frame = ds.frame.collect().unwrap().lazy();
+
+        let mut rolling = ds
+            .clone()
+            .rolling_mean_as("mass", 9, Some("rolling_mass_audit"))
+            .unwrap();
+        assert!(rolling.can_undo());
+        assert!(
+            rolling
+                .history_of_operations
+                .vector_of_operations
+                .iter()
+                .any(|op| op.operation_name == "rolling_mean")
+        );
+        rolling.undo_last().unwrap();
+        assert!(
+            !rolling
+                .list_of_columns()
+                .contains(&"rolling_mass_audit".to_string())
+        );
+
+        let mut lowess = ds
+            .clone()
+            .lowess_filter_column_as("mass", 0.2, Some("lowess_mass_audit"))
+            .unwrap();
+        assert!(
+            lowess
+                .history_of_operations
+                .vector_of_operations
+                .iter()
+                .any(|op| op.operation_name == "lowess_filter")
+        );
+        lowess.undo_last().unwrap();
+        assert!(
+            !lowess
+                .list_of_columns()
+                .contains(&"lowess_mass_audit".to_string())
+        );
+
+        let mut spline = ds
+            .clone()
+            .spline_resample_columns_as(
+                "time",
+                "time_spline_audit",
+                &["mass"],
+                &[Some("mass_spline_audit")],
+                120,
+                SplineKind::Linear,
+            )
+            .unwrap();
+        assert!(
+            spline
+                .history_of_operations
+                .vector_of_operations
+                .iter()
+                .any(|op| op.operation_name == "spline_resample")
+        );
+        spline.undo_last().unwrap();
+        assert!(
+            !spline
+                .list_of_columns()
+                .contains(&"mass_spline_audit".to_string())
+        );
+        assert!(
+            !spline
+                .list_of_columns()
+                .contains(&"time_spline_audit".to_string())
+        );
+
+        let mut lsq = ds
+            .lsq_spline_resample_columns_as(
+                "time",
+                "time_lsq_audit",
+                &["mass"],
+                &[Some("mass_lsq_audit")],
+                120,
+                3,
+                12,
+                RustedSciThe::numerical::data_processing::LSQSplines::SolverKind::Banded,
+            )
+            .unwrap();
+        assert!(
+            lsq.history_of_operations
+                .vector_of_operations
+                .iter()
+                .any(|op| op.operation_name == "lsq_spline_resample")
+        );
+        lsq.undo_last().unwrap();
+        assert!(
+            !lsq.list_of_columns()
+                .contains(&"mass_lsq_audit".to_string())
+        );
+        assert!(
+            !lsq.list_of_columns()
+                .contains(&"time_lsq_audit".to_string())
+        );
+    }
+
+    #[test]
+    fn filter_rejects_output_name_used_by_another_column() {
+        let csv = make_csv(200, 992);
+        let ds = ds_from_csv(&csv);
+        let result = ds.sg_filter_column_as("mass", 11, 3, 0, 1.0, Some("temperature"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resample_all_columns_evaluates_at_the_requested_grid() {
+        let x = vec![0.0, 1.0, 2.0, 3.0];
+        let y = x.iter().map(|value| 2.0 * value + 1.0).collect::<Vec<_>>();
+        let df = DataFrame::new(
+            4,
+            vec![
+                Series::new("time".into(), x).into(),
+                Series::new("mass".into(), y).into(),
+            ],
+        )
+        .unwrap();
+        let requested = [0.0, 0.5, 2.5, 3.0];
+
+        let sampled = resample_all_columns(&df, "time", &requested, SplineKind::Linear).unwrap();
+        let sampled_time: Vec<f64> = sampled
+            .column("time")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        let sampled_mass: Vec<f64> = sampled
+            .column("mass")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        assert_eq!(sampled_time, requested);
+        assert_eq!(sampled_mass, vec![1.0, 2.0, 6.0, 7.0]);
+
+        assert!(matches!(
+            resample_all_columns(&df, "time", &[-0.1, 1.0], SplineKind::Linear),
+            Err(TGADomainError::OutOfRange)
+        ));
+        assert!(matches!(
+            resample_all_columns(&df, "time", &requested, SplineKind::Bezier(f64::NAN)),
+            Err(TGADomainError::InvalidFilterParameters { .. })
+        ));
+    }
+
+    #[test]
+    fn window_filters_reject_invalid_parameters_without_panicking() {
+        let csv = make_csv(20, 993);
+        let ds = ds_from_csv(&csv);
+        assert!(matches!(
+            ds.clone()
+                .hampel_filter("mass", 0, 3.0, HampelStrategy::ReplaceWithMedian),
+            Err(TGADomainError::InvalidFilterParameters { .. })
+        ));
+        let oversized_window =
+            ds.clone()
+                .hampel_filter("mass", usize::MAX, 3.0, HampelStrategy::ReplaceWithMedian);
+        assert!(
+            matches!(
+                &oversized_window,
+                Err(TGADomainError::InvalidFilterParameters { .. })
+            ),
+            "unexpected oversized-window result: {oversized_window:?}"
+        );
+        assert!(ds.clone().sg_filter_column("mass", 10, 3, 0, 1.0).is_err());
+        assert!(matches!(
+            ds.clone().rolling_mean("mass", usize::MAX),
+            Err(TGADomainError::InvalidFilterParameters { .. })
+        ));
+    }
+
+    #[test]
+    fn preprocessing_errors_include_operation_and_column_context() {
+        let csv = make_csv(30, 994);
+        let ds = ds_from_csv(&csv);
+
+        let sg_error = ds
+            .clone()
+            .sg_filter_column_as("mass", 3, 2, 0, 1.0, Some("sg_mass"))
+            .unwrap_err();
+        let sg_message = sg_error.to_string();
+        assert!(sg_message.contains("sg_filter_column"));
+        assert!(sg_message.contains("column 'mass'"));
+        assert!(!sg_message.contains("OperationContext"));
+        assert!(matches!(
+            sg_error,
+            TGADomainError::OperationContext {
+                operation,
+                column: Some(column),
+                source,
+                ..
+            } if operation == "sg_filter_column"
+                && column == "mass"
+                && matches!(*source, TGADomainError::InvalidFilterParameters { .. })
+        ));
+
+        let lowess_error = ds
+            .clone()
+            .lowess_filter_column_as("mass", f64::NAN, Some("lowess_mass"))
+            .unwrap_err();
+        assert!(matches!(
+            lowess_error,
+            TGADomainError::OperationContext {
+                operation,
+                column: Some(column),
+                source,
+                ..
+            } if operation == "lowess_filter_column"
+                && column == "mass"
+                && matches!(*source, TGADomainError::InvalidFilterParameters { .. })
+        ));
+
+        let output_name_error = ds
+            .lowess_filter_column_as("mass", 0.2, Some("temperature"))
+            .unwrap_err();
+        assert!(matches!(
+            output_name_error,
+            TGADomainError::ColumnAlreadyExists(name) if name == "temperature"
+        ));
+
+        let short_data = VirtualTGA {
+            time: vec![0.0, 1.0, 2.0],
+            temperature: vec![300.0, 301.0, 302.0],
+            mass: vec![10.0, 9.9, 9.8],
+        };
+        let backend_error = TGADataset::create_from_synthetic_data(&short_data)
+            .unwrap()
+            .spline_resample_columns_as(
+                "time",
+                "time_cosine",
+                &["mass"],
+                &[Some("mass_cosine")],
+                2,
+                SplineKind::Cosine,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            backend_error,
+            TGADomainError::OperationContext {
+                operation,
+                column: Some(column),
+                source,
+                ..
+            } if operation == "spline_resample"
+                && column == "mass"
+                && matches!(*source, TGADomainError::InvalidOperation(ref message) if message.contains("RustedSciThe"))
+        ));
+    }
+
+    #[test]
+    fn filters_have_explicit_and_consistent_null_and_edge_behavior() {
+        let csv = make_csv(30, 9941);
+        let mut ds = ds_from_csv(&csv);
+        let mut frame = ds.frame.clone().collect().unwrap();
+        let mut mass: Vec<Option<f64>> = frame
+            .column("mass")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .collect();
+        mass[10] = None;
+        frame
+            .with_column(Series::new("mass".into(), mass.clone()).into())
+            .unwrap();
+        ds.frame = frame.lazy();
+
+        let rolling = ds
+            .clone()
+            .rolling_mean_as("mass", 3, Some("rolling_mass"))
+            .unwrap();
+        let rolling_frame = rolling.frame.collect().unwrap();
+        assert_eq!(rolling_frame.height(), 30);
+        let rolling_values = rolling_frame.column("rolling_mass").unwrap().f64().unwrap();
+        let null_rows: Vec<usize> = rolling_values
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| value.is_none().then_some(index))
+            .collect();
+        assert_eq!(null_rows, vec![0, 1, 10, 11, 12]);
+
+        assert!(matches!(
+            ds.clone().hampel_filter_as(
+                "mass",
+                3,
+                3.0,
+                HampelStrategy::ReplaceWithMedian,
+                Some("hampel_mass"),
+            ),
+            Err(TGADomainError::InvalidOperation(_))
+        ));
+        let hampel = ds
+            .clone()
+            .hampel_filter_null_safe_as(
+                "mass",
+                3,
+                3.0,
+                HampelStrategy::ReplaceWithMedian,
+                Some("hampel_mass"),
+            )
+            .unwrap();
+        let hampel_frame = hampel.frame.collect().unwrap();
+        let hampel_values = hampel_frame.column("hampel_mass").unwrap().f64().unwrap();
+        assert_eq!(hampel_values.null_count(), 1);
+        assert_eq!(hampel_values.get(0), mass[0]);
+        assert_eq!(hampel_values.get(29), mass[29]);
+
+        assert!(
+            ds.clone()
+                .sg_filter_column_as("mass", 5, 2, 0, 1.0, Some("sg_mass"))
+                .is_err()
+        );
+        assert!(
+            ds.clone()
+                .lowess_filter_column_as("mass", 0.2, Some("lowess_mass"))
+                .is_err()
+        );
+        assert!(
+            ds.spline_resample_columns_as(
+                "time",
+                "time_spline",
+                &["mass"],
+                &[Some("mass_spline")],
+                20,
+                SplineKind::Linear,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn resampling_rejects_oversized_grids_and_conflicting_output_names() {
+        let csv = make_csv(40, 995);
+        let ds = ds_from_csv(&csv);
+
+        assert!(
+            ds.clone()
+                .spline_resample_columns_as(
+                    "time",
+                    "new_time",
+                    &["mass"],
+                    &[Some("spline_mass")],
+                    41,
+                    SplineKind::Linear,
+                )
+                .is_err()
+        );
+
+        assert!(
+            ds.clone()
+                .spline_resample_columns_as(
+                    "time",
+                    "new_time",
+                    &["mass", "temperature"],
+                    &[Some("duplicate"), Some("duplicate")],
+                    20,
+                    SplineKind::Linear,
+                )
+                .is_err()
+        );
+
+        assert!(
+            ds.clone()
+                .lsq_spline_resample_columns_as(
+                    "time",
+                    "new_time",
+                    &["mass"],
+                    &[Some("lsq_mass")],
+                    41,
+                    3,
+                    10,
+                    RustedSciThe::numerical::data_processing::LSQSplines::SolverKind::Banded,
+                )
+                .is_err()
+        );
+
+        assert!(
+            ds.clone()
+                .lsq_spline_resample_columns_as(
+                    "time",
+                    "time_degree",
+                    &["mass"],
+                    &[Some("mass_degree")],
+                    20,
+                    40,
+                    0,
+                    RustedSciThe::numerical::data_processing::LSQSplines::SolverKind::Banded,
+                )
+                .is_err()
+        );
+
+        assert!(
+            ds.clone()
+                .lsq_spline_resample_columns_as(
+                    "time",
+                    "time_knots",
+                    &["mass"],
+                    &[Some("mass_knots")],
+                    20,
+                    3,
+                    100,
+                    RustedSciThe::numerical::data_processing::LSQSplines::SolverKind::Banded,
+                )
+                .is_err()
+        );
+
+        assert!(
+            ds.lsq_spline_resample_columns_as(
+                "time",
+                "new_time",
+                &["mass"],
+                &[Some("temperature")],
+                20,
+                3,
+                10,
+                RustedSciThe::numerical::data_processing::LSQSplines::SolverKind::Banded,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn hampel_filter_drop_outliers() {
-        use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy;
+        use crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::HampelStrategy;
         let csv = make_csv(200, 888);
         let mut ds = ds_from_csv(&csv);
 
@@ -473,7 +1079,7 @@ mod tests {
         TGADataset,
         crate::Kinetics::experimental_kinetics::one_experiment_dataset::TGADomainError,
     > {
-        Ok(ds.rolling_mean_as("mass", 21, Some("rolling_mass")))
+        ds.rolling_mean_as("mass", 21, Some("rolling_mass"))
     }
 
     fn hampel_mass(
@@ -515,7 +1121,7 @@ mod tests {
         TGADataset,
         crate::Kinetics::experimental_kinetics::one_experiment_dataset::TGADomainError,
     > {
-        Ok(ds.rolling_mean_as("temperature", 21, Some("rolling_temperature")))
+        ds.rolling_mean_as("temperature", 21, Some("rolling_temperature"))
     }
 
     fn hampel_temperature(
@@ -585,6 +1191,91 @@ mod tests {
 
         for (label, filtered_col, transform) in scenarios {
             assert_filter_improves_quality(label, &clean, &noisy, "mass", filtered_col, *transform);
+        }
+    }
+
+    #[test]
+    fn smoothing_filters_preserve_peak_area_and_derivative_against_clean_signal() {
+        let (clean, noisy) = known_peak_pair(|index| {
+            let periodic_noise = 0.25 * (index as f64 * 0.37).sin();
+            let impulse = if index == 215 || index == 870 {
+                1.0
+            } else {
+                0.0
+            };
+            periodic_noise + impulse
+        });
+        let raw_fidelity = signal_fidelity(&clean, &noisy, "mass", "mass");
+        let filters: &[(
+            &str,
+            &str,
+            fn(TGADataset) -> Result<TGADataset, TGADomainError>,
+        )] = &[
+            ("rolling mean", "rolling_mass", rolling_mean_mass),
+            ("Hampel", "hampel_mass", hampel_mass),
+            ("Savitzky-Golay", "sg_mass", sg_mass),
+            ("LOWESS", "lowess_mass", lowess_mass),
+        ];
+
+        for (label, output_col, apply_filter) in filters {
+            let filtered = apply_filter(noisy.clone()).unwrap();
+            let fidelity = signal_fidelity(&clean, &filtered, "mass", output_col);
+            assert!(
+                fidelity.peak_height_error < raw_fidelity.peak_height_error,
+                "{label} did not improve rate-peak height: raw={raw_fidelity:?}, filtered={fidelity:?}"
+            );
+            assert!(
+                fidelity.peak_time_error < 10.0,
+                "{label} shifted the rate peak by 10 seconds or more: raw={raw_fidelity:?}, filtered={fidelity:?}"
+            );
+            assert!(
+                fidelity.integrated_area_error < 0.005,
+                "{label} distorted integrated area by more than 0.5%: raw={raw_fidelity:?}, filtered={fidelity:?}"
+            );
+            assert!(
+                fidelity.derivative_rmse < raw_fidelity.derivative_rmse,
+                "{label} did not improve derivative error: raw={raw_fidelity:?}, filtered={fidelity:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn smoothing_filters_retain_rate_peak_under_drift_and_flicker_noise() {
+        let (clean, noisy) = known_peak_pair(|index| {
+            0.35 * (index as f64 * 0.025).sin()
+                + 0.15 * (index as f64 * 0.19).sin()
+                + index as f64 * 0.00015
+        });
+        let filters: &[(
+            &str,
+            &str,
+            fn(TGADataset) -> Result<TGADataset, TGADomainError>,
+        )] = &[
+            ("rolling mean", "rolling_mass", rolling_mean_mass),
+            ("Hampel", "hampel_mass", hampel_mass),
+            ("Savitzky-Golay", "sg_mass", sg_mass),
+            ("LOWESS", "lowess_mass", lowess_mass),
+        ];
+
+        for (label, output_col, apply_filter) in filters {
+            let filtered = apply_filter(noisy.clone()).unwrap();
+            let fidelity = signal_fidelity(&clean, &filtered, "mass", output_col);
+            assert!(
+                fidelity.peak_height_error < 0.1,
+                "{label} changed rate-peak height excessively: {fidelity:?}"
+            );
+            assert!(
+                fidelity.peak_time_error < 15.0,
+                "{label} shifted the rate peak by 15 seconds or more: {fidelity:?}"
+            );
+            assert!(
+                fidelity.integrated_area_error < 0.01,
+                "{label} distorted area by more than 1%: {fidelity:?}"
+            );
+            assert!(
+                fidelity.derivative_rmse < 0.05,
+                "{label} derivative error exceeded tolerance: {fidelity:?}"
+            );
         }
     }
 
@@ -736,12 +1427,15 @@ mod tests {
 
         let ds2 = ds
             .trim_edges(5, 5)
+            .unwrap()
             .hampel_filter("mass", 11, 3.0, HampelStrategy::ReplaceWithMedian)
             .unwrap()
             .assert_no_nulls("hampel")
             .unwrap()
             .rolling_mean("mass", 9)
+            .unwrap()
             .trim_null_edges()
+            .unwrap()
             .assert_no_nulls("rolling_mean")
             .unwrap()
             .sg_filter_column("mass", 11, 3, 0, 1.0)
@@ -772,14 +1466,15 @@ mod tests {
             seed: 2024,
         };
 
-        let virtual_tga = VirtualTGA::generate(&cfg);
-        let txt = virtual_tga.write_txt();
+        let virtual_tga = VirtualTGA::generate(&cfg).unwrap();
+        let txt = virtual_tga.write_txt().unwrap();
         let csv = tempfile::NamedTempFile::new().unwrap();
         TGADataset::normalize_txt_to_csv(txt.path(), csv.path()).unwrap();
         let ds = ds_from_csv(&csv);
 
         let ds2 = ds
             .trim_edges(10, 10)
+            .unwrap()
             .hampel_filter("mass", 15, 3.0, HampelStrategy::ReplaceWithMedian)
             .unwrap()
             .assert_no_nulls("hampel")
@@ -787,6 +1482,7 @@ mod tests {
             .sg_filter_column("mass", 15, 3, 0, 1.0)
             .unwrap()
             .check_nulls_for_operation("SG")
+            .unwrap()
             .derive_mass_rate("dm_dt")
             .unwrap();
 
@@ -818,8 +1514,8 @@ mod tests {
             seed: 42,
         };
 
-        let virtual_tga = VirtualTGA::generate(&cfg);
-        let txt = virtual_tga.write_txt();
+        let virtual_tga = VirtualTGA::generate(&cfg).unwrap();
+        let txt = virtual_tga.write_txt().unwrap();
         let csv = tempfile::NamedTempFile::new().unwrap();
         TGADataset::normalize_txt_to_csv(txt.path(), csv.path()).unwrap();
         let ds = ds_from_csv(&csv);
@@ -836,9 +1532,12 @@ mod tests {
             .unwrap()
             // отсечь начальный мусор
             .trim_edges(50, 0)
+            .unwrap()
             // единицы
             .celsius_to_kelvin()
+            .unwrap()
             .seconds_to_hours()
+            .unwrap()
             // выбросы
             .hampel_filter("mass", 11, 3.0, HampelStrategy::ReplaceWithMedian)
             .unwrap()
@@ -846,15 +1545,18 @@ mod tests {
             .sg_filter_column("mass", 11, 3, 0, 1.0)
             .unwrap()
             .rolling_mean("mass", 9)
+            .unwrap()
             // синхронизация
             .trim_null_edges()
+            .unwrap()
             // степень превращения
             .dimensionless_mass(0.0, 10., "alpha")
             .unwrap()
             .derive_mass_rate("dalpha_dt")
             .unwrap()
             // финальная чистка
-            .trim_null_edges();
+            .trim_null_edges()
+            .unwrap();
 
         let df = ds.frame.collect().unwrap();
 
@@ -884,8 +1586,8 @@ mod tests {
             seed: 42,
         };
 
-        let virtual_tga = VirtualTGA::generate(&cfg);
-        let txt = virtual_tga.write_txt();
+        let virtual_tga = VirtualTGA::generate(&cfg).unwrap();
+        let txt = virtual_tga.write_txt().unwrap();
 
         let csv = tempfile::NamedTempFile::new().unwrap();
         TGADataset::normalize_txt_to_csv(txt.path(), csv.path()).unwrap();
@@ -905,9 +1607,12 @@ mod tests {
             .unwrap()
             // trim startup
             .trim_edges(50, 0)
+            .unwrap()
             // units
             .celsius_to_kelvin()
+            .unwrap()
             .seconds_to_hours()
+            .unwrap()
             // outliers
             .hampel_filter("mass", 11, 3.0, HampelStrategy::ReplaceWithMedian)
             .unwrap()
@@ -915,15 +1620,18 @@ mod tests {
             .sg_filter_column("mass", 11, 3, 0, 1.0)
             .unwrap()
             .rolling_mean("mass", 9)
+            .unwrap()
             // synchronization after smoothing
             .trim_null_edges()
+            .unwrap()
             // kinetics
             .dimensionless_mass(0.0, 10.0, "alpha")
             .unwrap()
-            .derive_mass_rate("dalpha_dt")
+            .derive_dalpha_dt("dalpha_dt")
             .unwrap()
             // final cleanup
-            .trim_null_edges();
+            .trim_null_edges()
+            .unwrap();
         assert!(ds.get_dalpha_dt().is_ok());
         assert!(ds.get_alpha().is_ok());
         // --- Invariants ---
@@ -1063,8 +1771,8 @@ mod tests {
             seed: 42,
         };
 
-        let virtual_tga = VirtualTGA::generate(&cfg);
-        let txt = virtual_tga.write_txt();
+        let virtual_tga = VirtualTGA::generate(&cfg).unwrap();
+        let txt = virtual_tga.write_txt().unwrap();
 
         let csv = tempfile::NamedTempFile::new().unwrap();
         TGADataset::normalize_txt_to_csv(txt.path(), csv.path()).unwrap();
@@ -1077,9 +1785,11 @@ mod tests {
             .bind_mass("mass", Unit::Milligram)
             .unwrap()
             .trim_edges(10, 10)
+            .unwrap()
             .hampel_filter_null_safe("mass", 11, 3.0, HampelStrategy::ReplaceWithMedian)
             .unwrap()
             .trim_null_edges()
+            .unwrap()
             .assert_no_nulls("hampel")
             .unwrap()
             .spline_resample_columns("time", "new_time", &["mass"], 300, SplineKind::Cosine)
@@ -1114,9 +1824,84 @@ mod tests {
     }
 
     #[test]
+    fn hampel_rejects_non_finite_values_without_panicking_or_snapshotting() {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let csv = make_csv(40, 861);
+            let mut ds = ds_from_csv(&csv);
+            let mut frame = ds.frame.clone().collect().unwrap();
+            let mut mass: Vec<f64> = frame
+                .column("mass")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_no_null_iter()
+                .collect();
+            mass[20] = invalid;
+            frame
+                .with_column(Series::new("mass".into(), mass).into())
+                .unwrap();
+            ds.frame = frame.lazy();
+            let history_len = ds.history_of_operations.vector_of_operations.len();
+            let undo_depth = ds.undo_depth();
+
+            let result = ds.clone().hampel_filter_as(
+                "mass",
+                5,
+                3.0,
+                HampelStrategy::ReplaceWithMedian,
+                Some("mass_hampel"),
+            );
+            assert!(matches!(
+                result,
+                Err(TGADomainError::InvalidColumnValues { .. })
+            ));
+            assert_eq!(
+                ds.history_of_operations.vector_of_operations.len(),
+                history_len
+            );
+            assert_eq!(ds.undo_depth(), undo_depth);
+        }
+    }
+
+    #[test]
+    fn null_safe_hampel_rejects_non_finite_non_null_values() {
+        let csv = make_csv(40, 862);
+        let mut ds = ds_from_csv(&csv);
+        let mut frame = ds.frame.clone().collect().unwrap();
+        let mut mass: Vec<f64> = frame
+            .column("mass")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        mass[20] = f64::NAN;
+        frame
+            .with_column(Series::new("mass".into(), mass).into())
+            .unwrap();
+        ds.frame = frame.lazy();
+
+        let result = ds.clone().hampel_filter_null_safe_as(
+            "mass",
+            5,
+            3.0,
+            HampelStrategy::ReplaceWithMedian,
+            Some("mass_hampel"),
+        );
+        assert!(matches!(
+            result,
+            Err(TGADomainError::InvalidColumnValues { .. })
+        ));
+    }
+
+    #[test]
     fn lsq_spline_resample_columns_as_adds_padded_columns() {
         let csv = make_csv(1000, 31415);
         let ds = ds_from_csv(&csv);
+        let source_time_unit = ds.schema.columns["time"].unit;
+        let source_mass_unit = ds.schema.columns["mass"].unit;
+        let source_time_nature = ds.schema.columns["time"].nature;
+        let source_mass_nature = ds.schema.columns["mass"].nature;
 
         let ds2 = ds
             .lsq_spline_resample_columns_as(
@@ -1147,6 +1932,21 @@ mod tests {
         for i in 1..time_vals.len() {
             assert!(time_vals[i] > time_vals[i - 1]);
         }
+
+        assert_eq!(ds2.schema.time.as_deref(), Some("time_lsq"));
+        assert_eq!(ds2.schema.mass.as_deref(), Some("mass_lsq"));
+        assert_eq!(ds2.schema.columns["time_lsq"].unit, source_time_unit);
+        assert_eq!(ds2.schema.columns["mass_lsq"].unit, source_mass_unit);
+        assert_eq!(ds2.schema.columns["time_lsq"].nature, source_time_nature);
+        assert_eq!(ds2.schema.columns["mass_lsq"].nature, source_mass_nature);
+        assert_eq!(
+            ds2.schema.columns["time_lsq"].origin,
+            ColumnOrigin::NumericDerived
+        );
+        assert_eq!(
+            ds2.schema.columns["mass_lsq"].origin,
+            ColumnOrigin::NumericDerived
+        );
     }
 
     #[test]

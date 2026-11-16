@@ -15,3 +15,7 @@ pub mod model_handlers;
 pub mod settings;
 pub mod test_options;
 pub mod view;
+
+#[cfg(test)]
+#[path = "experimental_kinetics_gui/tests/mod.rs"]
+mod story_tests;

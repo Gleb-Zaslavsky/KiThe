@@ -340,20 +340,11 @@ pub fn ivp_result_to_experiment(
         schema: TGASchema {
             columns: schema_columns,
             time: Some("time".to_string()),
-            temperature: None,
-            mass: None,
-            alpha: None,
-            dm_dt: None,
-            eta: None,
-            deta_dt: None,
-            dalpha_dt: None,
-            dT_dt: None,
-            E: None,
-            R2: None,
+            ..TGASchema::default()
         },
         oneframeplot: None,
         history_of_operations: History::new(),
-        undo_stack: Vec::new(),
+        undo_stack: Default::default(),
         undo_snapshot_latch: false,
     };
     dataset.initialize_column_provenance();

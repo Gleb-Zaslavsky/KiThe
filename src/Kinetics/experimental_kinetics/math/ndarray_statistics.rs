@@ -34,7 +34,12 @@
 //! let std_dev = dataset.column_std_dev("mass")?;
 //! ```
 
-use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{TGADataset, TGADomainError};
+use crate::Kinetics::experimental_kinetics::column_provenance::{
+    ColumnProvenance, ColumnTransformKind, ColumnTransformStep,
+};
+use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
+    AffectedColumns, ColumnMeta, ColumnNature, ColumnOrigin, TGADataset, TGADomainError, Unit,
+};
 
 use ndarray::{Array1, Array2, Axis};
 use ndarray_stats::CorrelationExt;
@@ -93,14 +98,92 @@ impl TGADataset {
         Ok(arr)
     }
 
-    /// Insert or replace a column from Array1<f64>
+    /// Add a numeric column or replace its values from an `Array1`.
+    ///
+    /// Replacements preserve the existing column metadata; new columns receive
+    /// unknown units/nature until the caller explicitly binds or annotates them.
     pub fn with_array1_column(
         mut self,
         col_name: &str,
         data: Array1<f64>,
     ) -> Result<Self, TGADomainError> {
+        let existing_frame = self.frame.clone().collect()?;
+        let row_count = existing_frame.height();
+        if data.len() != row_count {
+            return Err(TGADomainError::DatasetColumnLengthMismatch {
+                column: col_name.to_string(),
+                expected: row_count,
+                actual: data.len(),
+            });
+        }
+
+        let frame_has_column = existing_frame.column(col_name).is_ok();
+        let schema_has_column = self.schema.columns.contains_key(col_name);
+        if frame_has_column != schema_has_column {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "Column '{col_name}' exists in only one of the frame and schema"
+            )));
+        }
+        if !frame_has_column {
+            self.ensure_column_name_is_available(col_name)?;
+        }
+
         let series = Series::new(col_name.into(), data.to_vec());
+        let operation_id = self.history_of_operations.vector_of_operations.len();
+        let mut updated_schema = self.schema.clone();
+        if !schema_has_column {
+            updated_schema.columns.insert(
+                col_name.to_string(),
+                ColumnMeta::new(
+                    col_name,
+                    Unit::Unknown,
+                    ColumnOrigin::NumericDerived,
+                    ColumnNature::Unknown,
+                    ColumnProvenance {
+                        root_columns: vec![col_name.to_string()],
+                        steps: Vec::new(),
+                    },
+                ),
+            );
+        }
+
+        let details = if schema_has_column {
+            "replaced values in an existing column"
+        } else {
+            "added caller-provided numeric values"
+        };
+        updated_schema
+            .columns
+            .get_mut(col_name)
+            .ok_or_else(|| TGADomainError::ColumnNotFound(col_name.to_string()))?
+            .provenance
+            .append_step(ColumnTransformStep::new(
+                vec![col_name.to_string()],
+                col_name.to_string(),
+                ColumnTransformKind::Manual {
+                    operation: "with_array1_column".to_string(),
+                    details: Some(details.to_string()),
+                },
+                None,
+                Some(operation_id),
+                true,
+            ));
+
+        self.push_undo_snapshot();
         self.frame = self.frame.with_column(lit(series));
+        self.schema = updated_schema;
+        self.log_operation(
+            "with_array1_column",
+            AffectedColumns::Specific(vec![col_name.to_string()]),
+            None,
+            if schema_has_column {
+                format!("Replaced values in column '{col_name}' from an ndarray")
+            } else {
+                format!("Added column '{col_name}' from an ndarray")
+            },
+            true,
+        );
+
         Ok(self)
     }
 
@@ -232,7 +315,7 @@ impl StatisticalAnalysis {
             });
 
             // Covariance
-            let cov = compute_covariance(&data);
+            let cov = compute_covariance(&data)?;
             analysis.covariance = Some(cov);
         }
 
@@ -268,12 +351,19 @@ impl StatisticalAnalysis {
 }
 
 /// Compute covariance matrix from data matrix (n_rows, n_cols)
-fn compute_covariance(data: &Array2<f64>) -> Array2<f64> {
+fn compute_covariance(data: &Array2<f64>) -> Result<Array2<f64>, TGADomainError> {
+    if data.nrows() == 0 || data.ncols() == 0 {
+        return Err(TGADomainError::InvalidOperation(
+            "Cannot compute covariance for an empty matrix".into(),
+        ));
+    }
     let n_rows = data.nrows() as f64;
     let n_cols = data.ncols();
 
     // Compute means
-    let means = data.mean_axis(Axis(0)).unwrap();
+    let means = data
+        .mean_axis(Axis(0))
+        .ok_or_else(|| TGADomainError::InvalidOperation("Cannot compute column means".into()))?;
 
     // Center the data
     let mut centered = data.clone();
@@ -285,7 +375,7 @@ fn compute_covariance(data: &Array2<f64>) -> Array2<f64> {
 
     // Compute covariance: (X^T * X) / n
     let cov = centered.t().dot(&centered) / n_rows;
-    cov
+    Ok(cov)
 }
 
 //=================================================================
@@ -414,7 +504,7 @@ impl TGADataset {
 // FILTER / SMOOTHING QUALITY METRICS
 //=================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FilterQualityReport {
     pub column_raw: String,
     pub column_filtered: String,
@@ -672,8 +762,8 @@ mod tests {
             seed: 42,
         };
 
-        let virtual_tga = VirtualTGA::generate(&cfg);
-        let txt = virtual_tga.write_txt();
+        let virtual_tga = VirtualTGA::generate(&cfg).unwrap();
+        let txt = virtual_tga.write_txt().unwrap();
 
         let csv = tempfile::NamedTempFile::new().unwrap();
         TGADataset::normalize_txt_to_csv(txt.path(), csv.path()).unwrap();
@@ -767,6 +857,76 @@ mod tests {
         let retrieved = ds2.column_as_array1("test_col").unwrap();
         assert_eq!(retrieved.len(), 1000);
         assert!(retrieved.iter().all(|&x| (x - 1.0).abs() < 1e-10));
+        assert!(ds2.schema.columns.contains_key("test_col"));
+        assert!(
+            ds2.history_of_operations
+                .feed_text()
+                .contains("with_array1_column")
+        );
+        assert!(ds2.can_undo());
+
+        let mut restored = ds2;
+        restored.undo_last().unwrap();
+        assert!(!restored.schema.columns.contains_key("test_col"));
+        assert!(
+            restored
+                .frame
+                .clone()
+                .collect()
+                .unwrap()
+                .column("test_col")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_with_array1_column_replacement_preserves_metadata_and_undo() {
+        let ds = make_test_dataset();
+        let original = ds.column_as_array1("mass").unwrap();
+        let replacement = Array1::from_vec(vec![42.0; original.len()]);
+
+        let replaced = ds.with_array1_column("mass", replacement).unwrap();
+        assert_eq!(replaced.schema.mass.as_deref(), Some("mass"));
+        assert_eq!(replaced.schema.columns["mass"].unit, Unit::MilliVolt);
+        assert_eq!(replaced.schema.columns["mass"].nature, ColumnNature::Mass);
+        assert!(
+            replaced
+                .column_provenance_text("mass")
+                .unwrap()
+                .contains("with_array1_column")
+        );
+        assert_eq!(
+            replaced.column_as_array1("mass").unwrap(),
+            Array1::from_vec(vec![42.0; original.len()])
+        );
+
+        let mut restored = replaced;
+        restored.undo_last().unwrap();
+        assert_eq!(restored.column_as_array1("mass").unwrap(), original);
+    }
+
+    #[test]
+    fn test_with_array1_column_rejects_wrong_length_without_mutating_clone() {
+        let ds = make_test_dataset();
+        let before_history = ds.history_of_operations.feed_text();
+        let before_schema = ds.schema.columns.len();
+        let before_undo_depth = ds.undo_depth();
+        let err = ds
+            .clone()
+            .with_array1_column("bad_length", Array1::from_vec(vec![1.0; 999]))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            TGADomainError::DatasetColumnLengthMismatch {
+                expected: 1000,
+                actual: 999,
+                ..
+            }
+        ));
+        assert_eq!(ds.history_of_operations.feed_text(), before_history);
+        assert_eq!(ds.schema.columns.len(), before_schema);
+        assert_eq!(ds.undo_depth(), before_undo_depth);
     }
 
     #[test]

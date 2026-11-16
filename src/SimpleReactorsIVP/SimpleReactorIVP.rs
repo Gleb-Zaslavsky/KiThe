@@ -37,6 +37,7 @@ use crate::SimpleReactorsIVP::solver_backend::{
 };
 
 use RustedSciThe::command_interpreter::task_parser_ivp_hybrid::HybridStiffSettings;
+use RustedSciThe::numerical::LSODE2::solver::Lsode2CancelledSnapshot;
 use RustedSciThe::numerical::LSODE2::solver::Lsode2EvaluationTelemetry;
 use RustedSciThe::numerical::LSODE2::{
     Lsode2AlgorithmSnapshot, Lsode2Error, Lsode2NativeStatistics, Lsode2ProblemConfig,
@@ -79,6 +80,9 @@ pub enum IvpError {
         error: StiffSolveError,
         telemetry: Option<StiffTelemetrySnapshot>,
     },
+    SolverCancelled {
+        snapshot: Box<Lsode2CancelledSnapshot>,
+    },
 }
 
 impl fmt::Display for IvpError {
@@ -96,6 +100,12 @@ impl fmt::Display for IvpError {
             IvpError::SolverExecution { error, .. } => {
                 write!(f, "Solver execution failed: {error}")
             }
+            IvpError::SolverCancelled { snapshot } => write!(
+                f,
+                "Solver execution cancelled at z={} after {} accepted sample(s)",
+                snapshot.current_time,
+                snapshot.accepted_times.len().saturating_sub(1)
+            ),
         }
     }
 }
@@ -106,6 +116,7 @@ impl std::error::Error for IvpError {
             Self::SolverBackend(error) => Some(error),
             Self::SolverPreparation(error) => Some(error),
             Self::SolverExecution { error, .. } => Some(error),
+            Self::SolverCancelled { .. } => None,
             _ => None,
         }
     }
@@ -136,6 +147,9 @@ impl From<IvpError> for ReactorError {
             IvpError::SolverBackend(error) => Self::CalculationError(error.to_string()),
             IvpError::SolverPreparation(error) => Self::CalculationError(error.to_string()),
             IvpError::SolverExecution { error, .. } => Self::CalculationError(error.to_string()),
+            IvpError::SolverCancelled { snapshot } => {
+                Self::CalculationError(format!("solver cancelled at z={}", snapshot.current_time))
+            }
         }
     }
 }
@@ -188,6 +202,11 @@ impl From<Lsode2Error> for IvpError {
             Lsode2Error::InvalidConfig(message) => IvpError::InvalidConfiguration(message),
             Lsode2Error::GeneratedBackend(err) => IvpError::CalculationError(err.to_string()),
             Lsode2Error::NativeStep(message) => IvpError::CalculationError(message),
+            Lsode2Error::Bridge(error) => IvpError::SolverExecution {
+                error: StiffSolveError::Bdf(error),
+                telemetry: None,
+            },
+            Lsode2Error::Cancelled { snapshot } => IvpError::SolverCancelled { snapshot },
         }
     }
 }

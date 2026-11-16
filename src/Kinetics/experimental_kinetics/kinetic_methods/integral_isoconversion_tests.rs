@@ -6,12 +6,21 @@
 pub mod tests {
     use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
     use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::*;
+    use crate::Kinetics::experimental_kinetics::kinetic_methods::isoconversion::{
+        IsoconversionalKineticMethod, IsoconversionalMethod,
+    };
     use crate::Kinetics::experimental_kinetics::kinetic_methods::*;
     use crate::Kinetics::experimental_kinetics::kinetic_methods_tests::tests::{
         build_view_from_cfg, build_view_from_cfg_exact_m0,
     };
     use crate::Kinetics::experimental_kinetics::testing_mod::tests_afvanced_config::{
         base_advanced_config_isothermal, base_advanced_config_non_isothermal,
+    };
+    use crate::Kinetics::experimental_kinetics::testing_mod::{
+        AdvancedTGAConfig, ExperimentMode, KineticModel, NoiseConfig, NoiseKind, VirtualTGA,
+    };
+    use crate::Kinetics::experimental_kinetics::{
+        experiment_series_main::TGASeries, one_experiment_dataset::Unit,
     };
 
     use ndarray::{Array1, Array2};
@@ -544,7 +553,17 @@ pub mod tests {
 
         let result = OFW {}.compute(&view).unwrap();
 
-        assert_eq!(result.layers.len(), 50); // default grid segments in ConversionGridBuilder
+        assert_eq!(
+            result.layers.len() + result.warnings.len(),
+            50,
+            "each default conversion-grid level must be fitted or reported as skipped"
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .all(|warning| warning.contains("eta="))
+        );
         for layer in &result.layers {
             let eta = layer.eta;
             if eta > 0.05 && eta < 0.95 {
@@ -926,6 +945,233 @@ pub mod tests {
             for w in time.windows(2) {
                 assert!(w[1] >= w[0]);
             }
+        }
+    }
+
+    fn story_matrix_domain_series(
+        config: &AdvancedTGAConfig,
+        apply_gui_preprocessing: bool,
+    ) -> TGASeries {
+        let runs = VirtualTGA::generate_series(config).unwrap();
+        let mut series = TGASeries::new();
+        let mut ids = Vec::with_capacity(runs.len());
+
+        for (index, run) in runs.iter().enumerate() {
+            let id = format!("domain_matrix_{index}");
+            let meta = ExperimentMeta {
+                id: id.clone(),
+                heating_rate: run.meta.heating_rate,
+                isothermal_temperature: run.meta.isothermal_temperature,
+                comment: run.meta.comment.clone(),
+            };
+            series
+                .create_from_synthetic_data(&run.virtual_tga, meta)
+                .unwrap();
+            series.bind_time(&id, "time", Unit::Second).unwrap();
+            series
+                .bind_temperature(&id, "temperature", Unit::Kelvin)
+                .unwrap();
+            series.bind_mass(&id, "mass", Unit::Milligram).unwrap();
+            if apply_gui_preprocessing {
+                series
+                    .sg_filter_column_as(&id, "mass", 31, 3, 0, 1.0, Some("sg_mass"))
+                    .unwrap();
+                series.bind_mass(&id, "sg_mass", Unit::Milligram).unwrap();
+                series.seconds_to_hours(&id).unwrap();
+                series.conversion(&id, 0.0, 0.005, "eta").unwrap();
+            } else {
+                let m0 = match config.kinetic_model {
+                    KineticModel::ArrheniusSingle { m0, .. } => m0,
+                    _ => unreachable!("this diagnostic uses a single-step fixture"),
+                };
+                series.conversion_with_m0(&id, m0, "eta").unwrap();
+            }
+            let (time, eta) = series
+                .try_apply_by_id(&id, |experiment| {
+                    Ok((
+                        experiment.dataset.get_time()?,
+                        experiment.dataset.get_eta()?,
+                    ))
+                })
+                .unwrap();
+            if let Some(index) = eta.iter().position(|value| *value >= 0.95) {
+                let cutoff = time[index];
+                series
+                    .try_transform_by_id(&id, |experiment| experiment.cut_after_time(cutoff))
+                    .unwrap();
+            }
+            if apply_gui_preprocessing {
+                series
+                    .sg_filter_column_as(&id, "eta", 31, 3, 0, 1.0, Some("eta"))
+                    .unwrap();
+            }
+            series.derive_deta_dt(&id, "deta_dt").unwrap();
+            series.drop_nulls(&id).unwrap();
+            if apply_gui_preprocessing {
+                series
+                    .sg_filter_column_as(&id, "deta_dt", 11, 3, 0, 1.0, Some("deta_dt"))
+                    .unwrap();
+            }
+            ids.push(id);
+        }
+
+        series
+    }
+
+    #[test]
+    fn domain_reproduces_story_matrix_integral_method_bias_on_exact_fixture() {
+        const E_TRUE: f64 = 85_000.0;
+        let config = AdvancedTGAConfig {
+            n_points: 360,
+            dt: 2.0,
+            experiment_mode: ExperimentMode::NonIsothermal {
+                t0: 500.0,
+                heating_rates: vec![2.0, 5.0, 10.0],
+            },
+            kinetic_model: KineticModel::ArrheniusSingle {
+                m0: 100.0,
+                k0: 2.0e5,
+                e: E_TRUE,
+                r: 8.314,
+            },
+            mass_noise: Some(NoiseConfig {
+                kind: NoiseKind::Gaussian { sigma: 0.12 },
+            }),
+            temp_noise: None,
+            spikes: None,
+            seed: 94_000,
+        };
+
+        let mut long_clean = config.clone();
+        long_clean.n_points = 5_000;
+        long_clean.mass_noise = None;
+        let mut cold_start_clean = long_clean.clone();
+        cold_start_clean.n_points = 3_000;
+        cold_start_clean.experiment_mode = ExperimentMode::NonIsothermal {
+            t0: 350.0,
+            heating_rates: vec![2.0, 5.0, 10.0],
+        };
+        for (label, mut case_config) in [
+            ("noisy_short", config.clone()),
+            ("clean_short", config.clone()),
+            ("clean_long", long_clean),
+            ("clean_cold_start", cold_start_clean),
+        ] {
+            if label != "noisy_short" {
+                case_config.mass_noise = None;
+            }
+            let series = story_matrix_domain_series(&case_config, true);
+            let ids = series
+                .experiments()
+                .iter()
+                .map(|experiment| experiment.meta.id.as_str())
+                .collect::<Vec<_>>();
+            let ranges = ids
+                .iter()
+                .map(|id| {
+                    let eta = series
+                        .try_apply_by_id(id, |experiment| experiment.dataset.get_eta())
+                        .unwrap();
+                    let temperature = series
+                        .try_apply_by_id(id, |experiment| experiment.dataset.get_temperature())
+                        .unwrap();
+                    let max_eta = eta.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    let temp_at = |target: f64| {
+                        eta.iter()
+                            .position(|value| *value >= target)
+                            .map(|index| temperature[index])
+                    };
+                    format!(
+                        "{id}: eta=[{:.3},{max_eta:.3}], T@0.1={:?}K, T@0.9={:?}K, rows={}",
+                        eta.first().copied().unwrap_or(f64::NAN),
+                        temp_at(0.1),
+                        temp_at(0.9),
+                        eta.len()
+                    )
+                })
+                .collect::<Vec<_>>();
+            println!(
+                "[DOMAIN-STORY-RANGE] fixture={label}: {}",
+                ranges.join("; ")
+            );
+
+            for method in [
+                IsoconversionalMethod::OFW,
+                IsoconversionalMethod::KAS,
+                IsoconversionalMethod::Starink,
+                IsoconversionalMethod::FriedmanDifferential,
+                IsoconversionalMethod::Vyazovkin,
+            ] {
+                let data = series
+                    .create_kinetic_data_view_for_method(Some(&ids), &method)
+                    .unwrap();
+                let result = IsoconversionalKineticMethod { method }
+                    .compute(&data)
+                    .unwrap();
+                let values = result
+                    .layers
+                    .iter()
+                    .filter(|layer| (0.1..=0.9).contains(&layer.eta) && layer.ea.is_finite())
+                    .map(|layer| layer.ea)
+                    .collect::<Vec<_>>();
+                assert!(
+                    !values.is_empty(),
+                    "{label}: no finite Ea for {}",
+                    result.method
+                );
+                let mean_ea = values.iter().sum::<f64>() / values.len() as f64;
+                if label == "clean_cold_start" {
+                    let relative_error = (mean_ea - E_TRUE).abs() / E_TRUE;
+                    assert!(
+                        relative_error <= 0.08,
+                        "{} failed the domain cold-start recovery gate: Ea={mean_ea:.1} J/mol, truth={E_TRUE:.1}, relative error={:.2}%",
+                        result.method,
+                        100.0 * relative_error
+                    );
+                }
+                println!(
+                    "[DOMAIN-STORY-DIAGNOSTIC] fixture=matrix_gaussian_sg seed=94000 signal={label} method={} layers={} mean_Ea={:.2}J/mol relative_error={:.2}%",
+                    result.method,
+                    values.len(),
+                    mean_ea,
+                    100.0 * (mean_ea - E_TRUE).abs() / E_TRUE
+                );
+            }
+        }
+
+        let mut exact_short = config.clone();
+        exact_short.mass_noise = None;
+        let exact_series = story_matrix_domain_series(&exact_short, false);
+        let ids = exact_series
+            .experiments()
+            .iter()
+            .map(|experiment| experiment.meta.id.as_str())
+            .collect::<Vec<_>>();
+        for method in [
+            IsoconversionalMethod::OFW,
+            IsoconversionalMethod::KAS,
+            IsoconversionalMethod::Starink,
+        ] {
+            let data = exact_series
+                .create_kinetic_data_view_for_method(Some(&ids), &method)
+                .unwrap();
+            let result = IsoconversionalKineticMethod { method }
+                .compute(&data)
+                .unwrap();
+            let values = result
+                .layers
+                .iter()
+                .filter(|layer| (0.1..=0.9).contains(&layer.eta) && layer.ea.is_finite())
+                .map(|layer| layer.ea)
+                .collect::<Vec<_>>();
+            let mean_ea = values.iter().sum::<f64>() / values.len() as f64;
+            println!(
+                "[DOMAIN-STORY-DIAGNOSTIC] fixture=matrix_gaussian_sg seed=94000 signal=clean_short_exact_m0_no_smoothing method={} layers={} mean_Ea={:.2}J/mol relative_error={:.2}%",
+                result.method,
+                values.len(),
+                mean_ea,
+                100.0 * (mean_ea - E_TRUE).abs() / E_TRUE
+            );
         }
     }
 }

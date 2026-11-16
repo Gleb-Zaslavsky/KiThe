@@ -108,6 +108,7 @@ impl DifferentialFriedmanSolver {
         let n_exp = grid.inv_temperature.nrows();
 
         let mut layers = Vec::with_capacity(n_eta);
+        let mut warnings = Vec::new();
 
         for k in 0..n_eta {
             let inv_t = grid.inv_temperature.column(k);
@@ -126,10 +127,27 @@ impl DifferentialFriedmanSolver {
             }
 
             if x.len() < 2 {
+                let message = format!(
+                    "Skipped conversion eta={:.6}: fewer than two valid rate/temperature pairs",
+                    grid.eta[k]
+                );
+                log::warn!("{}", message);
+                warnings.push(message);
                 continue;
             }
 
-            let reg = linear_regression(&Array1::from_vec(x), &Array1::from_vec(y));
+            let reg = match linear_regression(&Array1::from_vec(x), &Array1::from_vec(y)) {
+                Ok(regression) => regression,
+                Err(error) => {
+                    let message = format!(
+                        "Skipped conversion eta={:.6}: regression unavailable ({error:?})",
+                        grid.eta[k]
+                    );
+                    log::warn!("{}", message);
+                    warnings.push(message);
+                    continue;
+                }
+            };
 
             let ea = -reg.slope * r;
 
@@ -144,10 +162,18 @@ impl DifferentialFriedmanSolver {
             });
         }
 
+        if layers.is_empty() {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "Friedman differential could not fit any conversion layer: {}",
+                warnings.join(" | ")
+            )));
+        }
+
         Ok(IsoconversionalResult {
             method: "Friedman differential",
 
             layers,
+            warnings,
         })
     }
 }
@@ -171,10 +197,6 @@ impl KineticMethod for DifferentialFriedman {
             .build_nonisothermal(data)?;
         DifferentialFriedmanSolver.solve(&grid)
     }
-    fn check_input(&self, data: &KineticDataView) -> Result<(), TGADomainError> {
-        require_isothermal(data)
-    }
-
     fn requirements(&self) -> KineticRequirements {
         KineticRequirements {
             min_experiments: 3,
@@ -216,6 +238,7 @@ impl FriedmanIntegralSolver {
         let n_exp = grid.inv_temperature.nrows();
 
         let mut layers = Vec::with_capacity(n_eta);
+        let mut warnings = Vec::new();
 
         for k in 0..n_eta {
             let inv_t = grid.inv_temperature.column(k);
@@ -234,10 +257,27 @@ impl FriedmanIntegralSolver {
             }
 
             if x.len() < 2 {
+                let message = format!(
+                    "Skipped conversion eta={:.6}: fewer than two valid time/temperature pairs",
+                    grid.eta[k]
+                );
+                log::warn!("{}", message);
+                warnings.push(message);
                 continue;
             }
 
-            let reg = linear_regression(&Array1::from_vec(x), &Array1::from_vec(y));
+            let reg = match linear_regression(&Array1::from_vec(x), &Array1::from_vec(y)) {
+                Ok(regression) => regression,
+                Err(error) => {
+                    let message = format!(
+                        "Skipped conversion eta={:.6}: regression unavailable ({error:?})",
+                        grid.eta[k]
+                    );
+                    log::warn!("{}", message);
+                    warnings.push(message);
+                    continue;
+                }
+            };
 
             let ea = -reg.slope * r;
 
@@ -252,10 +292,18 @@ impl FriedmanIntegralSolver {
             });
         }
 
+        if layers.is_empty() {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "Friedman integral could not fit any conversion layer: {}",
+                warnings.join(" | ")
+            )));
+        }
+
         Ok(IsoconversionalResult {
             method: "Friedman integral",
 
             layers,
+            warnings,
         })
     }
 }
@@ -279,6 +327,10 @@ impl KineticMethod for FriedmanIntegral {
             .interpolation(GridInterpolation::Linear)
             .build_isothermal(data)?;
         FriedmanIntegralSolver.solve(&grid)
+    }
+
+    fn check_input(&self, data: &KineticDataView) -> Result<(), TGADomainError> {
+        require_isothermal(data)
     }
 
     fn requirements(&self) -> KineticRequirements {

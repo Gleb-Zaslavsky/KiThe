@@ -6,6 +6,11 @@
 
 use super::*;
 use crate::Kinetics::experimental_kinetics::column_provenance::ColumnProvenance;
+use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
+    ColumnMeta, ColumnNature, ColumnOrigin, TGADataset, TGASchema, Unit,
+};
+use polars::prelude::{CsvReader, SerReader};
+use std::io::Cursor;
 
 #[derive(Clone, Debug, Default)]
 struct SeriesExperimentRecord {
@@ -16,6 +21,7 @@ struct SeriesExperimentRecord {
     len: usize,
     columns: Vec<SeriesColumnRecord>,
     binds: HashMap<String, Option<String>>,
+    provenance: HashMap<String, ColumnProvenance>,
 }
 
 #[derive(Clone, Debug)]
@@ -24,6 +30,7 @@ struct SeriesColumnRecord {
     header_name: String,
     unit: Unit,
     origin: ColumnOrigin,
+    nature: Option<ColumnNature>,
 }
 
 pub(super) fn to_csv_series_impl(series: &TGASeries, path: &Path) -> Result<(), TGADomainError> {
@@ -64,6 +71,7 @@ pub(super) fn to_csv_series_impl(series: &TGASeries, path: &Path) -> Result<(), 
             ("dalpha_dt", exp.dataset.schema.dalpha_dt.as_ref()),
             ("dT_dt", exp.dataset.schema.dT_dt.as_ref()),
             ("E", exp.dataset.schema.E.as_ref()),
+            ("R2", exp.dataset.schema.R2.as_ref()),
         ] {
             meta_lines.push(format!(
                 "#META\tBIND\t{}\t{}\t{}",
@@ -82,13 +90,28 @@ pub(super) fn to_csv_series_impl(series: &TGASeries, path: &Path) -> Result<(), 
             let origin = meta.map(|m| m.origin).unwrap_or(ColumnOrigin::Imported);
 
             meta_lines.push(format!(
-                "#META\tCOL\t{}\t{}\t{}\t{}\t{}",
+                "#META\tCOL\t{}\t{}\t{}\t{}\t{}\t{}",
                 exp_id_token,
                 escape_meta_field(&col_name),
                 escape_meta_field(&header_name),
                 unit_tag(unit),
                 origin_tag(origin),
+                nature_tag(meta.map(|m| m.nature).unwrap_or(ColumnNature::Unknown)),
             ));
+            if let Some(provenance) = meta.map(|m| &m.provenance) {
+                let provenance_json = serde_json::to_string(provenance).map_err(|err| {
+                    TGADomainError::InvalidOperation(format!(
+                        "Failed to serialize provenance for '{}_{}': {}",
+                        exp_id, col_name, err
+                    ))
+                })?;
+                meta_lines.push(format!(
+                    "#META\tPROV\t{}\t{}\t{}",
+                    exp_id_token,
+                    escape_meta_field(&col_name),
+                    provenance_json
+                ));
+            }
 
             let casted = col.cast(&DataType::Float64)?;
             let values = casted.f64()?;
@@ -118,7 +141,7 @@ pub(super) fn to_csv_series_impl(series: &TGASeries, path: &Path) -> Result<(), 
             e
         ))
     })?;
-    writeln!(file, "# format_version=1").map_err(|e| {
+    writeln!(file, "# format_version=2").map_err(|e| {
         TGADomainError::InvalidOperation(format!(
             "Failed to write series CSV '{}': {}",
             path.display(),
@@ -156,9 +179,31 @@ pub(super) fn from_csv_series_impl(path: &Path) -> Result<TGASeries, TGADomainEr
 
     let mut records: HashMap<String, SeriesExperimentRecord> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
-    let mut csv_data_lines: Vec<String> = Vec::new();
+    let mut csv_data = String::new();
+    let mut format_version = None;
 
     for line in text.lines() {
+        if let Some(version) = line.strip_prefix("# format_version=") {
+            if format_version.is_some() {
+                return Err(TGADomainError::InvalidOperation(
+                    "Series CSV declares its format version more than once".to_string(),
+                ));
+            }
+            let parsed = version.parse::<u32>().map_err(|error| {
+                TGADomainError::InvalidOperation(format!(
+                    "Invalid series CSV format version '{}': {}",
+                    version, error
+                ))
+            })?;
+            if !(1..=2).contains(&parsed) {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Unsupported series CSV format version '{}'",
+                    parsed
+                )));
+            }
+            format_version = Some(parsed);
+            continue;
+        }
         if let Some(meta_payload) = line.strip_prefix("#META\t") {
             parse_series_meta_line(meta_payload, &mut records, &mut order)?;
             continue;
@@ -166,33 +211,14 @@ pub(super) fn from_csv_series_impl(path: &Path) -> Result<TGASeries, TGADomainEr
         if line.trim().is_empty() || line.starts_with('#') {
             continue;
         }
-        csv_data_lines.push(line.to_string());
+        csv_data.push_str(line);
+        csv_data.push('\n');
     }
 
-    let data_df = if csv_data_lines.is_empty() {
+    let data_df = if csv_data.is_empty() {
         None
     } else {
-        let tmp = tempfile::NamedTempFile::new().map_err(|e| {
-            TGADomainError::InvalidOperation(format!(
-                "Failed to create temp file while reading '{}': {}",
-                path.display(),
-                e
-            ))
-        })?;
-        std::fs::write(tmp.path(), csv_data_lines.join("\n")).map_err(|e| {
-            TGADomainError::InvalidOperation(format!(
-                "Failed to write temp CSV while reading '{}': {}",
-                path.display(),
-                e
-            ))
-        })?;
-        let plpath = PlRefPath::try_from_path(tmp.path())?;
-        Some(
-            LazyCsvReader::new(plpath)
-                .with_has_header(true)
-                .finish()?
-                .collect()?,
-        )
+        Some(CsvReader::new(Cursor::new(csv_data.into_bytes())).finish()?)
     };
 
     let mut series = TGASeries::new();
@@ -243,12 +269,17 @@ pub(super) fn from_csv_series_impl(path: &Path) -> Result<TGASeries, TGADomainEr
                     c.column_name.clone(),
                     c.unit,
                     c.origin,
-                    ColumnNature::Unknown,
-                    ColumnProvenance::manual(
-                        c.column_name.clone(),
-                        "from_csv_series",
-                        Some("restored from series csv".to_string()),
-                    ),
+                    c.nature.unwrap_or(ColumnNature::Unknown),
+                    rec.provenance
+                        .get(&c.column_name)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            ColumnProvenance::manual(
+                                c.column_name.clone(),
+                                "from_csv_series",
+                                Some("restored from legacy series csv".to_string()),
+                            )
+                        }),
                 ),
             );
         }
@@ -257,23 +288,27 @@ pub(super) fn from_csv_series_impl(path: &Path) -> Result<TGASeries, TGADomainEr
             frame: exp_df.lazy(),
             schema: TGASchema {
                 columns: schema_columns,
-                time: rec.binds.get("time").cloned().unwrap_or(None),
-                temperature: rec.binds.get("temperature").cloned().unwrap_or(None),
-                mass: rec.binds.get("mass").cloned().unwrap_or(None),
-                alpha: rec.binds.get("alpha").cloned().unwrap_or(None),
-                dm_dt: rec.binds.get("dm_dt").cloned().unwrap_or(None),
-                eta: rec.binds.get("eta").cloned().unwrap_or(None),
-                deta_dt: rec.binds.get("deta_dt").cloned().unwrap_or(None),
-                dalpha_dt: rec.binds.get("dalpha_dt").cloned().unwrap_or(None),
-                dT_dt: rec.binds.get("dT_dt").cloned().unwrap_or(None),
-                E: rec.binds.get("E").cloned().unwrap_or(None),
-                R2: rec.binds.get("R2").cloned().unwrap_or(None),
+                time: rec.binds.get("time").cloned().flatten(),
+                temperature: rec.binds.get("temperature").cloned().flatten(),
+                mass: rec.binds.get("mass").cloned().flatten(),
+                alpha: rec.binds.get("alpha").cloned().flatten(),
+                dm_dt: rec.binds.get("dm_dt").cloned().flatten(),
+                eta: rec.binds.get("eta").cloned().flatten(),
+                deta_dt: rec.binds.get("deta_dt").cloned().flatten(),
+                dalpha_dt: rec.binds.get("dalpha_dt").cloned().flatten(),
+                dT_dt: rec.binds.get("dT_dt").cloned().flatten(),
+                E: rec.binds.get("E").cloned().flatten(),
+                R2: rec.binds.get("R2").cloned().flatten(),
             },
             oneframeplot: None,
             history_of_operations: History::new(),
-            undo_stack: Vec::new(),
+            undo_stack: Default::default(),
             undo_snapshot_latch: false,
         };
+        dataset
+            .schema
+            .refresh_active_column_natures()
+            .map_err(TGADomainError::PolarsError)?;
         dataset.initialize_column_provenance();
         dataset.log_operation(
             "from_csv_series",
@@ -379,7 +414,7 @@ fn parse_series_meta_line(
                 .insert(parts[2].to_string(), decode_opt_string(parts[3])?);
         }
         "COL" => {
-            if parts.len() != 6 {
+            if parts.len() != 6 && parts.len() != 7 {
                 return Err(TGADomainError::InvalidOperation(format!(
                     "Invalid COL metadata line: '{}'",
                     payload
@@ -400,7 +435,34 @@ fn parse_series_meta_line(
                 header_name: unescape_meta_field(parts[3])?,
                 unit: parse_unit_tag(parts[4])?,
                 origin: parse_origin_tag(parts[5])?,
+                nature: parts.get(6).map(|tag| parse_nature_tag(tag)).transpose()?,
             });
+        }
+        "PROV" => {
+            if parts.len() != 4 {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Invalid PROV metadata line: '{}'",
+                    payload
+                )));
+            }
+            let id = unescape_meta_field(parts[1])?;
+            if !records.contains_key(&id) {
+                order.push(id.clone());
+            }
+            let rec = records
+                .entry(id.clone())
+                .or_insert_with(|| SeriesExperimentRecord {
+                    id,
+                    ..Default::default()
+                });
+            let column_name = unescape_meta_field(parts[2])?;
+            let provenance = serde_json::from_str(parts[3]).map_err(|err| {
+                TGADomainError::InvalidOperation(format!(
+                    "Invalid provenance metadata for column '{}': {}",
+                    column_name, err
+                ))
+            })?;
+            rec.provenance.insert(column_name, provenance);
         }
         _ => {}
     }
@@ -523,6 +585,48 @@ fn parse_origin_tag(tag: &str) -> Result<ColumnOrigin, TGADomainError> {
         "Imported" => Ok(ColumnOrigin::Imported),
         _ => Err(TGADomainError::InvalidOperation(format!(
             "Unknown column origin tag '{}'",
+            tag
+        ))),
+    }
+}
+
+fn nature_tag(nature: ColumnNature) -> &'static str {
+    match nature {
+        ColumnNature::Time => "Time",
+        ColumnNature::Temperature => "Temperature",
+        ColumnNature::Mass => "Mass",
+        ColumnNature::Conversion => "Conversion",
+        ColumnNature::DimensionlessMass => "DimensionlessMass",
+        ColumnNature::MassRate => "MassRate",
+        ColumnNature::ConversionRate => "ConversionRate",
+        ColumnNature::TemperatureRate => "TemperatureRate",
+        ColumnNature::DimensionlessMassRate => "DimensionlessMassRate",
+        ColumnNature::Unknown => "Unknown",
+        ColumnNature::ActivationEnergy => "ActivationEnergy",
+        ColumnNature::PredexFactor => "PredexFactor",
+        ColumnNature::R2 => "R2",
+        ColumnNature::FittedCurve => "FittedCurve",
+    }
+}
+
+fn parse_nature_tag(tag: &str) -> Result<ColumnNature, TGADomainError> {
+    match tag {
+        "Time" => Ok(ColumnNature::Time),
+        "Temperature" => Ok(ColumnNature::Temperature),
+        "Mass" => Ok(ColumnNature::Mass),
+        "Conversion" => Ok(ColumnNature::Conversion),
+        "DimensionlessMass" => Ok(ColumnNature::DimensionlessMass),
+        "MassRate" => Ok(ColumnNature::MassRate),
+        "ConversionRate" => Ok(ColumnNature::ConversionRate),
+        "TemperatureRate" => Ok(ColumnNature::TemperatureRate),
+        "DimensionlessMassRate" => Ok(ColumnNature::DimensionlessMassRate),
+        "Unknown" => Ok(ColumnNature::Unknown),
+        "ActivationEnergy" => Ok(ColumnNature::ActivationEnergy),
+        "PredexFactor" => Ok(ColumnNature::PredexFactor),
+        "R2" => Ok(ColumnNature::R2),
+        "FittedCurve" => Ok(ColumnNature::FittedCurve),
+        _ => Err(TGADomainError::InvalidOperation(format!(
+            "Unknown column nature tag '{}'",
             tag
         ))),
     }

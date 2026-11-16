@@ -3,7 +3,7 @@ use crate::Kinetics::experimental_kinetics::experiment_series_main::{
     ExperimentMeta, TGAExperiment, TGASeries,
 };
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    ColumnNature, TGADataset, TGADomainError, TGASchema, TimeMonotonicityReport,
+    ColumnNature, TGADataset, TGADomainError, TGASchema, TimeMonotonicityReport, Unit,
 };
 
 use polars::prelude::*;
@@ -14,6 +14,54 @@ use std::collections::HashMap;
 pub struct UnitedDataset {
     pub frame: LazyFrame,
     pub meta: Vec<ExperimentMeta>,
+    /// Source units for semantic columns, keyed by experiment id.
+    pub units: HashMap<String, KineticColumnUnits>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct KineticColumnUnits {
+    pub time: Unit,
+    pub temperature: Unit,
+    pub conversion_rate: Unit,
+    pub mass: Unit,
+    pub mass_rate: Unit,
+}
+
+impl Default for KineticColumnUnits {
+    fn default() -> Self {
+        Self {
+            time: Unit::Second,
+            temperature: Unit::Kelvin,
+            conversion_rate: Unit::PerSecond,
+            mass: Unit::Unknown,
+            mass_rate: Unit::Unknown,
+        }
+    }
+}
+
+impl KineticColumnUnits {
+    pub fn from_dataset(dataset: &TGADataset) -> Self {
+        let unit_for = |name: Option<&String>, fallback| {
+            name.and_then(|name| dataset.schema.columns.get(name))
+                .map(|meta| meta.unit)
+                .unwrap_or(fallback)
+        };
+        let conversion_rate = unit_for(
+            dataset
+                .schema
+                .deta_dt
+                .as_ref()
+                .or(dataset.schema.dalpha_dt.as_ref()),
+            Unit::Unknown,
+        );
+        Self {
+            time: unit_for(dataset.schema.time.as_ref(), Unit::Unknown),
+            temperature: unit_for(dataset.schema.temperature.as_ref(), Unit::Unknown),
+            conversion_rate,
+            mass: unit_for(dataset.schema.mass.as_ref(), Unit::Unknown),
+            mass_rate: unit_for(dataset.schema.dm_dt.as_ref(), Unit::Unknown),
+        }
+    }
 }
 
 impl UnitedDataset {
@@ -42,11 +90,25 @@ impl UnitedDataset {
         Self {
             frame: DataFrame::default().lazy(),
             meta: Vec::new(),
+            units: HashMap::new(),
         }
     }
 
     pub fn new(frame: LazyFrame, meta: Vec<ExperimentMeta>) -> Self {
-        Self { frame, meta }
+        Self {
+            frame,
+            meta,
+            units: HashMap::new(),
+        }
+    }
+
+    pub fn with_units(mut self, units: HashMap<String, KineticColumnUnits>) -> Self {
+        self.units = units;
+        self
+    }
+
+    pub fn units_for(&self, id: &str) -> KineticColumnUnits {
+        self.units.get(id).copied().unwrap_or_default()
     }
 
     pub fn frame(&self) -> &LazyFrame {
@@ -239,20 +301,21 @@ impl TGASeries {
 
     /// Sort one experiment by the active time column while preserving row alignment.
     pub fn sort_experiment_by_time(&mut self, id: &str) -> Result<&mut Self, TGADomainError> {
-        self.try_mutate_by_id(id, |exp| exp.dataset.sort_by_bound_time_inplace())?;
+        self.try_mutate_by_id_in_place(id, |exp| exp.dataset.sort_by_bound_time_inplace())?;
         Ok(self)
     }
 
     pub fn unite_datasets(&self) -> Result<UnitedDataset, TGADomainError> {
-        if self.experiments.is_empty() {
+        if self.is_empty() {
             return Ok(UnitedDataset::empty());
         }
 
         let mut united_df = DataFrame::default();
         let mut expected_height: Option<usize> = None;
-        let mut metas: Vec<ExperimentMeta> = Vec::with_capacity(self.experiments.len());
+        let mut metas: Vec<ExperimentMeta> = Vec::with_capacity(self.len());
+        let mut units = HashMap::with_capacity(self.len());
 
-        for (idx, exp) in self.experiments.iter().enumerate() {
+        for (idx, exp) in self.experiments().iter().enumerate() {
             let df = exp.dataset.frame.clone().collect()?;
 
             if let Some(height) = expected_height {
@@ -290,9 +353,13 @@ impl TGASeries {
             }
 
             metas.push(exp.meta.clone());
+            units.insert(
+                exp.meta.id.clone(),
+                KineticColumnUnits::from_dataset(&exp.dataset),
+            );
         }
 
-        Ok(UnitedDataset::new(united_df.lazy(), metas))
+        Ok(UnitedDataset::new(united_df.lazy(), metas).with_units(units))
     }
 
     /// Create a new experiment from an existing one by selecting specific columns.
@@ -322,7 +389,7 @@ impl TGASeries {
         new_id: String,
         columns: &[&str],
     ) -> Result<(), TGADomainError> {
-        let parent = self.experiments.get(parent_idx).ok_or_else(|| {
+        let parent = self.get_experiment(parent_idx).ok_or_else(|| {
             TGADomainError::InvalidOperation(format!(
                 "Experiment index {} out of bounds",
                 parent_idx
@@ -386,7 +453,7 @@ impl TGASeries {
             oneframeplot: None,
             history_of_operations:
                 crate::Kinetics::experimental_kinetics::one_experiment_dataset::History::new(),
-            undo_stack: Vec::new(),
+            undo_stack: Default::default(),
             undo_snapshot_latch: false,
         };
         new_dataset.initialize_column_provenance();
@@ -430,7 +497,7 @@ impl TGASeries {
     //  GOLDEN PIPELINE
     //================================================================================
     pub fn drop_nulls(&mut self, id: &str) -> Result<(), TGADomainError> {
-        self.try_mutate_by_id(id, |exp| exp.drop_nulls())
+        self.try_mutate_by_id_in_place(id, |exp| exp.dataset.drop_nulls())
     }
 
     pub fn apply_golden_pipeline_inner(
@@ -444,30 +511,46 @@ impl TGASeries {
             new_columns = Some(cols);
             Ok(new_exp)
         })?;
-        Ok(new_columns.unwrap_or_default())
+        new_columns.ok_or_else(|| {
+            TGADomainError::InvalidOperation(format!(
+                "Golden Pipeline for experiment '{id}' completed without returning its output columns"
+            ))
+        })
     }
     pub fn apply_golden_pipeline(
         &mut self,
         id: &str,
         config: GoldenPipelineConfig,
     ) -> Result<(), TGADomainError> {
-        let do_we_need_new_exp = config.save_to_new_experiment;
-        let do_we_need_drop_old_exp = config.del_old_experiment;
-        let new_columns = self.apply_golden_pipeline_inner(id, config)?;
+        let save_to_new = config.save_to_new_experiment;
+        let drop_source = config.del_old_experiment;
+        let source_index = self.index_by_id(id)?;
+        let original_source = self.experiments()[source_index].clone();
+        let mut candidate = self.clone();
 
-        if do_we_need_new_exp {
-            let idx = self.index_by_id(id)?;
-            let new_id = format!("proceeded_{}", id);
-            let new_columns: Vec<&str> = new_columns.iter().map(|x| x.as_str()).collect();
-            self.create_experiment_from_columns(idx, new_id.clone(), &new_columns)?;
-            // self.trim_null_edges(&new_id)?;
-            self.drop_nulls(&new_id)?;
-            self.assert_no_nulls(&new_id, "final")?;
-            if do_we_need_drop_old_exp {
-                self.drop_experiment(idx)?;
+        let new_columns = candidate.apply_golden_pipeline_inner(id, config)?;
+        if save_to_new {
+            let processed_index = candidate.index_by_id(id)?;
+            let new_id = format!("proceeded_{id}");
+            let selected: Vec<&str> = new_columns.iter().map(String::as_str).collect();
+            let new_experiment = Self::extract_columns_to_new_experiment(
+                &candidate.experiments()[processed_index],
+                new_id.clone(),
+                &selected,
+            )?;
+            candidate.push(new_experiment)?;
+            candidate.drop_nulls(&new_id)?;
+            candidate.assert_no_nulls(&new_id, "final")?;
+
+            if drop_source {
+                candidate.drop_experiment_by_id(id)?;
+            } else {
+                // Save-as-new must not silently rewrite the retained source.
+                candidate.commit_experiment_update(source_index, original_source)?;
             }
-            self.rebuild_index();
         }
+
+        *self = candidate;
         Ok(())
     }
 
@@ -480,7 +563,7 @@ impl TGASeries {
 
         for id in self.ids() {
             let idx = self.index_by_id(&id)?;
-            let frame = self.experiments[idx].dataset.frame.clone().collect()?;
+            let frame = self.experiments()[idx].dataset.frame.clone().collect()?;
             for col in self.list_of_columns(&id)? {
                 let short_name = format!("{}_{}", id, col);
                 let eager_col: Vec<f64> = frame.column(&col)?.f64()?.into_no_null_iter().collect();
@@ -554,29 +637,19 @@ pub fn create_experiment_from_columns(
         }
     }
 
-    let filter_field = |field: &Option<String>| -> Option<String> {
-        field.as_ref().and_then(|name| {
-            if columns.contains(&name.as_str()) {
-                Some(name.clone())
-            } else {
-                None
-            }
-        })
-    };
-
     let new_schema = TGASchema {
         columns: new_schema_columns,
-        time: filter_field(&parent.dataset.schema.time),
-        temperature: filter_field(&parent.dataset.schema.temperature),
-        mass: filter_field(&parent.dataset.schema.mass),
-        alpha: filter_field(&parent.dataset.schema.alpha),
-        dm_dt: filter_field(&parent.dataset.schema.dm_dt),
-        eta: filter_field(&parent.dataset.schema.eta),
-        deta_dt: filter_field(&parent.dataset.schema.deta_dt),
-        dalpha_dt: filter_field(&parent.dataset.schema.dalpha_dt),
-        dT_dt: filter_field(&parent.dataset.schema.dT_dt),
-        E: filter_field(&parent.dataset.schema.E),
-        R2: filter_field(&parent.dataset.schema.R2),
+        time: TGASeries::filter_semantic_field(&parent.dataset.schema.time, columns),
+        temperature: TGASeries::filter_semantic_field(&parent.dataset.schema.temperature, columns),
+        mass: TGASeries::filter_semantic_field(&parent.dataset.schema.mass, columns),
+        alpha: TGASeries::filter_semantic_field(&parent.dataset.schema.alpha, columns),
+        dm_dt: TGASeries::filter_semantic_field(&parent.dataset.schema.dm_dt, columns),
+        eta: TGASeries::filter_semantic_field(&parent.dataset.schema.eta, columns),
+        deta_dt: TGASeries::filter_semantic_field(&parent.dataset.schema.deta_dt, columns),
+        dalpha_dt: TGASeries::filter_semantic_field(&parent.dataset.schema.dalpha_dt, columns),
+        dT_dt: TGASeries::filter_semantic_field(&parent.dataset.schema.dT_dt, columns),
+        E: TGASeries::filter_semantic_field(&parent.dataset.schema.E, columns),
+        R2: TGASeries::filter_semantic_field(&parent.dataset.schema.R2, columns),
     };
 
     let mut new_dataset = TGADataset {
@@ -585,7 +658,7 @@ pub fn create_experiment_from_columns(
         oneframeplot: None,
         history_of_operations:
             crate::Kinetics::experimental_kinetics::one_experiment_dataset::History::new(),
-        undo_stack: Vec::new(),
+        undo_stack: Default::default(),
         undo_snapshot_latch: false,
     };
     new_dataset.initialize_column_provenance();
@@ -667,14 +740,7 @@ mod tests {
             time: Some("time".to_string()),
             temperature: Some("temperature".to_string()),
             mass: Some("mass".to_string()),
-            alpha: None,
-            dm_dt: None,
-            eta: None,
-            deta_dt: None,
-            dalpha_dt: None,
-            dT_dt: None,
-            E: None,
-            R2: None,
+            ..TGASchema::default()
         };
 
         let mut dataset = TGADataset {
@@ -682,7 +748,7 @@ mod tests {
             schema,
             oneframeplot: None,
             history_of_operations: History::new(),
-            undo_stack: Vec::new(),
+            undo_stack: Default::default(),
             undo_snapshot_latch: false,
         };
         dataset.initialize_column_provenance();
@@ -793,27 +859,25 @@ mod tests {
             },
         };
 
-        let mut series = TGASeries {
-            experiments: vec![exp],
-            exp_map: HashMap::new(),
-        };
+        let mut series = TGASeries::new();
+        series.push(exp).unwrap();
 
         series
             .create_experiment_from_columns(0, "exp2".to_string(), &["time", "temperature"])
             .unwrap();
 
-        assert_eq!(series.experiments.len(), 2);
-        assert_eq!(series.experiments[1].meta.id, "exp2");
-        assert_eq!(series.experiments[1].meta.heating_rate, Some(5.0));
-        assert_eq!(series.experiments[1].meta.comment, Some("test".to_string()));
+        assert_eq!(series.len(), 2);
+        assert_eq!(series.experiments()[1].meta.id, "exp2");
+        assert_eq!(series.experiments()[1].meta.heating_rate, Some(5.0));
+        assert_eq!(
+            series.experiments()[1].meta.comment,
+            Some("test".to_string())
+        );
     }
 
     #[test]
     fn test_series_method_invalid_index() {
-        let mut series = TGASeries {
-            experiments: vec![],
-            exp_map: HashMap::new(),
-        };
+        let mut series = TGASeries::new();
 
         let result = series.create_experiment_from_columns(0, "test".to_string(), &["time"]);
 

@@ -1,6 +1,6 @@
-use polars::prelude::{DataFrame, LazyFrame, PolarsResult};
-
-use crate::Kinetics::experimental_kinetics::experiment_series_main::{ExperimentMeta, TGASeries};
+use crate::Kinetics::experimental_kinetics::experiment_series_main::{
+    ExperimentMeta, TGAExperiment, TGASeries,
+};
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     AffectedColumns, ColumnMeta, ColumnNature, History, TGADataset, TGADomainError, TGASchema, Unit,
 };
@@ -8,7 +8,7 @@ use polars::prelude::*;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use rand_distr::{Distribution, Normal, Uniform};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -52,18 +52,11 @@ impl TGADataset {
                 time: Some("time".to_string()),
                 temperature: Some("temperature".to_string()),
                 mass: Some("mass".to_string()),
-                alpha: None,
-                dm_dt: None,
-                eta: None,
-                deta_dt: None,
-                dalpha_dt: None,
-                dT_dt: None,
-                E: None,
-                R2: None,
+                ..TGASchema::default()
             },
             oneframeplot: None,
             history_of_operations: History::new(),
-            undo_stack: Vec::new(),
+            undo_stack: Default::default(),
             undo_snapshot_latch: false,
         };
         dataset.initialize_column_provenance();
@@ -175,32 +168,122 @@ pub struct AdvancedTGAConfig {
     pub seed: u64,
 }
 impl VirtualTGA {
+    fn normal_distribution(
+        parameter: &str,
+        sigma: f64,
+    ) -> Result<Option<Normal<f64>>, TGADomainError> {
+        if !sigma.is_finite() || sigma < 0.0 {
+            return Err(TGADomainError::InvalidFilterParameters {
+                filter: "synthetic data generator".to_string(),
+                details: format!("{parameter} must be finite and non-negative, got {sigma}"),
+            });
+        }
+        if sigma == 0.0 {
+            return Ok(None);
+        }
+        Normal::new(0.0, sigma)
+            .map(Some)
+            .map_err(|error| TGADomainError::InvalidFilterParameters {
+                filter: "synthetic data generator".to_string(),
+                details: format!("invalid {parameter}: {error}"),
+            })
+    }
+
+    fn validate_probability(parameter: &str, probability: f64) -> Result<(), TGADomainError> {
+        if !probability.is_finite() || !(0.0..=1.0).contains(&probability) {
+            return Err(TGADomainError::InvalidFilterParameters {
+                filter: "synthetic data generator".to_string(),
+                details: format!("{parameter} must be between 0 and 1, got {probability}"),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_noise_config(cfg: &NoiseConfig) -> Result<(), TGADomainError> {
+        match &cfg.kind {
+            NoiseKind::Gaussian { sigma } => {
+                Self::normal_distribution("Gaussian sigma", *sigma)?;
+            }
+            NoiseKind::Uniform { amplitude } => {
+                if !amplitude.is_finite() || *amplitude < 0.0 {
+                    return Err(TGADomainError::InvalidFilterParameters {
+                        filter: "synthetic data generator".to_string(),
+                        details: format!(
+                            "uniform amplitude must be finite and non-negative, got {amplitude}"
+                        ),
+                    });
+                }
+            }
+            NoiseKind::Drift { slope } => {
+                if !slope.is_finite() {
+                    return Err(TGADomainError::InvalidFilterParameters {
+                        filter: "synthetic data generator".to_string(),
+                        details: format!("drift slope must be finite, got {slope}"),
+                    });
+                }
+            }
+            NoiseKind::Impulse {
+                probability,
+                amplitude,
+            } => {
+                Self::validate_probability("impulse probability", *probability)?;
+                Self::normal_distribution("impulse amplitude", *amplitude)?;
+            }
+            NoiseKind::Flicker { amplitude } => {
+                Self::normal_distribution("flicker amplitude", *amplitude)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_spike_model(spike: &SpikeModel) -> Result<(), TGADomainError> {
+        Self::validate_probability("spike probability", spike.probability)?;
+        Self::normal_distribution("spike amplitude", spike.amplitude)?;
+        Ok(())
+    }
+
+    fn validate_advanced_config(cfg: &AdvancedTGAConfig) -> Result<(), TGADomainError> {
+        if cfg.n_points < 2 {
+            return Err(TGADomainError::InvalidFilterParameters {
+                filter: "synthetic data generator".to_string(),
+                details: format!("at least two points are required, got {}", cfg.n_points),
+            });
+        }
+        for noise in [&cfg.mass_noise, &cfg.temp_noise].into_iter().flatten() {
+            Self::validate_noise_config(noise)?;
+        }
+        if let Some(spike) = &cfg.spikes {
+            Self::validate_spike_model(spike)?;
+        }
+        Ok(())
+    }
+
     fn generate_one_isothermal(
         cfg: &AdvancedTGAConfig,
         temperature: f64,
         index: u64,
-    ) -> SimulatedTGA {
-        let mut rng = StdRng::seed_from_u64(cfg.seed + index);
+    ) -> Result<SimulatedTGA, TGADomainError> {
+        let mut rng = StdRng::seed_from_u64(cfg.seed.wrapping_add(index));
 
         let time: Vec<f64> = (0..cfg.n_points).map(|i| i as f64 * cfg.dt).collect();
 
         let mut temp_vec = vec![temperature; cfg.n_points];
 
         if let Some(noise) = &cfg.temp_noise {
-            Self::apply_noise(&mut temp_vec, noise, &mut rng);
+            Self::apply_noise(&mut temp_vec, noise, &mut rng)?;
         }
 
         let mut mass = Self::generate_mass(&time, &temp_vec, &cfg.kinetic_model, cfg.dt);
 
         if let Some(noise) = &cfg.mass_noise {
-            Self::apply_noise(&mut mass, noise, &mut rng);
+            Self::apply_noise(&mut mass, noise, &mut rng)?;
         }
 
         if let Some(spike) = &cfg.spikes {
-            Self::apply_spikes(&mut mass, spike, &mut rng);
+            Self::apply_spikes(&mut mass, spike, &mut rng)?;
         }
 
-        SimulatedTGA {
+        Ok(SimulatedTGA {
             virtual_tga: VirtualTGA {
                 time,
                 temperature: temp_vec,
@@ -212,7 +295,7 @@ impl VirtualTGA {
                 isothermal_temperature: Some(temperature),
                 comment: None,
             },
-        }
+        })
     }
 
     fn generate_one_ramp(
@@ -220,8 +303,8 @@ impl VirtualTGA {
         t0: f64,
         beta_min: f64, // K/min
         index: u64,
-    ) -> SimulatedTGA {
-        let mut rng = StdRng::seed_from_u64(cfg.seed + index);
+    ) -> Result<SimulatedTGA, TGADomainError> {
+        let mut rng = StdRng::seed_from_u64(cfg.seed.wrapping_add(index));
 
         let beta = beta_min / 60.0; // convert to K/s
 
@@ -230,20 +313,20 @@ impl VirtualTGA {
         let mut temperature: Vec<f64> = time.iter().map(|t| t0 + beta * t).collect();
 
         if let Some(noise) = &cfg.temp_noise {
-            Self::apply_noise(&mut temperature, noise, &mut rng);
+            Self::apply_noise(&mut temperature, noise, &mut rng)?;
         }
 
         let mut mass = Self::generate_mass(&time, &temperature, &cfg.kinetic_model, cfg.dt);
 
         if let Some(noise) = &cfg.mass_noise {
-            Self::apply_noise(&mut mass, noise, &mut rng);
+            Self::apply_noise(&mut mass, noise, &mut rng)?;
         }
 
         if let Some(spike) = &cfg.spikes {
-            Self::apply_spikes(&mut mass, spike, &mut rng);
+            Self::apply_spikes(&mut mass, spike, &mut rng)?;
         }
 
-        SimulatedTGA {
+        Ok(SimulatedTGA {
             virtual_tga: VirtualTGA {
                 time,
                 temperature,
@@ -255,7 +338,7 @@ impl VirtualTGA {
                 isothermal_temperature: None,
                 comment: None,
             },
-        }
+        })
     }
 
     fn generate_mass(time: &[f64], temperature: &[f64], model: &KineticModel, dt: f64) -> Vec<f64> {
@@ -351,19 +434,32 @@ impl VirtualTGA {
         }
     }
 
-    fn apply_noise(data: &mut [f64], cfg: &NoiseConfig, rng: &mut StdRng) {
+    fn apply_noise(
+        data: &mut [f64],
+        cfg: &NoiseConfig,
+        rng: &mut StdRng,
+    ) -> Result<(), TGADomainError> {
+        Self::validate_noise_config(cfg)?;
         match &cfg.kind {
             NoiseKind::Gaussian { sigma } => {
-                let dist = Normal::new(0.0, *sigma).unwrap();
-                for v in data {
-                    *v += dist.sample(rng);
+                if let Some(dist) = Self::normal_distribution("Gaussian sigma", *sigma)? {
+                    for v in data {
+                        *v += dist.sample(rng);
+                    }
                 }
             }
 
             NoiseKind::Uniform { amplitude } => {
-                let dist = Uniform::new(-amplitude, *amplitude).unwrap();
-                for v in data {
-                    *v += dist.sample(rng);
+                if *amplitude > 0.0 {
+                    let dist = Uniform::new(-amplitude, *amplitude).map_err(|error| {
+                        TGADomainError::InvalidFilterParameters {
+                            filter: "synthetic data generator".to_string(),
+                            details: format!("invalid uniform amplitude {amplitude}: {error}"),
+                        }
+                    })?;
+                    for v in data {
+                        *v += dist.sample(rng);
+                    }
                 }
             }
 
@@ -377,11 +473,13 @@ impl VirtualTGA {
                 probability,
                 amplitude,
             } => {
-                if *probability <= 0.0 {
-                    return;
+                if *probability == 0.0 {
+                    return Ok(());
                 }
 
-                let dist = Normal::new(0.0, *amplitude).unwrap();
+                let Some(dist) = Self::normal_distribution("impulse amplitude", *amplitude)? else {
+                    return Ok(());
+                };
                 for v in data {
                     let r: f64 = rng.random();
                     if r < *probability {
@@ -391,7 +489,9 @@ impl VirtualTGA {
             }
 
             NoiseKind::Flicker { amplitude } => {
-                let dist = Normal::new(0.0, *amplitude).unwrap();
+                let Some(dist) = Self::normal_distribution("flicker amplitude", *amplitude)? else {
+                    return Ok(());
+                };
                 let mut state = 0.0;
                 for v in data {
                     state = 0.995 * state + dist.sample(rng);
@@ -399,14 +499,23 @@ impl VirtualTGA {
                 }
             }
         }
+        Ok(())
     }
 
-    fn apply_spikes(data: &mut [f64], spike: &SpikeModel, rng: &mut StdRng) {
-        if spike.probability <= 0.0 {
-            return;
+    fn apply_spikes(
+        data: &mut [f64],
+        spike: &SpikeModel,
+        rng: &mut StdRng,
+    ) -> Result<(), TGADomainError> {
+        Self::validate_spike_model(spike)?;
+        if spike.probability == 0.0 || spike.amplitude == 0.0 {
+            return Ok(());
         }
 
-        let spike_dist = Normal::new(0.0, spike.amplitude).unwrap();
+        let Some(spike_dist) = Self::normal_distribution("spike amplitude", spike.amplitude)?
+        else {
+            return Ok(());
+        };
 
         for v in data.iter_mut() {
             let r: f64 = rng.random();
@@ -414,9 +523,11 @@ impl VirtualTGA {
                 *v += spike_dist.sample(rng);
             }
         }
+        Ok(())
     }
 
-    pub fn generate_series(cfg: &AdvancedTGAConfig) -> Vec<SimulatedTGA> {
+    pub fn generate_series(cfg: &AdvancedTGAConfig) -> Result<Vec<SimulatedTGA>, TGADomainError> {
+        Self::validate_advanced_config(cfg)?;
         match &cfg.experiment_mode {
             ExperimentMode::Isothermal { temperatures } => temperatures
                 .iter()
@@ -438,13 +549,23 @@ impl TGASeries {
         &mut self,
         config: &AdvancedTGAConfig,
     ) -> Result<(), TGADomainError> {
-        let simulated = VirtualTGA::generate_series(config);
-        for exp in simulated {
-            let meta = exp.meta;
-            let vtga = exp.virtual_tga;
-            self.create_from_synthetic_data(&vtga, meta)?;
+        let simulated = VirtualTGA::generate_series(config)?;
+        let pending = simulated
+            .into_iter()
+            .map(|run| TGAExperiment::create_from_synthetic_data(&run.virtual_tga, run.meta))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut ids: HashSet<String> = self.ids().into_iter().collect();
+        for experiment in &pending {
+            let id = experiment.meta.id.clone();
+            if !ids.insert(id.clone()) {
+                return Err(TGADomainError::DuplicateExperimentId(id));
+            }
         }
-        self.rebuild_index();
+
+        for experiment in pending {
+            self.push(experiment)?;
+        }
         Ok(())
     }
 }
@@ -479,29 +600,45 @@ pub struct VirtualTGAConfig {
 }
 //===========================================================================================
 impl VirtualTGA {
-    pub fn generate(cfg: &VirtualTGAConfig) -> Self {
+    pub fn generate(cfg: &VirtualTGAConfig) -> Result<Self, TGADomainError> {
+        if cfg.n_points < 2 {
+            return Err(TGADomainError::InvalidFilterParameters {
+                filter: "synthetic data generator".to_string(),
+                details: format!("at least two points are required, got {}", cfg.n_points),
+            });
+        }
+        let temp_noise =
+            Self::normal_distribution("temperature noise sigma", cfg.temp_noise.sigma)?;
+        let mass_noise = Self::normal_distribution("mass noise sigma", cfg.mass_noise.sigma)?;
+        if let Some(spike) = &cfg.spikes {
+            Self::validate_spike_model(spike)?;
+        }
         let mut rng = StdRng::seed_from_u64(cfg.seed);
 
         let time: Vec<f64> = (0..cfg.n_points).map(|i| i as f64 * cfg.dt).collect();
 
-        let temp_noise = Normal::new(0.0, cfg.temp_noise.sigma).unwrap();
-        let mass_noise = Normal::new(0.0, cfg.mass_noise.sigma).unwrap();
-
         let temperature: Vec<f64> = time
             .iter()
-            .map(|_| cfg.temperature + temp_noise.sample(&mut rng))
+            .map(|_| cfg.temperature + temp_noise.as_ref().map_or(0.0, |d| d.sample(&mut rng)))
             .collect();
 
         let mut mass: Vec<f64> = time
             .iter()
             .map(|&t| {
                 let clean = cfg.m0 * (-cfg.k * t).exp();
-                clean + mass_noise.sample(&mut rng)
+                clean + mass_noise.as_ref().map_or(0.0, |d| d.sample(&mut rng))
             })
             .collect();
 
         if let Some(spike) = &cfg.spikes {
-            let spike_noise = Normal::new(0.0, spike.amplitude).unwrap();
+            let Some(spike_noise) = Self::normal_distribution("spike amplitude", spike.amplitude)?
+            else {
+                return Ok(Self {
+                    time,
+                    temperature,
+                    mass,
+                });
+            };
             for m in &mut mass {
                 let r: f64 = rng.random();
                 if r < spike.probability {
@@ -510,27 +647,27 @@ impl VirtualTGA {
             }
         }
 
-        Self {
+        Ok(Self {
             time,
             temperature,
             mass,
-        }
+        })
     }
 
-    pub fn write_txt(&self) -> NamedTempFile {
-        let mut file = NamedTempFile::new().unwrap();
+    pub fn write_txt(&self) -> std::io::Result<NamedTempFile> {
+        let mut file = NamedTempFile::new()?;
 
-        file.write_all(b"time mass temperature\n").unwrap();
+        file.write_all(b"time mass temperature\n")?;
 
         for i in 0..self.time.len() {
             let line = format!(
                 "{} {} {}\n",
                 self.time[i], self.mass[i], self.temperature[i],
             );
-            file.write_all(line.as_bytes()).unwrap();
+            file.write_all(line.as_bytes())?;
         }
 
-        file
+        Ok(file)
     }
 }
 //================================================================================================================
@@ -585,16 +722,18 @@ impl VirtualTGABuilder {
         self
     }
 
-    pub fn build(self) -> VirtualTGA {
+    pub fn build(self) -> Result<VirtualTGA, TGADomainError> {
         VirtualTGA::generate(&self.cfg)
     }
 }
 //================================================================================================================
 //  PIPELINR INVARIANT TEST
+#[cfg(test)]
 pub struct PipelineInvariantTest {
     pub df: DataFrame,
 }
 
+#[cfg(test)]
 impl PipelineInvariantTest {
     pub fn from_lazy(frame: &LazyFrame) -> PolarsResult<Self> {
         Ok(Self {
@@ -742,38 +881,39 @@ pub mod tests_afvanced_config {
         cutoff: f64,
     ) -> Result<TGASeries, TGADomainError> {
         let mut series = TGASeries::new();
-        series.create_series_from_synthetic_data(cfg).unwrap();
+        series.create_series_from_synthetic_data(cfg)?;
 
-        for indx in &mut series.exp_map.values() {
-            let e = series.experiments[*indx]
-                .clone()
-                .celsius_to_kelvin()
-                .seconds_to_hours()
-                .calibrate_mass_from_voltage(k, b)
-                .conversion(0.0, cutoff, "eta")
-                .unwrap()
-                .derive_deta_dt("deta_dt")
-                .unwrap()
-                .derive_temperature_rate("dT_dt")?;
-            let b = e.dataset.get_mass()?;
-            let mass = b[0..10].as_ref();
-            println!("mass {:?}", mass);
-            let b = e.dataset.get_time()?;
-            let time = b[0..10].as_ref();
-            println!("\n time {:?}", time);
-            let conversion = e.dataset.get_eta()?;
-            println!(
-                "\n conversion: from {:?} to {:?}",
-                conversion.first(),
-                conversion.last()
-            );
-            let deta_dt = e.dataset.get_deta_dt()?;
-            println!(
-                "\n deta_dt: from {:?} to {:?}",
-                deta_dt.first(),
-                deta_dt.last()
-            );
-            series.experiments[*indx] = e;
+        for id in series.ids() {
+            series.try_transform_by_id(&id, |exp| {
+                let e = exp
+                    .celsius_to_kelvin()?
+                    .seconds_to_hours()?
+                    .calibrate_mass_from_voltage(k, b)?
+                    .conversion(0.0, cutoff, "eta")
+                    .unwrap()
+                    .derive_deta_dt("deta_dt")
+                    .unwrap()
+                    .derive_temperature_rate("dT_dt")?;
+                let b = e.dataset.get_mass()?;
+                let mass = b[0..10].as_ref();
+                println!("mass {:?}", mass);
+                let b = e.dataset.get_time()?;
+                let time = b[0..10].as_ref();
+                println!("\n time {:?}", time);
+                let conversion = e.dataset.get_eta()?;
+                println!(
+                    "\n conversion: from {:?} to {:?}",
+                    conversion.first(),
+                    conversion.last()
+                );
+                let deta_dt = e.dataset.get_deta_dt()?;
+                println!(
+                    "\n deta_dt: from {:?} to {:?}",
+                    deta_dt.first(),
+                    deta_dt.last()
+                );
+                Ok(e)
+            })?;
         }
         Ok(series)
     }
@@ -785,18 +925,19 @@ pub mod tests_afvanced_config {
         m0: f64,
     ) -> Result<TGASeries, TGADomainError> {
         let mut series = TGASeries::new();
-        series.create_series_from_synthetic_data(cfg).unwrap();
+        series.create_series_from_synthetic_data(cfg)?;
 
-        for indx in &mut series.exp_map.values() {
-            let e = series.experiments[*indx]
-                .clone()
-                .celsius_to_kelvin()
-                .seconds_to_hours()
-                .calibrate_mass_from_voltage(k, b)
-                .conversion_with_m0(m0, "eta")?
-                .derive_deta_dt("deta_dt")?
-                .derive_temperature_rate("dT_dt")?;
-            series.experiments[*indx] = e;
+        for id in series.ids() {
+            series.try_transform_by_id(&id, |exp| {
+                let e = exp
+                    .celsius_to_kelvin()?
+                    .seconds_to_hours()?
+                    .calibrate_mass_from_voltage(k, b)?
+                    .conversion_with_m0(m0, "eta")?
+                    .derive_deta_dt("deta_dt")?
+                    .derive_temperature_rate("dT_dt")?;
+                Ok(e)
+            })?;
         }
 
         Ok(series)
@@ -807,12 +948,12 @@ pub mod tests_afvanced_config {
         let cfg = base_advanced_config_isothermal(1e5, 80_000.0, T.clone(), 0.1, 10_000);
         let series = build_series_from_cfg(&cfg, -1.0, 0.0, 1e-4).unwrap();
         let mut k_vec = vec![];
-        for i in series.experiments.iter() {
+        for i in series.experiments().iter() {
             let conversion = i.dataset.get_eta().unwrap();
             let deta_dt = i.dataset.get_deta_dt().unwrap();
             let deta_dt = Array1::from(deta_dt);
             let conversion = Array1::from(conversion);
-            let res = linear_regression(&conversion, &deta_dt);
+            let res = linear_regression(&conversion, &deta_dt).unwrap();
             let k = res.slope;
             let b = res.intercept;
             let r2 = res.r2;
@@ -827,7 +968,7 @@ pub mod tests_afvanced_config {
         let T_inv = Array1::from(T_inv);
         let ln_k = Array1::from(ln_k);
 
-        let res = linear_regression(&T_inv, &ln_k);
+        let res = linear_regression(&T_inv, &ln_k).unwrap();
 
         let k = res.slope * 8.314;
         let b = res.intercept;
@@ -847,7 +988,7 @@ pub mod tests_afvanced_config {
         let mut all_T_inv = vec![];
         let mut all_complex = vec![];
 
-        for i in series.experiments.iter() {
+        for i in series.experiments().iter() {
             let conversion = i.dataset.get_eta().unwrap();
             let deta_dt = i.dataset.get_deta_dt().unwrap();
             let temp = i.dataset.get_temperature().unwrap();
@@ -872,7 +1013,7 @@ pub mod tests_afvanced_config {
 
         let T_inv = Array1::from(all_T_inv);
         let complex = Array1::from(all_complex);
-        let res = linear_regression(&T_inv, &complex);
+        let res = linear_regression(&T_inv, &complex).unwrap();
         let k = res.slope * 8.314;
         let b = res.intercept;
         let r2 = res.r2;
@@ -885,7 +1026,7 @@ pub mod tests_afvanced_config {
     #[test]
     fn mass_monotonic_without_noise() {
         let cfg = base_config_single();
-        let series = VirtualTGA::generate_series(&cfg);
+        let series = VirtualTGA::generate_series(&cfg).unwrap();
         let exp = &series[0];
 
         for i in 1..exp.virtual_tga.mass.len() {
@@ -899,7 +1040,7 @@ pub mod tests_afvanced_config {
     #[test]
     fn temperature_linear_ramp() {
         let cfg = base_config_single();
-        let series = VirtualTGA::generate_series(&cfg);
+        let series = VirtualTGA::generate_series(&cfg).unwrap();
         let exp = &series[0];
 
         for i in 1..exp.virtual_tga.temperature.len() {
@@ -911,13 +1052,24 @@ pub mod tests_afvanced_config {
     }
     #[test]
     fn reproducible_by_seed() {
-        let cfg = base_config_single();
+        let mut cfg = base_config_single();
+        cfg.mass_noise = Some(NoiseConfig {
+            kind: NoiseKind::Gaussian { sigma: 0.01 },
+        });
+        cfg.temp_noise = Some(NoiseConfig {
+            kind: NoiseKind::Gaussian { sigma: 0.1 },
+        });
 
-        let s1 = VirtualTGA::generate_series(&cfg);
-        let s2 = VirtualTGA::generate_series(&cfg);
+        let s1 = VirtualTGA::generate_series(&cfg).unwrap();
+        let s2 = VirtualTGA::generate_series(&cfg).unwrap();
 
         assert_eq!(s1[0].virtual_tga.mass, s2[0].virtual_tga.mass);
         assert_eq!(s1[0].virtual_tga.temperature, s2[0].virtual_tga.temperature);
+
+        cfg.seed += 1;
+        let s3 = VirtualTGA::generate_series(&cfg).unwrap();
+        assert_ne!(s1[0].virtual_tga.mass, s3[0].virtual_tga.mass);
+        assert_ne!(s1[0].virtual_tga.temperature, s3[0].virtual_tga.temperature);
     }
 
     #[test]
@@ -928,7 +1080,7 @@ pub mod tests_afvanced_config {
             amplitude: 50.0,
         });
 
-        let series = VirtualTGA::generate_series(&cfg);
+        let series = VirtualTGA::generate_series(&cfg).unwrap();
         let exp = &series[0];
 
         let mut spike_detected = false;
@@ -954,11 +1106,13 @@ pub mod tests_afvanced_config {
             },
             kinetic_model: KineticModel::ArrheniusTwoComponent {
                 m01: 50.0,
-                k01: 1e6,
-                e1: 90000.0,
+                // Fast component gives the early drop; the slower component
+                // remains measurable as a tail over this short test ramp.
+                k01: 1e5,
+                e1: 30000.0,
                 m02: 50.0,
-                k02: 1e3,
-                e2: 60000.0,
+                k02: 7e4,
+                e2: 45000.0,
                 r: R,
             },
             mass_noise: None,
@@ -968,15 +1122,22 @@ pub mod tests_afvanced_config {
             seed: 7,
         };
 
-        let series = VirtualTGA::generate_series(&cfg);
+        let series = VirtualTGA::generate_series(&cfg).unwrap();
         let exp = &series[0];
 
         let initial_drop = exp.virtual_tga.mass[10] - exp.virtual_tga.mass[0];
         let later_drop = exp.virtual_tga.mass[900] - exp.virtual_tga.mass[890];
 
         assert!(
-            initial_drop.abs() > later_drop.abs(),
-            "Two-stage behavior not observed"
+            initial_drop.abs() > 10.0 * later_drop.abs(),
+            "Expected a fast initial decay followed by a slower tail; early drop={:.6}, late drop={:.6}",
+            initial_drop.abs(),
+            later_drop.abs()
+        );
+        assert!(
+            later_drop.abs() > 0.01,
+            "The slow component should produce a measurable tail; late drop={:.6}",
+            later_drop.abs()
         );
     }
 
@@ -987,15 +1148,99 @@ pub mod tests_afvanced_config {
             kind: NoiseKind::Gaussian { sigma: 5.0 },
         });
 
-        let noisy = VirtualTGA::generate_series(&cfg);
+        let noisy = VirtualTGA::generate_series(&cfg).unwrap();
 
         cfg.mass_noise = None;
-        let clean = VirtualTGA::generate_series(&cfg);
+        let clean = VirtualTGA::generate_series(&cfg).unwrap();
 
         let var_noisy: f64 = variance(&noisy[0].virtual_tga.mass);
         let var_clean: f64 = variance(&clean[0].virtual_tga.mass);
 
         assert!(var_noisy > var_clean);
+    }
+
+    #[test]
+    fn invalid_noise_parameters_return_errors_before_series_mutation() {
+        let mut cfg = base_config_single();
+        cfg.mass_noise = Some(NoiseConfig {
+            kind: NoiseKind::Gaussian { sigma: f64::NAN },
+        });
+        let mut series = TGASeries::new();
+
+        assert!(matches!(
+            series.create_series_from_synthetic_data(&cfg),
+            Err(TGADomainError::InvalidFilterParameters { .. })
+        ));
+        assert!(series.ids().is_empty());
+
+        cfg.mass_noise = Some(NoiseConfig {
+            kind: NoiseKind::Uniform { amplitude: -1.0 },
+        });
+        assert!(matches!(
+            VirtualTGA::generate_series(&cfg),
+            Err(TGADomainError::InvalidFilterParameters { .. })
+        ));
+
+        cfg.mass_noise = Some(NoiseConfig {
+            kind: NoiseKind::Impulse {
+                probability: 1.1,
+                amplitude: 1.0,
+            },
+        });
+        assert!(matches!(
+            VirtualTGA::generate_series(&cfg),
+            Err(TGADomainError::InvalidFilterParameters { .. })
+        ));
+    }
+
+    #[test]
+    fn zero_noise_and_too_short_generator_input_are_handled_without_panics() {
+        let mut cfg = base_config_single();
+        cfg.mass_noise = Some(NoiseConfig {
+            kind: NoiseKind::Gaussian { sigma: 0.0 },
+        });
+        assert!(VirtualTGA::generate_series(&cfg).is_ok());
+
+        cfg.n_points = 1;
+        assert!(matches!(
+            VirtualTGA::generate_series(&cfg),
+            Err(TGADomainError::InvalidFilterParameters { .. })
+        ));
+
+        cfg.n_points = 10;
+        cfg.seed = u64::MAX;
+        cfg.experiment_mode = ExperimentMode::Isothermal {
+            temperatures: vec![500.0, 510.0],
+        };
+        assert_eq!(VirtualTGA::generate_series(&cfg).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn synthetic_series_id_conflicts_do_not_partially_append_runs() {
+        let mut cfg = base_config_single();
+        cfg.experiment_mode = ExperimentMode::Isothermal {
+            temperatures: vec![600.01, 600.02],
+        };
+        let mut series = TGASeries::new();
+        let error = series.create_series_from_synthetic_data(&cfg).unwrap_err();
+
+        assert!(matches!(error, TGADomainError::DuplicateExperimentId(_)));
+        assert!(series.ids().is_empty());
+
+        cfg.experiment_mode = ExperimentMode::Isothermal {
+            temperatures: vec![600.0],
+        };
+        let seed_experiment = VirtualTGA::generate_series(&cfg).unwrap().remove(0);
+        series
+            .create_from_synthetic_data(&seed_experiment.virtual_tga, seed_experiment.meta)
+            .unwrap();
+
+        let before = series.ids();
+        assert!(matches!(
+            series.create_series_from_synthetic_data(&cfg),
+            Err(TGADomainError::DuplicateExperimentId(_))
+        ));
+        assert_eq!(series.ids(), before);
     }
 
     fn variance(data: &[f64]) -> f64 {
@@ -1039,7 +1284,7 @@ mod tests {
             seed: 123,
         };
 
-        let virtual_tga = VirtualTGA::generate(&cfg);
+        let virtual_tga = VirtualTGA::generate(&cfg).unwrap();
         println!("time {:?}", virtual_tga.time);
 
         assert_eq!(virtual_tga.time.len(), cfg.n_points);
@@ -1064,8 +1309,8 @@ mod tests {
             seed: 456,
         };
 
-        let virtual_tga = VirtualTGA::generate(&cfg);
-        let file = virtual_tga.write_txt();
+        let virtual_tga = VirtualTGA::generate(&cfg).unwrap();
+        let file = virtual_tga.write_txt().unwrap();
 
         // Check that the file exists
         assert!(file.path().exists());
@@ -1105,8 +1350,8 @@ mod tests {
             seed: 789,
         };
 
-        let virtual_tga = VirtualTGA::generate(&cfg);
-        let file = virtual_tga.write_txt();
+        let virtual_tga = VirtualTGA::generate(&cfg).unwrap();
+        let file = virtual_tga.write_txt().unwrap();
 
         let content = std::fs::read_to_string(file.path()).unwrap();
         let lines: Vec<&str> = content.lines().collect();
@@ -1139,7 +1384,7 @@ mod tests {
             seed: 999,
         };
 
-        let virtual_tga = VirtualTGA::generate(&cfg);
+        let virtual_tga = VirtualTGA::generate(&cfg).unwrap();
 
         // Since spikes are added, mass should not be exactly the exponential decay
         let expected_mass: Vec<f64> = virtual_tga

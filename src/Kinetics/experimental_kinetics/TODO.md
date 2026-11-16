@@ -42,15 +42,19 @@
 - [x] Проверен порядок и единицы в `apply_golden_pipeline`: pipeline переводит секунды в часы
       до вычисления `dT/dt`, `dalpha/dt` и `deta/dt`, а производные получают метаданные
       в соответствии с часовой шкалой времени (`K/h`, `/h`).
-- [ ] Исключить потерю выравнивания строк в `TGADataset::materialize`.
-      Независимый `into_no_null_iter()` для каждой колонки может вернуть векторы разной длины
-      и сопоставить значения из разных строк.
-- [ ] Добавить единую проверку перед численной материализацией: одинаковая длина колонок,
-      отсутствие недопустимых `null`, конечность значений, монотонность сетки.
+- [x] Сохранить выравнивание строк в `TGADataset::materialize`: grid и все запрошенные
+      колонки фильтруются одной общей complete-case маской. Строки с `null` пропускаются
+      совместно, включая штатные краевые `null` производных; независимые
+      `into_no_null_iter()` не используются для сборки числового блока.
+- [x] Проверять конечность материализуемых значений и строгую монотонность активной
+      временной сетки после пропуска строк с `null`. Глобальный запрет на штатные `null`
+      не вводить.
 - [x] Проверяются физически допустимые единицы при `bind_time`, `bind_temperature` и `bind_mass`;
       GUI показывает только контекстные варианты, а бэкенд отвергает неподходящие `Unit`.
-- [ ] Проверять диапазон и направление conversion-колонок перед построением
-      `ConversionGrid` (`0 <= alpha/eta <= 1`, монотонность, отсутствие повторов и NaN).
+- [x] Проверять направление и конечность conversion перед интерполяцией.
+      Расчётная сетка ограничена `[0, 1]`; измеренные значения могут слегка выходить
+      за эти границы из-за шума и не обрезаются молча. Внутренние повторы отклоняются,
+      терминальное плато полного превращения допускается.
 - [x] Проверена семантика `alpha` и `eta` во всём API и закреплён единый контракт:
       `alpha` = relative mass `m/m0`, `eta` = conversion `1 - alpha`,
       а типы, комментарии и подписи приведены к этой схеме там, где берётся
@@ -64,28 +68,48 @@
 
 ## P1: доменная модель одного эксперимента
 
-- [ ] Сделать `TGASchema` единственным источником истины для семантики колонок и исключить
-      рассинхронизацию между `columns[*].nature` и полями `time`, `mass`, `eta` и т. д.
-- [ ] В `bind_time`, `bind_temperature` и `bind_mass` обновлять не только unit и binding,
+- [x] Закрепить различие активной схемы и повторяемой классификации Nature: поля `TGASchema`
+      выбирают активную колонку роли, а `ColumnMeta::nature` может встречаться у нескольких
+      колонок. Повторный binding и импорт проверяются тестами.
+- [x] В `bind_time`, `bind_temperature` и `bind_mass` обновлять не только unit и binding,
       но и `ColumnMeta::nature`.
-- [ ] В `bind_column` проверять, что колонка действительно существует в `LazyFrame`;
-      сейчас можно создать metadata binding для отсутствующей колонки.
-- [ ] В `TGASchema::update_schema` и `drop_schema_record` обрабатывать также `E` и `R2`.
-- [ ] Убрать небезопасные предположения `TGASchema::from_columns` о наличии минимум трёх
-      колонок и совпадении длины `names`/`units`.
+- [x] Проверять в `bind_column` и специализированных binding-методах наличие колонки
+      и в `LazyFrame`, и в schema metadata до snapshot/history-изменений.
+- [x] В `TGASchema::update_schema` и `drop_schema_record` обрабатывать также `E` и `R2`;
+      `rename_column`/`drop_column` используют эти helpers, чтобы не оставлять устаревшие bindings.
+- [x] Убрать небезопасные предположения `TGASchema::from_columns` о наличии минимум трёх
+      колонок и совпадении длины `names`/`units`; неполные bindings теперь остаются `None`,
+      а несовпадение метаданных и повторяющиеся имена возвращают ошибку.
 - [x] Развести `Unit::Unknown` и `Unit::Dimensionless` в CSV-представлении:
       сейчас оба сериализуются как `-`, а обратно читаются как `Dimensionless`.
 - [x] Расширить систему единиц или ввести размерности: минуты, K/min, mg/min и производные
       сейчас невозможно выразить без неоднозначности.
-- [ ] Добавить валидацию уникальности имени при создании/переименовании колонки.
-- [ ] Определить политику перезаписи существующей колонки для `with_column_expr`,
-      `add_column_from_vec`, фильтров и производных.
+- [x] Добавить валидацию уникальности имени при создании/переименовании колонки.
+      Проверка учитывает и метаданные, и фактическую схему LazyFrame; выходные колонки
+      не перезаписывают существующие, а переименование в занятое имя отклоняется.
+- [x] Определить политику перезаписи существующей колонки для `with_column_expr`,
+      `add_column_from_vec`, фильтров и производных: новые результаты отклоняют коллизию;
+      изменение существующих данных выполняется только явными in-place операциями.
 - [x] Все операции, изменяющие frame или schema, пишут согласованную запись в History.
       Проверены `bind_column`, `drop_nulls` и операции импорта; лог истории уже читается в GUI.
 - [x] Определена практическая семантика `OperationRecord::reversible`:
       `Expr` сам по себе не хранит снапшот, а откат реализован отдельной undo-машиной.
 - [ ] Заменить потребляющий API с постоянным клонированием `TGADataset` там, где безопаснее
       и дешевле использовать контролируемую мутацию или транзакционное преобразование.
+      [x] `bind_time`, `bind_temperature`, `bind_mass` и `bind_column` в `TGASeries` теперь
+      мутируют выбранный эксперимент напрямую: эти операции проверяют параметры до записи,
+      не меняют ID и сохраняют штатные History/undo snapshots. Тем же путём идут
+      `sort_experiment_by_time` (валидация завершена до первого изменения) и `drop_nulls`
+      (infallible lazy-операция), а также infallible lazy-операции `filter_rows`,
+      `filter_by_mask`, `cut_interval`, `trim_range`, `scale_*` и `offset_*`. Их
+      standalone consuming wrappers сохранены и делегируют тем же in-place helper-ам.
+      [x] Undo snapshots хранятся в ограниченном shared copy-on-write стеке: clone dataset
+      больше не копирует до 20 старых snapshots вместе с их schema; запись/удаление в клоне
+      отделяет только deque handles и не затрагивает исходный стек.
+      [ ] Остальные candidate-клоны в общих `mutate_by_id`/`try_mutate_by_id` и consuming
+      transforms оставлены ради атомарного rollback произвольных closures. Хотя копирование
+      undo-stack уже дешёвое, остаётся clone History/schema. Оптимизировать их после отдельного
+      проектирования ограниченного transaction API и замеров; не убирать rollback при ошибке.
 - [ ] Возвращать детерминированный порядок колонок вместо порядка ключей `HashMap`.
 - [ ] Удалить `println!` из библиотечного кода; использовать `log` и настраиваемые уровни.
 
@@ -95,24 +119,37 @@
       Теперь `push` и `set_experiment_id` отклоняют дубликаты, а пересборка индекса больше не молчит.
 - [x] Сделать `drop_experiment(index)` возвращающим `Result`, чтобы неверный индекс не вызывал panic.
 - [x] Заменить `TGADomainError::NotImplemented` в `drop_experiment_by_id` на содержательную ошибку.
-- [ ] Исключить клонирование всего `TGAExperiment` в `transform_by_id`/`try_transform_by_id`
-      либо документировать стоимость и атомарность такого подхода.
-- [ ] Инкапсулировать `experiments` и `exp_map`, чтобы внешний код не мог нарушить их согласованность.
-- [ ] При series CSV roundtrip сохранять и восстанавливать `ColumnNature`.
-- [ ] При series CSV roundtrip сохранять binding `R2`; сейчас сохраняется `E`, но не `R2`.
-- [ ] Добавить версионирование и тесты миграции формата `#META`, включая экранирование id,
-      комментариев, табуляций, переводов строк и пустых серий.
-- [ ] Проверить single-dataset CSV roundtrip: bindings, nature и origin должны либо сохраняться,
-      либо потеря метаданных должна быть явно частью формата.
-- [ ] Убрать временный файл из `from_csv_series` и читать CSV-часть через поток/буфер.
-- [ ] Определить поведение объединения опытов с разными длинами, схемами и единицами до создания
-      `UnitedDataset`.
+- [x] Reviewed cloning in `transform_by_id`/`try_transform_by_id`; retain the candidate
+      clone because it guarantees rollback when a multi-step closure fails or an ID
+      update collides. The rationale is documented at the API. Revisit only with a
+      transaction mechanism that preserves this atomicity and evidence that cloning
+      is a measurable bottleneck.
+- [x] Encapsulate `experiments` and `exp_map`; both fields are private and public
+      access is read-only, so external code cannot desynchronize the series index.
+- [x] При series CSV roundtrip сохранять и восстанавливать `ColumnNature` и `ColumnOrigin`;
+      старые `COL`-строки без Nature продолжают читаться, активные bindings получают Nature
+      из схемы. Проверено roundtrip-тестом.
+- [x] Preserve the `R2` binding in series CSV roundtrips; regression coverage verifies
+      the binding and its `ColumnNature` after restore.
+- [x] Validate `#META` format versions 1 and 2 and reject malformed, duplicate, or
+      unsupported versions. Roundtrip tests cover legacy v1 metadata, escaped IDs and
+      comments (tabs, line breaks, carriage returns, backslashes), and empty series.
+- [x] Single-dataset CSV roundtrip сохраняет bindings, `ColumnNature` и `ColumnOrigin`;
+      файлы старого формата без строки метаданных колонок читаются с прежним fallback.
+- [x] Parse the CSV payload in memory with a buffered cursor; `from_csv_series` no
+      longer creates an intermediate temporary file.
+- [x] Зафиксировать контракт вертикального объединения: разное число строк в опытах
+      допустимо; для запрошенных ролей берётся активная колонка каждого опыта, но
+      единицы должны совпадать. Значения автоматически не пересчитываются; несовпадение
+      возвращается как `IncompatibleUnits`. Добавлены тесты на разные длины и единицы.
 
 ## P1: численные и кинетические методы
 
 - [ ] Централизовать проверку требований метода: число опытов, режим эксперимента,
       heating rate/isothermal temperature, обязательные природы колонок и единицы.
-- [ ] Проверять одинаковую длину всех векторов внутри `ExperimentData`, как обещано документацией.
+- [x] Проверять одинаковую длину всех предоставленных векторов `ExperimentData` до
+      кинетических расчётов; несовпадение возвращает типизированную ошибку с id опыта,
+      именем колонки и ожидаемой/фактической длиной.
 - [x] Проверять сортировку и уникальность conversion перед линейной/сплайн-интерполяцией.
 - [x] Защитить `compute_dt_matrix` от сеток длины меньше двух и неположительных `dt`.
 - [x] Проверять `segments >= 2`, конечность и корректность ручного диапазона в
@@ -130,59 +167,88 @@
 
 ## P2: preprocessing и RustedSciThe
 
-- [ ] Описать явную границу ответственности: KiThe отвечает за доменную семантику и pipeline,
-      RustedSciThe — за численные примитивы.
-- [ ] Обернуть ошибки Savitzky-Golay, LOWESS и сплайнов RustedSciThe в содержательные
-      `TGADomainError` с параметрами операции и именами колонок.
-- [ ] Валидировать параметры фильтров до вызова backend: размер окна, степень полинома,
-      число точек, число узлов, диапазон `frac`, минимальную длину данных.
-- [ ] Унифицировать правила обработки краёв и `null` для всех фильтров.
-- [ ] Зафиксировать контракт resampling: какая колонка является сеткой, сохраняются ли исходные
-      колонки, как назначаются unit/nature/origin результирующим колонкам.
-- [ ] Устранить дублирование методов `*_as`/без `*_as` через общий внутренний helper.
-- [ ] Добавить regression-тесты совместимости с используемой версией RustedSciThe.
+- [x] Зафиксировать границу ответственности пакетов: KiThe валидирует доменные входы,
+      единицы, схему и pipeline; RustedSciThe предоставляет численные примитивы. Изменения
+      backend рассматриваются как совместная разработка, а не как риск рассинхронизации версий.
+- [x] Оборачивать ошибки Savitzky-Golay, LOWESS и сплайнов RustedSciThe в содержательные
+      `TGADomainError` с операцией и колонкой; сохранять текст backend-ошибки в цепочке source.
+- [x] Валидировать параметры фильтров до backend-вызова: ограничения SG окна/порядка,
+      число точек/узлов, LOWESS `frac`/config и минимальную длину данных.
+- [x] Явно определить и regression-тестами закрепить поведение краёв и `null`:
+      rolling mean сохраняет строки и выдаёт null для неполного окна; стандартный Hampel
+      требует null-free input, null-safe Hampel сохраняет null; SG/LOWESS/splines отвергают
+      null; SG использует nearest-value padding, Hampel копирует края.
+- [x] Зафиксировать contract resampling: выбранные ряды оцениваются на общей сетке;
+      frame сохраняет исходную высоту и дополняет resampled ряды хвостовыми null;
+      единицы и природа переносятся, origin становится `NumericDerived`, активные bindings
+      следуют за выходными колонками. Явный `x_new` теперь действительно используется.
+- [x] Проверить `*_as`/без `*_as`: одиночные convenience-варианты делегируют в общий путь;
+      дополнительный общий helper не нужен и не уменьшил бы дублирование.
+- [x] Добавить KiThe ↔ RustedSciThe integration regression tests для параметров и ошибок,
+      выходной длины/сетки, null и обработки краёв. Это защита совместно разрабатываемого
+      поведения, а не тест соответствия версий.
 - [ ] Решить судьбу локального `LSQSplines2.rs`: удалить, подключить или явно пометить
       как архивную/экспериментальную реализацию.
 
 ## P2: GUI и синхронизация состояния
 
 - [ ] Сократить дублирование фасадов `TGADataset -> TGAExperiment -> TGASeries -> PlotModel`.
-- [ ] Формализовать синхронизацию `TGASeries` и `PlotCurve`: сейчас обновление sampled-кривых
-      распределено между history, флагами и ручными вызовами.
-- [ ] Исключить stale plots после переименования/удаления колонок, удаления опыта и смены id.
-- [ ] Убрать `unwrap()` из пользовательских GUI-сценариев, особенно для calibration settings,
-      последнего опыта и обязательных derived-колонок golden pipeline.
-- [ ] Сделать ошибки `TGADomainError` и `TGAGUIError` реализующими `Display`/`Error`
-      и показывать пользователю содержательные сообщения.
-- [ ] Разделить крупный `model_handlers.rs` по сценариям: data management, preprocessing,
-      plotting, kinetic methods и result publishing.
-- [ ] Удалить видимые заглушки `TODO: Implement Criado master curve analysis`
-      и `TODO: Implement model fitting` либо скрыть незавершённые действия.
+- [x] Закрепить синхронизацию `TGASeries` и `PlotCurve`: Undo после in-place операции пересэмплирует
+      оставшиеся кривые; если Undo удалил исходную колонку производной, её кривая удаляется,
+      а доступная кривая опыта вновь выбирается. При ошибке пересэмплирования частичные/устаревшие
+      кривые не остаются на экране.
+- [x] Исключить stale plots после переименования/удаления колонок и удаления опыта; при удалении
+      опыта индексы оставшихся кривых пересчитываются.
+- [x] Проверить `unwrap()` в пользовательских GUI-сценариях: оставшиеся вызовы находятся
+      в `#[cfg(test)]`; обязательные настройки и выходы Golden Pipeline обрабатываются через
+      `Result`/`Option` с сообщением пользователю.
+- [x] Сделать ошибки `TGADomainError` и `TGAGUIError` реализующими `Display`/`Error`
+      и выводить их человекочитаемый текст в основные пользовательские статусы.
+- [ ] Продолжить разделение крупного `model_handlers.rs` по сценариям. Блок публикации fitting-
+      результатов вынесен в `model_handlers/model_handler_results.rs`; data management,
+      preprocessing, plotting и kinetic methods пока остаются в фасадном модуле.
+- [ ] Удалить GUI-заглушку `TODO: Implement Criado master curve analysis` и
+      `todo!()` для оценки предэкспоненциального фактора Kissinger либо скрыть незавершённые действия.
 - [ ] Исправить повреждённую кодировку русских комментариев и строк интерфейса.
-- [ ] Уточнить границу между встроенным `egui_plot` и `kithe_plot`, чтобы не поддерживать
-      два несогласованных пути визуализации.
+- [x] Уточнить границу между встроенным `egui_plot` и `kithe_plot`: первый отображает живые
+      интерактивные кривые, второй является отдельным редактором подготовленных к публикации
+      изображений и не меняет рабочее состояние графиков.
 - [ ] Добавить end-to-end GUI-тесты основных пользовательских маршрутов:
       импорт, binding, preprocessing, построение серии, запуск метода, экспорт результата.
 
 ## P2: provenance колонок и качество фильтрации
 
-- [ ] Вынести provenance колонок в отдельный модуль и хранить цепочку преобразований рядом с `TGADataset`.
-- [ ] По умолчанию для smoothing/filtering создавать новую колонку, а in-place режим оставить как совместимый вариант.
-- [ ] Прокинуть provenance и quality report в GUI table manager, чтобы над каждой колонкой была видна история преобразований.
-- [ ] Добавить synthetic-data сценарии с шумом и выбросами для сравнения качества сглаживания не "на глаз", а по метрикам.
+- [x] Вынести provenance колонок в отдельный модуль и хранить цепочку преобразований рядом с `TGADataset`.
+- [x] Для smoothing/filtering по умолчанию создавать новую колонку; in-place режим оставить явным вариантом.
+- [x] Показывать provenance и quality report в GUI Column Manager для выбранной колонки.
+- [x] Добавить synthetic-data сценарии с шумом и выбросами для сравнения качества фильтрации по метрикам.
 - [ ] Проверить, что цепочка `RAW -> SG -> LOWESS -> ...` не теряется при повторных преобразованиях и `undo`.
+      Сохранение цепочки при последовательных преобразованиях покрыто; отдельно завершить проверку
+      восстановления provenance после нескольких undo и CSV round-trip.
 
 ## P2: тестирование и инварианты
 
 - [ ] Собрать общие проверки pipeline в reusable test helpers вместо повторяющихся проверок.
-- [ ] Добавить property-based тесты: сохранение выравнивания строк, монотонность сетки,
-      roundtrip сериализации, корректность metadata после цепочки операций.
-- [ ] Тестировать данные с `null`, NaN, infinity, пустыми колонками, одной строкой,
-      повторяющимся временем и немонотонной conversion.
-- [ ] Добавить тесты для повторяющихся experiment id и повреждённого `exp_map`.
-- [ ] Добавить тесты roundtrip всех `Unit`, `ColumnNature`, `ColumnOrigin` и bindings.
+- [ ] Расширить property-based тесты: отдельно закрыть монотонность сетки и roundtrip
+      сериализации metadata.
+      [x] Генерируемые последовательности add/rename/drop/undo проверяют равенство frame/schema,
+      длины строк, bindings, provenance и согласованность operation History; случайные push/rename/
+      drop/duplicate-ID проверяют порядок опытов и индекс серии.
+- [ ] Довести матрицу граничных данных для `null`, NaN, infinity, пустых колонок и одной строки.
+      [x] Уже покрыты невалидные значения времени/фильтров, пустые агрегаты и baseline,
+      повторяющиеся timestamps, немонотонная/дублирующаяся conversion и dt-grid длиной < 2.
+      Осталось явно проверить однострочный dataset для материализации и пользовательских операций.
+- [x] Добавить тест на отклонение повторяющегося experiment id без повреждения индекса.
+- [x] Внешнее повреждение `exp_map`/`experiments` невозможно через публичный API:
+      поля приватные, доступ к опытам только read-only; тесты проверяют индекс после
+      добавления, переименования и удаления.
+- [x] Добавить series CSV roundtrip-тест всех вариантов `Unit`, `ColumnNature` и
+      `ColumnOrigin`; bindings проверяются отдельно, включая `R2`.
 - [ ] Разделить быстрые unit-тесты, численные regression-тесты и тяжёлые synthetic/integration tests.
-- [ ] Убрать тестовые модули из публичного production API или закрыть их через `#[cfg(test)]`.
+      Property-based проверки пока остаются частью unit test target.
+- [x] Убрать тестовые модули из публичного production API: test-only модули подключаются через
+      `#[cfg(test)]` и `pub(crate)`. Публичный `testing_mod` оставлен, так как synthetic generation
+      используется также GUI и production-сценариями.
 - [ ] Проверить, что сборка библиотеки не компилирует ненужные тестовые генераторы и GUI harness.
 - [ ] Настроить CI-матрицу минимум для `cargo fmt`, `cargo check`, unit tests и документационных тестов.
 
@@ -204,12 +270,12 @@
 - [ ] Добавить архитектурную диаграмму потока:
       `TGADataset -> TGAExperiment -> TGASeries -> UnitedDataset -> KineticDataView -> ConversionGrid`.
 
-## Ближайший рекомендуемый этап
+## Статус прежней очереди работ
 
-- [ ] Сначала исправить размерности производных и безопасную materialization.
-- [ ] Затем закрепить инварианты `TGASchema` и терминологию `alpha/eta`.
-- [ ] После этого стабилизировать id/index серии и полный metadata roundtrip.
-- [ ] Только затем сокращать фасады и перестраивать GUI, опираясь на стабильный domain API.
+Прежний порядок работ устарел: единицы производных, материализация с общей null-маской,
+контракт `alpha/eta`, проверки длин `ExperimentData` и часть CSV metadata round-trip уже
+выполнены. Оставшиеся задачи перечислены в актуальных разделах ниже; этот исторический список
+не следует использовать как текущий план.
 
 ## Текущая итерация: время и сортировка
 - [x] Добавлен `TimeMonotonicityReport` для активной time-колонки: null / NaN / inf / duplicate / decreasing.
@@ -220,14 +286,31 @@
 - [x] Кнопка `Sort by time` сортирует эксперимент и пересобирает живые графики.
 - [x] Добавлены тесты на структурированный отчёт времени, отказ при invalid time и сохранение row alignment после сортировки.
 
-## Текущая итерация: materialize
-- [x] `TGADataset::materialize` теперь отказывается молча терять `null`-значения в grid/колонках.
+## Ближний круг: согласованность схемы и входных данных
+- [x] `TGADataset::materialize` применяет общую маску к grid и выбранным колонкам:
+      пропуск `null` сохраняет построчное соответствие и штатно обрезает края производных.
 - [x] `materialize_vertical_column_by_name` и `materialize_struct_field_by_name` тоже проверяют `null` перед сборкой числовых векторов.
-- [x] Добавлен тест на отказ materialize при `null` вместо тихого укорочения вектора.
+- [x] Добавлены тесты на общую маску, совместное удаление краевых `null` производных,
+      нечисловые значения и немонотонное bound-time.
+- [x] Зафиксировать инвариант схемы и `ColumnNature`: schema binding выбирает ровно одну
+      активную колонку роли, а `ColumnNature` остаётся повторяемой классификацией. Проверить
+      создание, переименование, удаление, фильтрацию и импорт; повторный binding очищает
+      конфликтующую активную ссылку, а импорт восстанавливает природу активных колонок.
+      Добавлены регрессионные тесты на повторяемую Nature и сохранение активного binding.
+- [x] Проверять согласованность длин предоставленных векторов `ExperimentData` перед
+      стандартными runners и conversion-grid расчётами; несовпадение покрыто тестом.
+- [x] Закончить контракт CSV round-trip `ColumnNature`/`ColumnOrigin` для single-dataset и
+      series CSV. Сохранить существующее восстановление bindings, сделать новые поля совместимыми
+      со старыми файлами и закрепить оба направления round-trip тестами.
+- [x] Исправить регрессии `golden_pipeline_test2` и `two_component_decay_shape`: первый тест
+      дифференцирует `alpha` через `derive_dalpha_dt`, второй использует параметры, дающие
+      измеримые ранний спад и медленный хвост.
+- [ ] Исправить действия над выбранной GUI-кривой: использовать X/Y из описания выбранной
+      кривой, а не общий `oneframeplot` эксперимента. Проверить сценарий с `T vs t` и `m vs t`.
 - [x] Базовые `bind_*`-операции переведены на mutable-путь без лишнего клонирования `TGAExperiment`
       на уровне `TGASeries`: `bind_time`, `bind_temperature`, `bind_mass`, `bind_column`.
-- [x] `TGASeries::transform_by_id` переведён на временное извлечение эксперимента из вектора
-      без `clone`; consuming-операции теперь не копируют весь `TGAExperiment` заранее.
+- [ ] Устранить клон `TGAExperiment` в `TGASeries::transform_by_id`: фасад сейчас клонирует
+      эксперимент перед передачей в consuming closure.
 
 ## Текущая итерация: fitting
 
@@ -289,59 +372,50 @@
 
 ### P0: научная корректность и сохранность данных
 
-- [ ] Зафиксировать единый контракт единиц на входе кинетических методов.
+- [x] Зафиксировать единый контракт единиц на входе кинетических методов.
       `KineticDataView` содержит числовые векторы, но не сохраняет единицы исходных колонок;
       формулы методов при этом предполагают конкретные размерности. Проверить и описать
       требования к температуре (K), времени и скоростям (`/s`, `/min`, `/h`), нагреву
       (`K/min` и т. п.). На границе подготовки данных либо нормализовать значения,
       либо отклонять неподходящие/смешанные единицы с понятной ошибкой.
-- [ ] Проверить все пути построения `KineticDataView` на Celsius и несовпадающие единицы
+- [x] Проверить все пути построения `KineticDataView` на Celsius и несовпадающие единицы
       времени/скорости между опытами. Добавить тесты с физически эквивалентными наборами
       данных в разных единицах: после нормализации результат метода должен совпадать.
-- [ ] Проверить временную индексацию `ConversionGrid::compute_dt_matrix` и решателя
-      Vyazovkin. Сейчас матрица хранит прямые интервалы `t[k+1]-t[k]` и повторяет последний,
-      тогда как решатель использует столбцы `dt` совместно с температурой слоя `k` начиная
-      не с того края. Согласовать определение слоя/интервала и закрепить неравномерной
-      временной сеткой, для которой сдвиг и повтор интервала меняют ответ.
-- [ ] В Vyazovkin возвращать ошибку, если ни один кандидат энергии не дал допустимого
-      функционала. Начальное `best_e = 0` не должно превращать пустой поиск, underflow,
-      `steps < 2` или некорректный диапазон в успешный физический результат.
-      Проверять конечность и порядок границ диапазона до начала расчёта.
-- [ ] Развести требование наличия температурной колонки и требование изотермического
-      эксперимента в `KineticRequirements`. Проверить обычные неизотермические KAS/OFW/
-      Starink/Vyazovkin/Friedman-пути через единый validated runner и старые адаптеры;
-      исправить расхождения между точками входа.
+- [x] Согласовать индексацию интервалов Vyazovkin: `dt[:, j]` хранит интервал
+      `time[:, j+1] - time[:, j]`, а conversion-слой `k` использует `dt[:, k-1]`.
+      Добавлен тест матрицы на неравномерной сетке; обе реализации решателя индексируют
+      предыдущий интервал явно.
+- [x] Vyazovkin возвращает ошибку, если ни один кандидат энергии невалиден; `steps < 2`,
+      не конечные границы и `e_min >= e_max` отклоняются до расчёта.
+- [ ] Добавить регрессионный тест, что методы, которым нужна только температурная колонка,
+      принимают корректный неизотермический view через validated runner, а изотермические
+      методы отдельно требуют `isothermal_temperature`. В `check_requirements` проверки уже разделены.
 - [ ] Проверить единицы fitted rates в sublimation workflow: убедиться, что значения
       действительно переводятся в `/s`, прежде чем колонке назначается `Unit::PerSecond`.
       Тестировать эквивалентный сигнал с исходной скоростью на минутной и секундной шкале.
-- [ ] Проверить `TGADataset::materialize`: выбранные числовые колонки должны материализоваться
-      с одной общей маской строк, а не независимо превращаться в векторы через
-      `into_no_null_iter()`. Сохранить выравнивание времени и всех данных; корректно
-      обрабатывать штатные краевые null от производных/сплайнов и выдавать ошибку с именем
-      колонки/индексами для недопустимых null. Не вводить глобальный запрет на штатные null.
+- [x] `TGADataset::materialize` материализует сетку и выбранные колонки с одной общей
+      маской строк: строки с `null` пропускаются совместно, выравнивание сохраняется,
+      штатные края производных/сплайнов обрабатываются без глобального запрета на `null`.
 - [ ] Проверить атомарность неуспешных операций: ошибка валидации/вычисления не должна
       оставлять частично изменённый frame, schema, provenance, History или undo stack.
       В первую очередь проверить многоколоночный LSQ spline, fitting и составные действия GUI.
 
 ### P1: доменные инварианты, History и provenance
 
-- [ ] Свести все операции изменения данных к согласованному контракту:
-      pre-change snapshot (если операция обратима через undo), запись в History,
-      обновление schema и provenance только после успешного изменения. Проверить SG,
-      Hampel, LOWESS, rolling mean, spline/resampling и производные: некоторые пути уже
-      записывают provenance, но не создают snapshot и/или запись в общей History.
-- [ ] Определить и тестами закрепить семантику `undo_last` для нескольких последовательных
+- [ ] Завершить аудит всех операций изменения данных на согласованный контракт:
+      pre-change snapshot, запись в History и согласованные schema/provenance только после
+      успешного изменения. Hampel, SG, LOWESS, rolling mean и spline/resampling уже создают
+      snapshot и запись History; проверить оставшиеся операции и атомарность составных действий.
+- [x] Определить и тестами закрепить семантику `undo_last` для нескольких последовательных
       undo. History должна ясно различать исходную операцию и каждое её обращение; snapshot,
       operation id и сообщение для GUI не должны описывать отмену не той операции.
-- [ ] Сделать binding единой операцией доменного уровня. Проверить, что `bind_time`,
-      `bind_temperature`, `bind_mass` и `bind_column` одинаково валидируют существование
-      колонки, числовой тип и допустимую единицу, обновляют `ColumnNature` и семантическую
-      ссылку без потери исходного `ColumnOrigin`/provenance. Особо проверить поведение
-      одноимённых старых bindings при перепривязке.
-- [ ] Обеспечить уникальность `ExperimentMeta::id` независимо от способа изменения серии.
-      Публичные `experiments_mut`/`get_experiment_mut` и consuming-transform wrappers могут
-      изменить id в обход индекса и проверки дубликатов. Уточнить API мутации metadata,
-      затем тестировать целостность `experiments` и `exp_map` после rename/transform/error.
+- [x] Исправить binding-инварианты: bind-методы проверяют наличие колонки и допустимую
+      единицу, обновляют активную ссылку и Nature, сохраняя provenance существующей колонки.
+- [ ] Свести bind-методы к общему внутреннему пути; дополнительно проверять числовой dtype
+      и добавить регрессию сохранения origin/provenance при перепривязке.
+- [ ] Обеспечить уникальность `ExperimentMeta::id` при любой мутации. `push`, `set_experiment_id`
+      и `transform_by_id` проверяют дубликаты, но публичные `experiments`/`exp_map` позволяют
+      напрямую нарушить согласованность индекса.
 - [ ] Ввести единый preflight выходных имён колонок для всех преобразований. Проверить
       `out_col == input`, совпадение с другой существующей колонкой, повтор имён в пачке,
       rename и экспорт. Перезапись in-place разрешать явно; остальные конфликты возвращать
@@ -362,17 +436,15 @@
       минимум точек, строго возрастающее время/conversion там, где требуется, положительный
       шаг и допустимый диапазон `alpha/eta`. Проверять до интерполяции, логарифмов,
       `1/T`, деления и построения сетки.
-- [ ] Проверить параметры Hampel и оконных методов: `window >= 1`, окно не шире данных,
-      конечный `n_sigma >= 0`, корректное поведение NaN и бесконечностей. Исключить
-      underflow/overflow индексов и `partial_cmp(...).unwrap()` на NaN.
-- [ ] Проверить LSQ/spline-resampling, если `n_points > исходного числа строк`, если
+- [ ] Завершить защиту входных данных фильтров от NaN/inf. Для Hampel валидируются нечётное
+      окно и его длина, но значения не проверяются до `hampel_median`, где
+      `partial_cmp(...).unwrap()` всё ещё может паниковать на NaN.
+- [x] Проверить LSQ/spline-resampling, если `n_points > исходного числа строк`, если
       `degree`/число узлов несовместимы, вход содержит null/non-finite или выходная сетка
       длиннее исходного frame. Сейчас код дополняет результат до исходной длины через
       `n - n_new`; предусмотреть явную политику длины вместо риска underflow.
-- [ ] В VARPRO передавать те же `tolerance` и `max_iter`, которые задаёт пользователь
-      и которые отображаются в `FitColumnResult`; либо явно сообщать, что конкретный backend
-      эти настройки не поддерживает. Добавить тест, доказывающий, что настройки реально
-      доходят до solver, а не только попадают в отчёт.
+- [ ] Добавить regression-тест передачи заданных `tolerance` и `max_iter` в VARPRO.
+      Настройки уже передаются в `UniversalFitting`, но отдельной проверки этого контракта нет.
 - [ ] Развивать `TGADomainError` в сторону классифицируемых причин: неверные параметры,
       недопустимые данные/единицы, отсутствие сходимости, ошибка solver и нарушение
       инварианта. Сохранять source ошибки backend и контекст experiment/column/operation;
@@ -408,11 +480,6 @@
 
 ### P2: GUI, источники колонок и пользовательская диагностика
 
-- [ ] Хранить X/Y каждой кривой как часть состояния самой кривой и использовать эти
-      источники для действий над selected curve. Не выводить выбранную колонку только из
-      общего `oneframeplot` эксперимента, когда одновременно отображается несколько кривых.
-      Добавить регрессию: создать `T vs t` и `m vs t`, выбрать каждую кривую и подтвердить,
-      что преобразуется именно её Y.
 - [ ] Уточнить поведение GUI при неудачном обновлении таблицы/кэша: показывать ошибку,
       сохранять dirty-state и позволять повторить операцию; не оставлять устаревшие цифры
       без визуального признака.
@@ -484,3 +551,248 @@
    измерениям.
 5. После укрепления контрактов улучшать preflight, GUI-диагностику, сравнение веток и
    формат воспроизводимого проекта.
+
+## Source-list items 7-10 status
+
+- [x] 7. Hampel rejects NaN and infinities in both null-intolerant and null-safe
+  paths before mutating history/undo state; median ordering no longer uses an
+  unwrap, and overflow in the deviation calculation returns a domain error.
+- [x] 8. All binding entry points share numeric-column validation before changing
+  metadata, active bindings, provenance, history, or undo state.
+- [x] 9. `TGASeries` experiment storage and its ID index are no longer public API;
+  controlled mutation methods retain duplicate-ID checks. Unused mutable accessors
+  were removed.
+- [x] 10. Provenance rename changes only the current terminal step. Series CSV now
+  round-trips full provenance and quality reports through optional `#META PROV`
+  records while retaining a fallback for older files. VARPRO forwards requested
+  tolerance/iteration settings and has a regression test for the configured fit.
+
+## Scientific debt (methodological, not implementation)
+
+- [ ] Document the identifiability limit of the non-isothermal Criado master plot:
+      after normalization, `g(alpha) * f(alpha)` is identical for F1 and Avrami A2-A4.
+      Therefore, a best-score label among these models does not establish a unique
+      reaction mechanism; report and interpret this as an equivalence class unless
+      independent evidence or a method with additional discriminating information is used.
+
+## Current integrity pass
+
+- [x] GUI arithmetic resolves its source X/Y from the selected curve and refreshes
+  every live curve using that curve's own axes.
+- [x] Fallible series mutations run on a candidate experiment and commit only after
+  success; duplicate IDs are rejected without changing the stored experiment/index.
+- [x] Encapsulate `TGASeries` storage and remove mutable experiment access that could
+  desynchronize IDs from the index. `push` and ID changes update the index directly.
+- [x] Make New Experiment's mass/temperature/time binding batch atomic on failure.
+- [x] Keep `cut_interval` data change, History record, and undo snapshot aligned.
+- [x] Roll back a newly imported experiment and its curves when sampling, binding,
+  or default-plot creation fails; cover the failure path with a GUI-domain test.
+- [x] Preserve both the original import failure and rollback failure in the returned
+  GUI error so the main status can report the complete failure.
+- [x] Route Column Manager status messages, including cache-refresh failures, to the
+  main system-message label with an explicit severity.
+- [x] Make Column Manager bulk deletion a single validated domain transaction with
+  one undo snapshot/History entry; a failed batch leaves columns and plots unchanged.
+- [x] Return a settings error for missing/non-positive plot sample counts instead
+  of panicking; locate a rebuilt curve by its X/Y identity rather than mutating the
+  last vector entry. Add GUI regression tests for both cases.
+- [ ] Audit remaining multi-step GUI workflows for rollback of earlier steps when
+  later processing or export preparation fails.
+
+## Production readiness review
+
+### P1: Data integrity and recoverable failures
+
+- [ ] Complete the silent-error audit for numerical helpers and kinetic methods.
+  Rolling mean now returns collection/extraction failures; Criado interpolation
+  failures and missing fitting R2 now return typed errors. Quality reports can
+  now explicitly be unavailable without inventing numeric values, but audit all
+  filter paths and ensure each unavailable status reaches the GUI system label.
+
+- [x] Make the Golden Pipeline atomic across source processing, optional output
+  experiment creation, null cleanup, ID validation, optional source deletion,
+  and plot refresh. A failed step must leave source data, series membership,
+  History, undo state, and existing plots unchanged.
+- [x] Define and test save-to-new semantics: when the source is retained, it must
+  remain unchanged; when replacement is requested, commit the completed output
+  and remove the source in one transaction.
+- [ ] Complete the audit of production panics and failure paths reachable through
+  user input. Completed: active-role operations and calibration return typed errors;
+  invalid plot sample counts, kinetic regression inputs, Criado scores, and
+  synthetic-generator noise distributions no longer panic. Synthetic-series
+  generation also preflights IDs so a collision cannot append only part of a batch.
+  Numeric extraction now propagates Polars type errors, and missing VarPro model
+  definitions return a fitting error instead of panicking. Synthetic fixture file
+  writes now return I/O errors to callers rather than unwrapping them; invariant
+  assertion helpers are compiled only for tests.
+  Remaining: audit interpolation/assertion helpers outside Criado and the rest of
+  public numerical entry points, separating invariants from external input.
+- [x] Make null-edge trimming and explicit edge trimming fallible: Polars
+  collection errors propagate, requested columns are validated before mutation,
+  and empty column selections return an error rather than silently trimming
+  nothing. Use saturating arithmetic for requested edge counts.
+- [x] Fix the CSV-with-units importer temporary-file lifetime. Import must return
+  filesystem errors rather than panic, must not leak the temporary file/handle,
+  and must retain the imported data after the temporary source is released.
+- [ ] Add regression tests for pipeline ID collision, null-cleanup failure,
+  missing binding/calibration, import I/O failure, and GUI plot-refresh failure;
+  assert the complete pre-operation state is preserved on each error.
+- [ ] Ensure every user-triggered `Result` failure reaches the main system-message
+  label with an actionable typed message. Golden Pipeline, kinetic-method, and
+  Column Manager statuses now publish there; import rollback failures preserve both
+  causes. Continue auditing remaining menus, filters, and multi-step workflows.
+
+### P2: Scientific validation, API contracts, and GUI resilience
+
+- [ ] Bind Golden Pipeline quality feedback to the exact operation and source/
+  output columns produced by that run, not a search through historical provenance.
+- [x] Correct `resample_all_columns`: it evaluates each curve at the requested X
+  coordinates and validates the grid and source time domain.
+- [x] Route public numerical-column insertion through the dataset API that also
+  maintains schema, provenance, History, and undo; `with_array1_column` now uses
+  that path, validates row count, and frame/schema fields are crate-private with
+  public read-only getters.
+- [x] Establish domain and GUI non-isothermal release-gate fixtures with known
+  Arrhenius parameters, a cold start, sufficient conversion overlap, and
+  explicit Ea tolerances. Both gates exercise mass/eta/rate preprocessing and
+  require all five applicable methods to recover Ea within 8%. In the broader
+  noisy matrix, only the expected non-monotone-conversion precondition rejection
+  is accepted; any other method error fails the test.
+- [x] Reproduce the large OFW/KAS/Starink bias through the domain API and
+  compare against differential Friedman and Vyazovkin. The bias is not caused
+  by GUI routing, noise, SG filtering, or the conversion baseline. It comes
+  with the short fixture initializing conversion at 500 K despite a nonzero
+  Arrhenius rate there: the integral approximations assume negligible reaction
+  below the measurement start, so this hot-start fixture likely violates their
+  lower-bound assumption. Extending the run at the same start does not remove
+  the bias; starting at 350 K does. No kinetic formula was changed. Keep the
+  hot-start fixture as a diagnostic and use physically valid cold-start data
+  for the recovery gate. A broader reference-method study remains scientific
+  follow-up before generalizing this explanation beyond this generator model.
+- [ ] Represent unavailable diagnostics (for example Vyazovkin regression R2)
+  as unavailable, not a numeric zero; report optimization/convergence diagnostics
+  separately from regression quality.
+- [ ] Validate filters against clean synthetic references using derivative
+  error, peak location/height, area distortion, endpoints, and nonuniform time.
+  Keep signal-change/roughness metrics distinct from accuracy against truth.
+- [x] Add operation-sequence property tests for frame/schema/provenance/history/
+  series-index consistency and metadata round trips. Generated tests cover
+  add/rename/drop/undo, time sorting with row alignment, metadata enum variants,
+  and arbitrary escaped comments.
+- [ ] Exercise GUI workflows across viewport sizes, scaling, focus, scrolling,
+  modal errors, and rollback; measure accessibility-tree tests against actual
+  user-visible interaction.
+
+### P3: Performance and product workflow
+
+- [ ] Measure collection/materialization, multi-curve refresh, Column Manager,
+  common-grid methods, long processing chains, and undo memory before optimizing.
+- [ ] Bound undo by retained memory as well as snapshot count; expose the limit
+  and behavior clearly to the user.
+- [ ] Move long-running fitting/kinetic calculations to cancellable background
+  work and reject results computed from stale dataset versions.
+- [ ] Improve user-facing error messages while preserving typed error sources
+  and detailed logs.
+- [ ] Add a versioned project format for restoring raw data, units/bindings,
+  provenance, operation parameters, fit results, and plot state. Keep CSV as an
+  exchange format unless full-session restoration is explicitly supported.
+- [ ] Add a method preflight summary for selected inputs, units, conversion
+  range, rejected rows, and reasons calculation cannot proceed.
+
+### Suggested implementation order
+
+1. Complete P1 transaction boundaries and panic-free failure paths.
+2. Add strict regression tests for atomicity and state preservation.
+3. Resolve scientific discrepancies and strengthen quantitative release gates.
+4. Measure performance, then optimize evidence-backed hotspots.
+5. Improve async GUI execution, diagnostics, and project persistence.
+
+## Errors and test-quality backlog
+
+- [x] Add typed domain errors for filter parameters, nonnumeric columns, invalid
+  numeric values, incompatible units, and non-convergence; add a context wrapper
+  whose `Error::source` preserves the typed cause. Hampel/binding/statistics now
+  use typed variants.
+- [ ] Apply experiment/column/operation context consistently at series and method
+  boundaries; migrate remaining backend and unit failures from generic strings.
+- [x] Strengthen the seed reproducibility test with Gaussian mass/temperature noise:
+  identical seeds match and a changed seed changes both generated signals.
+- [x] Cover selected-curve behavior with multiple live curves, filter undo, output
+  name conflicts, nonuniform time-grid construction, and failed-operation atomicity.
+- [x] Verify per-experiment mixed-unit normalization and compare optimized
+  Vyazovkin against the pairwise reference on nonuniform time steps.
+- [x] Verify different null rows across requested columns are removed with one
+  shared mask while preserving each retained row's alignment.
+- [x] Make linear regression, Pearson correlation, and covariance reject mismatched,
+  insufficient, non-finite, or degenerate inputs with domain errors; kinetic solvers
+  propagate failures instead of producing NaN coefficients. Residual standard error
+  is explicitly unavailable for a two-point fit.
+- [x] Report isoconversion layers skipped for degenerate regressions in the result
+  and publish those diagnostics in the main GUI status; fit valid paired values only.
+- [x] Remove Criado's partial-comparison unwrap and guard empty/non-finite model
+  rankings; empty experiment rankings no longer panic in the frequency summary.
+- [x] Make Kissinger peak-window detection and peak extraction fallible for empty,
+  non-finite, non-positive, or misaligned grids instead of unwrapping/indexing.
+- [x] Replace Criado interpolation assertions with validated errors; preserve
+  endpoint clamping and accept non-decreasing conversion grids with plateaus.
+- [x] Add known-shape synthetic regressions measuring derivative peak height and
+  location, relative area distortion, and derivative RMSE against the clean signal
+  for rolling mean, Hampel, Savitzky-Golay, and LOWESS under periodic/impulse noise
+  and drift/flicker noise.
+- [ ] Extend physical-fidelity checks to spline/resampling and any remaining GUI
+  filters, then broaden noise profiles while keeping method-appropriate tolerances
+  instead of demanding every metric improve monotonically.
+- [x] Add property tests for frame/schema/provenance/history/index invariants and
+  metadata serialization round-trips across operation sequences; see the generated
+  lifecycle, monotonicity, and series CSV properties in `invariant_tests.rs`.
+- [ ] Add benchmarks for long processing chains, multi-curve refresh, Column Manager
+  opening, common-grid construction, and memory growth across undo snapshots.
+
+## Future Workflow Improvements
+
+- [ ] Provide a method preflight report with chosen sources, units, conversion
+  range, rejected rows, and specific reasons a calculation cannot proceed.
+- [ ] Support explicit comparison and selection of preprocessing branches from raw
+  mass/temperature through smoothing, conversion, and rate.
+- [ ] Design a versioned project format that restores provenance and operation
+  parameters; keep CSV focused on data exchange.
+- [ ] Move long calculations to cancellable background tasks and publish results
+  only if their source dataset version is still current.
+- [ ] Separate quality metrics describing signal change from accuracy against a
+  known reference; low error relative to noisy input is not proof of filter quality.
+- [x] Audit output-column paths for collision-safe naming and matching
+  History/provenance/undo record; add negative tests for occupied names.
+- [x] Add series invariant tests covering push, remove, rename, failed transform,
+  serialization round-trip, and ID-index agreement after each operation.
+
+## Fitting: staged reconstruction and extrapolation
+
+- [x] Preserve a reusable RustedSciThe `FittedModel` after fitting; fitting and evaluation are separate stages.
+- [x] Fit each requested dependent column once against the combined observations on both sides of an excluded gap. Report joint R2 and left/right residual diagnostics; never ask the user to choose between separate left/right coefficient sets.
+- [x] Keep each fit session tied to experiment, X/Y columns, model, selected training window, excluded gap, units, and the source data used for the fit.
+- [x] Build one explicit X evaluation grid for the whole batch. Every fitted model in a multi-column reconstruction evaluates at exactly those same X values.
+- [x] Support two explicit evaluation modes: extrapolation strictly outside the fit domain, and reconstruction of an internal interval with a user-specified number of missing samples.
+- [x] Preview fitted metadata and evaluated values before committing. R2 is always visible, but the decision to use a fit remains with the user.
+- [x] Never add placeholder/null samples to the source experiment. Preserve raw data and create a complete reconstructed experiment containing X plus every selected dependent column on a sorted, unique grid.
+- [x] Apply the completed batch explicitly from Column Manager as one atomic operation; retain model parameters, R2, evaluation mode/range, units, and source columns in provenance/history.
+- [x] Add domain tests for joint left+right fitting, common-grid evaluation across multiple columns, extrapolation boundaries, missing-point counts, duplicate output validation, duplicate experiment IDs, provenance, and source immutability.
+- [x] Add egui_kittest workflows for fit -> inspect R2 -> fit a second column -> evaluate on a shared grid -> preview -> commit from Column Manager, including a real time/temperature/mass gap; verify the source is unchanged, reconstructed curves are shown, and the new experiment can be dropped.
+
+## P2 status update: invariants, History, and CI
+
+- [x] Prove failure atomicity for multi-column LSQ after an earlier output column has already been computed: the original frame, schema bindings/provenance, History, undo depth, and series membership remain identical.
+- [x] Prove failed fitting does not publish a partial fitted column or alter frame/provenance/History/undo; reject non-finite or misaligned fit output before commit.
+- [x] Make fit-and-plot reject invalid sampling configuration before fitting. For reconstruction-and-plot, a failed plot build removes the newly inserted experiment, restores affected curves and viewport state, and keeps the evaluated batch available for retry.
+- [x] Reconcile the earlier P2 checklist: property coverage, one-row boundaries, tiered test execution, CI checks, and production-library compilation are implemented below. Consolidating duplicate test helpers remains optional maintenance, not a data-integrity gate.
+- [x] Reconcile the stale Hampel NaN panic note: the median uses `f64::total_cmp`, and both standard/null-safe entry points reject non-finite input before changing History or undo state; dedicated NaN/infinity regression tests cover this.
+- [x] Cover a one-row dataset through `materialize`, a data operation, History, and undo.
+- [x] Make `with_array1_column` validate row count and update frame, schema, provenance, History, and undo as one operation; test add, replace, undo, and failure without mutation.
+- [x] Add generated monotonicity/sorting checks that verify every column remains row-aligned.
+- [x] Add generated series CSV round-trip checks for free-form metadata, Unit, ColumnNature, ColumnOrigin, and provenance.
+- [x] Split CI execution into fast invariant properties, numerical regressions, the complete experimental-kinetics domain suite, and a library documentation build. Windows test-tier jobs run one at a time because the suite creates many temporary CSV fixtures.
+- [x] Prevent external callers from mutating `TGADataset.frame` or `TGADataset.schema` without a journaled domain operation; expose read-only getters.
+- [x] Audit internal frame/schema mutation paths. Imports, derived columns, filters, row operations, fitting/reconstruction, series construction, and undo record their corresponding operation; plot selection and experiment-level descriptive metadata do not alter dataset frame/schema and intentionally remain outside this History.
+- [x] Treat continuation-preview column selection/casting as part of the final `append_continuation` transaction: the intermediate dataset is not published, and the committed result records the append operation.
+- [x] Reconcile high-risk stale entries above: selected-curve operations read their X/Y names from the selected `PlotCurve`; `tier3_selected_mass_smoothing_preserves_temperature_curve` covers the two-curve case. The candidate clone in `transform_by_id` is intentionally retained for rollback on closure errors and ID conflicts. `TGASeries` storage/index are private and ID mutations are validated.
+- [x] GUI post-commit plot policy: successful scientific/data mutations are never rolled back solely because a plot cannot be built. Keep the committed frame, History, and undo snapshot; remove stale/partial curves and show a typed warning in the main system-message path. Applied to data refresh, new-column plotting, import, continuation, fitting/reconstruction, IVP output, and fitted sublimation rates. Regression coverage verifies committed data and History survive a forced plotting failure.
+- [ ] The repository-wide `cargo fmt --all -- --check` currently fails on pre-existing formatting in experiment-series files. Keep the new invariant/materialization files formatted; broaden the gate after the existing formatting backlog is resolved.

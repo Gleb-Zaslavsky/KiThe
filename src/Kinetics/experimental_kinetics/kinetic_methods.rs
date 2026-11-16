@@ -106,6 +106,111 @@ pub struct KineticDataView {
     pub experiments: Vec<ExperimentData>,
 }
 impl KineticDataView {
+    /// Rejects ragged experiment vectors before downstream numerical code indexes them in lockstep.
+    pub fn validate_lengths(&self) -> Result<(), TGADomainError> {
+        for experiment in &self.experiments {
+            experiment.validate_lengths()?;
+        }
+        Ok(())
+    }
+
+    fn normalize_experiment_units(
+        experiment: &mut ExperimentData,
+        units: crate::Kinetics::experimental_kinetics::experiment_series2::KineticColumnUnits,
+    ) -> Result<(), TGADomainError> {
+        use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
+
+        if !experiment.time.is_empty() {
+            let time_scale = match units.time {
+                crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit::Second => 1.0,
+                crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit::Minute => {
+                    60.0
+                }
+                crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit::Hour => {
+                    3600.0
+                }
+                unit => {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Unsupported kinetic time unit: {:?}",
+                        unit
+                    )));
+                }
+            };
+            experiment
+                .time
+                .iter_mut()
+                .for_each(|value| *value *= time_scale);
+        }
+
+        if !experiment.temperature.is_empty() {
+            match units.temperature {
+                crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit::Kelvin => {}
+                crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit::Celsius => {
+                    experiment
+                        .temperature
+                        .iter_mut()
+                        .for_each(|value| *value += 273.15);
+                }
+                unit => {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Unsupported kinetic temperature unit: {:?}",
+                        unit
+                    )));
+                }
+            }
+        }
+
+        if !experiment.conversion_rate.is_empty() {
+            let rate_scale = match units.conversion_rate {
+                Unit::PerSecond => 1.0,
+                Unit::PerMinute => 1.0 / 60.0,
+                Unit::PerHour => 1.0 / 3600.0,
+                unit => {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Unsupported conversion-rate unit: {:?}",
+                        unit
+                    )));
+                }
+            };
+            experiment
+                .conversion_rate
+                .iter_mut()
+                .for_each(|value| *value *= rate_scale);
+        }
+
+        if let Some(mass) = experiment.mass.as_mut() {
+            let mass_scale = match units.mass {
+                Unit::Milligram => 1.0,
+                Unit::Gram => 1000.0,
+                unit => {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Unsupported kinetic mass unit: {:?}",
+                        unit
+                    )));
+                }
+            };
+            mass.iter_mut().for_each(|value| *value *= mass_scale);
+        }
+
+        if let Some(mass_rate) = experiment.mass_rate.as_mut() {
+            let mass_rate_scale = match units.mass_rate {
+                Unit::MilligramPerSecond => 1.0,
+                Unit::MilligramPerMinute => 1.0 / 60.0,
+                Unit::MilligramPerHour => 1.0 / 3600.0,
+                unit => {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Unsupported kinetic mass-rate unit: {:?}",
+                        unit
+                    )));
+                }
+            };
+            mass_rate
+                .iter_mut()
+                .for_each(|value| *value *= mass_rate_scale);
+        }
+        Ok(())
+    }
+
     /// Constructs a `KineticDataView` by materialising all required columns
     /// (time, temperature, conversion, conversion rate) from a `UnitedDataset`.
     ///
@@ -125,7 +230,7 @@ impl KineticDataView {
             let conversion_rate =
                 ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::ConversionRate)?;
 
-            experiments.push(ExperimentData {
+            let mut experiment = ExperimentData {
                 meta: meta.clone(),
                 time,
                 temperature,
@@ -133,7 +238,10 @@ impl KineticDataView {
                 conversion_rate,
                 mass: None,
                 mass_rate: None,
-            });
+            };
+            Self::normalize_experiment_units(&mut experiment, ds.units_for(&meta.id))?;
+            experiment.validate_lengths()?;
+            experiments.push(experiment);
         }
 
         Ok(Self { experiments })
@@ -180,7 +288,7 @@ impl KineticDataView {
             } else {
                 None
             };
-            experiments.push(ExperimentData {
+            let mut experiment = ExperimentData {
                 meta: meta.clone(),
                 time,
                 temperature,
@@ -188,7 +296,10 @@ impl KineticDataView {
                 conversion_rate,
                 mass,
                 mass_rate,
-            });
+            };
+            Self::normalize_experiment_units(&mut experiment, ds.units_for(&meta.id))?;
+            experiment.validate_lengths()?;
+            experiments.push(experiment);
         }
 
         Ok(Self { experiments })
@@ -209,12 +320,61 @@ pub struct ExperimentData {
     pub temperature: Vec<f64>,
     /// Conversion η ∈ [0, 1].
     pub conversion: Vec<f64>,
-    /// dη/dt (reciprocal of the stored time unit).
+    /// dη/dt normalized to reciprocal seconds by `KineticDataView` constructors.
     pub conversion_rate: Vec<f64>,
     /// Raw sample mass (optional; not used by isoconversional solvers).
     pub mass: Option<Vec<f64>>,
     /// dm/dt (optional).
     pub mass_rate: Option<Vec<f64>>,
+}
+
+impl ExperimentData {
+    /// Validates that every provided series can be indexed against the same rows.
+    /// Empty required vectors are treated as omitted here and are reported by method requirements.
+    pub fn validate_lengths(&self) -> Result<(), TGADomainError> {
+        let mut series = vec![
+            ("time", self.time.len(), !self.time.is_empty()),
+            (
+                "temperature",
+                self.temperature.len(),
+                !self.temperature.is_empty(),
+            ),
+            (
+                "conversion",
+                self.conversion.len(),
+                !self.conversion.is_empty(),
+            ),
+            (
+                "conversion_rate",
+                self.conversion_rate.len(),
+                !self.conversion_rate.is_empty(),
+            ),
+        ];
+        if let Some(mass) = &self.mass {
+            series.push(("mass", mass.len(), true));
+        }
+        if let Some(mass_rate) = &self.mass_rate {
+            series.push(("mass_rate", mass_rate.len(), true));
+        }
+
+        let Some(expected) = series
+            .iter()
+            .find_map(|(_, len, present)| present.then_some(*len))
+        else {
+            return Ok(());
+        };
+        for (column, actual, present) in series {
+            if present && actual != expected {
+                return Err(TGADomainError::ExperimentDataLengthMismatch {
+                    experiment_id: self.meta.id.clone(),
+                    column: column.to_string(),
+                    expected,
+                    actual,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 /// Common trait implemented by every kinetic method in this crate.
 ///
@@ -253,6 +413,7 @@ impl<O> dyn KineticMethod<Output = O> {
         method: &M,
         data: &KineticDataView,
     ) -> Result<O, TGADomainError> {
+        data.validate_lengths()?;
         method.check_input(data)?;
 
         method.compute(data)
@@ -338,8 +499,7 @@ pub struct KineticRequirements {
     needs_conversion: bool,
     /// Whether every experiment must have a non-empty `conversion_rate` vector.
     needs_conversion_rate: bool,
-    /// Whether every experiment must have a temperature column
-    /// (used to gate `require_isothermal` for isothermal methods).
+    /// Whether every experiment must contain a temperature vector.
     needs_temperature: bool,
     /// Whether every experiment must carry a heating rate in its metadata.
     needs_heating_rate: bool,
@@ -353,6 +513,7 @@ pub fn check_requirements(
     data: &KineticDataView,
     req: &KineticRequirements,
 ) -> Result<(), TGADomainError> {
+    data.validate_lengths()?;
     require_min_experiments(data, req.min_experiments)?;
 
     if req.needs_heating_rate {
@@ -360,7 +521,13 @@ pub fn check_requirements(
     }
 
     if req.needs_temperature {
-        require_isothermal(data)?;
+        if data
+            .experiments
+            .iter()
+            .any(|exp| exp.temperature.is_empty())
+        {
+            return Err(TGADomainError::TemperatureNotBound);
+        }
     }
 
     if req.needs_conversion_rate {
@@ -418,7 +585,7 @@ pub struct ConversionGrid {
     pub inv_temperature: Array2<f64>,
     /// Time at which experiment `i` reached conversion `η[j]` (stored time unit).
     pub time: Array2<f64>,
-    /// dη/dt at each `(experiment, η)` cell (reciprocal of the stored time unit).
+    /// dη/dt at each `(experiment, η)` cell, normalized to reciprocal seconds.
     pub conversion_rate: Array2<f64>,
     /// Time-step increments Δt between consecutive α layers, required by the
     /// Vyazovkin method.  `None` unless built with `with_dt_matrix()`.
@@ -740,8 +907,87 @@ impl ConversionGridBuilder {
         &self,
         data: &KineticDataView,
     ) -> Result<(f64, f64), TGADomainError> {
-        let mut global_min = f64::NEG_INFINITY;
-        let mut global_max = f64::INFINITY;
+        Self::validate_input_data(data)?;
+        self.calc_auto_eta_range_validated(data)
+    }
+
+    fn validate_input_data(data: &KineticDataView) -> Result<(), TGADomainError> {
+        data.validate_lengths()?;
+        if data.experiments.is_empty() {
+            return Err(TGADomainError::InvalidOperation(
+                "Cannot build a conversion grid without experiments".into(),
+            ));
+        }
+
+        for (exp_index, exp) in data.experiments.iter().enumerate() {
+            let n = exp.conversion.len();
+            if n < 2
+                || exp.time.len() != n
+                || exp.temperature.len() != n
+                || exp.conversion_rate.len() != n
+            {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Experiment {} has inconsistent kinetic vector lengths (conversion={}, time={}, temperature={}, conversion_rate={}); at least two aligned points are required",
+                    exp_index,
+                    n,
+                    exp.time.len(),
+                    exp.temperature.len(),
+                    exp.conversion_rate.len()
+                )));
+            }
+
+            for (name, values) in [
+                ("conversion", exp.conversion.as_slice()),
+                ("time", exp.time.as_slice()),
+                ("temperature", exp.temperature.as_slice()),
+                ("conversion_rate", exp.conversion_rate.as_slice()),
+            ] {
+                if let Some((index, value)) = values
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .find(|(_, value)| !value.is_finite())
+                {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Experiment {} has non-finite {} at index {}: {}",
+                        exp_index, name, index, value
+                    )));
+                }
+            }
+
+            for (index, &value) in exp.conversion.iter().enumerate() {
+                let terminal_complete_conversion_plateau = index > 0
+                    && value == exp.conversion[index - 1]
+                    && value >= 1.0 - 1e-12
+                    && exp.conversion[index..]
+                        .iter()
+                        .all(|&tail| tail >= 1.0 - 1e-12);
+                if index > 0
+                    && value <= exp.conversion[index - 1]
+                    && !terminal_complete_conversion_plateau
+                {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Experiment {} conversion must be strictly increasing; values at indices {} and {} are {} and {}",
+                        exp_index,
+                        index - 1,
+                        index,
+                        exp.conversion[index - 1],
+                        value
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn calc_auto_eta_range_validated(
+        &self,
+        data: &KineticDataView,
+    ) -> Result<(f64, f64), TGADomainError> {
+        // Measurements may slightly overshoot physical conversion bounds due to noise.
+        // Keep the calculation grid physical while intersecting it with every experiment.
+        let mut global_min: f64 = 0.0;
+        let mut global_max: f64 = 1.0;
 
         for eta in data.experiments.iter().map(|e| &e.conversion) {
             let local_min = eta.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -766,19 +1012,18 @@ impl ConversionGridBuilder {
     /// Allocating variant of the non-isothermal grid builder (Vec-based).
     /// Prefer `build_nonisothermal` for better memory locality.
     pub fn build_withcopy(self, data: &KineticDataView) -> Result<ConversionGrid, TGADomainError> {
+        Self::validate_input_data(data)?;
+        self.validate_margins()?;
         let (mut eta_min, mut eta_max) = match self.eta_mode {
             AlphaRangeMode::Auto => {
-                let range = self.calc_auto_eta_range(data)?;
+                let range = self.calc_auto_eta_range_validated(data)?;
                 (range.0, range.1)
             }
             AlphaRangeMode::Manual { min, max } => (min, max),
         };
         eta_min += self.margin_left;
         eta_max -= self.margin_right;
-
-        if eta_max <= eta_min {
-            return Err(TGADomainError::InvalidConversionRange);
-        }
+        Self::validate_eta_range(eta_min, eta_max)?;
 
         let eta_grid = Self::build_eta_grid(eta_min, eta_max, self.segments)?;
 
@@ -840,14 +1085,17 @@ impl ConversionGridBuilder {
         self,
         data: &KineticDataView,
     ) -> Result<ConversionGrid, TGADomainError> {
+        Self::validate_input_data(data)?;
+        self.validate_margins()?;
         let (mut eta_min, mut eta_max) = match self.eta_mode {
-            AlphaRangeMode::Auto => self.calc_auto_eta_range(data)?,
+            AlphaRangeMode::Auto => self.calc_auto_eta_range_validated(data)?,
             AlphaRangeMode::Manual { min, max } => (min, max),
         };
 
         eta_min += self.margin_left;
         eta_max -= self.margin_right;
 
+        Self::validate_eta_range(eta_min, eta_max)?;
         let eta_grid = Self::build_eta_grid(eta_min, eta_max, self.segments)?;
 
         let n_exp = data.experiments.len();
@@ -899,12 +1147,36 @@ impl ConversionGridBuilder {
                 "Conversion grid requires at least 2 segments".to_string(),
             ));
         }
-        if !min.is_finite() || !max.is_finite() || max <= min {
+        Self::validate_eta_range(min, max)?;
+        let step = (max - min) / n as f64;
+        if !step.is_finite() || step <= 0.0 {
             return Err(TGADomainError::InvalidConversionRange);
         }
-        let step = (max - min) / n as f64;
+        let grid: Vec<f64> = (0..n).map(|i| min + step * i as f64).collect();
+        if grid.iter().any(|value| !value.is_finite())
+            || grid.windows(2).any(|pair| pair[1] <= pair[0])
+        {
+            return Err(TGADomainError::InvalidConversionRange);
+        }
+        Ok(grid)
+    }
 
-        Ok((0..n).map(|i| min + step * i as f64).collect())
+    fn validate_eta_range(min: f64, max: f64) -> Result<(), TGADomainError> {
+        if !min.is_finite() || !max.is_finite() || min < 0.0 || max > 1.0 || max <= min {
+            return Err(TGADomainError::InvalidConversionRange);
+        }
+        Ok(())
+    }
+
+    fn validate_margins(&self) -> Result<(), TGADomainError> {
+        if !self.margin_left.is_finite()
+            || !self.margin_right.is_finite()
+            || self.margin_left < 0.0
+            || self.margin_right < 0.0
+        {
+            return Err(TGADomainError::InvalidConversionRange);
+        }
+        Ok(())
     }
 
     fn inverse_temperature_matrix(
@@ -968,14 +1240,17 @@ impl ConversionGridBuilder {
         self,
         data: &KineticDataView,
     ) -> Result<ConversionGrid, TGADomainError> {
+        Self::validate_input_data(data)?;
+        self.validate_margins()?;
         let (mut eta_min, mut eta_max) = match self.eta_mode {
-            AlphaRangeMode::Auto => self.calc_auto_eta_range(data)?,
+            AlphaRangeMode::Auto => self.calc_auto_eta_range_validated(data)?,
             AlphaRangeMode::Manual { min, max } => (min, max),
         };
 
         eta_min += self.margin_left;
         eta_max -= self.margin_right;
 
+        Self::validate_eta_range(eta_min, eta_max)?;
         let eta_grid = Self::build_eta_grid(eta_min, eta_max, self.segments)?;
 
         let n_exp = data.experiments.len();

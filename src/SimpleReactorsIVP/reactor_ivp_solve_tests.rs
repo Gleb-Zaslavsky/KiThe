@@ -7,10 +7,11 @@ mod tests {
     };
     use crate::Kinetics::mechfinder_api::ReactionData;
     use RustedSciThe::numerical::BDF::BDF_api::BdfSolveError;
-    use RustedSciThe::numerical::LSODE2::Lsode2AlgorithmSnapshot;
     use RustedSciThe::numerical::LSODE2::solver::{
-        Lsode2EvaluationTelemetry, Lsode2TelemetryScope,
+        Lsode2CancellationRoute, Lsode2CancelledSnapshot, Lsode2EvaluationTelemetry,
+        Lsode2TelemetryScope,
     };
+    use RustedSciThe::numerical::LSODE2::{Lsode2AlgorithmSnapshot, Lsode2Error};
     use RustedSciThe::numerical::StiffAPI::{StiffApiError, StiffSolveError};
     use approx::assert_abs_diff_eq;
     use nalgebra::{DMatrix, DVector};
@@ -29,6 +30,42 @@ mod tests {
         let source = std::error::Error::source(&error).expect("RST solve error should be a source");
         assert!(source.to_string().contains("BDF solve failed"));
         assert!(source.downcast_ref::<StiffSolveError>().is_some());
+    }
+
+    #[test]
+    fn lsode2_bridge_error_keeps_typed_bdf_solve_context() {
+        let bridge = IvpError::from(Lsode2Error::Bridge(BdfSolveError::InvalidMaxSteps));
+        assert!(matches!(
+            bridge,
+            IvpError::SolverExecution {
+                error: StiffSolveError::Bdf(BdfSolveError::InvalidMaxSteps),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn lsode2_cancellation_keeps_the_partial_native_snapshot() {
+        let snapshot = Lsode2CancelledSnapshot {
+            route: Lsode2CancellationRoute::NativeIntegration,
+            current_time: 0.375,
+            current_state: vec![1.0, 2.0],
+            accepted_times: vec![0.0, 0.25, 0.375],
+            accepted_states: vec![vec![1.0, 2.0]; 3],
+            native_statistics: Default::default(),
+            callback_statistics: Default::default(),
+            telemetry: RustedSciThe::symbolic::ivp_telemetry::IvpTelemetry::detailed().snapshot(),
+        };
+        let error = IvpError::from(Lsode2Error::Cancelled {
+            snapshot: Box::new(snapshot),
+        });
+
+        let IvpError::SolverCancelled { snapshot } = error else {
+            panic!("cancellation must retain its typed partial-result snapshot");
+        };
+        assert_eq!(snapshot.current_time, 0.375);
+        assert_eq!(snapshot.current_state, vec![1.0, 2.0]);
+        assert_eq!(snapshot.accepted_times.len(), 3);
     }
 
     fn build_solve_task() -> SimpleReactorTask {

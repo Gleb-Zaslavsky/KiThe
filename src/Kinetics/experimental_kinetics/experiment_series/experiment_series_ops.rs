@@ -90,12 +90,12 @@ impl TGAExperiment {
         }
     }
 
-    pub fn calibrate_mass_from_voltage(self, k: f64, b: f64) -> Self {
-        let dataset = self.dataset.calibrate_mass_from_voltage(k, b);
-        Self {
+    pub fn calibrate_mass_from_voltage(self, k: f64, b: f64) -> Result<Self, TGADomainError> {
+        let dataset = self.dataset.calibrate_mass_from_voltage(k, b)?;
+        Ok(Self {
             dataset,
             meta: self.meta,
-        }
+        })
     }
 
     //======================================================================

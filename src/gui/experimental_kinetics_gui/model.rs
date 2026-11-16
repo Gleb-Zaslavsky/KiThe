@@ -21,6 +21,36 @@ pub enum TGAGUIError {
     TGADomainError(TGADomainError),
     SettingsErrors(String),
     BindingError(String),
+    PostCommitWarning(String),
+}
+
+impl std::fmt::Display for TGAGUIError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TGADomainError(error) => write!(formatter, "{error}"),
+            Self::SettingsErrors(message) | Self::BindingError(message) => {
+                formatter.write_str(message)
+            }
+            Self::PostCommitWarning(message) => {
+                write!(formatter, "Warning: data changes were committed, but plot refresh failed: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TGAGUIError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::TGADomainError(error) => Some(error),
+            Self::SettingsErrors(_) | Self::BindingError(_) | Self::PostCommitWarning(_) => None,
+        }
+    }
+}
+
+impl TGAGUIError {
+    pub fn post_commit_warning(message: impl Into<String>) -> Self {
+        Self::PostCommitWarning(message.into())
+    }
 }
 
 impl From<TGADomainError> for TGAGUIError {

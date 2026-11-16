@@ -3,8 +3,10 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 use crate::Kinetics::experimental_kinetics::exp_engine_api::XY;
-use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
-use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
+use crate::Kinetics::experimental_kinetics::experiment_series_main::{
+    ExperimentMeta, TGAExperiment,
+};
+use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{TGADataset, Unit};
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
 use crate::gui::experimental_kinetics_gui::model::TGAGUIError;
 
@@ -18,7 +20,8 @@ use crate::gui::experimental_kinetics_gui::kitheplot_wrapper::KiThePlotWindowSta
 
 use crate::gui::experimental_kinetics_gui::test_options::TestOptions;
 use eframe::egui;
-use log::info;
+use log::{info, warn};
+use polars::prelude::col;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -27,6 +30,13 @@ use std::path::PathBuf;
 //====================================================================================
 /// High-level entrypoint for top menus and panels.
 pub struct TopDropDownMenues;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TopMenuShortcut {
+    File,
+    Math,
+    KineticMethods,
+}
 
 impl TopDropDownMenues {
     /// Render the top menus directly inside a parent `Ui`.
@@ -40,18 +50,88 @@ impl TopDropDownMenues {
         kinetic_methods: &mut KineticMethodsWindowState,
         direct_problem_state: &mut DirectProblemDialogState,
     ) {
+        let ctx = ui.ctx().clone();
+        let mut requested_menu = None;
+        if !ctx.egui_wants_keyboard_input() && !egui::Popup::is_any_open(&ctx) {
+            let (open_import, save, save_as, undo, open_column_manager, requested_menu_key) = ctx
+                .input_mut(|input| {
+                    let open_import = input.consume_key(egui::Modifiers::COMMAND, egui::Key::O);
+                    let save_as = input.consume_key(
+                        egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+                        egui::Key::S,
+                    );
+                    let save =
+                        !save_as && input.consume_key(egui::Modifiers::COMMAND, egui::Key::S);
+                    let undo = input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
+                    let open_column_manager =
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::F1);
+                    let file = input.consume_key(egui::Modifiers::NONE, egui::Key::F2);
+                    let math = input.consume_key(egui::Modifiers::NONE, egui::Key::F3);
+                    let kinetics = input.consume_key(egui::Modifiers::NONE, egui::Key::F4);
+                    let requested = if file {
+                        Some(TopMenuShortcut::File)
+                    } else if math {
+                        Some(TopMenuShortcut::Math)
+                    } else if kinetics {
+                        Some(TopMenuShortcut::KineticMethods)
+                    } else {
+                        None
+                    };
+                    (
+                        open_import,
+                        save,
+                        save_as,
+                        undo,
+                        open_column_manager,
+                        requested,
+                    )
+                });
+            requested_menu = requested_menu_key;
+
+            if open_import {
+                new_experiment_dialog.open_import_dialog();
+            }
+            if save || save_as {
+                new_experiment_dialog.save_series_shortcut(model, save_as);
+            }
+            if undo {
+                Self::undo_selected(model);
+            }
+            if open_column_manager {
+                new_experiment_dialog.column_manager_open = true;
+            }
+        }
+
         ui.horizontal_wrapped(|ui| {
-            ui.menu_button("File Manager", |ui| {
-                FileManager::show(ui, model, new_experiment_dialog, kithe_plot_window);
-            });
+            Self::menu_button_with_shortcut(
+                ui,
+                "File Manager",
+                "F2",
+                requested_menu == Some(TopMenuShortcut::File),
+                |ui| {
+                    FileManager::show(ui, model, new_experiment_dialog, kithe_plot_window);
+                },
+            );
 
-            ui.menu_button("Math", |ui| {
-                mathematics.show_menu(ui);
-            });
+            Self::menu_button_with_shortcut(
+                ui,
+                "Math",
+                "F3",
+                requested_menu == Some(TopMenuShortcut::Math),
+                |ui| {
+                    mathematics.show_menu(ui);
+                },
+            );
 
-            ui.menu_button("Kinetic Methods", |ui| {
-                KineticMethods::show_menu(ui, kinetic_methods);
-            });
+            Self::menu_button_with_shortcut(
+                ui,
+                "Kinetic Methods",
+                "F4",
+                requested_menu == Some(TopMenuShortcut::KineticMethods),
+                |ui| {
+                    KineticMethods::show_menu(ui, kinetic_methods);
+                },
+            );
 
             ui.menu_button("Direct Problem", |ui| {
                 if ui.button("Solve IVP").clicked() {
@@ -69,6 +149,40 @@ impl TopDropDownMenues {
         // Show any open Kinetic Methods windows
         let _ = KineticMethods::show_windows(ui, model, kinetic_methods);
     }
+
+    fn menu_button_with_shortcut(
+        ui: &mut egui::Ui,
+        label: &str,
+        shortcut: &str,
+        requested_open: bool,
+        add_contents: impl FnOnce(&mut egui::Ui),
+    ) {
+        let response = ui
+            .button(label)
+            .on_hover_text(format!("Open {label} menu ({shortcut})"));
+        let open_command = if requested_open {
+            Some(egui::SetOpenCommand::Bool(true))
+        } else if response.clicked() {
+            Some(egui::SetOpenCommand::Toggle)
+        } else {
+            None
+        };
+        egui::Popup::menu(&response)
+            .open_memory(open_command)
+            .show(add_contents);
+    }
+
+    fn undo_selected(model: &mut PlotModel) {
+        match model.reverse_selected() {
+            Ok(()) => {
+                let _ = model.push_message("Last operation undone");
+            }
+            Err(err) => {
+                warn!("Undo failed: {err}");
+                let _ = model.push_message(&format!("Undo failed: {err}"));
+            }
+        }
+    }
 }
 
 // Group: File Manager
@@ -81,53 +195,73 @@ impl FileManager {
         new_experiment_dialog: &mut NewExperimentDialogState,
         kithe_plot_window: &mut KiThePlotWindowState,
     ) {
-        if ui.button("Import Data").clicked() {
-            Self::import_data(model);
+        if ui
+            .button("Import Data")
+            .on_hover_text(
+                "Open a data file and import its columns as an experiment. Shortcut: Ctrl/Cmd+O.",
+            )
+            .clicked()
+        {
+            new_experiment_dialog.open_import_dialog();
         }
-        if ui.button("New experiment").clicked() {
+        if ui
+            .button("New experiment")
+            .on_hover_text("Open the dialog to create an experiment from imported or entered data.")
+            .clicked()
+        {
             new_experiment_dialog.open = true;
             new_experiment_dialog.last_error = None;
         }
-
-        if ui.button("Append data to experiment").clicked() {}
-
-        if ui.button("Export Data").clicked() {
-            Self::export_data(model);
+        if ui.button("Append to experiment")
+            .on_hover_text("Import a continuation, preview its time alignment, then append it or replace the selected experiment.")
+            .clicked()
+        {
+            new_experiment_dialog.open_append_dialog(model);
         }
 
-        if ui.button("Manage Data").clicked() {
-            Self::manage_data(model);
-        }
-
-        if ui.button("Manage Plot").clicked() {
+        if ui
+            .button("Manage Plot")
+            .on_hover_text("Show or hide plot curves and manage their selection.")
+            .clicked()
+        {
             new_experiment_dialog.manage_plot_open = true;
             ui.ctx().request_repaint();
         }
         ui.separator();
-        if ui.button("Save As CSV").clicked() {
+        if ui
+            .button("Save")
+            .on_hover_text(
+                "Save the current experiment series to its current file. Shortcut: Ctrl/Cmd+S.",
+            )
+            .clicked()
+        {
+            new_experiment_dialog.save_series_shortcut(model, false);
+        }
+        if ui
+            .button("Save As CSV")
+            .on_hover_text("Choose a path and export the series as CSV.")
+            .clicked()
+        {
             new_experiment_dialog.open_save_series_dialog(SaveSeriesFormat::Csv);
             ui.ctx().request_repaint();
         }
-        if ui.button("Save As TXT").clicked() {
+        if ui
+            .button("Save As TXT")
+            .on_hover_text("Choose a path and export the series as TXT.")
+            .clicked()
+        {
             new_experiment_dialog.open_save_series_dialog(SaveSeriesFormat::Txt);
             ui.ctx().request_repaint();
         }
-        if ui.button("Save As Excel").clicked() {}
-        if ui.button("Save As Image").clicked() {
+        if ui
+            .button("Plot Editor")
+            .on_hover_text(
+                "Open the print-ready plot editor for journal/report figures. This does not change the live interactive plots or experiment data.",
+            )
+            .clicked()
+        {
             Self::save_as_image(model, kithe_plot_window);
         }
-    }
-
-    fn import_data(_model: &mut PlotModel) {
-        info!("Stub: Import Data clicked");
-    }
-
-    fn export_data(_model: &mut PlotModel) {
-        info!("Stub: Export Data clicked");
-    }
-
-    fn manage_data(_model: &mut PlotModel) {
-        info!("Stub: Manage Data clicked");
     }
 
     fn save_as_image(model: &mut PlotModel, kithe_plot_window: &mut KiThePlotWindowState) {
@@ -136,12 +270,8 @@ impl FileManager {
                 let _ = model.push_message("KiThe Plot Redactor window opened");
             }
             Err(err) => {
-                let message = match err {
-                    TGAGUIError::TGADomainError(domain) => format!("{:?}", domain),
-                    TGAGUIError::SettingsErrors(msg) => msg,
-                    TGAGUIError::BindingError(msg) => msg,
-                };
-                let _ = model.push_message(&format!("Save As Image failed: {message}"));
+                let message = err.to_string();
+                let _ = model.push_message(&format!("Opening Plot Editor failed: {message}"));
             }
         }
     }
@@ -163,6 +293,86 @@ pub struct QuickActionPanelState {
 pub struct WrightPanelControllers;
 
 impl WrightPanelControllers {
+    fn quick_action_tooltip(action: &str) -> &'static str {
+        match action {
+            "Manage Plots" => "Open plot visibility and selection controls; no data changes.",
+            "Column Manager" => {
+                "Inspect columns, samples, provenance and filter-quality reports; no data changes. Shortcut: F1."
+            }
+            "golden pipeline" => {
+                "Open the preprocessing pipeline; applying it may add or modify columns as configured."
+            }
+            "Clear Selected" => "Clear the current plot selection; no data changes.",
+            "Reset View" => "Reset plot axes; no data changes.",
+            "Refresh" => "Redraw plots; no data changes.",
+            "cut before time" => {
+                "Uses Input value as the time threshold. Removes earlier rows from the selected experiment in place; no new column."
+            }
+            "cut selected" => {
+                "Choose X or Y, then select a plot range. Removes rows outside that range in place; no new column."
+            }
+            "Zoom To Selection" => "Fit the plot view to the selected region; no data changes.",
+            "move time to zero" => {
+                "Subtracts the first time value from the bound time column in place; no new column."
+            }
+            "Delete Plot" => {
+                "Remove the selected curve from the plot; experiment data is unchanged."
+            }
+            "Undo" => {
+                "Undo the latest reversible operation for the selected experiment. Shortcut: Ctrl/Cmd+Z."
+            }
+            "calc relative mass" => {
+                "Uses Input value as the positive baseline end time and the active mass source. Adds a relative-mass column; optional output name is in the text field."
+            }
+            "calc conversion" => {
+                "Uses Input value as the positive baseline end time and the active mass source. Adds a conversion column; optional output name is in the text field."
+            }
+            "from mV to mg" => {
+                "Applies configured voltage-to-mass calibration. By default replaces the mass column; enter another output name to create a separate calibrated column."
+            }
+            "from s to h" => {
+                "Converts the bound time column from seconds to hours in place; no new column."
+            }
+            "from C° to K" => {
+                "Converts the bound temperature column from Celsius to Kelvin in place; no new column."
+            }
+            "average on column" => {
+                "Reports the mean of the selected curve's Y column over the selected range (or full column); no data changes."
+            }
+            "conversion rate" => {
+                "Adds d(conversion)/dt using the active mass source; optional output name is in the text field. Source is preserved."
+            }
+            "dim-less mass rate" => {
+                "Adds d(relative mass)/dt using the active mass source; optional output name is in the text field. Source is preserved."
+            }
+            "mass rate" => {
+                "Adds d(mass)/dt using the active mass source; optional output name is in the text field. Source is preserved."
+            }
+            "T rate" => {
+                "Adds d(temperature)/dt using the active temperature source; optional output name is in the text field. Source is preserved."
+            }
+            "Add" => {
+                "Requires X or Y selection and Input value. Adds to that existing column in place; no new column."
+            }
+            "Sub" => {
+                "Requires X or Y selection and Input value. Subtracts from that existing column in place; no new column."
+            }
+            "Mul" => {
+                "Requires X or Y selection and Input value. Multiplies that existing column in place; no new column."
+            }
+            "Divide" => {
+                "Requires X or Y selection and a non-zero Input value. Divides that existing column in place; no new column."
+            }
+            "ln" => {
+                "Requires X or Y selection. Replaces that existing column with its natural logarithm; no new column."
+            }
+            "exp" => {
+                "Requires X or Y selection. Replaces that existing column with its exponential; no new column."
+            }
+            _ => "Run the selected action.",
+        }
+    }
+
     pub fn quick_action_panel(
         ui: &mut egui::Ui,
         model: &mut PlotModel,
@@ -173,7 +383,7 @@ impl WrightPanelControllers {
         let labels = [
             "Manage Plots",
             "Column Manager",
-            "golden pipeline",
+            "Undo",
             "Clear Selected",
             "Reset View",
             "Refresh",
@@ -182,7 +392,7 @@ impl WrightPanelControllers {
             "Zoom To Selection",
             "move time to zero",
             "Delete Plot",
-            "Reverse",
+            "golden pipeline",
             // moved arithmetic buttons to be near input field below
             "calc relative mass",
             "calc conversion",
@@ -202,8 +412,9 @@ impl WrightPanelControllers {
             .spacing([4.0, 4.0])
             .show(ui, |ui| {
                 for (index, label) in labels.iter().enumerate() {
-                    if ui
-                        .add_sized(button_size, egui::Button::new(*label))
+                    let button = ui.add_sized(button_size, egui::Button::new(*label));
+                    if button
+                        .on_hover_text(Self::quick_action_tooltip(label))
                         .clicked()
                     {
                         if let Err(err) = Self::handle_quick_action(
@@ -228,16 +439,18 @@ impl WrightPanelControllers {
         ui.horizontal_wrapped(|ui| {
             // Input value
             let input_value_label = ui.label("Input value:");
-            let input_value = ui.add(egui::DragValue::new(&mut state.input_value).speed(0.1));
+            let input_value = ui
+                .add(egui::DragValue::new(&mut state.input_value).speed(0.1))
+                .on_hover_text("Numeric parameter used by time cuts, baseline normalization and arithmetic operations.");
             let _ = input_value.labelled_by(input_value_label.id);
 
             ui.separator();
 
             // X/Y selector: sets state.x_or_y
-            if ui.button("X").clicked() {
+            if ui.button("X").on_hover_text("Select the X column for cut/arithmetic operations.").clicked() {
                 state.x_or_y = Some(XY::X);
             }
-            if ui.button("Y").clicked() {
+            if ui.button("Y").on_hover_text("Select the Y column for cut/arithmetic operations.").clicked() {
                 state.x_or_y = Some(XY::Y);
             }
 
@@ -246,7 +459,9 @@ impl WrightPanelControllers {
             // Optional output column name for transforms that materialize a derived column.
             let mut tmp = state.input_string.clone().unwrap_or_default();
             let output_column_label = ui.label("output column:");
-            let output_column = ui.text_edit_singleline(&mut tmp);
+            let output_column = ui
+                .text_edit_singleline(&mut tmp)
+                .on_hover_text("Optional output name. Leave empty for the default; using the source name replaces it, another name creates a new column.");
             let _ = output_column.clone().labelled_by(output_column_label.id);
             if output_column.changed() {
                 if tmp.trim().is_empty() {
@@ -335,8 +550,9 @@ impl WrightPanelControllers {
                     .iter()
                     .enumerate()
                 {
-                    if ui
-                        .add_sized(button_size_small, egui::Button::new(*label))
+                    let button = ui.add_sized(button_size_small, egui::Button::new(*label));
+                    if button
+                        .on_hover_text(Self::quick_action_tooltip(label))
                         .clicked()
                     {
                         if let Err(err) = Self::handle_quick_action(
@@ -358,7 +574,8 @@ impl WrightPanelControllers {
         ui.checkbox(
             &mut state.apply_only_to_selected_chart,
             "apply only to the selected chart.",
-        );
+        )
+        .on_hover_text("When enabled, arithmetic changes only the selected curve's X/Y values inside its plotted range; otherwise it changes the whole selected column.");
         ui.separator();
         Ok(())
     }
@@ -423,8 +640,8 @@ impl WrightPanelControllers {
                 model.delete_selected_curve()?;
                 ctx.request_repaint();
             }
-            "Reverse" => {
-                model.reverse_selected()?;
+            "Undo" => {
+                TopDropDownMenues::undo_selected(model);
                 ctx.request_repaint();
             }
             "calc relative mass" => {
@@ -523,22 +740,16 @@ impl WrightPanelControllers {
                 ctx.request_repaint();
             }
             _ => {
-                info!(
-                    "Stub: {action} clicked (input_value={}, selected_only={})",
-                    state.input_value, state.apply_only_to_selected_chart
-                );
+                return Err(TGAGUIError::BindingError(format!(
+                    "Unsupported quick action: {action}"
+                )));
             }
         }
         Ok(())
     }
 
     fn set_action_error(model: &mut PlotModel, err: TGAGUIError) {
-        let text = match err {
-            TGAGUIError::TGADomainError(domain) => format!("{:?}", domain),
-            TGAGUIError::SettingsErrors(msg) => msg,
-            TGAGUIError::BindingError(msg) => msg,
-        };
-        let _ = model.push_message(&text);
+        let _ = model.push_message(&err.to_string());
     }
     /// The functions for processing button presses for div, mul, add, sub, ln, exp.
     /// Pressing the "X" or "Y" button calls the this_is_x_or_y function, which specifies the name of the column
@@ -644,6 +855,7 @@ pub struct NewExperimentDialogState {
     save_series_format: SaveSeriesFormat,
     save_series_filename_input: String,
     save_series_last_status: Option<String>,
+    last_saved_series_path: Option<PathBuf>,
     heating_rate_input: String,
     isothermal_temp_input: String,
     bind_mass_input: String,
@@ -654,9 +866,46 @@ pub struct NewExperimentDialogState {
     bind_time_unit: Unit,
     meta: ExperimentMeta,
     plot_configs: Vec<PlotConfig>,
+    append_mode: bool,
+    append_target_id: Option<String>,
+    append_replace_target: bool,
+    append_result_id: String,
+    append_preview: Option<TGADataset>,
+    append_preview_rows: Option<usize>,
 }
 
 impl NewExperimentDialogState {
+    pub(crate) fn close_window_on_layer(&mut self, layer: Option<egui::LayerId>) -> bool {
+        let Some(layer) = layer else { return false };
+        if self.append_mode
+            && layer.id == egui::Id::unique(Some("Append to Experiment"))
+            && self.open
+        {
+            self.open = false;
+            return true;
+        }
+        let windows = [
+            ("New Experiment", &mut self.open),
+            ("Manage Plots", &mut self.manage_plot_open),
+            ("Column Manager", &mut self.column_manager_open),
+        ];
+        for (title, is_open) in windows {
+            if layer.id == egui::Id::unique(Some(title)) && *is_open {
+                *is_open = false;
+                return true;
+            }
+        }
+        if self.save_series_open
+            && ["Save Series As CSV", "Save Series As TXT"]
+                .into_iter()
+                .any(|title| layer.id == egui::Id::unique(Some(title)))
+        {
+            self.save_series_open = false;
+            return true;
+        }
+        false
+    }
+
     /// Create a new dialog state with the current directory
     pub fn new() -> Self {
         Self {
@@ -672,6 +921,7 @@ impl NewExperimentDialogState {
             save_series_format: SaveSeriesFormat::Csv,
             save_series_filename_input: "series_export.csv".to_string(),
             save_series_last_status: None,
+            last_saved_series_path: None,
             heating_rate_input: String::new(),
             isothermal_temp_input: String::new(),
             bind_mass_input: String::new(),
@@ -682,6 +932,12 @@ impl NewExperimentDialogState {
             bind_time_unit: Unit::Second,
             meta: ExperimentMeta::new(),
             plot_configs: vec![PlotConfig::default()],
+            append_mode: false,
+            append_target_id: None,
+            append_replace_target: false,
+            append_result_id: String::new(),
+            append_preview: None,
+            append_preview_rows: None,
         }
     }
 
@@ -765,7 +1021,7 @@ impl NewExperimentDialogState {
     }
 
     fn autofill_bind_inputs_from_last_experiment(&mut self, model: &PlotModel) {
-        let Some(last_exp) = model.series.experiments.last() else {
+        let Some(last_exp) = model.series.experiments().last() else {
             return;
         };
         let Ok(columns) = model.list_of_columns(&last_exp.meta.id) else {
@@ -793,68 +1049,105 @@ impl NewExperimentDialogState {
         &mut self,
         model: &mut PlotModel,
     ) -> Result<(), TGAGUIError> {
-        let Some(last_exp) = model.series.experiments.last() else {
+        let Some(last_exp) = model.series.experiments().last() else {
             return Ok(());
         };
         let exp_id = last_exp.meta.id.clone();
 
-        let bind_mass = self.bind_mass_input.trim();
-        if !bind_mass.is_empty() {
-            model
-                .series
-                .bind_mass(&exp_id, bind_mass, self.bind_mass_unit)
-                .map_err(|e| TGAGUIError::BindingError(format!("bind m failed: {:?}", e)))?;
-            match model.series.get_mass_col(&exp_id) {
-                Ok(mass_name) => {
-                    info!("binded mass column {}", mass_name);
+        let mass = self.bind_mass_input.trim().to_owned();
+        let temperature = self.bind_temperature_input.trim().to_owned();
+        let time = self.bind_time_input.trim().to_owned();
+        let mass_unit = self.bind_mass_unit;
+        let temperature_unit = self.bind_temperature_unit;
+        let time_unit = self.bind_time_unit;
+
+        model
+            .series
+            .try_mutate_by_id(&exp_id, |exp| {
+                if !mass.is_empty() {
+                    exp.dataset.bind_mass_inplace(&mass, mass_unit)?;
                 }
-                Err(e) => {
-                    return Err(TGAGUIError::BindingError(format!(
-                        "failed to read bound mass column for '{}': {:?}",
-                        exp_id, e
-                    )));
+                if !temperature.is_empty() {
+                    exp.dataset
+                        .bind_temperature_inplace(&temperature, temperature_unit)?;
                 }
-            }
+                if !time.is_empty() {
+                    exp.dataset.bind_time_inplace(&time, time_unit)?;
+                }
+                Ok(())
+            })
+            .map_err(|e| TGAGUIError::BindingError(format!("binding failed: {:?}", e)))?;
+
+        if !mass.is_empty() {
+            info!(
+                "bound mass column {}",
+                model
+                    .series
+                    .get_mass_col(&exp_id)
+                    .map_err(|e| TGAGUIError::BindingError(format!(
+                        "failed to read bound mass: {:?}",
+                        e
+                    )))?
+            );
+        }
+        if !temperature.is_empty() {
+            info!(
+                "bound temperature column {}",
+                model.series.get_temperature_col(&exp_id).map_err(
+                    |e| TGAGUIError::BindingError(format!(
+                        "failed to read bound temperature: {:?}",
+                        e
+                    ))
+                )?
+            );
+        }
+        if !time.is_empty() {
+            info!(
+                "bound time column {}",
+                model
+                    .series
+                    .get_time_col(&exp_id)
+                    .map_err(|e| TGAGUIError::BindingError(format!(
+                        "failed to read bound time: {:?}",
+                        e
+                    )))?
+            );
         }
 
-        let bind_temperature = self.bind_temperature_input.trim();
-        if !bind_temperature.is_empty() {
-            model
-                .series
-                .bind_temperature(&exp_id, bind_temperature, self.bind_temperature_unit)
-                .map_err(|e| TGAGUIError::BindingError(format!("bind T failed: {:?}", e)))?;
-            match model.series.get_temperature_col(&exp_id) {
-                Ok(t_name) => {
-                    info!("binded temperature column {}", t_name);
-                }
-                Err(e) => {
-                    return Err(TGAGUIError::BindingError(format!(
-                        "failed to read bound temperature column for '{}': {:?}",
-                        exp_id, e
-                    )));
-                }
-            }
+        Ok(())
+    }
+
+    fn finish_new_experiment_import(
+        &mut self,
+        model: &mut PlotModel,
+        exp_id: &str,
+    ) -> Result<(), TGAGUIError> {
+        let result = (|| {
+            model.series.try_mutate_by_id(exp_id, |exp| {
+                exp.check_nulls_for_operation_borrowed("parsing file")?;
+                exp.sample_all_columns_even_layers_table(50, Vec::new())
+            })?;
+            self.autofill_bind_inputs_from_last_experiment(model);
+            self.apply_bindings_to_last_experiment(model)?;
+            Ok(())
+        })();
+
+        if let Err(operation_error) = result {
+            return match model.drop_experiment_by_id(exp_id) {
+                Ok(()) => Err(operation_error),
+                Err(cleanup_error) => Err(TGAGUIError::BindingError(format!(
+                    "Import failed: {operation_error:?}; rollback of experiment '{exp_id}' also failed: {cleanup_error:?}"
+                ))),
+            };
         }
 
-        let bind_time = self.bind_time_input.trim();
-        if !bind_time.is_empty() {
-            model
-                .series
-                .bind_time(&exp_id, bind_time, self.bind_time_unit)
-                .map_err(|e| TGAGUIError::BindingError(format!("bind t failed: {:?}", e)))?;
-            match model.series.get_time_col(&exp_id) {
-                Ok(t_name) => {
-                    info!("binded time column {}", t_name);
-                }
-                Err(e) => {
-                    return Err(TGAGUIError::BindingError(format!(
-                        "failed to read bound time column for '{}': {:?}",
-                        exp_id, e
-                    )));
-                }
-            }
+        if let Err(error) = self.create_default_plots_for_last_experiment(model) {
+            model.plots.retain(|plot| plot.experiment_id != exp_id);
+            model.reset_view();
+            return Err(TGAGUIError::post_commit_warning(format!(
+                "experiment '{exp_id}' was imported and remains available, but its plots could not be created ({error})"
+            )));
         }
-
         Ok(())
     }
 
@@ -862,7 +1155,7 @@ impl NewExperimentDialogState {
         &self,
         model: &mut PlotModel,
     ) -> Result<(), TGAGUIError> {
-        let Some(last_exp) = model.series.experiments.last() else {
+        let Some(last_exp) = model.series.experiments().last() else {
             return Ok(());
         };
         let exp_id = last_exp.meta.id.clone();
@@ -907,13 +1200,14 @@ impl NewExperimentDialogState {
     /// Show the new experiment dialog
     pub fn show_new_experiment_dialogue(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
         let mut should_load_experiment = false;
+        let mut commit_append = false;
 
         if self.open {
             let mut dialog_open = self.open;
-            egui::Window::new("New Experiment")
+            egui::Window::new(if self.append_mode { "Append to Experiment" } else { "New Experiment" })
                 .open(&mut dialog_open)
                 .resizable(true)
-                .default_size([600.0, 400.0])
+                .default_size(if self.append_mode { [760.0, 640.0] } else { [600.0, 400.0] })
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("📁 Current directory:");
@@ -929,6 +1223,19 @@ impl NewExperimentDialogState {
 
                     ui.separator();
 
+                    if self.append_mode && self.append_preview.is_some() {
+                        ui.horizontal(|ui| {
+                            ui.strong(format!("Preview: {} combined rows", self.append_preview_rows.unwrap_or_default()));
+                            let commit_label = if self.append_replace_target { "Replace source with combined experiment" } else { "Add combined experiment" };
+                            if ui.button(commit_label)
+                                .on_hover_text("Commit the validated preview. Replacement is explicit and happens only after validation.")
+                                .clicked()
+                            {
+                                commit_append = true;
+                            }
+                        });
+                    }
+
                     // File browser panel (left side)
                     egui::Panel::left("file_browser")
                         .resizable(true)
@@ -943,36 +1250,58 @@ impl NewExperimentDialogState {
                         .default_size(250.0)
                         .show(ui, |ui| {
                             ui.heading("📝 Metadata");
+                            if ui.button(if self.append_mode { "Preview continuation" } else { "Import experiment" }).clicked() {
+                                should_load_experiment = true;
+                            }
                             ui.separator();
+
+                            if self.append_mode {
+                                let experiments = model.list_of_experiments();
+                                if self.append_target_id.as_ref().is_none_or(|id| !experiments.contains(id)) {
+                                    self.append_target_id = experiments.first().cloned();
+                                }
+                                egui::ComboBox::from_label("Append to")
+                                    .selected_text(self.append_target_id.as_deref().unwrap_or("Select experiment"))
+                                    .show_ui(ui, |ui| {
+                                        for id in &experiments {
+                                            ui.selectable_value(&mut self.append_target_id, Some(id.clone()), id);
+                                        }
+                                    });
+                                ui.checkbox(&mut self.append_replace_target, "Replace the original experiment");
+                                if !self.append_replace_target {
+                                    let label = ui.label("New experiment ID:");
+                                    let input = ui.text_edit_singleline(&mut self.append_result_id);
+                                    let _ = input.labelled_by(label.id);
+                                }
+                                ui.label("Incoming columns must match the selected experiment's column names and order. Time is preserved if already continuous; otherwise the segment is shifted to the next typical time step.");
+                            }
 
                             let label = ui.label("File path:");
                             let input = ui.text_edit_singleline(&mut self.file_path_input);
                             let _ = input.labelled_by(label.id);
 
-                            ui.add_space(5.0);
+                            if !self.append_mode {
+                                ui.add_space(5.0);
+                                let label = ui.label("Experiment ID:");
+                                let input = ui.text_edit_singleline(&mut self.meta.id);
+                                let _ = input.labelled_by(label.id);
 
-                            let label = ui.label("Experiment ID:");
-                            let input = ui.text_edit_singleline(&mut self.meta.id);
-                            let _ = input.labelled_by(label.id);
+                                ui.add_space(5.0);
+                                let label = ui.label("Heating Rate (K/min):");
+                                let input = ui.text_edit_singleline(&mut self.heating_rate_input);
+                                let _ = input.labelled_by(label.id);
 
-                            ui.add_space(5.0);
+                                ui.add_space(5.0);
+                                let label = ui.label("Isothermal Temperature (K):");
+                                let input = ui.text_edit_singleline(&mut self.isothermal_temp_input);
+                                let _ = input.labelled_by(label.id);
 
-                            let label = ui.label("Heating Rate (K/min):");
-                            let input = ui.text_edit_singleline(&mut self.heating_rate_input);
-                            let _ = input.labelled_by(label.id);
-
-                            ui.add_space(5.0);
-
-                            let label = ui.label("Isothermal Temperature (K):");
-                            let input = ui.text_edit_singleline(&mut self.isothermal_temp_input);
-                            let _ = input.labelled_by(label.id);
-
-                            ui.add_space(5.0);
-
-                            let label = ui.label("Comment:");
-                            let comment = self.meta.comment.get_or_insert_with(String::new);
-                            let input = ui.text_edit_multiline(comment);
-                            let _ = input.labelled_by(label.id);
+                                ui.add_space(5.0);
+                                let label = ui.label("Comment:");
+                                let comment = self.meta.comment.get_or_insert_with(String::new);
+                                let input = ui.text_edit_multiline(comment);
+                                let _ = input.labelled_by(label.id);
+                            }
 
                             ui.add_space(8.0);
                             self.show_bindings_row(ui);
@@ -983,91 +1312,346 @@ impl NewExperimentDialogState {
                                 ui.colored_label(egui::Color32::RED, err);
                                 ui.add_space(5.0);
                             }
-
-                            // Select button
-                            if ui.button("✅ Select").clicked() {
-                                should_load_experiment = true;
-                            }
                         });
                 });
             self.open = dialog_open;
 
-            // Handle experiment loading outside the window closure
+            // Handle import or continuation preview outside the window closure.
             if should_load_experiment {
-                self.meta.heating_rate = if self.heating_rate_input.trim().is_empty() {
-                    None
-                } else {
-                    match self.heating_rate_input.trim().parse::<f64>() {
-                        Ok(v) => Some(v),
-                        Err(_) => {
-                            self.last_error = Some("Heating rate must be a number".to_string());
-                            return;
-                        }
-                    }
-                };
-                self.meta.isothermal_temperature = if self.isothermal_temp_input.trim().is_empty() {
-                    None
-                } else {
-                    match self.isothermal_temp_input.trim().parse::<f64>() {
-                        Ok(v) => Some(v),
-                        Err(_) => {
-                            self.last_error =
-                                Some("Isothermal temperature must be a number".to_string());
-                            return;
-                        }
-                    }
-                };
-
-                let file_path_candidate = if self.file_path_input.trim().is_empty() {
-                    self.selected_file.clone()
-                } else {
-                    Some(PathBuf::from(self.file_path_input.trim()))
-                };
-
-                if let Some(file_path) = file_path_candidate {
-                    if file_path.is_file() {
-                        self.selected_file = Some(file_path.clone());
-                        self.file_path_input = file_path.to_string_lossy().to_string();
-                        // Create a new experiment with the selected file and metadata
-                        if let Err(e) = model.push_from_file(&file_path) {
-                            self.last_error = Some(format!("Error loading experiment: {:?}", e));
-                        } else {
-                            if let Some(exp) = model.series.experiments.last_mut() {
-                                exp.meta.id = self.meta.id.clone();
-                                exp.meta.heating_rate = self.meta.heating_rate;
-                                exp.meta.isothermal_temperature = self.meta.isothermal_temperature;
-                                exp.meta.comment = self.meta.comment.clone();
-                                info!("File parsed successfully");
-                                info!("Experiment ID set to: {}", exp.meta.id);
-                                info!("found columns with names {:?}", &exp.list_of_columns());
-                                exp.check_nulls_for_operation_borrowed("parsing file");
-                                if let Err(e) =
-                                    exp.sample_all_columns_even_layers_table(50, Vec::new())
-                                {
-                                    self.last_error = Some(format!("can't make a table: {:?}", e));
+                if self.append_mode {
+                    let path = if self.file_path_input.trim().is_empty() {
+                        self.selected_file.clone()
+                    } else {
+                        Some(PathBuf::from(self.file_path_input.trim()))
+                    };
+                    let result = (|| -> Result<(), String> {
+                        let path =
+                            path.ok_or_else(|| "Select a continuation file first".to_string())?;
+                        let target_id = self
+                            .append_target_id
+                            .as_deref()
+                            .ok_or_else(|| "Select a target experiment first".to_string())?;
+                        let target = model
+                            .series
+                            .get_experiment_by_id(target_id)
+                            .map_err(|e| format!("{e:?}"))?;
+                        target.dataset.schema.time.as_deref().ok_or_else(|| {
+                            "Target experiment has no bound time column".to_string()
+                        })?;
+                        let mut continuation =
+                            TGADataset::from_csv_raw(&path).map_err(|e| e.to_string())?;
+                        let incoming_names = continuation
+                            .frame
+                            .clone()
+                            .collect_schema()
+                            .map_err(|e| e.to_string())?;
+                        let target_names = target
+                            .dataset
+                            .frame
+                            .clone()
+                            .collect_schema()
+                            .map_err(|e| e.to_string())?
+                            .iter_names()
+                            .map(|name| name.to_string())
+                            .collect::<Vec<_>>();
+                        let mappings = [
+                            (
+                                target.dataset.schema.time.as_deref(),
+                                self.bind_time_input.trim(),
+                            ),
+                            (
+                                target.dataset.schema.temperature.as_deref(),
+                                self.bind_temperature_input.trim(),
+                            ),
+                            (
+                                target.dataset.schema.mass.as_deref(),
+                                self.bind_mass_input.trim(),
+                            ),
+                        ];
+                        for (target_column, incoming_column) in mappings {
+                            if let Some(target_column) = target_column {
+                                let target_unit = target
+                                    .dataset
+                                    .schema
+                                    .columns
+                                    .get(target_column)
+                                    .map(|meta| meta.unit);
+                                let incoming_unit = match target_column {
+                                    column
+                                        if Some(column)
+                                            == target.dataset.schema.time.as_deref() =>
+                                    {
+                                        self.bind_time_unit
+                                    }
+                                    column
+                                        if Some(column)
+                                            == target.dataset.schema.temperature.as_deref() =>
+                                    {
+                                        self.bind_temperature_unit
+                                    }
+                                    _ => self.bind_mass_unit,
                                 };
+                                if target_unit != Some(incoming_unit) {
+                                    return Err(format!(
+                                        "Incoming unit for '{target_column}' must match the target experiment unit {:?}",
+                                        target_unit
+                                    ));
+                                }
+                                if !incoming_names
+                                    .iter_names()
+                                    .any(|name| name.as_str() == incoming_column)
+                                {
+                                    return Err(format!(
+                                        "Incoming file has no bound column '{incoming_column}'"
+                                    ));
+                                }
                             }
-                            model.series.exp_map.clear();
-                            for (idx, exp) in model.series.experiments.iter().enumerate() {
-                                model.series.exp_map.insert(exp.meta.id.clone(), idx);
+                        }
+                        let mut selected_sources = Vec::with_capacity(target_names.len());
+                        let mut expressions = Vec::with_capacity(target_names.len());
+                        for target_column in &target_names {
+                            let source_column = if Some(target_column.as_str())
+                                == target.dataset.schema.time.as_deref()
+                            {
+                                self.bind_time_input.trim()
+                            } else if Some(target_column.as_str())
+                                == target.dataset.schema.temperature.as_deref()
+                            {
+                                self.bind_temperature_input.trim()
+                            } else if Some(target_column.as_str())
+                                == target.dataset.schema.mass.as_deref()
+                            {
+                                self.bind_mass_input.trim()
+                            } else {
+                                target_column.as_str()
+                            };
+                            if !incoming_names
+                                .iter_names()
+                                .any(|name| name.as_str() == source_column)
+                            {
+                                return Err(format!(
+                                    "Incoming file is missing column '{source_column}' required for '{target_column}'"
+                                ));
                             }
-                            self.autofill_bind_inputs_from_last_experiment(model);
-                            if let Err(e) = self.apply_bindings_to_last_experiment(model) {
-                                self.last_error = Some(format!("{:?}", e));
+                            if selected_sources.iter().any(|name| name == source_column) {
+                                return Err("Time, temperature, and mass bindings must use distinct incoming columns".into());
+                            }
+                            selected_sources.push(source_column.to_owned());
+                            let target_dtype = target
+                                .dataset
+                                .frame
+                                .clone()
+                                .collect_schema()
+                                .map_err(|error| error.to_string())?
+                                .get(target_column)
+                                .ok_or_else(|| {
+                                    format!("Target schema is missing '{target_column}'")
+                                })?
+                                .clone();
+                            let expression =
+                                col(source_column).cast(target_dtype).alias(target_column);
+                            expressions.push(expression);
+                        }
+                        if selected_sources.len() != incoming_names.len() {
+                            return Err("The continuation file has extra columns; map or remove them explicitly before appending".into());
+                        }
+                        continuation.frame = continuation.frame.select(expressions);
+                        continuation.schema = target.dataset.schema.clone();
+                        let candidate = target
+                            .dataset
+                            .append_continuation(&continuation)
+                            .map_err(|e| format!("{e:?}"))?;
+                        self.append_preview_rows = Some(
+                            candidate
+                                .frame
+                                .clone()
+                                .collect()
+                                .map_err(|e| e.to_string())?
+                                .height(),
+                        );
+                        self.append_preview = Some(candidate);
+                        self.append_result_id = format!("{}_continued", target_id);
+                        self.file_path_input = path.to_string_lossy().to_string();
+                        Ok(())
+                    })();
+                    self.last_error = result.err();
+                    if let Some(error) = &self.last_error {
+                        let _ =
+                            model.push_message(&format!("Continuation preview failed: {error}"));
+                    }
+                } else {
+                    self.meta.heating_rate = if self.heating_rate_input.trim().is_empty() {
+                        None
+                    } else {
+                        match self.heating_rate_input.trim().parse::<f64>() {
+                            Ok(v) => Some(v),
+                            Err(_) => {
+                                self.last_error = Some("Heating rate must be a number".to_string());
+                                let _ = model
+                                    .push_message("Import failed: heating rate must be a number.");
                                 return;
                             }
-                            if let Err(e) = self.create_default_plots_for_last_experiment(model) {
-                                self.last_error = Some(format!("{:?}", e));
-                                return;
+                        }
+                    };
+                    self.meta.isothermal_temperature =
+                        if self.isothermal_temp_input.trim().is_empty() {
+                            None
+                        } else {
+                            match self.isothermal_temp_input.trim().parse::<f64>() {
+                                Ok(v) => Some(v),
+                                Err(_) => {
+                                    self.last_error =
+                                        Some("Isothermal temperature must be a number".to_string());
+                                    let _ = model.push_message(
+                                        "Import failed: isothermal temperature must be a number.",
+                                    );
+                                    return;
+                                }
                             }
-                            self.last_error = None;
-                            self.open = false;
+                        };
+
+                    let file_path_candidate = if self.file_path_input.trim().is_empty() {
+                        self.selected_file.clone()
+                    } else {
+                        Some(PathBuf::from(self.file_path_input.trim()))
+                    };
+
+                    if let Some(file_path) = file_path_candidate {
+                        if file_path.is_file() {
+                            self.selected_file = Some(file_path.clone());
+                            self.file_path_input = file_path.to_string_lossy().to_string();
+                            if self.meta.id.trim().is_empty() {
+                                self.meta.id = file_path
+                                    .file_stem()
+                                    .map(|stem| stem.to_string_lossy().into_owned())
+                                    .filter(|stem| !stem.trim().is_empty())
+                                    .unwrap_or_else(|| "experiment".to_string());
+                            }
+                            // Create a new experiment with the selected file and metadata
+                            if let Err(e) =
+                                model.push_from_file_with_meta(&file_path, self.meta.clone())
+                            {
+                                self.last_error = Some(format!("Error loading experiment: {e}"));
+                                let _ = model.push_message(&format!("Import failed: {e}"));
+                            } else {
+                                let exp_id = self.meta.id.clone();
+                                match self.finish_new_experiment_import(model, &exp_id) {
+                                    Ok(()) => {
+                                        info!("File parsed successfully");
+                                        info!("Experiment ID set to: {}", exp_id);
+                                        if let Ok(exp) = model.series.get_experiment_by_id(&exp_id)
+                                        {
+                                            info!(
+                                                "found columns with names {:?}",
+                                                exp.list_of_columns()
+                                            );
+                                        }
+                                        self.last_error = None;
+                                        self.open = false;
+                                    }
+                                    Err(e) => {
+                                        if let TGAGUIError::PostCommitWarning(warning) = e {
+                                            self.last_error = None;
+                                            self.open = false;
+                                            let _ = model.push_message(&format!("Warning: {warning}"));
+                                        } else {
+                                            self.last_error = Some(e.to_string());
+                                            let _ = model.push_message(&format!("Import failed: {e}"));
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            self.last_error = Some("Selected path is not a file".to_string());
+                            let _ =
+                                model.push_message("Import failed: selected path is not a file.");
                         }
                     } else {
-                        self.last_error = Some("Selected path is not a file".to_string());
+                        self.last_error = Some("Please select a file".to_string());
+                        let _ = model.push_message("Import failed: select a file first.");
                     }
-                } else {
-                    self.last_error = Some("Please select a file".to_string());
+                }
+            }
+
+            if commit_append {
+                let result = (|| -> Result<(String, Option<String>), String> {
+                    let target_id = self
+                        .append_target_id
+                        .clone()
+                        .ok_or_else(|| "Select a target experiment".to_string())?;
+                    let candidate = self
+                        .append_preview
+                        .take()
+                        .ok_or_else(|| "Preview the continuation before committing".to_string())?;
+                    if self.append_replace_target {
+                        model
+                            .series
+                            .try_mutate_by_id(&target_id, |experiment| {
+                                experiment.dataset = candidate;
+                                Ok(())
+                            })
+                            .map_err(|e| format!("{e:?}"))?;
+                        let warning = model
+                            .rebuild_plots_for_experiment(&target_id)
+                            .err()
+                            .map(|error| match error {
+                                TGAGUIError::PostCommitWarning(message) => message,
+                                other => other.to_string(),
+                            });
+                        Ok((target_id, warning))
+                    } else {
+                        let id = self.append_result_id.trim();
+                        if id.is_empty() {
+                            return Err("Enter a new experiment ID".into());
+                        }
+                        let mut meta = model
+                            .series
+                            .get_experiment_by_id(&target_id)
+                            .map_err(|e| format!("{e:?}"))?
+                            .meta
+                            .clone();
+                        meta.id = id.to_string();
+                        model
+                            .series
+                            .push(TGAExperiment {
+                                dataset: candidate,
+                                meta,
+                            })
+                            .map_err(|e| format!("{e:?}"))?;
+                        let previous_view = (
+                            model.interaction.view_range,
+                            model.interaction.view_y_range,
+                        );
+                        let warning = self
+                            .create_default_plots_for_last_experiment(model)
+                            .err()
+                            .map(|error| {
+                                model.plots.retain(|plot| plot.experiment_id != id);
+                                model.interaction.view_range = previous_view.0;
+                                model.interaction.view_y_range = previous_view.1;
+                                format!(
+                                    "Continuation experiment '{id}' was added, but its plots could not be created; data remain available ({error})"
+                                )
+                            });
+                        Ok((id.to_string(), warning))
+                    }
+                })();
+                match result {
+                    Ok((_id, Some(warning))) => {
+                        let _ = model.push_message(&format!("Warning: {warning}"));
+                        self.open = false;
+                        self.last_error = None;
+                    }
+                    Ok((id, None)) => {
+                        let _ = model.push_message(&format!("Continuation appended as experiment '{id}'"));
+                        self.open = false;
+                        self.last_error = None;
+                    }
+                    Err(error) => {
+                        let _ = model.push_message(&format!("Continuation failed: {error}"));
+                        self.last_error = Some(error);
+                    }
                 }
             }
         }
@@ -1201,6 +1785,95 @@ impl NewExperimentDialogState {
         };
     }
 
+    fn open_import_dialog(&mut self) {
+        self.open = true;
+        self.append_mode = false;
+        self.last_error = None;
+    }
+
+    fn open_append_dialog(&mut self, model: &PlotModel) {
+        self.open = true;
+        self.append_mode = true;
+        self.last_error = None;
+        self.append_preview = None;
+        self.append_preview_rows = None;
+        self.append_target_id = model
+            .get_experiment_by_selected_curve()
+            .ok()
+            .or_else(|| model.list_of_experiments().into_iter().next());
+        self.append_replace_target = false;
+        self.append_result_id.clear();
+        self.file_path_input.clear();
+        self.selected_file = None;
+        if let Some(id) = self.append_target_id.as_deref()
+            && let Ok(experiment) = model.series.get_experiment_by_id(id)
+        {
+            self.bind_time_input = experiment.dataset.schema.time.clone().unwrap_or_default();
+            self.bind_temperature_input = experiment
+                .dataset
+                .schema
+                .temperature
+                .clone()
+                .unwrap_or_default();
+            self.bind_mass_input = experiment.dataset.schema.mass.clone().unwrap_or_default();
+            if let Some(unit) = experiment
+                .dataset
+                .schema
+                .time
+                .as_deref()
+                .and_then(|name| experiment.dataset.schema.columns.get(name))
+                .map(|meta| meta.unit)
+            {
+                self.bind_time_unit = unit;
+            }
+            if let Some(unit) = experiment
+                .dataset
+                .schema
+                .temperature
+                .as_deref()
+                .and_then(|name| experiment.dataset.schema.columns.get(name))
+                .map(|meta| meta.unit)
+            {
+                self.bind_temperature_unit = unit;
+            }
+            if let Some(unit) = experiment
+                .dataset
+                .schema
+                .mass
+                .as_deref()
+                .and_then(|name| experiment.dataset.schema.columns.get(name))
+                .map(|meta| meta.unit)
+            {
+                self.bind_mass_unit = unit;
+            }
+        }
+    }
+
+    fn save_series_shortcut(&mut self, model: &mut PlotModel, save_as: bool) {
+        if save_as {
+            self.open_save_series_dialog(SaveSeriesFormat::Csv);
+            return;
+        }
+
+        let Some(path) = self.last_saved_series_path.clone() else {
+            self.open_save_series_dialog(SaveSeriesFormat::Csv);
+            return;
+        };
+
+        match model.to_csv_series(&path) {
+            Ok(()) => {
+                self.last_error = None;
+                let _ = model.push_message(&format!("Series saved to {}", path.display()));
+                info!("Series saved to {}", path.display());
+            }
+            Err(err) => {
+                self.last_error = Some(format!("Failed to save series: {err}"));
+                let _ = model.push_message(&format!("Saving series failed: {err}"));
+                self.save_series_open = true;
+            }
+        }
+    }
+
     pub fn show_save_series_dialog(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
         if !self.save_series_open {
             return;
@@ -1285,13 +1958,15 @@ impl NewExperimentDialogState {
             match model.to_csv_series(&save_path) {
                 Ok(()) => {
                     self.last_error = None;
+                    self.last_saved_series_path = Some(save_path.clone());
                     self.save_series_last_status =
                         Some(format!("Saved to {}", save_path.to_string_lossy()));
                     self.save_series_open = false;
                 }
                 Err(err) => {
                     self.save_series_last_status = None;
-                    self.last_error = Some(format!("Failed to save series: {:?}", err));
+                    self.last_error = Some(format!("Failed to save series: {err}"));
+                    let _ = model.push_message(&format!("Saving series failed: {err}"));
                 }
             }
         }
@@ -1428,15 +2103,15 @@ impl NewExperimentDialogState {
                             (&config.experiment, &config.x_column, &config.y_column)
                         {
                             if let Err(e) = model.set_x(exp_id, x_col) {
-                                self.last_error = Some(format!("Error setting X: {:?}", e));
+                                self.last_error = Some(format!("Error setting X: {e}"));
                                 success = false;
                                 break;
                             } else if let Err(e) = model.set_y(exp_id, y_col) {
-                                self.last_error = Some(format!("Error setting Y: {:?}", e));
+                                self.last_error = Some(format!("Error setting Y: {e}"));
                                 success = false;
                                 break;
                             } else if let Err(e) = model.create_points_for_curve(exp_id) {
-                                self.last_error = Some(format!("Error creating curve: {:?}", e));
+                                self.last_error = Some(format!("Error creating curve: {e}"));
                                 success = false;
                                 break;
                             }
@@ -1459,6 +2134,7 @@ impl NewExperimentDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Kinetics::experimental_kinetics::experiment_series_main::TGAExperiment;
     use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
     use std::path::Path;
 
@@ -1515,6 +2191,78 @@ mod tests {
             curves
                 .iter()
                 .any(|curve| curve.x_name == "t" && curve.y_name == "m")
+        );
+    }
+
+    #[test]
+    fn failed_new_experiment_binding_does_not_commit_partial_schema_or_history() {
+        let mut model = fixture_model();
+        let exp_id = model.list_of_experiments()[0].clone();
+        let before = model.series.get_experiment_by_id(&exp_id).unwrap();
+        let before_schema = before.dataset.schema.clone();
+        let before_history = before
+            .dataset
+            .history_of_operations
+            .vector_of_operations
+            .len();
+        let before_undo_depth = before.dataset.undo_depth();
+
+        let mut dialog = NewExperimentDialogState::new();
+        dialog.bind_mass_input = "m".to_owned();
+        dialog.bind_temperature_input = "missing_temperature".to_owned();
+        dialog.bind_time_input = "t".to_owned();
+
+        assert!(
+            dialog
+                .apply_bindings_to_last_experiment(&mut model)
+                .is_err()
+        );
+
+        let after = model.series.get_experiment_by_id(&exp_id).unwrap();
+        assert_eq!(after.dataset.schema.time, before_schema.time);
+        assert_eq!(after.dataset.schema.temperature, before_schema.temperature);
+        assert_eq!(after.dataset.schema.mass, before_schema.mass);
+        assert_eq!(
+            after
+                .dataset
+                .history_of_operations
+                .vector_of_operations
+                .len(),
+            before_history
+        );
+        assert_eq!(after.dataset.undo_depth(), before_undo_depth);
+    }
+
+    #[test]
+    fn failed_new_experiment_setup_rolls_back_imported_experiment_and_curves() {
+        let mut model = fixture_model();
+        let source = model.series.experiments().last().unwrap().dataset.clone();
+        model
+            .series
+            .push(TGAExperiment::new(source).with_id("rollback_candidate"))
+            .unwrap();
+
+        let mut dialog = NewExperimentDialogState::new();
+        dialog.bind_mass_input = "m".to_owned();
+        dialog.bind_temperature_input = "missing_temperature".to_owned();
+        dialog.bind_time_input = "t".to_owned();
+        let before_ids = model.list_of_experiments();
+
+        assert!(
+            dialog
+                .finish_new_experiment_import(&mut model, "rollback_candidate")
+                .is_err()
+        );
+
+        assert_eq!(
+            model.list_of_experiments(),
+            before_ids[..before_ids.len() - 1]
+        );
+        assert!(
+            !model
+                .plots
+                .iter()
+                .any(|curve| curve.experiment_id == "rollback_candidate")
         );
     }
 }

@@ -67,14 +67,20 @@ impl VyazovkinSolver {
     /// Run the Vyazovkin method over all α-layers in `grid`.
     ///
     /// Requires `grid.dt` to be populated (use `ConversionGridBuilder::with_dt_matrix()`).
-    /// Returns one [`IsoLayerResult`] per layer (starting from layer index 1,
-    /// since Δt at layer 0 is undefined).
+    /// Returns one [`IsoLayerResult`] for each destination layer after the
+    /// first. The interval ending at layer `k` is stored in `dt[:, k - 1]`.
     pub fn solve(&self, grid: &ConversionGrid) -> Result<IsoconversionalResult, TGADomainError> {
+        self.validate_search()?;
         let dt = grid.dt.as_ref().ok_or(TGADomainError::InvalidOperation(
             "Vyazovkin requires dt matrix".into(),
         ))?;
 
         let n_eta = grid.eta.len();
+        if n_eta < 2 {
+            return Err(TGADomainError::InvalidOperation(
+                "Vyazovkin requires at least two conversion layers".into(),
+            ));
+        }
         let mut layers = Vec::with_capacity(n_eta - 1);
 
         for k in 1..n_eta {
@@ -91,7 +97,22 @@ impl VyazovkinSolver {
         Ok(IsoconversionalResult {
             method: "Vyazovkin",
             layers,
+            warnings: Vec::new(),
         })
+    }
+
+    fn validate_search(&self) -> Result<(), TGADomainError> {
+        if self.steps < 2
+            || !self.e_min.is_finite()
+            || !self.e_max.is_finite()
+            || self.e_min >= self.e_max
+        {
+            return Err(TGADomainError::InvalidOperation(
+                "Vyazovkin requires finite increasing energy bounds and at least two search steps"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Naive O(n²) reference implementation of the layer solver.
@@ -107,11 +128,14 @@ impl VyazovkinSolver {
         k: usize,
     ) -> Result<f64, TGADomainError> {
         let inv_t_col = grid.inv_temperature.column(k);
-        let dt_col = dt.column(k);
+        // dt[:, k - 1] spans conversion layers k-1 -> k; temperature is
+        // evaluated at the destination layer k.
+        let dt_col = dt.column(k - 1);
 
         let r = 8.314462618;
 
-        let mut best_e = 0.0;
+        self.validate_search()?;
+        let mut best_e = None;
         let mut best_phi = f64::INFINITY;
 
         let n_exp = inv_t_col.len();
@@ -167,11 +191,16 @@ impl VyazovkinSolver {
 
             if phi < best_phi {
                 best_phi = phi;
-                best_e = e;
+                best_e = Some(e);
             }
         }
 
-        Ok(best_e)
+        best_e.ok_or_else(|| {
+            TGADomainError::InvalidOperation(format!(
+                "Vyazovkin found no valid energy candidate at layer {}",
+                k
+            ))
+        })
     }
 
     /// Optimised O(n) equivalent of `solve_layer`.
@@ -185,14 +214,21 @@ impl VyazovkinSolver {
         dt: &Array2<f64>,
         k: usize,
     ) -> Result<f64, TGADomainError> {
+        self.validate_search()?;
+        if k == 0 || k >= grid.eta.len() || dt.ncols() < k {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "Vyazovkin layer {} has no corresponding preceding time interval",
+                k
+            )));
+        }
         let inv_t_col = grid.inv_temperature.column(k);
-        let dt_col = dt.column(k);
+        let dt_col = dt.column(k - 1);
 
         let r = 8.314462618;
 
         let n_exp = inv_t_col.len();
 
-        let mut best_e = 0.0;
+        let mut best_e = None;
         let mut best_phi = f64::INFINITY;
 
         for s in 0..self.steps {
@@ -223,11 +259,16 @@ impl VyazovkinSolver {
 
             if phi < best_phi {
                 best_phi = phi;
-                best_e = e;
+                best_e = Some(e);
             }
         }
 
-        Ok(best_e)
+        best_e.ok_or_else(|| {
+            TGADomainError::InvalidOperation(format!(
+                "Vyazovkin found no valid energy candidate at layer {}",
+                k
+            ))
+        })
     }
     /// Low-level functional Φ(E) evaluated at a single candidate energy `e`
     /// for layer `k`.  Used internally; exposed for debugging and plotting.
@@ -277,11 +318,43 @@ pub struct Vyzaovkin;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
     use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion_tests::tests::simulate_tga_first_order_with_dt;
 
     use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconversion::VyazovkinMethod;
     use crate::Kinetics::experimental_kinetics::kinetic_methods_tests::tests::build_view_from_cfg_exact_m0;
     use crate::Kinetics::experimental_kinetics::testing_mod::tests_afvanced_config::base_advanced_config_non_isothermal;
+    use ndarray::{Array1, Array2, array};
+
+    #[test]
+    fn optimized_solver_matches_pairwise_reference_on_nonuniform_time_steps() {
+        let time = array![[0.0, 1.0, 4.0, 10.0], [0.0, 2.0, 8.0, 20.0]];
+        let temperature = array![[480.0, 510.0, 550.0, 600.0], [500.0, 530.0, 570.0, 620.0]];
+        let inv_temperature = temperature.mapv(|value| 1.0 / value);
+        let dt = ConversionGridBuilder::compute_dt_matrix(&time).unwrap();
+        let grid = ConversionGrid {
+            eta: Array1::from_vec(vec![0.1, 0.3, 0.6, 0.9]),
+            temperature,
+            inv_temperature,
+            time,
+            conversion_rate: Array2::ones((2, 4)),
+            dt: Some(dt),
+            meta: vec![ExperimentMeta::new(), ExperimentMeta::new()],
+        };
+        let solver = VyazovkinSolver {
+            e_min: 20_000.0,
+            e_max: 250_000.0,
+            steps: 701,
+        };
+        let dt = grid.dt.as_ref().unwrap();
+
+        for layer in 1..grid.eta.len() {
+            let pairwise = solver.solve_layer(&grid, dt, layer).unwrap();
+            let optimized = solver.solve_layer_optimized(&grid, dt, layer).unwrap();
+            assert_eq!(optimized, pairwise, "energy mismatch at layer {layer}");
+        }
+    }
+
     #[test]
     fn vyazovkin_compute_with_mock_non_isothermal_data() {
         // similar to ofw_compute_with_mock_non_isothermal_data2 but using Vyazovkin pipeline
@@ -314,12 +387,33 @@ mod tests {
             &[0.5, 1.0, 1.5, 2.0],
             0.5,
             50_000,
-            None,
+            Some(vec![0.1, 0.3, 0.5, 0.7, 0.9]),
         );
         // Build a new grid with dt via the production builder path by wrapping into a view is complex here,
         // instead directly call solver expecting dt to be absent -> we check method path on real pipeline in previous test.
         // Here we only assert solver refuses grids without dt to avoid silent misuse.
         let result = VyazovkinSolver::default().solve(&grid).unwrap();
         result.pretty_print_and_assert(0.05, 0.95, 100, None);
+    }
+
+    #[test]
+    fn vyazovkin_rejects_invalid_search_grid() {
+        assert!(
+            VyazovkinSolver {
+                steps: 1,
+                ..Default::default()
+            }
+            .validate_search()
+            .is_err()
+        );
+        assert!(
+            VyazovkinSolver {
+                e_min: 300_000.0,
+                e_max: 40_000.0,
+                ..Default::default()
+            }
+            .validate_search()
+            .is_err()
+        );
     }
 }

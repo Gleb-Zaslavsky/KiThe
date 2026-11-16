@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 pub struct TestOptions {
     /// Flag to show/hide the settings window
-    show_settings_window: bool,
+    pub(crate) show_settings_window: bool,
     /// Temporary settings being edited in the UI
     temp_k: String,
     temp_b: String,
@@ -27,9 +27,9 @@ pub struct TestOptions {
     pub(crate) help_edit_mode: bool,
     pub(crate) help_editor_buffer: String,
     pub(crate) help_expanded_sections: std::collections::HashSet<usize>,
-    show_logs_window: bool,
+    pub(crate) show_logs_window: bool,
     // Synthetic data window
-    show_synthetic_data: bool,
+    pub(crate) show_synthetic_data: bool,
 
     // Synthetic data: general
     syn_n_points: String,
@@ -141,17 +141,31 @@ impl Default for TestOptions {
 }
 
 impl TestOptions {
+    pub(crate) fn close_window_on_layer(&mut self, layer: Option<egui::LayerId>) -> bool {
+        let Some(layer) = layer else { return false };
+        let windows = [
+            ("TGA Settings", &mut self.show_settings_window),
+            ("Help", &mut self.show_help_window),
+            ("Create Synthetic TGA Data", &mut self.show_synthetic_data),
+            ("Operation History", &mut self.show_logs_window),
+        ];
+        for (title, is_open) in windows {
+            if layer.id == egui::Id::unique(Some(title)) && *is_open {
+                *is_open = false;
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Main UI display function
     pub fn show(ui: &mut egui::Ui, model: &mut PlotModel, test_options: &mut TestOptions) {
-        if ui.button("Run Tests").clicked() {
-            info!("Stub: Run Tests");
-        }
         if ui.button("Load testing data").clicked() {
-            info!("Stub: Load testing data");
+            info!("Loading packaged test data");
             model.push_testing_data();
         }
         if ui.button("Create synthetic data").clicked() {

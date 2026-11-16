@@ -1,4 +1,5 @@
-use crate::Kinetics::experimental_kinetics::exp_kinetics_smooth_filter::HampelStrategy;
+use crate::Kinetics::experimental_kinetics::math::exp_kinetics_smooth_filter::HampelStrategy;
+use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
 use crate::gui::experimental_kinetics_gui::model::{PlotModel, TGAGUIError};
 use RustedSciThe::numerical::data_processing::lowess_wrapper::LowessConfig;
 use RustedSciThe::numerical::data_processing::splines::SplineKind;
@@ -64,6 +65,84 @@ pub struct Mathematics {
 }
 
 impl Mathematics {
+    /// Estimate the selected curve's time spacing from its currently displayed points.
+    /// Plot downsampling can make this differ from the underlying measurement grid.
+    fn time_grid_summary(model: &PlotModel) -> Option<(f64, &'static str, f64)> {
+        let curve = model
+            .get_selected_curve_index()
+            .and_then(|index| model.plots.get(index))
+            .or_else(|| {
+                if model.is_only_one_shown() {
+                    model.plots.iter().find(|curve| curve.is_shown())
+                } else {
+                    None
+                }
+            })?;
+        let experiment = model
+            .series
+            .get_experiment_by_id(&curve.experiment_id)
+            .ok()?;
+        let unit = experiment.dataset.schema.columns.get(&curve.x_name)?.unit;
+        let unit_name = match unit {
+            Unit::Second => "s",
+            Unit::Minute => "min",
+            Unit::Hour => "h",
+            _ => return None,
+        };
+
+        let mut steps: Vec<f64> = curve
+            .points
+            .windows(2)
+            .map(|pair| (pair[1][0] - pair[0][0]).abs())
+            .filter(|step| step.is_finite() && *step > 0.0)
+            .collect();
+        if steps.is_empty() {
+            return None;
+        }
+        steps.sort_by(f64::total_cmp);
+        let median_step = steps[steps.len() / 2];
+        let total_span = curve
+            .points
+            .iter()
+            .map(|point| point[0])
+            .filter(|x| x.is_finite())
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), x| {
+                (min.min(x), max.max(x))
+            });
+        let span = total_span.1 - total_span.0;
+        (span.is_finite() && span > 0.0).then_some((median_step, unit_name, span))
+    }
+
+    fn show_window_duration(ui: &mut egui::Ui, model: &PlotModel, points: usize) {
+        if let Some((median_step, unit, _)) = Self::time_grid_summary(model) {
+            let covered = median_step * points.saturating_sub(1) as f64;
+            ui.small(format!(
+                "Plot-based estimate: {covered:.6} {unit} ({points} points; median plotted step {median_step:.6} {unit}). Downsampling may make this differ from the measurement grid."
+            ));
+        } else {
+            ui.small("Time span unavailable: select a curve with a bound time unit and at least two distinct time points.");
+        }
+    }
+
+    pub(crate) fn close_window_on_layer(&mut self, layer: Option<egui::LayerId>) -> bool {
+        let Some(layer) = layer else { return false };
+        let windows = [
+            ("Hampel filter", &mut self.show_hampel_window),
+            ("Savitzky Golay", &mut self.show_sg_window),
+            ("rolling mean", &mut self.show_rolling_window),
+            ("Splines", &mut self.show_splines_window),
+            ("LSQ Splines", &mut self.show_sql_splines_window),
+            ("LOWESS", &mut self.show_lowess_window),
+        ];
+        for (title, is_open) in windows {
+            if layer.id == egui::Id::unique(Some(title)) && *is_open {
+                *is_open = false;
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn new() -> Self {
         Self {
             show_hampel_window: false,
@@ -99,7 +178,7 @@ impl Mathematics {
             sql_splines_degree: 3,
             sql_splines_n_points: 1000,
             sql_splines_out_col: String::new(),
-            sq_splines_n_internal_knots: 10000,
+            sq_splines_n_internal_knots: 0,
 
             lowess_time_col: None,
             lowess_fraction: 0.5,
@@ -112,27 +191,45 @@ impl Mathematics {
     }
 
     pub fn show_menu(&mut self, ui: &mut egui::Ui) {
-        if ui.button("Hampel filter").clicked() {
+        if ui.button("Hampel filter").on_hover_text("Robust local-median outlier filter; opens settings for the selected column and output behavior.").clicked() {
             self.show_hampel_window = true;
         }
 
-        if ui.button(" Savitzky Golay").clicked() {
+        if ui.button(" Savitzky Golay").on_hover_text("Local polynomial smoother or derivative estimator; opens column, window, order and output settings.").clicked() {
             self.show_sg_window = true;
         }
 
-        if ui.button("rolling mean").clicked() {
+        if ui
+            .button("rolling mean")
+            .on_hover_text(
+                "Sliding-window mean smoother; opens source, window and output settings.",
+            )
+            .clicked()
+        {
             self.show_rolling_window = true;
         }
 
-        if ui.button("Splines").clicked() {
+        if ui
+            .button("Splines")
+            .on_hover_text(
+                "Interpolate the selected curve onto a new time grid; creates resampled columns.",
+            )
+            .clicked()
+        {
             self.show_splines_window = true;
         }
 
-        if ui.button("LSQ Splines").clicked() {
+        if ui
+            .button("LSQ Splines")
+            .on_hover_text(
+                "Fit a least-squares B-spline and resample the selected curve into new columns.",
+            )
+            .clicked()
+        {
             self.show_sql_splines_window = true;
         }
 
-        if ui.button("LOWESS").clicked() {
+        if ui.button("LOWESS").on_hover_text("Locally weighted regression smoother for selected columns versus a chosen time column.").clicked() {
             self.show_lowess_window = true;
         }
     }
@@ -152,9 +249,11 @@ impl Mathematics {
 
     fn selected_column_ui(
         ui: &mut egui::Ui,
+        label_text: &str,
         combo_id: &str,
         selected_col: &mut Option<String>,
         columns: &[String],
+        default_col: Option<&str>,
     ) {
         if columns.is_empty() {
             ui.label("No columns available for selected curve.");
@@ -166,17 +265,26 @@ impl Mathematics {
             .map(|col| !columns.contains(col))
             .unwrap_or(true)
         {
-            *selected_col = columns.first().cloned();
+            *selected_col = default_col
+                .filter(|default| columns.iter().any(|column| column == default))
+                .map(str::to_owned)
+                .or_else(|| columns.first().cloned());
         }
 
-        let selected_text = selected_col.as_deref().unwrap_or("Select column");
-        egui::ComboBox::from_id_salt(combo_id)
-            .selected_text(selected_text)
-            .show_ui(ui, |ui| {
-                for col in columns {
-                    ui.selectable_value(selected_col, Some(col.clone()), col);
-                }
-            });
+        let selected_text = selected_col
+            .clone()
+            .unwrap_or_else(|| "Select column".to_owned());
+        ui.horizontal(|ui| {
+            ui.label(label_text);
+            let combo = egui::ComboBox::from_id_salt(combo_id)
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    for col in columns {
+                        ui.selectable_value(selected_col, Some(col.clone()), col);
+                    }
+                });
+            let _ = combo.response.accessible_name(label_text);
+        });
     }
 
     fn set_action_error(model: &mut PlotModel, err: TGAGUIError) {
@@ -185,16 +293,21 @@ impl Mathematics {
     }
 
     fn error_text(err: TGAGUIError) -> String {
-        match err {
-            TGAGUIError::TGADomainError(domain) => format!("{:?}", domain),
-            TGAGUIError::SettingsErrors(msg) => msg,
-            TGAGUIError::BindingError(msg) => msg,
-        }
+        err.to_string()
     }
 
     fn finalize_success(model: &mut PlotModel, message: &str) {
         if let Err(err) = model.create_points_for_selected_curve() {
-            Self::set_action_error(model, err);
+            if let Ok(id) = model.get_experiment_by_selected_curve() {
+                model.plots.retain(|curve| curve.experiment_id != id);
+                model.reset_view();
+            }
+            Self::set_action_error(
+                model,
+                TGAGUIError::post_commit_warning(format!(
+                    "the filter was applied, but its graph could not be refreshed; stale curves were removed ({err})"
+                )),
+            );
             return;
         }
         model.reset_view();
@@ -211,14 +324,18 @@ impl Mathematics {
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
+                ui.label("Robust outlier filter: compares each point with a local median and MAD-based threshold. Apply reads the selected column and settings; a different output name creates a new column, while the source name replaces it.");
+                ui.add_space(4.0);
                 match Self::columns_for_selected(model) {
                     Ok(columns) => {
-                        ui.label("col_name");
+                        let default_col = model.this_is_y().ok();
                         Self::selected_column_ui(
                             ui,
+                            "Column",
                             "hampel_filter_column_combo",
                             &mut self.hampel_col,
                             &columns,
+                            default_col.as_deref(),
                         );
                     }
                     Err(err) => {
@@ -227,12 +344,15 @@ impl Mathematics {
                 }
 
                 ui.horizontal(|ui| {
-                    ui.label("window");
-                    ui.add(egui::DragValue::new(&mut self.hampel_window).speed(1.0));
+                    let label = ui.label("Window size");
+                    let value = ui.add(egui::DragValue::new(&mut self.hampel_window).speed(1.0));
+                    value.labelled_by(label.id);
                 });
+                Self::show_window_duration(ui, model, self.hampel_window);
                 ui.horizontal(|ui| {
-                    ui.label("sigma");
-                    ui.add(egui::DragValue::new(&mut self.hampel_sigma).speed(0.1));
+                    let label = ui.label("Sigma threshold");
+                    let value = ui.add(egui::DragValue::new(&mut self.hampel_sigma).speed(0.1));
+                    value.labelled_by(label.id);
                 });
 
                 let strategy_text = match self.hampel_strategy {
@@ -270,16 +390,20 @@ impl Mathematics {
                         {
                             self.hampel_strategy = HampelStrategy::Drop;
                         }
-                    });
+                    })
+                    .response
+                    .accessible_name("Strategy");
 
                 ui.horizontal(|ui| {
-                    ui.label("out_col (optional)");
-                    ui.text_edit_singleline(&mut self.hampel_out_col);
+                    let label = ui.label("Output column (optional)");
+                    let input = ui.text_edit_singleline(&mut self.hampel_out_col);
+                    input.labelled_by(label.id);
                 });
 
                 ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
-                        let Some(col) = self.hampel_col.clone() else {
+                    if ui.button("Apply").on_hover_text("Requires a source column, window size and sigma threshold. A different output name creates a column; using the source name edits it in place.").clicked() {
+                        let Some(col) = self.hampel_col.clone().or_else(|| model.this_is_y().ok())
+                        else {
                             let _ = model.push_message("Select a column first.");
                             return;
                         };
@@ -318,14 +442,18 @@ impl Mathematics {
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
+                ui.label("Local polynomial smoothing (or derivative estimation) with the Savitzky-Golay method. Apply reads the selected column and numeric settings; a different output name creates a new column, while the source name replaces it.");
+                ui.add_space(4.0);
                 match Self::columns_for_selected(model) {
                     Ok(columns) => {
-                        ui.label("col");
+                        let default_col = model.this_is_y().ok();
                         Self::selected_column_ui(
                             ui,
+                            "Column",
                             "sg_filter_column_combo",
                             &mut self.sg_col,
                             &columns,
+                            default_col.as_deref(),
                         );
                     }
                     Err(err) => {
@@ -334,30 +462,37 @@ impl Mathematics {
                 }
 
                 ui.horizontal(|ui| {
-                    ui.label("window");
-                    ui.add(egui::DragValue::new(&mut self.sg_window).speed(1.0));
+                    let label = ui.label("Window size");
+                    let value = ui.add(egui::DragValue::new(&mut self.sg_window).speed(1.0));
+                    value.labelled_by(label.id);
+                });
+                Self::show_window_duration(ui, model, self.sg_window);
+                ui.horizontal(|ui| {
+                    let label = ui.label("Polynomial order");
+                    let value = ui.add(egui::DragValue::new(&mut self.sg_poly_order).speed(1.0));
+                    value.labelled_by(label.id);
                 });
                 ui.horizontal(|ui| {
-                    ui.label("poly_order");
-                    ui.add(egui::DragValue::new(&mut self.sg_poly_order).speed(1.0));
+                    let label = ui.label("Derivative order");
+                    let value = ui.add(egui::DragValue::new(&mut self.sg_deriv).speed(1.0));
+                    value.labelled_by(label.id);
                 });
                 ui.horizontal(|ui| {
-                    ui.label("deriv");
-                    ui.add(egui::DragValue::new(&mut self.sg_deriv).speed(1.0));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("delta");
-                    ui.add(egui::DragValue::new(&mut self.sg_delta).speed(0.1));
+                    let label = ui.label("Time step");
+                    let value = ui.add(egui::DragValue::new(&mut self.sg_delta).speed(0.1));
+                    value.labelled_by(label.id);
                 });
 
                 ui.horizontal(|ui| {
-                    ui.label("out_col (optional)");
-                    ui.text_edit_singleline(&mut self.sg_out_col);
+                    let label = ui.label("Output column (optional)");
+                    let input = ui.text_edit_singleline(&mut self.sg_out_col);
+                    input.labelled_by(label.id);
                 });
 
                 ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
-                        let Some(col) = self.sg_col.clone() else {
+                    if ui.button("Apply").on_hover_text("Requires a source column and window, polynomial order, derivative order and time step. A different output name creates a column; using the source name edits it in place.").clicked() {
+                        let Some(col) = self.sg_col.clone().or_else(|| model.this_is_y().ok())
+                        else {
                             let _ = model.push_message("Select a column first.");
                             return;
                         };
@@ -397,14 +532,18 @@ impl Mathematics {
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
+                ui.label("Sliding-window arithmetic mean for smoothing short-scale fluctuations. Apply reads the selected column and window size; a different output name creates a new column, while the source name replaces it.");
+                ui.add_space(4.0);
                 match Self::columns_for_selected(model) {
                     Ok(columns) => {
-                        ui.label("col_name");
+                        let default_col = model.this_is_y().ok();
                         Self::selected_column_ui(
                             ui,
+                            "Column",
                             "rolling_mean_column_combo",
                             &mut self.rolling_col,
                             &columns,
+                            default_col.as_deref(),
                         );
                     }
                     Err(err) => {
@@ -413,18 +552,22 @@ impl Mathematics {
                 }
 
                 ui.horizontal(|ui| {
-                    ui.label("window");
-                    ui.add(egui::DragValue::new(&mut self.rolling_window).speed(1.0));
+                    let label = ui.label("Window size");
+                    let value = ui.add(egui::DragValue::new(&mut self.rolling_window).speed(1.0));
+                    value.labelled_by(label.id);
+                });
+                Self::show_window_duration(ui, model, self.rolling_window);
+
+                ui.horizontal(|ui| {
+                    let label = ui.label("Output column (optional)");
+                    let input = ui.text_edit_singleline(&mut self.rolling_out_col);
+                    input.labelled_by(label.id);
                 });
 
                 ui.horizontal(|ui| {
-                    ui.label("out_col (optional)");
-                    ui.text_edit_singleline(&mut self.rolling_out_col);
-                });
-
-                ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
-                        let Some(col) = self.rolling_col.clone() else {
+                    if ui.button("Apply").on_hover_text("Requires a source column and window size. A different output name creates a column; using the source name edits it in place.").clicked() {
+                        let Some(col) = self.rolling_col.clone().or_else(|| model.this_is_y().ok())
+                        else {
                             let _ = model.push_message("Select a column first.");
                             return;
                         };
@@ -461,6 +604,8 @@ impl Mathematics {
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
+                ui.label("LOWESS fits local weighted regressions against the chosen time column. Select one or more source columns and numeric settings; outputs are separate columns by default, and an output name matching its source replaces that source.");
+                ui.add_space(4.0);
                 match Self::columns_for_selected(model) {
                     Ok(columns) => {
                         if columns.is_empty() {
@@ -468,12 +613,14 @@ impl Mathematics {
                             return;
                         }
 
-                        ui.label("time_col");
+                        let default_col = model.this_is_x().ok();
                         Self::selected_column_ui(
                             ui,
+                            "Time column",
                             "lowess_time_col_combo",
                             &mut self.lowess_time_col,
                             &columns,
+                            default_col.as_deref(),
                         );
 
                         self.lowess_selected_cols
@@ -507,8 +654,9 @@ impl Mathematics {
                                     .entry(col.clone())
                                     .or_insert_with(String::new);
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("out for {} (optional)", col));
-                                    ui.text_edit_singleline(out_name);
+                                    let label = ui.label(format!("Output for {} (optional)", col));
+                                    let input = ui.text_edit_singleline(out_name);
+                                    let _ = input.labelled_by(label.id);
                                 });
                             }
                         }
@@ -521,21 +669,25 @@ impl Mathematics {
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label("fraction");
-                    ui.add(egui::DragValue::new(&mut self.lowess_fraction).speed(0.01));
+                    let label = ui.label("Fraction");
+                    let input = ui.add(egui::DragValue::new(&mut self.lowess_fraction).speed(0.01));
+                    let _ = input.labelled_by(label.id);
                 });
                 ui.horizontal(|ui| {
-                    ui.label("iterations");
-                    ui.add(egui::DragValue::new(&mut self.lowess_iterations).speed(1.0));
+                    let label = ui.label("Iterations");
+                    let input =
+                        ui.add(egui::DragValue::new(&mut self.lowess_iterations).speed(1.0));
+                    let _ = input.labelled_by(label.id);
                 });
                 ui.horizontal(|ui| {
-                    ui.label("delta");
-                    ui.add(egui::DragValue::new(&mut self.lowess_delta).speed(0.001));
+                    let label = ui.label("Delta");
+                    let input = ui.add(egui::DragValue::new(&mut self.lowess_delta).speed(0.001));
+                    let _ = input.labelled_by(label.id);
                 });
                 ui.checkbox(&mut self.lowess_parallel, "parallel");
 
                 ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
+                    if ui.button("Apply").on_hover_text("Requires a time column, at least one selected column, and fraction/iteration/delta settings. Creates output columns by default; matching an output name to its source edits it in place.").clicked() {
                         let Some(time_col) = self.lowess_time_col.clone() else {
                             let _ = model.push_message("Select time_col first.");
                             return;
@@ -604,13 +756,18 @@ impl Mathematics {
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
+                ui.label("Resamples the selected curve onto a new time grid using the chosen linear, cosine or Bezier interpolation. It creates a new time column and a resampled Y column; the original columns are retained.");
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label("new_time_col");
-                    ui.text_edit_singleline(&mut self.splines_new_time_col);
+                    let label = ui.label("New time column");
+                    let input = ui.text_edit_singleline(&mut self.splines_new_time_col);
+                    let _ = input.labelled_by(label.id);
                 });
                 ui.horizontal(|ui| {
-                    ui.label("n_points");
-                    ui.add(egui::DragValue::new(&mut self.splines_n_points).speed(10.0));
+                    let label = ui.label("Number of points");
+                    let input =
+                        ui.add(egui::DragValue::new(&mut self.splines_n_points).speed(10.0));
+                    let _ = input.labelled_by(label.id);
                 });
 
                 let kind_text = match self.splines_kind {
@@ -637,22 +794,28 @@ impl Mathematics {
                             SplineKindChoice::Bezier,
                             "Bezier",
                         );
-                    });
+                    })
+                    .response
+                    .accessible_name("Spline type");
 
                 if self.splines_kind == SplineKindChoice::Bezier {
                     ui.horizontal(|ui| {
-                        ui.label("bezier_tension");
-                        ui.add(egui::DragValue::new(&mut self.splines_bezier_tension).speed(0.05));
+                        let label = ui.label("Bezier tension");
+                        let input = ui.add(
+                            egui::DragValue::new(&mut self.splines_bezier_tension).speed(0.05),
+                        );
+                        let _ = input.labelled_by(label.id);
                     });
                 }
 
                 ui.horizontal(|ui| {
-                    ui.label("out_col (optional)");
-                    ui.text_edit_singleline(&mut self.splines_out_col);
+                    let label = ui.label("Output column (optional)");
+                    let input = ui.text_edit_singleline(&mut self.splines_out_col);
+                    let _ = input.labelled_by(label.id);
                 });
 
                 ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
+                    if ui.button("Apply").on_hover_text("Requires a new time-column name and point count; Bezier also uses tension. Creates resampled time and Y columns; original columns are retained.").clicked() {
                         let new_time_col = self.splines_new_time_col.trim();
                         if new_time_col.is_empty() {
                             let _ = model.push_message("new_time_col cannot be empty.");
@@ -700,26 +863,48 @@ impl Mathematics {
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
+                ui.label("Fits a least-squares B-spline to the selected curve and resamples it. Creates a new time column and fitted Y column; original columns are retained.");
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label("degree");
-                    ui.add(egui::DragValue::new(&mut self.sql_splines_degree).speed(1.0));
+                    let label = ui.label("Degree");
+                    let input =
+                        ui.add(egui::DragValue::new(&mut self.sql_splines_degree).speed(1.0));
+                    let _ = input.labelled_by(label.id);
                 });
                 ui.horizontal(|ui| {
-                    ui.label("n_points");
-                    ui.add(egui::DragValue::new(&mut self.sql_splines_n_points).speed(10.0));
+                    let label = ui.label("Number of points");
+                    let input =
+                        ui.add(egui::DragValue::new(&mut self.sql_splines_n_points).speed(10.0));
+                    let _ = input.labelled_by(label.id);
                 });
                 ui.horizontal(|ui| {
-                    ui.label("n_internal_knots");
-                    ui.add(egui::DragValue::new(&mut self.sq_splines_n_internal_knots).speed(10.0));
+                    let label = ui.label("Internal knots");
+                    let input = ui.add(
+                        egui::DragValue::new(&mut self.sq_splines_n_internal_knots).speed(10.0),
+                    );
+                    let _ = input.labelled_by(label.id);
+                });
+                if let Some((_, unit, span)) = Self::time_grid_summary(model) {
+                    if self.sq_splines_n_internal_knots == 0 {
+                        ui.small("No internal knots; knot spacing is not applicable.");
+                    } else {
+                        let spacing = span / (self.sq_splines_n_internal_knots + 1) as f64;
+                        ui.small(format!(
+                            "Plot-based estimate of internal-knot spacing: {spacing:.6} {unit}. Downsampling may affect the displayed time range."
+                        ));
+                    }
+                } else {
+                    ui.small("Knot spacing unavailable: select a curve with a bound time unit and at least two distinct time points.");
+                }
+
+                ui.horizontal(|ui| {
+                    let label = ui.label("Output column (optional)");
+                    let input = ui.text_edit_singleline(&mut self.sql_splines_out_col);
+                    let _ = input.labelled_by(label.id);
                 });
 
                 ui.horizontal(|ui| {
-                    ui.label("out_col (optional)");
-                    ui.text_edit_singleline(&mut self.sql_splines_out_col);
-                });
-
-                ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
+                    if ui.button("Apply").on_hover_text("Requires degree, point count and internal-knot count. Uses the selected curve's X/Y columns; creates new time and fitted Y columns, retaining the originals.").clicked() {
                         let time_col = match model.this_is_x() {
                             Ok(col) => col,
                             Err(err) => {

@@ -8,7 +8,7 @@ use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{
 };
 use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
 use RustedSciThe::numerical::BVP_Damp::grid_api::GridRefinementMethod;
-use RustedSciThe::numerical::BVP_Damp::telemetry::BvpSolveStatus;
+use RustedSciThe::numerical::BVP_Damp::telemetry::{BvpSolveStatus, BvpTelemetryMode};
 use RustedSciThe::numerical::BVP_api::{
     BvpBoundaryCondition, BvpBoundarySide, BvpProblem, BvpSciSparseFactorization, BvpSolver,
     BvpSolverConfig, BvpSolverTelemetrySnapshot,
@@ -315,6 +315,7 @@ fn damped_options(adaptive: bool) -> DampedSolverOptions {
         .with_abs_tolerance(1e-5)
         .with_rel_tolerance(tolerances)
         .with_max_iterations(150)
+        .with_bvp_telemetry_mode(BvpTelemetryMode::Counters)
         .with_bounds(bounds)
 }
 
