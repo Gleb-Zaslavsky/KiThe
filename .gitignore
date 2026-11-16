@@ -12,6 +12,21 @@ Cargo.lock
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
+*.txt
+*.csv
+!src/SimpleReactorsIVP/combustion_validation/fixtures/tw_03_profiles.csv
+!src/SimpleReactorsBVP/literature_mf1963/fixtures/*.csv
+*.png
+*.pickle
+
+# Local archives and packaged workspace backups
+*.rar
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
