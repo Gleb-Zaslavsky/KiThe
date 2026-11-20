@@ -307,3 +307,65 @@ negative cases as explicit assertions about safe failure and unchanged state.
 Numerical filter/fit reports and the observed fixture results are documented in
 [`story_tests.md`](story_tests.md); simulated workflow tests print `[STORY]`
 lines with quality metrics and recovered parameters.
+
+## Isothermal experiments without a measured temperature column
+
+- [x] Make thermal mode explicit in New Experiment / Import Data. Allow an
+  isothermal import with a manually entered temperature and no T binding; keep
+  measured-temperature binding optional for that mode. Preserve current
+  non-isothermal import and validation behavior.
+- [x] Support Append to Experiment for isothermal targets without a T column;
+  require an incoming temperature column only when the target's data schema
+  actually contains one. Preserve mode and temperature metadata on commit.
+- [x] Replace the unconditional `Temperature source` presentation with a
+  measured-temperature source control shown only when a usable column exists.
+  When metadata defines an isothermal temperature, show it as the calculation
+  temperature instead of an empty source selector.
+- [x] When a measured temperature column exists, provide an explicit action to
+  calculate its mean over the experiment and adopt that value as the isothermal
+  temperature. Convert the selected unit to Kelvin, retain the original column,
+  report the valid sample count and result, and do not infer isothermal mode
+  merely because the column appears flat.
+- [x] Make Golden Pipeline's GUI preflight and result explanation mode-aware.
+  Isothermal data without a T column must complete mass/conversion processing
+  using metadata; do not fabricate measured T or dT/dt columns. Keep measured T
+  available when present, and leave the non-isothermal path unchanged.
+- [x] Label kinetic methods by thermal compatibility and prevent running
+  non-isothermal methods on isothermal experiments. Ensure isothermal methods
+  accept metadata temperature without requiring a bound T column. All failures
+  must reach the main system-message label.
+- [x] Add egui_kittest routes for manual-temperature import of t/m-only data,
+  explicit sensor-column averaging, Golden Pipeline with and without measured
+  temperature, Append without a T column, compatible isothermal method
+  execution, and clear rejection of an incompatible non-isothermal method.
+  Assert visible status and resulting dataset/schema/metadata, not only clicks.
+- [x] Final validation for this refactor: run the complete
+  `Kinetics::experimental_kinetics` domain test module and the complete
+  `gui::experimental_kinetics_gui` test module, including story tests.
+
+## GUI Production Hardening Follow-up
+
+- [x] P1: Make import thermal-mode controls mutually consistent. Clearing or
+  hiding the sensor-mean option must clear its state; validate the active mode,
+  not stale hidden fields. Test mode switching both directions and verify
+  resulting metadata and required bindings.
+- [x] P1: Make Column Manager metadata edits atomic. Parse and validate the full
+  draft first (including finite positive heating rate/setpoint and incompatible
+  simultaneous values), then commit once; on invalid input preserve every field.
+  Add egui_kittest coverage for partial-update regressions and valid updates.
+- [x] P1: Separate Golden Pipeline data commit from plot refresh. Preserve all
+  unrelated experiment curves; refresh only the processed experiment for
+  in-place mode; for save-as-new add only its curve. If plotting fails, keep
+  processed data and History, remove partial/stale curves for that experiment,
+  and publish a visible post-commit warning. Test with two live experiments and
+  injected plot failure.
+- [ ] P2: Make source selectors communicate role-compatible columns and units;
+  retain access to unusual sources through an explicit advanced choice. Before
+  transformations, show source -> output, units, and whether the column is
+  created or overwritten. Test selection and operation-target consistency.
+- [ ] P2: Expand GUI guarantees beyond dialog-local `last_error`: assert the
+  main status label describes failure or partial success and the available
+  recovery action. Add selected-column type/unit and large-series Column
+  Manager latency benchmarks before optimizing its sample cache.
+- [x] Final verification: focused regressions, complete
+  `gui::experimental_kinetics_gui` tests, and `git diff --check`.

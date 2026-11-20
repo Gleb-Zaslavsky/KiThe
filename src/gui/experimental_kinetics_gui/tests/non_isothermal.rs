@@ -348,6 +348,7 @@ fn story_non_isothermal_method_rejects_missing_heating_rate_metadata() {
                     id: format!("no_beta_{index}"),
                     heating_rate: None,
                     isothermal_temperature: None,
+                    thermal_mode: crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::Unspecified,
                     comment: None,
                 },
             )

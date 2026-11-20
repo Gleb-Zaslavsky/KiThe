@@ -796,3 +796,137 @@
 - [x] Reconcile high-risk stale entries above: selected-curve operations read their X/Y names from the selected `PlotCurve`; `tier3_selected_mass_smoothing_preserves_temperature_curve` covers the two-curve case. The candidate clone in `transform_by_id` is intentionally retained for rollback on closure errors and ID conflicts. `TGASeries` storage/index are private and ID mutations are validated.
 - [x] GUI post-commit plot policy: successful scientific/data mutations are never rolled back solely because a plot cannot be built. Keep the committed frame, History, and undo snapshot; remove stale/partial curves and show a typed warning in the main system-message path. Applied to data refresh, new-column plotting, import, continuation, fitting/reconstruction, IVP output, and fitted sublimation rates. Regression coverage verifies committed data and History survive a forced plotting failure.
 - [ ] The repository-wide `cargo fmt --all -- --check` currently fails on pre-existing formatting in experiment-series files. Keep the new invariant/materialization files formatted; broaden the gate after the existing formatting backlog is resolved.
+
+## Isothermal thermal-condition support
+
+- [x] Define and validate an explicit experiment thermal-mode contract. Keep
+  measured temperature-column availability separate from whether the experiment
+  is isothermal; an isothermal experiment may have no measured T column or may
+  retain a noisy sensor column. Preserve compatibility with existing metadata
+  and CSV round trips deliberately rather than inferring mode from column names.
+- [x] Build kinetic input for isothermal experiments from the declared
+  isothermal temperature in metadata when no T column exists. Normalize that
+  scalar to Kelvin and provide the constant temperature vector required by
+  isothermal methods without materializing a fake measurement column.
+- [x] Align kinetic method requirements and requested column natures. Isothermal
+  methods must not require a measured temperature column when metadata supplies
+  the temperature; non-isothermal methods must require a measured temperature
+  series and the method-specific heating metadata. Reject incompatible modes
+  with a clear domain error before numerical work.
+- [x] Split Golden Pipeline's shared time/mass/conversion processing from its
+  thermal branch. For isothermal input, do not require temperature binding,
+  Celsius conversion, temperature spline input, or dT/dt. Preserve and process
+  a measured T column only when present and requested. Keep the existing
+  non-isothermal temperature and dT/dt behavior covered as a regression.
+- [x] Add domain tests for: t/m-only isothermal data with metadata temperature;
+  isothermal data with a measured, nearly constant T column; missing both T and
+  isothermal metadata; method/mode incompatibility; Golden Pipeline with and
+  without a measured T column; and unchanged non-isothermal results. Verify
+  units, row alignment, schema, History, undo, and metadata serialization.
+
+## Numerical-core audit: correctness and scientific validation
+
+This section records concrete findings from a static review of the production
+`experimental_kinetics` domain. It does not claim that every scientific concern
+below is already a demonstrated bias; items marked as validation work need an
+independent numerical reference before changing the algorithm.
+
+### P0: plausible but incorrect numerical results
+
+- [ ] Fix conversion-window selection in `SublimationMethod::solve`. Missing
+  lower/upper bounds currently fall back to the first/last sample, so a window
+  outside the measured conversion range can silently regress the whole curve.
+  Select points by the actual conversion mask, keep temperature/rate aligned,
+  validate the requested window and report the number/range of accepted points.
+- [ ] Replace the tautological expected-vs-actual assertion in the sublimation
+  test (`expected` and `actual` currently use the same expression) with an
+  independently calculated expected rate and a disjoint-window regression case.
+- [x] Unify range handling in `ConversionGridBuilder` interpolation paths.
+  All grid builders now require the requested range to be covered by every
+  experiment, and allocating/in-place linear and spline helpers reject values
+  outside the measured interval. Exact measured boundaries remain valid; no
+  extrapolation policy is currently exposed.
+- [ ] Give Savitzky-Golay derivative mode (`deriv > 0`) a distinct semantic
+  contract from smoothing. It currently follows the generic smoothing metadata
+  and quality-report path, which compares input signal with its derivative and
+  can retain the source column's unit/nature. Define output dimensions using
+  `delta` and the source X unit, distinguish derivative provenance/quality, and
+  test a linear signal sampled in seconds and hours (including in-place use).
+- [ ] Validate derivative accuracy on non-uniform time grids. The current
+  centered secant `(y[i+1]-y[i-1])/(t[i+1]-t[i-1])` is not the exact derivative
+  at `t[i]` for a curved signal on an irregular grid (for example `y=t^2` at
+  `t=[0,1,3]`). Add an analytic quadratic test and decide/document the supported
+  derivative scheme. Do not bridge large acquisition gaps as if they were
+  ordinary local intervals; define a gap policy separately from normal edge
+  null trimming.
+
+### P1: method diagnostics and numerical robustness
+
+- [ ] Audit Kissinger peak extraction for boundary maxima and flat/ambiguous
+  plateaus. A maximum at the first/last conversion-grid point may be a truncated
+  peak, not an observed `Tm`; currently it can enter the regression as a valid
+  peak. Return per-experiment peak diagnostics and test clipped peaks and plateaus.
+- [ ] Assess whether Kissinger should locate each peak on that experiment's own
+  processed curve rather than a common conversion-interpolated grid. Compare
+  `Tm` and resulting activation energy against an independent synthetic reference;
+  this is scientific validation, not an assumed algorithm change.
+- [ ] Reconcile Vyazovkin implementation and stated quadrature. The functional
+  currently evaluates `exp(-E/(R*T_destination))*dt`, a right-endpoint sum,
+  while module documentation describes a trapezoidal/exact integral. Confirm the
+  intended published formulation, implement/document the matching quadrature,
+  and compare against an independent reference while refining the conversion
+  grid. Do not infer the direction or size of energy bias without this study.
+- [ ] Report a Vyazovkin search minimum at `e_min`/`e_max` as boundary-limited,
+  with the search step and objective value. Do not expose a default zero-valued
+  regression object as if it were a fitted regression for this method.
+- [ ] Replace silent/skipped invalid observations with explicit per-layer
+  diagnostics where a method intentionally continues. Results should identify
+  experiment IDs, conversion layer, accepted/rejected counts, and reason; a
+  failed layer must not look like a complete smooth energy profile.
+- [ ] Add stability diagnostics for isoconversional regressions: number of
+  experiments used, `1/T` span, slope/activation-energy uncertainty where
+  meaningful, and sensitivity to leaving out one experiment. A high R2 from two
+  nearly identical temperatures is not evidence of a well-determined Ea.
+- [ ] Clarify that `LinearRegressionResult::stderr` is residual standard error,
+  not uncertainty of slope or activation energy; provide a separate statistic if
+  the latter is reported.
+
+### P1: filtering diagnostics and signal fidelity
+
+- [ ] Make filter-quality reports metric-wise and diagnostic. A zero/undefined
+  roughness denominator should not discard otherwise valid RMSE/correlation, and
+  callers must retain the reason a metric is unavailable instead of collapsing
+  the whole report to `None` with `.ok()`.
+- [ ] Separate 'change relative to input' from 'accuracy relative to known
+  signal.' Index-based roughness ratios are not time-aware and do not establish
+  that a curve is ready for differentiation. Add TGA-oriented diagnostics on
+  time-based derivative noise over a declared quiet region and mass-change
+  consistency (integrated cleaned rate versus observed mass change).
+- [ ] Validate smoothing using clean synthetic `m(t)` and `m'(t)` references:
+  residual derivative noise, derivative RMSE, peak height/location where
+  applicable, and integrated mass change. Treat thresholds as method- and
+  sampling-specific; do not require every metric to improve monotonically.
+- [ ] Extend physical-fidelity tests to spline/resampling and all remaining
+  production filters, including irregular sampling, acquisition gaps, plateaus,
+  boundary behavior, and time-unit changes.
+
+### P2: errors, complexity, and performance measurements
+
+- [x] Replace high-impact fitting/grid `InvalidOperation(String)` cases with
+  typed errors for uncovered conversion ranges, insufficient observations,
+  degenerate regression and backend non-convergence. Fit errors retain the
+  experiment, X/Y column and model context; backend diagnostics are preserved
+  verbatim. Fits at the minimum identifiable sample count emit a warning.
+- [x] Remove the quadratic terminal-conversion-plateau validation in
+  `ConversionGridBuilder::validate_input_data`. Terminal plateau membership is
+  checked in one reverse pass; a 100,000-point plateau regression test protects
+  acceptance and the unchanged threshold semantics.
+- [ ] Reduce repeated full-frame collection in `TGADataset::column_as_array1`
+  callers such as `filter_quality_report`: project/materialize the requested
+  columns once and calculate metrics without building redundant full-frame and
+  temporary `N x 2` arrays where practical.
+- [ ] Benchmark representative 100-200 MB experiments and five-experiment
+  series before broader memory redesign. Record wall time and peak RSS for
+  filtering/quality reports, common-grid construction, long operation chains,
+  and undo snapshots; retain the in-memory design unless measurements show a
+  real bottleneck.

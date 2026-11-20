@@ -962,6 +962,7 @@ pub mod tests {
                 id: id.clone(),
                 heating_rate: run.meta.heating_rate,
                 isothermal_temperature: run.meta.isothermal_temperature,
+                thermal_mode: run.meta.thermal_mode,
                 comment: run.meta.comment.clone(),
             };
             series

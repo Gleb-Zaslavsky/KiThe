@@ -4,6 +4,7 @@ use crate::Kinetics::experimental_kinetics::column_provenance::{
     ColumnTransformKind, QualityStatus,
 };
 use crate::Kinetics::experimental_kinetics::exp_engine_api::GoldenPipelineConfig;
+use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode;
 use crate::Kinetics::experimental_kinetics::math::ndarray_statistics::FilterQualityReport;
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
 use eframe::egui;
@@ -81,6 +82,24 @@ impl GoldenPipelineDialogState {
             .default_size([500.0, 600.0])
             .show(ctx, |ui| {
                 ui.heading("Golden Pipeline Configuration");
+                if let Ok(id) = model.get_experiment_by_selected_curve() {
+                    if let Ok(experiment) = model.series.get_experiment_by_id(&id) {
+                        if experiment.meta.resolved_thermal_mode() == ExperimentThermalMode::Isothermal {
+                            if let Some(temperature) = experiment.meta.isothermal_temperature {
+                                ui.label(format!(
+                                    "Isothermal input: setpoint {temperature:.3} K; measured T is optional and dT/dt will not be generated."
+                                ));
+                            } else {
+                                ui.colored_label(
+                                    egui::Color32::YELLOW,
+                                    "Isothermal metadata has no setpoint temperature.",
+                                );
+                            }
+                        } else {
+                            ui.label("Non-isothermal input: a bound measured temperature column is required; the pipeline generates dT/dt.");
+                        }
+                    }
+                }
                 ui.separator();
 
                 egui::ScrollArea::vertical().show(ui, |ui| {

@@ -71,9 +71,11 @@ pub struct KineticMethodsWindowState {
     pub fit_reconstructed_experiment_id: String,
     pub sublimation_check_open: bool,
     pub sublimation_status: String,
-    pub sublimation_mean_ea_kj: Option<f64>,
-    pub sublimation_mean_k: Option<f64>,
+    pub sublimation_ea_kj: Option<f64>,
+    pub sublimation_k: Option<f64>,
     pub sublimation_verdict: Option<String>,
+    pub sublimation_x_min: String,
+    pub sublimation_x_max: String,
 }
 
 impl Default for KineticMethodsWindowState {
@@ -130,9 +132,11 @@ impl Default for KineticMethodsWindowState {
             fit_reconstructed_experiment_id: String::new(),
             sublimation_check_open: false,
             sublimation_status: String::new(),
-            sublimation_mean_ea_kj: None,
-            sublimation_mean_k: None,
+            sublimation_ea_kj: None,
+            sublimation_k: None,
             sublimation_verdict: None,
+            sublimation_x_min: String::new(),
+            sublimation_x_max: String::new(),
         }
     }
 }
@@ -182,7 +186,7 @@ impl KineticMethods {
         if ui.button("Fit Model").on_hover_text("General single-experiment curve fitting, not a kinetic method; adds a fitted output column.").clicked() {
             state.fit_model_open = true;
         }
-        if ui.button("Is this a sublimation?").on_hover_text("Non-isothermal diagnostic using conversion rate and temperature; adds fitted-rate columns.").clicked() {
+        if ui.button("Is this a sublimation?").on_hover_text("Diagnose one selected experiment or selected conversion interval using conversion rate and temperature; adds a fitted-rate column to that experiment.").clicked() {
             state.sublimation_check_open = true;
         }
     }
@@ -204,7 +208,11 @@ impl KineticMethods {
             .default_size([540.0, 360.0])
             .show(ui.ctx(), |ui| {
                 ui.vertical(|ui| {
-                    ui.label("Non-isothermal method: estimates activation energy versus conversion from experiments run at different heating rates. Choose the method and experiments; Calculate adds a result experiment using the Output ID.");
+                    if state.isoconversional_method == IsoconversionalMethod::FriedmanIntegral {
+                        ui.label("Isothermal Friedman method: uses the setpoint temperature from experiment metadata, so a measured T column is optional. Requires conversion data from at least three isothermal experiments.");
+                    } else {
+                        ui.label("Non-isothermal method: estimates activation energy versus conversion from experiments run at different heating rates. Requires a measured temperature column and heating-rate metadata; isothermal experiments are rejected.");
+                    }
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         let label = ui.label("Method:");
@@ -288,7 +296,12 @@ impl KineticMethods {
                     ui.add_space(8.0);
 
                     // Run the chosen method and store the result as a new experiment.
-                    if ui.button("Calculate").on_hover_text("Requires suitable non-isothermal experiments; optionally select a subset and set the result experiment ID. Adds a result experiment, not a source-data column.").clicked() {
+                    let calculate_help = if state.isoconversional_method == IsoconversionalMethod::FriedmanIntegral {
+                        "Requires at least three isothermal experiments with a finite setpoint temperature and conversion data. Adds a result experiment; source data are unchanged."
+                    } else {
+                        "Requires non-isothermal experiments with a measured temperature column and heating-rate metadata. Isothermal experiments are rejected. Adds a result experiment; source data are unchanged."
+                    };
+                    if ui.button("Calculate").on_hover_text(calculate_help).clicked() {
                         let status = (|| -> Result<String, TGAGUIError> {
                             if exp_ids.is_empty() {
                                 return Ok("No experiments to analyze.".to_string());
@@ -449,14 +462,22 @@ impl KineticMethods {
             .default_size([560.0, 320.0])
             .show(ui.ctx(), |ui| {
                 ui.vertical(|ui| {
-                    ui.label("Non-isothermal diagnostic: evaluates conversion-rate behavior against temperature across experiments and reports whether it is consistent with sublimation. It also adds fitted-rate columns; source columns are retained.");
+                    ui.label("Diagnoses one selected experiment. Leave Conversion X bounds empty to use the whole experiment, enter both bounds to restrict the fit, or drag-select an X interval on a conversion-vs-rate curve. Entered bounds take precedence over a plot selection. A used selection touching multiple curves is rejected. The fit uses only the chosen X interval; fitted rates are evaluated across the full experiment and stored in a new column.");
+                    ui.horizontal(|ui| {
+                        ui.label("Conversion X min (optional):");
+                        ui.add(egui::TextEdit::singleline(&mut state.sublimation_x_min)
+                            .hint_text("min conversion; empty = full range"));
+                        ui.label("max:");
+                        ui.add(egui::TextEdit::singleline(&mut state.sublimation_x_max)
+                            .hint_text("max conversion; empty = full range"));
+                    });
                     ui.add_space(4.0);
                     let ea_label = state
-                        .sublimation_mean_ea_kj
+                        .sublimation_ea_kj
                         .map(|v| format!("{:.2}", v))
                         .unwrap_or_else(|| "-".to_string());
                     let k_label = state
-                        .sublimation_mean_k
+                        .sublimation_k
                         .map(|v| format!("{:.4e}", v))
                         .unwrap_or_else(|| "-".to_string());
                     let verdict_label = state
@@ -465,12 +486,12 @@ impl KineticMethods {
                         .unwrap_or_else(|| "-".to_string());
 
                     ui.horizontal(|ui| {
-                        ui.label("Mean Ea (kJ/mol):");
+                        ui.label("Ea (kJ/mol):");
                         ui.label(ea_label);
                     });
 
                     ui.horizontal(|ui| {
-                        ui.label("Mean k:");
+                        ui.label("Pre-exponential factor k:");
                         ui.label(k_label);
                     });
 
@@ -488,21 +509,65 @@ impl KineticMethods {
 
                     ui.add_space(8.0);
 
-                    // Run the solver, store mean values, and push fitted curves into the series.
-                    if ui.button("Calculate").on_hover_text("Requires conversion, conversion rate and temperature data. Updates the verdict and adds fitted-rate columns; no input fields are required.").clicked() {
+                    // Fit the selected experiment, then add its full-length predicted rate column.
+                    if ui.button("Calculate").on_hover_text("Requires one selected experiment with conversion, conversion rate and temperature. Optional bounds or the selected X interval restrict the fit; fitted rates are added over the full experiment.").clicked() {
                         let status = (|| -> Result<String, TGAGUIError> {
-                            let method = SublimationMethod::default();
-                            let cols = method.required_columns_by_nature();
-                            let view = model.create_kinetic_data_view(None, cols)?;
-
+                            let selected_index = model.get_selected_curve_index().ok_or_else(|| TGAGUIError::BindingError("Select one curve for the experiment to diagnose.".into()))?;
+                            let curve = model.plots.get(selected_index).ok_or_else(|| TGAGUIError::BindingError("Selected curve is no longer available.".into()))?;
+                            let exp_id = curve.experiment_id.clone();
+                            let x_name = curve.x_name.clone();
+                            let parse_bound = |text: &str| -> Result<Option<f64>, TGAGUIError> {
+                                if text.trim().is_empty() { Ok(None) } else {
+                                    let value = text.trim().parse::<f64>().map_err(|_| TGAGUIError::BindingError("Conversion X bounds must be numbers.".into()))?;
+                                    if value.is_finite() { Ok(Some(value)) } else { Err(TGAGUIError::BindingError("Conversion X bounds must be finite.".into())) }
+                                }
+                            };
+                            let lower = parse_bound(&state.sublimation_x_min)?;
+                            let upper = parse_bound(&state.sublimation_x_max)?;
+                            if lower.is_some() != upper.is_some() {
+                                return Err(TGAGUIError::BindingError("Enter both conversion X bounds, or leave both empty.".into()));
+                            }
+                            let selected_range = if lower.is_none() {
+                                if let Some(rect) = model.interaction.selection_rect {
+                                    let (x_min, x_max, _, _) = rect.bounds();
+                                    let intersecting = model.plots.iter().filter(|plot| plot.highlighted).count();
+                                    if intersecting != 1 || !curve.highlighted {
+                                        return Err(TGAGUIError::BindingError(format!("The selected region intersects {intersecting} plotted curves; narrow it so exactly the selected curve is included.")));
+                                    }
+                                    let experiment = model.series.get_experiment_by_id(&exp_id)?;
+                                    if experiment.dataset.schema.eta.as_deref() != Some(x_name.as_str()) {
+                                        return Err(TGAGUIError::BindingError("For a plot selection, the curve X column must be the experiment's bound conversion column. Otherwise enter conversion X bounds above.".into()));
+                                    }
+                                    state.sublimation_x_min = x_min.to_string();
+                                    state.sublimation_x_max = x_max.to_string();
+                                    Some((x_min, x_max))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            let cols = SublimationMethod::default().required_columns_by_nature();
+                            let view = model.series.create_kinetic_data_view(Some(&[exp_id.as_str()]), cols)?;
+                            let exp_data = view.experiments.first().ok_or_else(|| TGAGUIError::BindingError("Selected experiment has no usable kinetic data.".into()))?;
+                            let (x_min, x_max) = if let (Some(a), Some(b)) = (lower, upper) {
+                                (a, b)
+                            } else if let Some((a, b)) = selected_range {
+                                (a, b)
+                            } else {
+                                (
+                                    exp_data.conversion.iter().copied().fold(f64::INFINITY, f64::min),
+                                    exp_data.conversion.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                                )
+                            };
+                            let method = SublimationMethod::new(x_min, x_max);
                             let results = method.compute(&view)?;
-                            let (mean_ea, mean_k, verdict) =
-                                SublimationMethod::mean_results(&results)?;
+                            let result = results.first().ok_or_else(|| TGAGUIError::BindingError("The selected experiment produced no sublimation result.".into()))?;
 
-                            state.sublimation_mean_ea_kj = Some(mean_ea / 1000.0);
-                            state.sublimation_mean_k = Some(mean_k);
+                            state.sublimation_ea_kj = Some(result.ea / 1000.0);
+                            state.sublimation_k = Some(result.k);
 
-                            let verdict_text = match verdict {
+                            let verdict_text = match result.resume {
                                 IsThisASublimationResult::Yes(r2) => {
                                     format!("Yes (R2={:.4})", r2)
                                 }

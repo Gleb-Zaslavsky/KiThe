@@ -35,6 +35,134 @@ pub mod tests {
         }
     }
 
+    fn partial_conversion_experiment() -> ExperimentData {
+        let mut exp = mock_experiment();
+        exp.conversion = vec![0.2, 0.5, 0.8];
+        exp
+    }
+
+    #[test]
+    fn conversion_grid_builders_share_no_extrapolation_contract() {
+        let data = KineticDataView {
+            experiments: vec![partial_conversion_experiment()],
+        };
+
+        // Both the allocating and in-place builder accept a range whose
+        // requested endpoints exactly match the measured interval.
+        for grid in [
+            ConversionGridBuilder::new()
+                .eta_range(0.2, 0.8)
+                .segments(8)
+                .build_withcopy(&data),
+            ConversionGridBuilder::new()
+                .eta_range(0.2, 0.8)
+                .segments(8)
+                .build_nonisothermal(&data),
+        ] {
+            assert!(grid.is_ok(), "exact measured boundaries must be accepted");
+        }
+
+        // A requested range extending beyond either measured endpoint must
+        // fail identically, even when the generated half-open grid might not
+        // happen to sample the out-of-range upper endpoint.
+        for (min, max) in [(0.1, 0.5), (0.5, 0.9)] {
+            let allocating = ConversionGridBuilder::new()
+                .eta_range(min, max)
+                .segments(8)
+                .build_withcopy(&data);
+            let in_place = ConversionGridBuilder::new()
+                .eta_range(min, max)
+                .segments(8)
+                .build_nonisothermal(&data);
+            assert!(
+                allocating.is_err(),
+                "allocating path accepted [{min}, {max}]"
+            );
+            assert!(in_place.is_err(), "in-place path accepted [{min}, {max}]");
+            match in_place {
+                Err(TGADomainError::ConversionRangeNotCovered {
+                    requested_min,
+                    requested_max,
+                    available_min,
+                    available_max,
+                    ..
+                }) => {
+                    assert_eq!(requested_min, min);
+                    assert_eq!(requested_max, max);
+                    assert_eq!(available_min, 0.2);
+                    assert_eq!(available_max, 0.8);
+                }
+                _ => panic!("expected typed conversion range error"),
+            }
+        }
+    }
+
+    #[test]
+    fn conversion_validation_handles_long_terminal_plateau_in_linear_time() {
+        let plateau_len = 100_000;
+        let mut exp = partial_conversion_experiment();
+        exp.conversion = vec![0.2, 0.5];
+        exp.conversion
+            .extend(std::iter::repeat(1.0).take(plateau_len));
+        exp.time = (0..exp.conversion.len()).map(|idx| idx as f64).collect();
+        exp.temperature = vec![350.0; exp.conversion.len()];
+        exp.conversion_rate = vec![0.1; exp.conversion.len()];
+
+        let data = KineticDataView {
+            experiments: vec![exp],
+        };
+        assert_eq!(
+            ConversionGridBuilder::new()
+                .calc_auto_eta_range(&data)
+                .unwrap(),
+            (0.2, 1.0)
+        );
+    }
+
+    #[test]
+    fn linear_interpolators_reject_extrapolation_but_accept_endpoints() {
+        let exp = partial_conversion_experiment();
+
+        for eta_grid in [&[0.1][..], &[0.9][..]] {
+            assert!(interpolate_linear(&exp, eta_grid).is_err());
+
+            let mut t = ndarray::Array1::zeros(eta_grid.len());
+            let mut temperature = ndarray::Array1::zeros(eta_grid.len());
+            let mut rate = ndarray::Array1::zeros(eta_grid.len());
+            assert!(
+                interpolate_linear_into(
+                    &exp,
+                    eta_grid,
+                    &mut t.view_mut(),
+                    &mut temperature.view_mut(),
+                    &mut rate.view_mut(),
+                )
+                .is_err()
+            );
+        }
+
+        let eta_grid = [0.2, 0.8];
+        let (t, temperature, rate) = interpolate_linear(&exp, &eta_grid).unwrap();
+        assert_eq!(t, vec![0.0, 10.0]);
+        assert_eq!(temperature, vec![300.0, 400.0]);
+        assert_eq!(rate, vec![0.1, 0.3]);
+
+        let mut t_into = ndarray::Array1::zeros(eta_grid.len());
+        let mut temperature_into = ndarray::Array1::zeros(eta_grid.len());
+        let mut rate_into = ndarray::Array1::zeros(eta_grid.len());
+        interpolate_linear_into(
+            &exp,
+            &eta_grid,
+            &mut t_into.view_mut(),
+            &mut temperature_into.view_mut(),
+            &mut rate_into.view_mut(),
+        )
+        .unwrap();
+        assert_eq!(t_into.to_vec(), t);
+        assert_eq!(temperature_into.to_vec(), temperature);
+        assert_eq!(rate_into.to_vec(), rate);
+    }
+
     #[test]
     fn dt_matrix_keeps_forward_intervals_for_nonuniform_grid() {
         let time = ndarray::array![[0.0, 1.0, 4.0, 10.0]];
@@ -187,6 +315,34 @@ pub mod tests {
             vec![298.15, 308.15]
         );
         assert_eq!(required_view.experiments[0].conversion_rate, vec![0.1, 0.2]);
+    }
+
+    #[test]
+    fn isothermal_kinetic_view_uses_metadata_temperature_without_measured_column() {
+        let frame = df!(
+            "exp_id" => ["iso", "iso", "iso"],
+            "time" => [0.0, 1.0, 2.0],
+            "conversion" => [0.0, 0.2, 0.4],
+            "conversion_rate" => [0.1, 0.1, 0.1]
+        )
+        .unwrap()
+        .lazy();
+        let meta = ExperimentMeta {
+            id: "iso".into(),
+            isothermal_temperature: Some(523.15),
+            thermal_mode: crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::Isothermal,
+            ..ExperimentMeta::default()
+        };
+        let united = UnitedDataset::new(frame, vec![meta]);
+
+        let view = KineticDataView::from_united_dataset_by_nature(
+            &united,
+            vec![ColumnNature::Time, ColumnNature::Conversion],
+        )
+        .unwrap();
+        let experiment = &view.experiments[0];
+        assert_eq!(experiment.temperature, vec![523.15; 3]);
+        assert_eq!(experiment.time, vec![0.0, 1.0, 2.0]);
     }
 
     #[test]
@@ -410,8 +566,11 @@ pub mod tests {
 
         assert_basic_view_sanity(&view, 3);
 
-        let grid = ConversionGridBuilder::new()
-            .eta_range(0.0, 1.0)
+        let builder = ConversionGridBuilder::new();
+        let (eta_min, eta_max) = builder.calc_auto_eta_range(&view).unwrap();
+
+        let grid = builder
+            .eta_range(eta_min, eta_max)
             .segments(200)
             .interpolation(GridInterpolation::Linear)
             .build_nonisothermal(&view)

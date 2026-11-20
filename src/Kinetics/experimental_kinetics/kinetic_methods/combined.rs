@@ -3,6 +3,7 @@ use crate::Kinetics::experimental_kinetics::kinetic_methods::kinetic_regression:
 };
 use crate::Kinetics::experimental_kinetics::kinetic_methods::{
     KineticDataView, KineticMethod, KineticRequirements, TGADomainError, check_requirements,
+    require_nonisothermal,
 };
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::ColumnNature;
 use ndarray::Array1;
@@ -176,6 +177,7 @@ impl KineticMethod for CombinedKineticAnalysis {
     }
 
     fn compute(&self, data: &KineticDataView) -> Result<Self::Output, TGADomainError> {
+        require_nonisothermal(data)?;
         self.solve(data)
     }
 

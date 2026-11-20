@@ -51,6 +51,7 @@ fn model_for_runs(runs: &[SimulatedTGA]) -> (PlotModel, Vec<String>) {
             id: id.clone(),
             heating_rate: run.meta.heating_rate,
             isothermal_temperature: run.meta.isothermal_temperature,
+            thermal_mode: run.meta.thermal_mode,
             comment: run.meta.comment.clone(),
         };
         model

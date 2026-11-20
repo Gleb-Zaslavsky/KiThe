@@ -1,5 +1,5 @@
 use crate::Kinetics::experimental_kinetics::experiment_series_main::{
-    ExperimentMeta, TGAExperiment, TGASeries,
+    ExperimentMeta, ExperimentThermalMode, TGAExperiment, TGASeries,
 };
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     AffectedColumns, ColumnMeta, ColumnNature, History, TGADataset, TGADomainError, TGASchema, Unit,
@@ -293,6 +293,7 @@ impl VirtualTGA {
                 id: format!("T = {:.1} K", temperature),
                 heating_rate: None,
                 isothermal_temperature: Some(temperature),
+                thermal_mode: ExperimentThermalMode::Isothermal,
                 comment: None,
             },
         })
@@ -336,6 +337,7 @@ impl VirtualTGA {
                 id: format!("β = {:.1} K/min", beta_min),
                 heating_rate: Some(beta_min),
                 isothermal_temperature: None,
+                thermal_mode: ExperimentThermalMode::NonIsothermal,
                 comment: None,
             },
         })
@@ -949,10 +951,9 @@ pub mod tests_afvanced_config {
         let series = build_series_from_cfg(&cfg, -1.0, 0.0, 1e-4).unwrap();
         let mut k_vec = vec![];
         for i in series.experiments().iter() {
-            let conversion = i.dataset.get_eta().unwrap();
-            let deta_dt = i.dataset.get_deta_dt().unwrap();
-            let deta_dt = Array1::from(deta_dt);
-            let conversion = Array1::from(conversion);
+            let aligned = i.dataset.materialize("time", &["eta", "deta_dt"]).unwrap();
+            let conversion = Array1::from(aligned.columns["eta"].as_ref().clone());
+            let deta_dt = Array1::from(aligned.columns["deta_dt"].as_ref().clone());
             let res = linear_regression(&conversion, &deta_dt).unwrap();
             let k = res.slope;
             let b = res.intercept;
@@ -989,9 +990,13 @@ pub mod tests_afvanced_config {
         let mut all_complex = vec![];
 
         for i in series.experiments().iter() {
-            let conversion = i.dataset.get_eta().unwrap();
-            let deta_dt = i.dataset.get_deta_dt().unwrap();
-            let temp = i.dataset.get_temperature().unwrap();
+            let aligned = i
+                .dataset
+                .materialize("time", &["eta", "deta_dt", "temperature"])
+                .unwrap();
+            let conversion = &aligned.columns["eta"];
+            let deta_dt = &aligned.columns["deta_dt"];
+            let temp = &aligned.columns["temperature"];
 
             // deta/dt = K(T(t))*(1-eta) => (deta/dt)/(1-eta) = K(T(t)) => ln((deta/dt)/(1-eta)) = ln(K(T(t)))= ln k0 - (E/R)*1/T
             for j in 0..conversion.len() {

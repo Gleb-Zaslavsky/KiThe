@@ -1667,6 +1667,7 @@ mod tests {
                 delta: 1.0,
             },
             averaging_time: 1.0,
+            isothermal_temperature: None,
             spline_config: SplineConfig {
                 n_points: 300,
                 n_internal_points: 200,
@@ -1738,6 +1739,7 @@ mod tests {
                 delta: 1.0,
             },
             averaging_time: 1.0,
+            isothermal_temperature: None,
             spline_config: SplineConfig {
                 n_points: 300,
                 n_internal_points: 200,

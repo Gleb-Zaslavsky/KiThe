@@ -20,6 +20,7 @@ use crate::Kinetics::experimental_kinetics::kinetic_methods::{
 };
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{ColumnNature, Unit};
 use ndarray::Array1;
+use polars::prelude::{DataType, col};
 
 pub const R: f64 = 8.314;
 
@@ -114,12 +115,18 @@ impl SublimationMethod {
     /// Core solver — returns one [`SublimationResult`] per experiment.
     ///
     /// For each experiment:
-    /// 1. Finds the sub-slice of `conversion` closest to `[eta_min, eta_max]`.
+    /// 1. Selects rows whose `conversion` values lie inside `[eta_min, eta_max]`.
     /// 2. Extracts the corresponding `temperature` and `conversion_rate`.
     /// 3. Regresses `ln(dα/dt)` vs `1/T` (OLS).
     /// 4. Recovers `k = exp(intercept)`, `E = -R · slope`.
     /// 5. Evaluates the fitted curve over the **full** temperature vector.
     pub fn solve(&self, data: &KineticDataView) -> Result<Vec<SublimationResult>, TGADomainError> {
+        if !self.eta_min.is_finite() || !self.eta_max.is_finite() || self.eta_min > self.eta_max {
+            return Err(TGADomainError::InvalidOperation(
+                "Conversion bounds must be finite and min must not exceed max".into(),
+            ));
+        }
+
         if data.experiments.is_empty() {
             return Err(TGADomainError::InvalidOperation(
                 "No experiments provided".into(),
@@ -138,29 +145,36 @@ impl SublimationMethod {
                     "Experiment has empty columns".into(),
                 ));
             }
-
-            // index range closest to [eta_min, eta_max]
-            let i_start = conv.iter().position(|&c| c >= self.eta_min).unwrap_or(0);
-            let i_end = conv
-                .iter()
-                .rposition(|&c| c <= self.eta_max)
-                .unwrap_or(conv.len() - 1);
-
-            if i_end <= i_start {
+            if conv.len() != temp.len() || conv.len() != rate.len() {
                 return Err(TGADomainError::InvalidOperation(format!(
-                    "No data in conversion window [{}, {}] for experiment '{}'",
+                    "Experiment '{}' has misaligned conversion, temperature, and rate vectors",
+                    exp.meta.id
+                )));
+            }
+
+            // Select by conversion value rather than assuming the matching rows are contiguous.
+            let selected_indices: Vec<usize> = conv
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &eta)| {
+                    (eta >= self.eta_min && eta <= self.eta_max).then_some(index)
+                })
+                .collect();
+
+            if selected_indices.len() < 3 {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Conversion range [{}, {}] contains fewer than three points for experiment '{}'",
                     self.eta_min, self.eta_max, exp.meta.id
                 )));
             }
 
             // build regression vectors: x = 1/T, y = ln(dα/dt)
-            let mut xs = Vec::with_capacity(i_end - i_start + 1);
-            let mut ys = Vec::with_capacity(i_end - i_start + 1);
+            let mut xs = Vec::with_capacity(selected_indices.len());
+            let mut ys = Vec::with_capacity(selected_indices.len());
 
-            for (&t, &r) in temp[i_start..=i_end]
-                .iter()
-                .zip(rate[i_start..=i_end].iter())
-            {
+            for index in selected_indices {
+                let t = temp[index];
+                let r = rate[index];
                 if !t.is_finite() || t <= 0.0 {
                     return Err(TGADomainError::InvalidOperation(
                         "Non-physical temperature".into(),
@@ -234,12 +248,71 @@ impl SublimationMethod {
         series: &mut TGASeries,
     ) -> Result<(), TGADomainError> {
         for res in results {
+            let exp = series.get_experiment_by_id(&res.experiment_id)?;
+            let temperature_column = exp
+                .dataset
+                .schema
+                .temperature
+                .as_deref()
+                .ok_or(TGADomainError::TemperatureNotBound)?;
+            let temperature_unit = exp
+                .dataset
+                .schema
+                .columns
+                .get(temperature_column)
+                .ok_or_else(|| TGADomainError::ColumnNotFound(temperature_column.to_string()))?
+                .unit;
+            let temperature_frame = exp
+                .dataset
+                .frame
+                .clone()
+                .select([col(temperature_column).cast(DataType::Float64)])
+                .collect()?;
+            let temperatures = temperature_frame.column(temperature_column)?.f64()?;
+            let missing_indices: Vec<_> = (0..temperatures.len())
+                .filter(|&index| temperatures.get(index).is_none())
+                .collect();
+            if !missing_indices.is_empty() {
+                return Err(TGADomainError::InvalidColumnValues {
+                    column: temperature_column.to_string(),
+                    details: "cannot evaluate the fitted rate at missing temperatures".into(),
+                    indices: missing_indices,
+                });
+            }
+
+            let full_length_temperature: Vec<f64> = temperatures
+                .into_no_null_iter()
+                .map(|temperature| match temperature_unit {
+                    Unit::Kelvin => temperature,
+                    Unit::Celsius => temperature + 273.15,
+                    _ => f64::NAN,
+                })
+                .collect();
+            if let Some((index, value)) = full_length_temperature
+                .iter()
+                .copied()
+                .enumerate()
+                .find(|(_, value)| !value.is_finite() || *value <= 0.0)
+            {
+                return Err(TGADomainError::InvalidColumnValues {
+                    column: temperature_column.to_string(),
+                    details: format!(
+                        "temperature must normalize to a finite positive Kelvin value; got {value}"
+                    ),
+                    indices: vec![index],
+                });
+            }
+
+            let fitted_rates = full_length_temperature
+                .iter()
+                .map(|&temperature| res.k * (-res.ea / (R * temperature)).exp())
+                .collect();
             series.add_column_from_vec(
                 &res.experiment_id,
                 "fitted_sublim_rate",
                 Unit::PerSecond,
                 ColumnNature::ConversionRate,
-                res.fitted_conversion_rate.clone(),
+                fitted_rates,
             )?;
         }
         Ok(())
@@ -326,6 +399,7 @@ mod tests {
                 id: id.to_string(),
                 heating_rate: None,
                 isothermal_temperature: None,
+                thermal_mode: crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::Unspecified,
                 comment: None,
             },
             time: (0..n).map(|i| i as f64).collect(),
@@ -377,6 +451,28 @@ mod tests {
     }
 
     #[test]
+    fn requested_conversion_window_selects_actual_points_and_rejects_disjoint_window() {
+        let view = make_view(1e6, 80_000.0, &["exp1"]);
+        let result = SublimationMethod::new(0.2, 0.8).solve(&view).unwrap();
+        assert_relative_eq!(result[0].ea, 80_000.0, epsilon = 800.0);
+
+        for (min, max) in [(1.1, 1.2), (-0.2, -0.1), (0.49, 0.491)] {
+            assert!(SublimationMethod::new(min, max).solve(&view).is_err());
+        }
+
+        for (min, max) in [(f64::NAN, 0.8), (0.2, f64::INFINITY), (0.8, 0.2)] {
+            assert!(SublimationMethod::new(min, max).solve(&view).is_err());
+        }
+    }
+
+    #[test]
+    fn sublimation_rejects_misaligned_input_vectors_without_panicking() {
+        let mut view = make_view(1e6, 80_000.0, &["exp1"]);
+        view.experiments[0].temperature.pop();
+        assert!(SublimationMethod::default().solve(&view).is_err());
+    }
+
+    #[test]
     fn fitted_curve_has_same_length_as_temperature() {
         let view = make_view(1e5, 60_000.0, &["e1"]);
         let n_temp = view.experiments[0].temperature.len();
@@ -393,9 +489,15 @@ mod tests {
         let res = &results[0];
 
         // spot-check a mid-range temperature point
-        let t = 600.0_f64;
-        let expected = res.k * (-res.ea / (R * t)).exp();
-        let actual = res.k * (-res.ea / (R * t)).exp();
+        let index = view.experiments[0]
+            .temperature
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| (*a - 600.0).abs().total_cmp(&(*b - 600.0).abs()))
+            .map(|(index, _)| index)
+            .unwrap();
+        let expected = view.experiments[0].conversion_rate[index];
+        let actual = res.fitted_conversion_rate[index];
         assert_relative_eq!(expected, actual, epsilon = 1e-10);
     }
 
@@ -511,6 +613,51 @@ mod tests {
         assert_relative_eq!(
             actual,
             results[0].fitted_conversion_rate[0],
+            epsilon = 1e-12
+        );
+    }
+
+    #[test]
+    fn push_fitted_rates_re_evaluates_against_full_source_temperature_axis() {
+        let ids = ["short_fit_view"];
+        let view = make_view(1e6, 80_000.0, &ids);
+        let results = SublimationMethod::new(0.05, 0.95).solve(&view).unwrap();
+        let fitted = &results[0];
+        let fit_len = view.experiments[0].temperature.len();
+        let mut full_temperature = view.experiments[0].temperature.clone();
+        full_temperature.extend([
+            full_temperature[fit_len - 1] + 1.0,
+            full_temperature[fit_len - 1] + 2.0,
+        ]);
+        let full_len = full_temperature.len();
+
+        let source = VirtualTGA {
+            time: (0..full_len).map(|index| index as f64).collect(),
+            temperature: full_temperature.clone(),
+            mass: vec![1.0; full_len],
+        };
+        let dataset = TGADataset::create_from_synthetic_data(&source).unwrap();
+        let mut series = TGASeries::new();
+        series
+            .push(TGAExperiment::new(dataset).with_id(ids[0]))
+            .unwrap();
+
+        SublimationMethod::push_fitted_rates_to_series(&results, &mut series).unwrap();
+
+        let frame = series
+            .get_experiment_by_id(ids[0])
+            .unwrap()
+            .dataset
+            .frame
+            .clone()
+            .collect()
+            .unwrap();
+        let fitted_rates = frame.column("fitted_sublim_rate").unwrap().f64().unwrap();
+        assert_eq!(frame.height(), full_len);
+        assert_eq!(fitted_rates.len(), full_len);
+        assert_relative_eq!(
+            fitted_rates.get(full_len - 1).unwrap(),
+            fitted.k * (-fitted.ea / (R * full_temperature[full_len - 1])).exp(),
             epsilon = 1e-12
         );
     }

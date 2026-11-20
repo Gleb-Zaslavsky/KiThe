@@ -11,8 +11,9 @@ use RustedSciThe::numerical::optimization::universal_fitting::{
     Method, UniversalFitting, UniversalFittingResult,
 };
 use RustedSciThe::symbolic::symbolic_engine::Expr;
+use log::warn;
 use polars::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 /// A small container for a named kinetic fitting model.
@@ -638,9 +639,29 @@ pub enum KineticFittingError {
     /// The initial guess is missing.
     #[error("initial guess cannot be empty")]
     InitialGuessMissing,
-    /// The solver backend failed.
-    #[error("fit failed: {0}")]
-    FitFailed(String),
+    /// The backend rejected or failed to solve the requested model.
+    /// Its original diagnostic text is retained verbatim.
+    #[error("fitting backend failed: {0}")]
+    BackendFailure(String),
+    /// The provided observations are fewer than the model requires.
+    #[error("insufficient observations: {available} available, {required} required")]
+    InsufficientObservations { available: usize, required: usize },
+    /// The data cannot identify the requested regression parameters.
+    #[error("degenerate regression: {0}")]
+    DegenerateRegression(String),
+    /// The x and y vectors have different lengths.
+    #[error("x/y length mismatch: {x_len} vs {y_len}")]
+    DataLengthMismatch { x_len: usize, y_len: usize },
+    /// An input value is not finite.
+    #[error("non-finite {series} value at index {index}: {value}")]
+    NonFiniteInput {
+        series: &'static str,
+        index: usize,
+        value: f64,
+    },
+    /// The initial guess has the wrong number of entries.
+    #[error("initial guess length {actual} does not match required length {required}")]
+    InvalidInitialGuess { actual: usize, required: usize },
     /// The solver result was missing a map of solutions.
     #[error("fit completed but did not produce a solution map")]
     MissingSolutionMap,
@@ -746,7 +767,16 @@ impl Fit {
                 universal.build()
             }
         }
-        .map_err(|err| KineticFittingError::FitFailed(err.to_string()))?;
+        .map_err(|err| KineticFittingError::BackendFailure(err.to_string()))?;
+
+        let required_points = self.kinetic_model.vec_of_params().len().max(2);
+        if self.x_data.len() == required_points {
+            warn!(
+                "Fitting {} with exactly {} observations: the result has no residual degrees of freedom",
+                self.kinetic_model.display_name(),
+                required_points
+            );
+        }
 
         self.fitted_model = Some(universal.fitted_model().clone());
 
@@ -821,7 +851,7 @@ impl Fit {
             .ok_or(KineticFittingError::MissingSolutionMap)?;
         let values = model
             .evaluate_at(&self.x_data)
-            .map_err(|err| KineticFittingError::FitFailed(err.to_string()))?;
+            .map_err(|err| KineticFittingError::BackendFailure(err.to_string()))?;
         Ok(values.values.column(0).iter().copied().collect())
     }
 
@@ -833,7 +863,7 @@ impl Fit {
             .ok_or(KineticFittingError::MissingSolutionMap)?;
         let values = model
             .evaluate_at(x)
-            .map_err(|err| KineticFittingError::FitFailed(err.to_string()))?;
+            .map_err(|err| KineticFittingError::BackendFailure(err.to_string()))?;
         Ok(values.values.column(0).iter().copied().collect())
     }
 
@@ -844,6 +874,26 @@ impl Fit {
         if self.y_data.is_empty() {
             return Err(KineticFittingError::YDataEmpty);
         }
+        if self.x_data.len() != self.y_data.len() {
+            return Err(KineticFittingError::DataLengthMismatch {
+                x_len: self.x_data.len(),
+                y_len: self.y_data.len(),
+            });
+        }
+        for (series, values) in [("x", &self.x_data), ("y", &self.y_data)] {
+            if let Some((index, value)) = values
+                .iter()
+                .copied()
+                .enumerate()
+                .find(|(_, value)| !value.is_finite())
+            {
+                return Err(KineticFittingError::NonFiniteInput {
+                    series,
+                    index,
+                    value,
+                });
+            }
+        }
         let expected_guess_len = match self.kinetic_model.preferred_method() {
             Method::LM => self.kinetic_model.vec_of_params().len(),
             Method::GAVIN => self.kinetic_model.vec_of_params().len(),
@@ -853,11 +903,36 @@ impl Fit {
                 .map(|unknowns| unknowns.len())
                 .unwrap_or_else(|| self.kinetic_model.vec_of_params().len()),
         };
+        let required_points = self.kinetic_model.vec_of_params().len().max(2);
+        if self.x_data.len() < required_points {
+            return Err(KineticFittingError::InsufficientObservations {
+                available: self.x_data.len(),
+                required: required_points,
+            });
+        }
+        let distinct_x = self
+            .x_data
+            .iter()
+            .map(|value| {
+                if *value == 0.0 {
+                    0.0f64.to_bits()
+                } else {
+                    value.to_bits()
+                }
+            })
+            .collect::<HashSet<_>>()
+            .len();
+        if distinct_x < required_points {
+            return Err(KineticFittingError::DegenerateRegression(format!(
+                "only {distinct_x} distinct X values are available for {required_points} model parameters"
+            )));
+        }
         let guess_len = self.effective_initial_guess().len();
         if guess_len != expected_guess_len {
-            return Err(KineticFittingError::FitFailed(
-                "initial guess length does not match parameter count".to_string(),
-            ));
+            return Err(KineticFittingError::InvalidInitialGuess {
+                actual: guess_len,
+                required: expected_guess_len,
+            });
         }
         Ok(())
     }
@@ -1013,9 +1088,21 @@ impl TGASeries {
             training_x.push(x);
             training_y.push(y);
         }
-        if training_x.len() < request.kinetic_model.vec_of_params().len().max(2) {
-            return Err(TGADomainError::InvalidOperation(
-                "The selected fitting range has too few observations".to_string(),
+        let required_points = request.kinetic_model.vec_of_params().len().max(2);
+        if training_x.len() < required_points {
+            return Err(TGADomainError::InsufficientData {
+                available: training_x.len(),
+                required: required_points,
+            }
+            .with_context(
+                format!(
+                    "fit {} using X='{}' and Y='{}'",
+                    request.kinetic_model.display_name(),
+                    request.x_col,
+                    request.y_col
+                ),
+                Some(&request.experiment_id),
+                Some(&request.y_col),
             ));
         }
         if request.excluded_range.is_some() && (left_x.is_empty() || right_x.is_empty()) {
@@ -1032,7 +1119,18 @@ impl TGASeries {
         if let Some(guess) = request.initial_guess.clone() {
             fit = fit.with_initial_guess(guess);
         }
-        let fit = fit.fit().map_err(fitting_error_to_domain)?;
+        let fit = fit.fit().map_err(|err| {
+            fitting_error_to_domain(err, request.kinetic_model.display_name()).with_context(
+                format!(
+                    "fit {} using X='{}' and Y='{}'",
+                    request.kinetic_model.display_name(),
+                    request.x_col,
+                    request.y_col
+                ),
+                Some(&request.experiment_id),
+                Some(&request.y_col),
+            )
+        })?;
         let result = FitColumnResult {
             experiment_id: request.experiment_id,
             x_col: request.x_col,
@@ -1378,8 +1476,25 @@ impl TGASeries {
             fit = fit.with_initial_guess(initial_guess);
         }
 
-        let fit = fit.fit().map_err(fitting_error_to_domain)?;
-        let fitted_y = fit.evaluate_solution().map_err(fitting_error_to_domain)?;
+        let fit = fit.fit().map_err(|err| {
+            fitting_error_to_domain(err, request.kinetic_model.display_name()).with_context(
+                "fit selected model",
+                Some(&request.experiment_id),
+                Some(&request.y_col),
+            )
+        })?;
+        let fitted_y = fit.evaluate_solution().map_err(|err| {
+            fitting_error_to_domain(err, request.kinetic_model.display_name()).with_context(
+                format!(
+                    "evaluate {} using X='{}' and Y='{}'",
+                    request.kinetic_model.display_name(),
+                    request.x_col,
+                    request.y_col
+                ),
+                Some(&request.experiment_id),
+                Some(&request.y_col),
+            )
+        })?;
         let coefficients = ordered_coefficients(request.kinetic_model, &fit);
         let r2 = fit.r_squared();
         if fitted_y.len() != expected_fit_len
@@ -1673,7 +1788,9 @@ fn model_rmse(fit: &Fit, x: &[f64], y: &[f64]) -> Result<f64, TGADomainError> {
             "Cannot calculate side residuals without aligned observations".to_string(),
         ));
     }
-    let predicted = fit.evaluate_at(x).map_err(fitting_error_to_domain)?;
+    let predicted = fit
+        .evaluate_at(x)
+        .map_err(|err| fitting_error_to_domain(err, fit.kinetic_model.display_name()))?;
     let mse = predicted
         .iter()
         .zip(y)
@@ -1729,8 +1846,56 @@ fn sanitize_column_fragment(raw: &str) -> String {
     }
 }
 
-fn fitting_error_to_domain(err: KineticFittingError) -> TGADomainError {
-    TGADomainError::InvalidOperation(err.to_string())
+fn fitting_error_to_domain(err: KineticFittingError, model: impl Into<String>) -> TGADomainError {
+    match err {
+        KineticFittingError::InsufficientObservations {
+            available,
+            required,
+        } => TGADomainError::InsufficientData {
+            available,
+            required,
+        },
+        KineticFittingError::DegenerateRegression(details) => {
+            TGADomainError::DegenerateRegression { details }
+        }
+        KineticFittingError::DataLengthMismatch { x_len, y_len } => {
+            TGADomainError::FittingInputLengthMismatch { x_len, y_len }
+        }
+        KineticFittingError::NonFiniteInput {
+            series,
+            index,
+            value,
+        } => TGADomainError::InvalidColumnValues {
+            column: series.to_string(),
+            details: format!("non-finite value {value}"),
+            indices: vec![index],
+        },
+        KineticFittingError::MissingR2 => TGADomainError::DegenerateRegression {
+            details: "fit completed without a defined coefficient of determination".to_string(),
+        },
+        KineticFittingError::BackendFailure(details) => TGADomainError::NoConvergence {
+            method: model.into(),
+            details,
+        },
+        KineticFittingError::InitialGuessMissing => TGADomainError::InvalidFittingConfiguration {
+            details: "initial guess is missing".to_string(),
+        },
+        KineticFittingError::InvalidInitialGuess { actual, required } => {
+            TGADomainError::InvalidFittingConfiguration {
+                details: format!("initial guess has {actual} values; {required} required"),
+            }
+        }
+        KineticFittingError::InvalidModelConfiguration => {
+            TGADomainError::InvalidFittingConfiguration {
+                details: "selected model is missing backend configuration".to_string(),
+            }
+        }
+        KineticFittingError::MissingSolutionMap => TGADomainError::NoConvergence {
+            method: model.into(),
+            details: "fit completed without a coefficient map".to_string(),
+        },
+        other => TGADomainError::InvalidOperation(other.to_string()),
+    }
 }
 
 impl Default for FittingModelName {
@@ -1758,6 +1923,63 @@ mod tests {
             0.0
         };
         (0..len).map(|idx| start + idx as f64 * step).collect()
+    }
+
+    #[test]
+    fn fitting_preflight_distinguishes_insufficient_and_degenerate_data() {
+        let boundary_minimum = Fit::new(FittingModelName::Linear)
+            .with_data(vec![0.0, 1.0], vec![1.0, 3.0])
+            .fit()
+            .expect("a just-identified linear fit should still return a result");
+        assert!(boundary_minimum.r_squared().is_finite());
+
+        let too_few = Fit::new(FittingModelName::Linear)
+            .with_data(vec![0.0], vec![1.0])
+            .fit()
+            .unwrap_err();
+        assert!(matches!(
+            too_few,
+            KineticFittingError::InsufficientObservations {
+                available: 1,
+                required: 2
+            }
+        ));
+
+        let no_x_spread = Fit::new(FittingModelName::Linear)
+            .with_data(vec![2.0, 2.0], vec![1.0, 3.0])
+            .fit()
+            .unwrap_err();
+        assert!(matches!(
+            no_x_spread,
+            KineticFittingError::DegenerateRegression(_)
+        ));
+
+        let mismatched = Fit::new(FittingModelName::Linear)
+            .with_data(vec![0.0, 1.0], vec![1.0])
+            .fit()
+            .unwrap_err();
+        assert!(matches!(
+            mismatched,
+            KineticFittingError::DataLengthMismatch { x_len: 2, y_len: 1 }
+        ));
+
+        let backend_failure = fitting_error_to_domain(
+            KineticFittingError::BackendFailure("singular normal matrix".to_string()),
+            "Linear",
+        )
+        .with_context("fit selected model", Some("run-7"), Some("mass"));
+        assert!(matches!(
+            backend_failure,
+            TGADomainError::OperationContext {
+                experiment_id: Some(ref id),
+                column: Some(ref column),
+                source,
+                ..
+            } if id == "run-7"
+                && column == "mass"
+                && matches!(*source, TGADomainError::NoConvergence { ref details, .. }
+                    if details == "singular normal matrix")
+        ));
     }
 
     fn fit_case(
@@ -1906,6 +2128,7 @@ mod tests {
                     id: exp_id.clone(),
                     heating_rate: None,
                     isothermal_temperature: Some(600.0),
+                    thermal_mode: crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::Isothermal,
                     comment: Some("empty fitting negative test".to_string()),
                 },
             )
@@ -1917,15 +2140,30 @@ mod tests {
         FitColumnRequest::new(exp_id, "time", "mass", model)
     }
 
-    fn assert_invalid_operation_contains(err: TGADomainError, needle: &str) {
+    fn assert_invalid_fitting_config_contains(err: TGADomainError, needle: &str) {
         match err {
-            TGADomainError::InvalidOperation(msg) => {
+            TGADomainError::OperationContext {
+                experiment_id,
+                column,
+                source,
+                ..
+            } => {
+                assert!(experiment_id.is_some());
+                assert_eq!(column.as_deref(), Some("mass"));
+                match *source {
+                    TGADomainError::InvalidFittingConfiguration { details } => {
+                        assert!(details.contains(needle));
+                    }
+                    other => panic!("expected typed fitting configuration error, got {other:?}"),
+                }
+            }
+            TGADomainError::InvalidFittingConfiguration { details } => {
                 assert!(
-                    msg.contains(needle),
-                    "expected invalid operation to contain '{needle}', got '{msg}'"
+                    details.contains(needle),
+                    "expected fitting configuration error to contain '{needle}', got '{details}'"
                 );
             }
-            other => panic!("expected InvalidOperation, got {other:?}"),
+            other => panic!("expected typed fitting configuration error, got {other:?}"),
         }
     }
 
@@ -2372,7 +2610,7 @@ mod tests {
                     .with_initial_guess(Vec::new()),
             )
             .unwrap_err();
-        assert_invalid_operation_contains(err, "initial guess length");
+        assert_invalid_fitting_config_contains(err, "initial guess");
         let after = series.get_experiment_by_id(&exp_id).unwrap();
         assert_eq!(after.dataset.frame.clone().collect().unwrap(), before_frame);
         assert_eq!(after.dataset.schema.columns.len(), before_columns);

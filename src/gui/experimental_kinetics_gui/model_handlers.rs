@@ -2241,6 +2241,38 @@ impl PlotModel {
         id: &str,
         config: GoldenPipelineConfig,
     ) -> Result<(), TGAGUIError> {
+        self.apply_golden_pipeline_with_plot_refresh(id, config, |model, output_id, is_new| {
+            if is_new {
+                let experiment = model.series.get_experiment_by_id(output_id)?;
+                let x = experiment.dataset.schema.eta.clone().ok_or_else(|| {
+                    TGAGUIError::BindingError(
+                        "Golden Pipeline output has no conversion column".into(),
+                    )
+                })?;
+                let y = experiment.dataset.schema.deta_dt.clone().ok_or_else(|| {
+                    TGAGUIError::BindingError(
+                        "Golden Pipeline output has no conversion rate".into(),
+                    )
+                })?;
+                model.set_x(output_id, &x)?;
+                model.set_y(output_id, &y)?;
+                model.create_points_for_curve(output_id)?;
+            } else {
+                model.rebuild_plots_for_experiment(output_id)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn apply_golden_pipeline_with_plot_refresh<F>(
+        &mut self,
+        id: &str,
+        config: GoldenPipelineConfig,
+        refresh_plots: F,
+    ) -> Result<(), TGAGUIError>
+    where
+        F: FnOnce(&mut Self, &str, bool) -> Result<(), TGAGUIError>,
+    {
         let mut config = config;
         let do_we_need_new_exp = config.save_to_new_experiment;
         let line = self.settings.calibration_line().ok_or_else(|| {
@@ -2250,34 +2282,24 @@ impl PlotModel {
         let b = line.b();
         config.b = b;
         config.k = k;
-        let mut candidate = self.clone();
-        candidate.series.apply_golden_pipeline(id, config)?;
+        self.series.apply_golden_pipeline(id, config)?;
+        let output_id = if do_we_need_new_exp {
+            format!("proceeded_{id}")
+        } else {
+            id.to_string()
+        };
 
-        if do_we_need_new_exp {
-            candidate.delete_all_plots()?;
+        let plot_result = refresh_plots(self, &output_id, do_we_need_new_exp);
 
-            let last_exp = candidate.series.experiments().last().ok_or_else(|| {
-                TGAGUIError::BindingError(
-                    "Golden Pipeline created no output experiment".to_string(),
-                )
-            })?;
-            let new_id = last_exp.meta.id.clone();
-            let deta_dt = last_exp.dataset.schema.deta_dt.clone().ok_or_else(|| {
-                TGAGUIError::BindingError(
-                    "Golden Pipeline output has no conversion rate".to_string(),
-                )
-            })?;
-            let eta = last_exp.dataset.schema.eta.clone().ok_or_else(|| {
-                TGAGUIError::BindingError(
-                    "Golden Pipeline output has no conversion column".to_string(),
-                )
-            })?;
-            candidate.set_x(&new_id, &eta)?;
-            candidate.set_y(&new_id, &deta_dt)?;
-            candidate.create_points_for_curve(&new_id)?;
-            info!("new experiment created");
+        if let Err(error) = plot_result {
+            self.plots.retain(|plot| plot.experiment_id != output_id);
+            let warning = TGAGUIError::post_commit_warning(format!(
+                "Golden Pipeline data for '{output_id}' were committed, but its plot could not be refreshed ({error})"
+            ));
+            let _ = self.push_message(&warning.to_string());
+            return Err(warning);
         }
-        *self = candidate;
+        let _ = self.push_message(&format!("Golden Pipeline completed for '{output_id}'"));
         Ok(())
     }
     //===========================================================================================
@@ -2409,6 +2431,7 @@ mod fitting_gui_model_tests {
                     id: "fit_gui".to_string(),
                     heating_rate: None,
                     isothermal_temperature: Some(500.0),
+                    thermal_mode: crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::Isothermal,
                     comment: Some("fit gui model test".to_string()),
                 },
             )
@@ -2431,5 +2454,167 @@ mod fitting_gui_model_tests {
                 && curve.shown
                 && !curve.points.is_empty()
         }));
+    }
+}
+
+#[cfg(test)]
+mod golden_pipeline_commit_tests {
+    use super::*;
+    use crate::Kinetics::experimental_kinetics::exp_engine_api::{SavGolConfig, SplineConfig};
+    use crate::Kinetics::experimental_kinetics::experiment_series_main::TGAExperiment;
+
+    fn model_with_two_experiments() -> PlotModel {
+        let time = (0..241).map(|index| index as f64).collect::<Vec<_>>();
+        let mass = time
+            .iter()
+            .map(|time| 100.0 * (-0.002 * time).exp())
+            .collect::<Vec<_>>();
+        let data = VirtualTGA {
+            temperature: vec![500.0; time.len()],
+            time,
+            mass,
+        };
+        let dataset = crate::Kinetics::experimental_kinetics::one_experiment_dataset::TGADataset::create_from_synthetic_data(&data).unwrap();
+        let mut model = PlotModel::default();
+        model.settings.set_calibration_coeffs(1.0, 0.0);
+        for id in ["source", "unrelated"] {
+            model
+                .series
+                .push(
+                    TGAExperiment::new(dataset.clone())
+                        .with_id(id)
+                        .with_isothermal_temperature(500.0),
+                )
+                .unwrap();
+        }
+        model.set_x("source", "time").unwrap();
+        model.set_y("source", "mass").unwrap();
+        model.create_points_for_curve("source").unwrap();
+        model.set_x("unrelated", "time").unwrap();
+        model.set_y("unrelated", "mass").unwrap();
+        model.create_points_for_curve("unrelated").unwrap();
+        model
+    }
+
+    fn config() -> GoldenPipelineConfig {
+        GoldenPipelineConfig {
+            sav_gol_config: SavGolConfig {
+                window_size: 11,
+                poly_degree: 3,
+                deriv: 0,
+                delta: 1.0,
+            },
+            averaging_time: 10.0,
+            isothermal_temperature: Some(500.0),
+            spline_config: SplineConfig {
+                n_points: 160,
+                n_internal_points: 8,
+                degree: 3,
+            },
+            save_to_new_experiment: true,
+            del_old_experiment: false,
+            ..GoldenPipelineConfig::default()
+        }
+    }
+
+    #[test]
+    fn plot_refresh_failure_keeps_committed_data_history_and_unrelated_curve() {
+        let mut model = model_with_two_experiments();
+        let unrelated_points = model
+            .plots
+            .iter()
+            .find(|curve| curve.experiment_id == "unrelated")
+            .unwrap()
+            .points
+            .clone();
+        let source_history_before = model
+            .series
+            .get_experiment_by_id("source")
+            .unwrap()
+            .dataset
+            .history_of_operations
+            .vector_of_operations
+            .len();
+
+        let error = model
+            .apply_golden_pipeline_with_plot_refresh(
+                "source",
+                config(),
+                |model, output_id, is_new| {
+                    assert!(is_new);
+                    let output = model.series.get_experiment_by_id(output_id).unwrap();
+                    assert!(output.dataset.schema.eta.is_some());
+                    assert!(
+                        output
+                            .dataset
+                            .history_of_operations
+                            .vector_of_operations
+                            .len()
+                            > source_history_before
+                    );
+                    model.plots.push(PlotCurve {
+                        experiment_id: output_id.to_string(),
+                        ..PlotCurve::default()
+                    });
+                    Err(TGAGUIError::BindingError(
+                        "injected plot refresh failure".into(),
+                    ))
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(&error, TGAGUIError::PostCommitWarning(_)));
+        assert!(error.to_string().contains("were committed"));
+        assert!(
+            model
+                .series
+                .get_experiment_by_id("proceeded_source")
+                .is_ok()
+        );
+        assert!(model.series.get_experiment_by_id("source").is_ok());
+        assert!(
+            !model
+                .plots
+                .iter()
+                .any(|curve| curve.experiment_id == "proceeded_source")
+        );
+        let unrelated_after = model
+            .plots
+            .iter()
+            .find(|curve| curve.experiment_id == "unrelated")
+            .unwrap();
+        assert_eq!(unrelated_after.points, unrelated_points);
+        assert!(model.message.contains("plot refresh failed"));
+    }
+
+    #[test]
+    fn save_as_new_pipeline_adds_output_curve_without_removing_other_curves() {
+        let mut model = model_with_two_experiments();
+        let unrelated_points = model
+            .plots
+            .iter()
+            .find(|curve| curve.experiment_id == "unrelated")
+            .unwrap()
+            .points
+            .clone();
+
+        model.apply_golden_pipeline("source", config()).unwrap();
+
+        assert!(
+            model
+                .series
+                .get_experiment_by_id("proceeded_source")
+                .is_ok()
+        );
+        assert!(model.plots.iter().any(|curve| {
+            curve.experiment_id == "proceeded_source" && !curve.points.is_empty()
+        }));
+        let unrelated_after = model
+            .plots
+            .iter()
+            .find(|curve| curve.experiment_id == "unrelated")
+            .unwrap();
+        assert_eq!(unrelated_after.points, unrelated_points);
+        assert!(model.message.contains("Golden Pipeline completed"));
     }
 }

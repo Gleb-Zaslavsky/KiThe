@@ -1,11 +1,12 @@
 use super::support::{
-    deterministic_config, empty_app, generated, import_csv, read_column, with_app,
-    write_simulated_csv,
+    click_menu_entry, deterministic_config, empty_app, generated, import_csv, read_column,
+    with_app, write_simulated_csv,
 };
 use crate::Kinetics::experimental_kinetics::kinetic_methods::isoconversion::IsoconversionalMethod;
 use crate::Kinetics::experimental_kinetics::math::fitting::FittingModelName;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
 use crate::Kinetics::experimental_kinetics::testing_mod::ExperimentMode;
+use eframe::egui;
 use egui_kittest::kittest::Queryable;
 use ndarray::Array1;
 use tempfile::tempdir;
@@ -369,6 +370,186 @@ fn story_three_noisy_isothermal_runs_recover_arrhenius_parameters_and_export() {
 }
 
 #[test]
+fn story_isothermal_golden_pipeline_runs_without_measured_temperature() {
+    let config = deterministic_config(true, 29_104);
+    let run = generated(&config).remove(0);
+    let temperature = run.meta.isothermal_temperature.unwrap();
+    let dir = tempdir().unwrap();
+    let input_path = dir.path().join("isothermal_t_m.csv");
+    let mut csv = String::from("t,m\n");
+    for (time, mass) in run.virtual_tga.time.iter().zip(&run.virtual_tga.mass) {
+        csv.push_str(&format!("{time:.8},{mass:.8}\n"));
+    }
+    std::fs::write(&input_path, csv).unwrap();
+
+    let mut app = empty_app();
+    app.new_experiment_dialog.current_dir = dir.path().to_path_buf();
+    app.model.settings.set_calibration_coeffs(1.0, 0.0);
+    with_app(app, |harness| {
+        import_csv(
+            harness,
+            &input_path,
+            "isothermal_t_m",
+            Some(temperature),
+            None,
+        );
+        harness.set_size(eframe::egui::vec2(1300.0, 1000.0));
+        harness.run();
+        harness.get_by_label("golden pipeline").click();
+        harness.run();
+        {
+            let state = &mut harness
+                .state_mut()
+                .app
+                .quick_actions_state
+                .golden_pipeline_dialog;
+            state.config.isothermal_temperature = Some(temperature);
+            state.config.sav_gol_config.window_size = 11;
+            state.config.spline_config.n_points = 240;
+            state.config.spline_config.n_internal_points = 12;
+            state.config.save_to_new_experiment = true;
+            state.config.del_old_experiment = true;
+        }
+        harness.run();
+        harness.get_by_label("Calculate").click();
+        harness.run();
+
+        let model = &harness.state().app.model;
+        assert!(
+            harness
+                .state()
+                .app
+                .quick_actions_state
+                .golden_pipeline_dialog
+                .last_error
+                .is_none(),
+            "Golden Pipeline failed: {:?}; status: {}",
+            harness
+                .state()
+                .app
+                .quick_actions_state
+                .golden_pipeline_dialog
+                .last_error,
+            model.message
+        );
+        let output = model
+            .series
+            .get_experiment_by_id("proceeded_isothermal_t_m")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "Golden Pipeline should publish its output; ids={:?}: {error}",
+                    model
+                        .series
+                        .experiments()
+                        .iter()
+                        .map(|exp| exp.meta.id.as_str())
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert!(output.dataset.schema.temperature.is_none());
+        assert!(output.dataset.schema.dT_dt.is_none());
+        assert!(output.dataset.schema.time.is_some());
+        assert!(output.dataset.schema.mass.is_some());
+        assert_eq!(output.meta.resolved_thermal_mode(), crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::Isothermal);
+        assert!(model.message.contains("Golden Pipeline completed"));
+        assert!(
+            harness
+                .state()
+                .app
+                .quick_actions_state
+                .golden_pipeline_dialog
+                .quality_report
+                .is_some()
+        );
+        assert!(model.series.get_experiment_by_id("isothermal_t_m").is_err());
+    });
+}
+
+#[test]
+fn gui_import_accepts_isothermal_t_m_file_without_measured_temperature() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("isothermal_t_m.csv");
+    std::fs::write(&path, "t,m\n0.0,10.0\n1.0,9.8\n2.0,9.5\n").unwrap();
+    let mut app = empty_app();
+    app.new_experiment_dialog.current_dir = dir.path().to_path_buf();
+
+    with_app(app, |harness| {
+        import_csv(harness, &path, "iso_no_sensor", Some(523.15), None);
+        let experiment = harness
+            .state()
+            .app
+            .model
+            .series
+            .get_experiment_by_id("iso_no_sensor")
+            .unwrap();
+        assert_eq!(experiment.meta.resolved_thermal_mode(), crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::Isothermal);
+        assert_eq!(experiment.meta.isothermal_temperature, Some(523.15));
+        assert!(experiment.dataset.schema.temperature.is_none());
+        assert_eq!(
+            harness
+                .state()
+                .app
+                .model
+                .plots
+                .iter()
+                .filter(|curve| curve.experiment_id == "iso_no_sensor")
+                .count(),
+            1
+        );
+    });
+}
+
+#[test]
+fn gui_import_can_adopt_mean_of_measured_celsius_temperature_as_isothermal_setpoint() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("isothermal_sensor.csv");
+    std::fs::write(&path, "t,T,m\n0.0,25.0,10.0\n1.0,26.0,9.8\n2.0,27.0,9.5\n").unwrap();
+    let mut app = empty_app();
+    app.new_experiment_dialog.current_dir = dir.path().to_path_buf();
+
+    with_app(app, |harness| {
+        click_menu_entry(harness, "File Manager", "Import Data");
+        harness.get_by_label("[F] isothermal_sensor.csv").click();
+        harness.run();
+        let id_input = harness.get_by_label("Experiment ID:");
+        id_input.focus();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness.key_press(egui::Key::Backspace);
+        id_input.type_text("iso_sensor_mean");
+        harness.get_by_label("Isothermal").click();
+        harness.run();
+        harness
+            .get_by_label("Use mean of the bound measured-temperature column")
+            .click();
+        harness.run();
+        harness.get_by_label("Import experiment").click();
+        harness.run();
+
+        assert!(
+            harness
+                .state()
+                .app
+                .new_experiment_dialog
+                .last_error
+                .is_none(),
+            "GUI import failed: {:?}",
+            harness.state().app.new_experiment_dialog.last_error
+        );
+        let experiment = harness
+            .state()
+            .app
+            .model
+            .series
+            .get_experiment_by_id("iso_sensor_mean")
+            .unwrap();
+        assert_eq!(experiment.meta.thermal_mode, crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::Isothermal);
+        assert!((experiment.meta.isothermal_temperature.unwrap() - 299.15).abs() < 1e-10);
+        assert_eq!(experiment.dataset.schema.temperature.as_deref(), Some("T"));
+        assert!(harness.state().app.model.message.contains("299.150 K"));
+    });
+}
+
+#[test]
 fn story_isothermal_method_rejects_series_without_isothermal_metadata() {
     let mut config = deterministic_config(false, 771);
     config.experiment_mode = ExperimentMode::NonIsothermal {
@@ -392,6 +573,7 @@ fn story_isothermal_method_rejects_series_without_isothermal_metadata() {
                     id: format!("no_beta_{index}"),
                     heating_rate: None,
                     isothermal_temperature: None,
+                    thermal_mode: crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::Unspecified,
                     comment: None,
                 },
             )
@@ -429,5 +611,33 @@ fn story_isothermal_method_rejects_series_without_isothermal_metadata() {
                 .list_of_experiments()
                 .contains(&"isoconversional_result".to_string())
         );
+    });
+}
+
+#[test]
+fn story_nonisothermal_method_rejects_declared_isothermal_series() {
+    let config = deterministic_config(true, 817);
+    let mut model = crate::gui::experimental_kinetics_gui::model::PlotModel::new();
+    model.generate_synthetic_data_from_config(&config).unwrap();
+    let mut app = empty_app();
+    app.model = model;
+
+    with_app(app, |harness| {
+        harness
+            .state_mut()
+            .app
+            .kinetic_methods_state
+            .isoconversional_method = IsoconversionalMethod::KAS;
+        harness.run();
+        super::support::click_menu_entry(harness, "Kinetic Methods", "Isoconversional");
+        harness.get_by_label("Calculate").click();
+        harness.run();
+        let status = &harness
+            .state()
+            .app
+            .kinetic_methods_state
+            .isoconversional_status;
+        assert!(status.contains("isothermal"), "unexpected status: {status}");
+        assert_eq!(harness.state().app.model.series.len(), 3);
     });
 }

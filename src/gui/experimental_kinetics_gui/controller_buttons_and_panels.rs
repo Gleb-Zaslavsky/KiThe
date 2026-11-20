@@ -4,9 +4,11 @@
 #![allow(non_snake_case)]
 use crate::Kinetics::experimental_kinetics::exp_engine_api::XY;
 use crate::Kinetics::experimental_kinetics::experiment_series_main::{
-    ExperimentMeta, TGAExperiment,
+    ExperimentMeta, ExperimentThermalMode, TGAExperiment, TGASeries,
 };
-use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{TGADataset, Unit};
+use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
+    TGADataset, TGADomainError, Unit,
+};
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
 use crate::gui::experimental_kinetics_gui::model::TGAGUIError;
 
@@ -24,6 +26,10 @@ use log::{info, warn};
 use polars::prelude::col;
 use std::path::Path;
 use std::path::PathBuf;
+use std::{
+    fs::File,
+    io::{BufRead, BufReader},
+};
 
 //===================================================================================
 //  DROP DOWN MENUE AT THE TOP OF WINDOW
@@ -198,19 +204,11 @@ impl FileManager {
         if ui
             .button("Import Data")
             .on_hover_text(
-                "Open a data file and import its columns as an experiment. Shortcut: Ctrl/Cmd+O.",
+                "Import raw TXT/CSV with manual bindings or restore a typed KiThe CSV. Shortcut: Ctrl/Cmd+O.",
             )
             .clicked()
         {
             new_experiment_dialog.open_import_dialog();
-        }
-        if ui
-            .button("New experiment")
-            .on_hover_text("Open the dialog to create an experiment from imported or entered data.")
-            .clicked()
-        {
-            new_experiment_dialog.open = true;
-            new_experiment_dialog.last_error = None;
         }
         if ui.button("Append to experiment")
             .on_hover_text("Import a continuation, preview its time alignment, then append it or replace the selected experiment.")
@@ -504,37 +502,50 @@ impl WrightPanelControllers {
                         ui.ctx().request_repaint();
                     }
 
-                    ui.separator();
+                    if model.series.get_temperature_col(&id).is_ok() {
+                        ui.separator();
 
-                    let temperature_source_label = ui.label("Temperature source:");
-                    let mut temperature_source = model
-                        .active_temperature_source_for_experiment(&id)
-                        .unwrap_or_else(|_| String::new());
-                    let temperature_source_combo =
-                        egui::ComboBox::from_id_salt("exp_kinetics_temperature_source")
-                            .selected_text(if temperature_source.is_empty() {
-                                "choose".to_string()
-                            } else {
-                                temperature_source.clone()
-                            })
-                            .show_ui(ui, |ui| {
-                                for col in &columns {
-                                    ui.selectable_value(&mut temperature_source, col.clone(), col);
-                                }
-                            });
-                    let _ = temperature_source_combo
-                        .response
-                        .labelled_by(temperature_source_label.id);
-                    if !temperature_source.is_empty()
-                        && model
-                            .active_temperature_sources
-                            .get(&id)
-                            .map(|current| current != &temperature_source)
-                            .unwrap_or(true)
-                    {
-                        model
-                            .set_active_temperature_source_for_experiment(&id, &temperature_source);
-                        ui.ctx().request_repaint();
+                        let temperature_source_label = ui.label("Temperature source:");
+                        let mut temperature_source = model
+                            .active_temperature_source_for_experiment(&id)
+                            .unwrap_or_else(|_| String::new());
+                        let temperature_source_combo =
+                            egui::ComboBox::from_id_salt("exp_kinetics_temperature_source")
+                                .selected_text(if temperature_source.is_empty() {
+                                    "choose".to_string()
+                                } else {
+                                    temperature_source.clone()
+                                })
+                                .show_ui(ui, |ui| {
+                                    for col in &columns {
+                                        ui.selectable_value(
+                                            &mut temperature_source,
+                                            col.clone(),
+                                            col,
+                                        );
+                                    }
+                                });
+                        let _ = temperature_source_combo
+                            .response
+                            .labelled_by(temperature_source_label.id);
+                        if !temperature_source.is_empty()
+                            && model
+                                .active_temperature_sources
+                                .get(&id)
+                                .map(|current| current != &temperature_source)
+                                .unwrap_or(true)
+                        {
+                            model.set_active_temperature_source_for_experiment(
+                                &id,
+                                &temperature_source,
+                            );
+                            ui.ctx().request_repaint();
+                        }
+                    } else if let Ok(experiment) = model.series.get_experiment_by_id(&id) {
+                        if let Some(temperature) = experiment.meta.isothermal_temperature {
+                            ui.separator();
+                            ui.label(format!("Isothermal setpoint: {temperature:.3} K"));
+                        }
                     }
                 });
             }
@@ -833,6 +844,37 @@ impl SaveSeriesFormat {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportFileFormat {
+    Raw,
+    TypedDataset,
+    TypedSeries,
+}
+
+fn detect_import_file_format(path: &Path) -> Result<ImportFileFormat, String> {
+    let file = File::open(path).map_err(|error| format!("Could not read file: {error}"))?;
+    let lines = BufReader::new(file)
+        .lines()
+        .take(16)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Could not read file header: {error}"))?;
+    let first = lines
+        .iter()
+        .find(|line| !line.trim().is_empty())
+        .map(String::as_str)
+        .unwrap_or_default();
+
+    if first.starts_with("# format_version=")
+        || lines.iter().any(|line| line.starts_with("#META\t"))
+    {
+        Ok(ImportFileFormat::TypedSeries)
+    } else if first == "# KiThe TGA Dataset" {
+        Ok(ImportFileFormat::TypedDataset)
+    } else {
+        Ok(ImportFileFormat::Raw)
+    }
+}
 /// State for the new experiment file selection dialog
 #[derive(Clone, Debug, Default)]
 pub struct PlotConfig {
@@ -858,6 +900,8 @@ pub struct NewExperimentDialogState {
     last_saved_series_path: Option<PathBuf>,
     heating_rate_input: String,
     isothermal_temp_input: String,
+    thermal_mode: ExperimentThermalMode,
+    use_measured_temperature_mean: bool,
     bind_mass_input: String,
     bind_mass_unit: Unit,
     bind_temperature_input: String,
@@ -872,6 +916,8 @@ pub struct NewExperimentDialogState {
     append_result_id: String,
     append_preview: Option<TGADataset>,
     append_preview_rows: Option<usize>,
+    import_file_format: Option<ImportFileFormat>,
+    replace_series_on_import: bool,
 }
 
 impl NewExperimentDialogState {
@@ -885,7 +931,7 @@ impl NewExperimentDialogState {
             return true;
         }
         let windows = [
-            ("New Experiment", &mut self.open),
+            ("Import Data", &mut self.open),
             ("Manage Plots", &mut self.manage_plot_open),
             ("Column Manager", &mut self.column_manager_open),
         ];
@@ -924,6 +970,8 @@ impl NewExperimentDialogState {
             last_saved_series_path: None,
             heating_rate_input: String::new(),
             isothermal_temp_input: String::new(),
+            thermal_mode: ExperimentThermalMode::Unspecified,
+            use_measured_temperature_mean: false,
             bind_mass_input: String::new(),
             bind_mass_unit: Unit::MilliVolt,
             bind_temperature_input: String::new(),
@@ -938,6 +986,19 @@ impl NewExperimentDialogState {
             append_result_id: String::new(),
             append_preview: None,
             append_preview_rows: None,
+            import_file_format: None,
+            replace_series_on_import: false,
+        }
+    }
+
+    fn select_thermal_mode(&mut self, mode: ExperimentThermalMode) {
+        self.thermal_mode = mode;
+        if mode != ExperimentThermalMode::Isothermal {
+            self.use_measured_temperature_mean = false;
+            self.isothermal_temp_input.clear();
+        }
+        if mode != ExperimentThermalMode::NonIsothermal {
+            self.heating_rate_input.clear();
         }
     }
 
@@ -1122,13 +1183,82 @@ impl NewExperimentDialogState {
         model: &mut PlotModel,
         exp_id: &str,
     ) -> Result<(), TGAGUIError> {
+        self.finish_new_experiment_import_with_bindings(model, exp_id, true)
+    }
+
+    fn finish_new_experiment_import_with_bindings(
+        &mut self,
+        model: &mut PlotModel,
+        exp_id: &str,
+        apply_user_bindings: bool,
+    ) -> Result<(), TGAGUIError> {
+        let mut adopted_sensor_temperature = None;
         let result = (|| {
             model.series.try_mutate_by_id(exp_id, |exp| {
                 exp.check_nulls_for_operation_borrowed("parsing file")?;
                 exp.sample_all_columns_even_layers_table(50, Vec::new())
             })?;
-            self.autofill_bind_inputs_from_last_experiment(model);
-            self.apply_bindings_to_last_experiment(model)?;
+            if apply_user_bindings {
+                self.autofill_bind_inputs_from_last_experiment(model);
+                self.apply_bindings_to_last_experiment(model)?;
+            }
+            if self.thermal_mode == ExperimentThermalMode::Isothermal
+                && self.use_measured_temperature_mean
+            {
+                let column = self.bind_temperature_input.trim();
+                if column.is_empty() {
+                    return Err(TGAGUIError::BindingError(
+                        "Choose and bind a measured temperature column before using its mean"
+                            .into(),
+                    ));
+                }
+                let dataset = &model.series.get_experiment_by_id(exp_id)?.dataset;
+                let preview = dataset
+                    .preview_rows(&[column], usize::MAX)
+                    .map_err(TGADomainError::from)?;
+                let values = preview.columns.get(column).ok_or_else(|| {
+                    TGAGUIError::BindingError(format!(
+                        "Temperature column '{column}' is unavailable"
+                    ))
+                })?;
+                let mut valid_count = 0usize;
+                let mut measured_mean = 0.0_f64;
+                for value in values
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .filter(|value| value.is_finite())
+                {
+                    valid_count += 1;
+                    measured_mean += (value - measured_mean) / valid_count as f64;
+                }
+                if valid_count == 0 {
+                    return Err(TGAGUIError::BindingError(format!(
+                        "Temperature column '{column}' has no finite measurements"
+                    )));
+                }
+                let mean_kelvin = match self.bind_temperature_unit {
+                    Unit::Kelvin => measured_mean,
+                    Unit::Celsius => measured_mean + 273.15,
+                    unit => {
+                        return Err(TGAGUIError::BindingError(format!(
+                            "Cannot use {:?} as a temperature unit",
+                            unit
+                        )));
+                    }
+                };
+                if !mean_kelvin.is_finite() || mean_kelvin <= 0.0 {
+                    return Err(TGAGUIError::BindingError(
+                        "Mean measured temperature must be finite and above 0 K".into(),
+                    ));
+                }
+                model.series.try_mutate_by_id(exp_id, |experiment| {
+                    experiment.meta.isothermal_temperature = Some(mean_kelvin);
+                    experiment.meta.thermal_mode = ExperimentThermalMode::Isothermal;
+                    Ok(())
+                })?;
+                adopted_sensor_temperature = Some((valid_count, mean_kelvin));
+            }
             Ok(())
         })();
 
@@ -1148,6 +1278,11 @@ impl NewExperimentDialogState {
                 "experiment '{exp_id}' was imported and remains available, but its plots could not be created ({error})"
             )));
         }
+        if let Some((valid_count, mean_kelvin)) = adopted_sensor_temperature {
+            let _ = model.push_message(&format!(
+                "Isothermal temperature set from {valid_count} valid measurements: {mean_kelvin:.3} K"
+            ));
+        }
         Ok(())
     }
 
@@ -1159,10 +1294,17 @@ impl NewExperimentDialogState {
             return Ok(());
         };
         let exp_id = last_exp.meta.id.clone();
+        self.create_default_plots_for_experiment(model, &exp_id)
+    }
 
+    fn create_default_plots_for_experiment(
+        &self,
+        model: &mut PlotModel,
+        exp_id: &str,
+    ) -> Result<(), TGAGUIError> {
         let time_col = model.series.get_time_col(&exp_id).or_else(|_| {
             model
-                .list_of_columns(&exp_id)
+                .list_of_columns(exp_id)
                 .ok()
                 .and_then(|columns| Self::first_matching_column(&columns, &["t", "time"]))
                 .ok_or_else(|| {
@@ -1175,8 +1317,8 @@ impl NewExperimentDialogState {
 
         let mut created_any = false;
         for y_col in [
-            model.series.get_temperature_col(&exp_id).ok(),
-            model.series.get_mass_col(&exp_id).ok(),
+            model.series.get_temperature_col(exp_id).ok(),
+            model.series.get_mass_col(exp_id).ok(),
         ]
         .into_iter()
         .flatten()
@@ -1184,9 +1326,9 @@ impl NewExperimentDialogState {
             if y_col == time_col {
                 continue;
             }
-            model.set_x(&exp_id, &time_col)?;
-            model.set_y(&exp_id, &y_col)?;
-            model.create_points_for_curve(&exp_id)?;
+            model.set_x(exp_id, &time_col)?;
+            model.set_y(exp_id, &y_col)?;
+            model.create_points_for_curve(exp_id)?;
             created_any = true;
         }
 
@@ -1197,6 +1339,55 @@ impl NewExperimentDialogState {
         Ok(())
     }
 
+    fn import_typed_series_file(
+        &self,
+        model: &mut PlotModel,
+        path: &Path,
+    ) -> Result<Vec<String>, TGAGUIError> {
+        let imported = TGASeries::from_csv_series(path)?;
+        let imported_ids = imported.ids();
+        if imported_ids.is_empty() {
+            return Err(TGAGUIError::BindingError(
+                "Typed CSV contains no experiments".into(),
+            ));
+        }
+
+        if self.replace_series_on_import {
+            model.series = imported;
+            model.plots.clear();
+            model.active_mass_sources.clear();
+            model.active_temperature_sources.clear();
+        } else {
+            let mut candidate = model.series.clone();
+            for experiment in imported.experiments().iter().cloned() {
+                candidate.push(experiment)?;
+            }
+            model.series = candidate;
+        }
+
+        let mut plot_warnings = Vec::new();
+        for id in &imported_ids {
+            if let Err(error) = self.create_default_plots_for_experiment(model, id) {
+                model.plots.retain(|plot| plot.experiment_id != *id);
+                plot_warnings.push(format!("{id}: {error}"));
+            }
+        }
+        model.reset_view();
+        if plot_warnings.is_empty() {
+            let _ = model.push_message(&format!(
+                "Imported {} experiment(s) from typed KiThe CSV",
+                imported_ids.len()
+            ));
+        } else {
+            let _ = model.push_message(&format!(
+                "Imported {} experiment(s); some plots could not be created, but the data and metadata remain available: {}",
+                imported_ids.len(),
+                plot_warnings.join("; ")
+            ));
+        }
+        Ok(imported_ids)
+    }
+
     /// Show the new experiment dialog
     pub fn show_new_experiment_dialogue(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
         let mut should_load_experiment = false;
@@ -1204,7 +1395,7 @@ impl NewExperimentDialogState {
 
         if self.open {
             let mut dialog_open = self.open;
-            egui::Window::new(if self.append_mode { "Append to Experiment" } else { "New Experiment" })
+            egui::Window::new(if self.append_mode { "Append to Experiment" } else { "Import Data" })
                 .open(&mut dialog_open)
                 .resizable(true)
                 .default_size(if self.append_mode { [760.0, 640.0] } else { [600.0, 400.0] })
@@ -1249,10 +1440,12 @@ impl NewExperimentDialogState {
                         .resizable(true)
                         .default_size(250.0)
                         .show(ui, |ui| {
+                            let content_height = (ui.available_height() - 64.0).max(120.0);
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .max_height(content_height)
+                                .show(ui, |ui| {
                             ui.heading("📝 Metadata");
-                            if ui.button(if self.append_mode { "Preview continuation" } else { "Import experiment" }).clicked() {
-                                should_load_experiment = true;
-                            }
                             ui.separator();
 
                             if self.append_mode {
@@ -1278,23 +1471,54 @@ impl NewExperimentDialogState {
 
                             let label = ui.label("File path:");
                             let input = ui.text_edit_singleline(&mut self.file_path_input);
+                            let path_changed = input.changed();
                             let _ = input.labelled_by(label.id);
+                            if path_changed && !self.append_mode {
+                                let path = PathBuf::from(self.file_path_input.trim());
+                                self.update_import_file_format(&path);
+                            }
 
-                            if !self.append_mode {
+                            if self.import_file_format == Some(ImportFileFormat::TypedSeries)
+                                && !self.append_mode
+                            {
+                                ui.label("KiThe series CSV detected. Experiment metadata, bindings, units, and provenance will be restored from the file.");
+                                ui.checkbox(
+                                    &mut self.replace_series_on_import,
+                                    "Replace the current series",
+                                );
+                            } else if !self.append_mode {
+                                if self.import_file_format == Some(ImportFileFormat::TypedDataset) {
+                                    ui.label("KiThe dataset CSV detected. Column metadata, units, and bindings will be restored from the file.");
+                                }
                                 ui.add_space(5.0);
                                 let label = ui.label("Experiment ID:");
                                 let input = ui.text_edit_singleline(&mut self.meta.id);
                                 let _ = input.labelled_by(label.id);
 
                                 ui.add_space(5.0);
-                                let label = ui.label("Heating Rate (K/min):");
-                                let input = ui.text_edit_singleline(&mut self.heating_rate_input);
-                                let _ = input.labelled_by(label.id);
-
-                                ui.add_space(5.0);
-                                let label = ui.label("Isothermal Temperature (K):");
-                                let input = ui.text_edit_singleline(&mut self.isothermal_temp_input);
-                                let _ = input.labelled_by(label.id);
+                                ui.horizontal(|ui| {
+                                    ui.label("Thermal regime:");
+                                    if ui.radio_value(&mut self.thermal_mode, ExperimentThermalMode::Unspecified, "Infer from metadata").changed() {
+                                        self.select_thermal_mode(ExperimentThermalMode::Unspecified);
+                                    }
+                                    if ui.radio_value(&mut self.thermal_mode, ExperimentThermalMode::Isothermal, "Isothermal").changed() {
+                                        self.select_thermal_mode(ExperimentThermalMode::Isothermal);
+                                    }
+                                    if ui.radio_value(&mut self.thermal_mode, ExperimentThermalMode::NonIsothermal, "Non-isothermal").changed() {
+                                        self.select_thermal_mode(ExperimentThermalMode::NonIsothermal);
+                                    }
+                                });
+                                if self.thermal_mode != ExperimentThermalMode::Isothermal {
+                                    let label = ui.label("Heating Rate (K/min):");
+                                    let input = ui.text_edit_singleline(&mut self.heating_rate_input);
+                                    let _ = input.labelled_by(label.id);
+                                }
+                                if self.thermal_mode != ExperimentThermalMode::NonIsothermal {
+                                    let label = ui.label("Isothermal Temperature (K):");
+                                    let input = ui.text_edit_singleline(&mut self.isothermal_temp_input);
+                                    let _ = input.labelled_by(label.id);
+                                    ui.checkbox(&mut self.use_measured_temperature_mean, "Use mean of the bound measured-temperature column");
+                                }
 
                                 ui.add_space(5.0);
                                 let label = ui.label("Comment:");
@@ -1304,9 +1528,48 @@ impl NewExperimentDialogState {
                             }
 
                             ui.add_space(8.0);
-                            self.show_bindings_row(ui);
+                            if !self.append_mode
+                                && self.import_file_format == Some(ImportFileFormat::TypedDataset)
+                            {
+                                ui.label("Bindings come from the file; edit them later in Column Manager if needed.");
+                            } else if !self.append_mode
+                                && self.import_file_format == Some(ImportFileFormat::TypedSeries)
+                            {
+                                ui.label("Bindings are restored independently for every imported experiment.");
+                            } else {
+                                self.show_bindings_row(ui);
+                            }
+                                });
 
-                            ui.add_space(10.0);
+                            ui.add_space(12.0);
+                            let action_label = if self.append_mode {
+                                "Preview continuation"
+                            } else if self.import_file_format == Some(ImportFileFormat::TypedSeries) {
+                                "Import series"
+                            } else {
+                                "Import experiment"
+                            };
+                            let action = ui.add_sized(
+                                [ui.available_width(), 42.0],
+                                egui::Button::new(
+                                    egui::RichText::new(action_label).size(18.0).strong(),
+                                ),
+                            );
+                            let action_tooltip = if self.append_mode {
+                                "Preview aligned rows, then choose whether to append or replace the experiment."
+                            } else if self.import_file_format == Some(ImportFileFormat::TypedSeries) {
+                                "Restore the series and its metadata. By default it is added to the current series; enable Replace to discard the current series."
+                            } else if self.import_file_format == Some(ImportFileFormat::TypedDataset) {
+                                "Import this typed dataset as a new experiment; column bindings and units are restored from the file."
+                            } else {
+                                "Import this raw file as a new experiment. Set column bindings and experiment metadata above."
+                            };
+                            if action
+                                .on_hover_text(action_tooltip)
+                                .clicked()
+                            {
+                                should_load_experiment = true;
+                            }
 
                             if let Some(err) = &self.last_error {
                                 ui.colored_label(egui::Color32::RED, err);
@@ -1315,6 +1578,18 @@ impl NewExperimentDialogState {
                         });
                 });
             self.open = dialog_open;
+
+            // Resolve the selected format when a path was entered manually.
+            if should_load_experiment && !self.append_mode {
+                let path = if self.file_path_input.trim().is_empty() {
+                    self.selected_file.clone()
+                } else {
+                    Some(PathBuf::from(self.file_path_input.trim()))
+                };
+                self.import_file_format = path
+                    .as_deref()
+                    .and_then(|path| detect_import_file_format(path).ok());
+            }
 
             // Handle import or continuation preview outside the window closure.
             if should_load_experiment {
@@ -1479,13 +1754,54 @@ impl NewExperimentDialogState {
                         let _ =
                             model.push_message(&format!("Continuation preview failed: {error}"));
                     }
+                } else if self.import_file_format == Some(ImportFileFormat::TypedSeries) {
+                    let path = if self.file_path_input.trim().is_empty() {
+                        self.selected_file.clone()
+                    } else {
+                        Some(PathBuf::from(self.file_path_input.trim()))
+                    };
+                    match path {
+                        Some(path) if path.is_file() => {
+                            match self.import_typed_series_file(model, &path) {
+                                Ok(ids) => {
+                                    info!(
+                                        "Restored typed KiThe CSV with {} experiments",
+                                        ids.len()
+                                    );
+                                    self.open = false;
+                                    self.last_error = None;
+                                }
+                                Err(error) => {
+                                    self.last_error = Some(error.to_string());
+                                    let _ = model
+                                        .push_message(&format!("Series import failed: {error}"));
+                                }
+                            }
+                        }
+                        _ => {
+                            self.last_error =
+                                Some("Please select a valid typed CSV file".to_string());
+                            let _ = model
+                                .push_message("Series import failed: select a valid CSV file.");
+                        }
+                    }
                 } else {
-                    self.meta.heating_rate = if self.heating_rate_input.trim().is_empty() {
+                    self.meta.thermal_mode = self.thermal_mode;
+                    let parse_optional_number = |input: &str| -> Result<Option<f64>, ()> {
+                        if input.trim().is_empty() {
+                            Ok(None)
+                        } else {
+                            input.trim().parse::<f64>().map(Some).map_err(|_| ())
+                        }
+                    };
+                    self.meta.heating_rate = if self.thermal_mode
+                        == ExperimentThermalMode::Isothermal
+                    {
                         None
                     } else {
-                        match self.heating_rate_input.trim().parse::<f64>() {
-                            Ok(v) => Some(v),
-                            Err(_) => {
+                        match parse_optional_number(&self.heating_rate_input) {
+                            Ok(value) => value,
+                            Err(()) => {
                                 self.last_error = Some("Heating rate must be a number".to_string());
                                 let _ = model
                                     .push_message("Import failed: heating rate must be a number.");
@@ -1493,22 +1809,72 @@ impl NewExperimentDialogState {
                             }
                         }
                     };
-                    self.meta.isothermal_temperature =
-                        if self.isothermal_temp_input.trim().is_empty() {
-                            None
-                        } else {
-                            match self.isothermal_temp_input.trim().parse::<f64>() {
-                                Ok(v) => Some(v),
-                                Err(_) => {
-                                    self.last_error =
-                                        Some("Isothermal temperature must be a number".to_string());
-                                    let _ = model.push_message(
-                                        "Import failed: isothermal temperature must be a number.",
-                                    );
-                                    return;
-                                }
+                    self.meta.isothermal_temperature = if self.thermal_mode
+                        == ExperimentThermalMode::NonIsothermal
+                        || self.use_measured_temperature_mean
+                    {
+                        None
+                    } else {
+                        match parse_optional_number(&self.isothermal_temp_input) {
+                            Ok(value) => value,
+                            Err(()) => {
+                                self.last_error =
+                                    Some("Isothermal temperature must be a number".to_string());
+                                let _ = model.push_message(
+                                    "Import failed: isothermal temperature must be a number.",
+                                );
+                                return;
                             }
-                        };
+                        }
+                    };
+                    if self.thermal_mode == ExperimentThermalMode::Unspecified
+                        && self.meta.heating_rate.is_some()
+                        && self.meta.isothermal_temperature.is_some()
+                    {
+                        self.last_error = Some("Choose Isothermal or Non-isothermal when both thermal metadata fields are provided".into());
+                        let _ = model.push_message("Import failed: thermal regime is ambiguous.");
+                        return;
+                    }
+                    if self
+                        .meta
+                        .heating_rate
+                        .is_some_and(|rate| !rate.is_finite() || rate <= 0.0)
+                    {
+                        self.last_error =
+                            Some("Heating rate must be finite and above 0 K/min".into());
+                        let _ = model.push_message(
+                            "Import failed: heating rate must be positive and finite.",
+                        );
+                        return;
+                    }
+                    if self
+                        .meta
+                        .isothermal_temperature
+                        .is_some_and(|temperature| !temperature.is_finite() || temperature <= 0.0)
+                    {
+                        self.last_error =
+                            Some("Isothermal temperature must be finite and above 0 K".into());
+                        let _ = model.push_message(
+                            "Import failed: isothermal temperature must be positive and finite.",
+                        );
+                        return;
+                    }
+                    if self.thermal_mode == ExperimentThermalMode::Isothermal
+                        && !self.use_measured_temperature_mean
+                    {
+                        match self.meta.isothermal_temperature {
+                            Some(temperature) if temperature.is_finite() && temperature > 0.0 => {}
+                            _ => {
+                                self.last_error = Some(
+                                    "Enter a finite isothermal temperature above 0 K, or choose the measured-column mean".into(),
+                                );
+                                let _ = model.push_message(
+                                    "Import failed: valid isothermal temperature is required.",
+                                );
+                                return;
+                            }
+                        }
+                    }
 
                     let file_path_candidate = if self.file_path_input.trim().is_empty() {
                         self.selected_file.clone()
@@ -1535,7 +1901,13 @@ impl NewExperimentDialogState {
                                 let _ = model.push_message(&format!("Import failed: {e}"));
                             } else {
                                 let exp_id = self.meta.id.clone();
-                                match self.finish_new_experiment_import(model, &exp_id) {
+                                let apply_user_bindings =
+                                    self.import_file_format != Some(ImportFileFormat::TypedDataset);
+                                match self.finish_new_experiment_import_with_bindings(
+                                    model,
+                                    &exp_id,
+                                    apply_user_bindings,
+                                ) {
                                     Ok(()) => {
                                         info!("File parsed successfully");
                                         info!("Experiment ID set to: {}", exp_id);
@@ -1553,10 +1925,12 @@ impl NewExperimentDialogState {
                                         if let TGAGUIError::PostCommitWarning(warning) = e {
                                             self.last_error = None;
                                             self.open = false;
-                                            let _ = model.push_message(&format!("Warning: {warning}"));
+                                            let _ =
+                                                model.push_message(&format!("Warning: {warning}"));
                                         } else {
                                             self.last_error = Some(e.to_string());
-                                            let _ = model.push_message(&format!("Import failed: {e}"));
+                                            let _ =
+                                                model.push_message(&format!("Import failed: {e}"));
                                             return;
                                         }
                                     }
@@ -1592,13 +1966,14 @@ impl NewExperimentDialogState {
                                 Ok(())
                             })
                             .map_err(|e| format!("{e:?}"))?;
-                        let warning = model
-                            .rebuild_plots_for_experiment(&target_id)
-                            .err()
-                            .map(|error| match error {
-                                TGAGUIError::PostCommitWarning(message) => message,
-                                other => other.to_string(),
-                            });
+                        let warning =
+                            model
+                                .rebuild_plots_for_experiment(&target_id)
+                                .err()
+                                .map(|error| match error {
+                                    TGAGUIError::PostCommitWarning(message) => message,
+                                    other => other.to_string(),
+                                });
                         Ok((target_id, warning))
                     } else {
                         let id = self.append_result_id.trim();
@@ -1619,10 +1994,8 @@ impl NewExperimentDialogState {
                                 meta,
                             })
                             .map_err(|e| format!("{e:?}"))?;
-                        let previous_view = (
-                            model.interaction.view_range,
-                            model.interaction.view_y_range,
-                        );
+                        let previous_view =
+                            (model.interaction.view_range, model.interaction.view_y_range);
                         let warning = self
                             .create_default_plots_for_last_experiment(model)
                             .err()
@@ -1644,7 +2017,8 @@ impl NewExperimentDialogState {
                         self.last_error = None;
                     }
                     Ok((id, None)) => {
-                        let _ = model.push_message(&format!("Continuation appended as experiment '{id}'"));
+                        let _ = model
+                            .push_message(&format!("Continuation appended as experiment '{id}'"));
                         self.open = false;
                         self.last_error = None;
                     }
@@ -1718,6 +2092,7 @@ impl NewExperimentDialogState {
                             .clicked()
                         {
                             self.file_path_input = path.to_string_lossy().to_string();
+                            self.update_import_file_format(&path);
                             self.selected_file = Some(path);
                         }
                     }
@@ -1788,7 +2163,17 @@ impl NewExperimentDialogState {
     fn open_import_dialog(&mut self) {
         self.open = true;
         self.append_mode = false;
+        self.import_file_format = self
+            .selected_file
+            .as_deref()
+            .and_then(|path| detect_import_file_format(path).ok());
+        self.replace_series_on_import = false;
         self.last_error = None;
+    }
+
+    fn update_import_file_format(&mut self, path: &Path) {
+        self.import_file_format = detect_import_file_format(path).ok();
+        self.replace_series_on_import = false;
     }
 
     fn open_append_dialog(&mut self, model: &PlotModel) {
@@ -2136,7 +2521,221 @@ mod tests {
     use super::*;
     use crate::Kinetics::experimental_kinetics::experiment_series_main::TGAExperiment;
     use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
+    use crate::Kinetics::experimental_kinetics::testing_mod::VirtualTGA;
     use std::path::Path;
+
+    fn typed_series() -> TGASeries {
+        let mut series = TGASeries::new();
+        let data = VirtualTGA {
+            time: (0..40).map(|index| index as f64).collect(),
+            temperature: vec![523.15; 40],
+            mass: (0..40).map(|index| 100.0 - index as f64 * 0.5).collect(),
+        };
+        for id in ["typed_a", "typed_b"] {
+            series
+                .create_from_synthetic_data(
+                    &data,
+                    ExperimentMeta {
+                        id: id.to_string(),
+                        isothermal_temperature: Some(523.15),
+                        thermal_mode: ExperimentThermalMode::Isothermal,
+                        comment: Some(format!("restored {id}")),
+                        ..ExperimentMeta::default()
+                    },
+                )
+                .unwrap();
+        }
+        series
+    }
+
+    fn existing_experiment(id: &str) -> TGAExperiment {
+        let data = VirtualTGA {
+            time: (0..40).map(|index| index as f64).collect(),
+            temperature: vec![500.0; 40],
+            mass: (0..40).map(|index| 90.0 - index as f64 * 0.3).collect(),
+        };
+        let dataset = TGADataset::create_from_synthetic_data(&data).unwrap();
+        TGAExperiment::new(dataset)
+            .with_id(id)
+            .with_isothermal_temperature(500.0)
+    }
+
+    fn write_typed_series() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        typed_series().to_csv_series(file.path()).unwrap();
+        file
+    }
+
+    #[test]
+    fn import_format_detection_distinguishes_raw_and_both_typed_csv_formats() {
+        let raw = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(raw.path(), "t,T,m\n0,500,10\n1,501,9\n").unwrap();
+        assert_eq!(
+            detect_import_file_format(raw.path()).unwrap(),
+            ImportFileFormat::Raw
+        );
+
+        let dataset = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            dataset.path(),
+            "# KiThe TGA Dataset\n# t [s], m [mg]\n# Bindings: {}\nt,m\n0,10\n",
+        )
+        .unwrap();
+        assert_eq!(
+            detect_import_file_format(dataset.path()).unwrap(),
+            ImportFileFormat::TypedDataset
+        );
+
+        let series = write_typed_series();
+        assert_eq!(
+            detect_import_file_format(series.path()).unwrap(),
+            ImportFileFormat::TypedSeries
+        );
+
+        let mut dialog = NewExperimentDialogState::new();
+        dialog.replace_series_on_import = true;
+        dialog.update_import_file_format(raw.path());
+        assert!(!dialog.replace_series_on_import);
+    }
+
+    #[test]
+    fn typed_series_import_adds_experiments_and_restores_metadata_atomically() {
+        let file = write_typed_series();
+        let mut model = PlotModel::new();
+        model.series.push(existing_experiment("existing")).unwrap();
+        let dialog = NewExperimentDialogState::new();
+
+        let imported_ids = dialog
+            .import_typed_series_file(&mut model, file.path())
+            .unwrap();
+
+        assert_eq!(imported_ids, vec!["typed_a", "typed_b"]);
+        assert_eq!(
+            model.list_of_experiments(),
+            vec!["existing", "typed_a", "typed_b"]
+        );
+        for id in ["typed_a", "typed_b"] {
+            let experiment = model.series.get_experiment_by_id(id).unwrap();
+            assert_eq!(
+                experiment.meta.comment.as_deref(),
+                Some(format!("restored {id}").as_str())
+            );
+            assert_eq!(
+                experiment.meta.thermal_mode,
+                ExperimentThermalMode::Isothermal
+            );
+            assert_eq!(experiment.meta.isothermal_temperature, Some(523.15));
+            assert_eq!(experiment.dataset.schema.time.as_deref(), Some("time"));
+            assert_eq!(
+                experiment.dataset.schema.temperature.as_deref(),
+                Some("temperature")
+            );
+            assert_eq!(experiment.dataset.schema.mass.as_deref(), Some("mass"));
+        }
+        for id in ["typed_a", "typed_b"] {
+            assert!(model.plots.iter().any(|curve| curve.experiment_id == id));
+        }
+    }
+
+    #[test]
+    fn typed_series_id_conflict_does_not_partially_modify_current_series() {
+        let file = write_typed_series();
+        let mut model = PlotModel::new();
+        model.series.push(existing_experiment("typed_a")).unwrap();
+        let before_ids = model.list_of_experiments();
+        let before_meta = model
+            .series
+            .get_experiment_by_id("typed_a")
+            .unwrap()
+            .meta
+            .clone();
+        let dialog = NewExperimentDialogState::new();
+
+        assert!(
+            dialog
+                .import_typed_series_file(&mut model, file.path())
+                .is_err()
+        );
+
+        assert_eq!(model.list_of_experiments(), before_ids);
+        let after = &model.series.get_experiment_by_id("typed_a").unwrap().meta;
+        assert_eq!(after.id, before_meta.id);
+        assert_eq!(
+            after.isothermal_temperature,
+            before_meta.isothermal_temperature
+        );
+        assert!(model.series.get_experiment_by_id("typed_b").is_err());
+    }
+
+    #[test]
+    fn typed_series_replace_discards_the_previous_series_only_when_requested() {
+        let file = write_typed_series();
+        let mut model = PlotModel::new();
+        model.series.push(existing_experiment("old")).unwrap();
+        let mut dialog = NewExperimentDialogState::new();
+        dialog.replace_series_on_import = true;
+
+        dialog
+            .import_typed_series_file(&mut model, file.path())
+            .unwrap();
+
+        assert_eq!(model.list_of_experiments(), vec!["typed_a", "typed_b"]);
+        assert!(model.series.get_experiment_by_id("old").is_err());
+        assert!(model.plots.iter().all(|plot| plot.experiment_id != "old"));
+    }
+
+    #[test]
+    fn typed_dataset_import_keeps_file_bindings_and_units_instead_of_applying_defaults() {
+        let data = VirtualTGA {
+            time: (0..40).map(|index| index as f64).collect(),
+            temperature: vec![523.15; 40],
+            mass: (0..40).map(|index| 100.0 - index as f64 * 0.5).collect(),
+        };
+        let dataset = TGADataset::create_from_synthetic_data(&data).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        dataset.to_csv_with_units(file.path()).unwrap();
+        assert_eq!(
+            detect_import_file_format(file.path()).unwrap(),
+            ImportFileFormat::TypedDataset
+        );
+
+        let mut model = PlotModel::new();
+        model
+            .push_from_file_with_meta(
+                file.path(),
+                ExperimentMeta {
+                    id: "typed_dataset".into(),
+                    isothermal_temperature: Some(523.15),
+                    thermal_mode: ExperimentThermalMode::Isothermal,
+                    ..ExperimentMeta::default()
+                },
+            )
+            .unwrap();
+        let mut dialog = NewExperimentDialogState::new();
+
+        dialog
+            .finish_new_experiment_import_with_bindings(&mut model, "typed_dataset", false)
+            .unwrap();
+
+        let imported = &model
+            .series
+            .get_experiment_by_id("typed_dataset")
+            .unwrap()
+            .dataset;
+        assert_eq!(imported.schema.time, dataset.schema.time);
+        assert_eq!(imported.schema.temperature, dataset.schema.temperature);
+        assert_eq!(imported.schema.mass, dataset.schema.mass);
+        for name in ["time", "temperature", "mass"] {
+            assert_eq!(
+                imported.schema.columns[name].unit,
+                dataset.schema.columns[name].unit
+            );
+            assert_eq!(
+                imported.schema.columns[name].origin,
+                dataset.schema.columns[name].origin
+            );
+        }
+    }
 
     fn fixture_model() -> PlotModel {
         let mut model = PlotModel::new();
@@ -2264,5 +2863,185 @@ mod tests {
                 .iter()
                 .any(|curve| curve.experiment_id == "rollback_candidate")
         );
+    }
+
+    #[test]
+    fn isothermal_t_m_import_binds_without_temperature_and_creates_mass_plot() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "t,m\n0.0,10.0\n1.0,9.8\n2.0,9.5\n").unwrap();
+        let mut model = PlotModel::new();
+        let meta = ExperimentMeta {
+            id: "isothermal_no_sensor".into(),
+            isothermal_temperature: Some(523.15),
+            thermal_mode: ExperimentThermalMode::Isothermal,
+            ..ExperimentMeta::default()
+        };
+        model
+            .push_from_file_with_meta(file.path(), meta)
+            .expect("load t/m data");
+
+        let mut dialog = NewExperimentDialogState::new();
+        dialog.thermal_mode = ExperimentThermalMode::Isothermal;
+        dialog.bind_time_input = "t".into();
+        dialog.bind_mass_input = "m".into();
+        dialog.bind_time_unit = Unit::Second;
+        dialog.bind_mass_unit = Unit::Milligram;
+        dialog
+            .finish_new_experiment_import(&mut model, "isothermal_no_sensor")
+            .expect("isothermal import should not require a measured T column");
+
+        let experiment = model
+            .series
+            .get_experiment_by_id("isothermal_no_sensor")
+            .unwrap();
+        assert!(experiment.dataset.schema.temperature.is_none());
+        assert_eq!(experiment.meta.isothermal_temperature, Some(523.15));
+        assert_eq!(
+            experiment.meta.resolved_thermal_mode(),
+            ExperimentThermalMode::Isothermal
+        );
+        assert_eq!(
+            model
+                .plots
+                .iter()
+                .filter(|curve| curve.experiment_id == "isothermal_no_sensor")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn explicit_sensor_mean_becomes_isothermal_temperature_in_kelvin() {
+        let mut model = fixture_model();
+        let exp_id = model.list_of_experiments()[0].clone();
+        let mean_celsius = model
+            .series
+            .get_experiment_by_id(&exp_id)
+            .unwrap()
+            .dataset
+            .mean_on_column("T")
+            .unwrap();
+        let valid_count = model
+            .series
+            .get_experiment_by_id(&exp_id)
+            .unwrap()
+            .dataset
+            .preview_rows(&["T"], usize::MAX)
+            .unwrap()
+            .columns["T"]
+            .iter()
+            .flatten()
+            .filter(|value| value.is_finite())
+            .count();
+        let mut dialog = NewExperimentDialogState::new();
+        dialog.thermal_mode = ExperimentThermalMode::Isothermal;
+        dialog.use_measured_temperature_mean = true;
+        dialog.bind_time_input = "t".into();
+        dialog.bind_temperature_input = "T".into();
+        dialog.bind_mass_input = "m".into();
+        dialog.bind_time_unit = Unit::Second;
+        dialog.bind_temperature_unit = Unit::Celsius;
+        dialog.bind_mass_unit = Unit::MilliVolt;
+
+        dialog
+            .finish_new_experiment_import(&mut model, &exp_id)
+            .expect("sensor mean should be adopted after binding");
+        let experiment = model.series.get_experiment_by_id(&exp_id).unwrap();
+        let actual = experiment.meta.isothermal_temperature.unwrap();
+        assert!((actual - (mean_celsius + 273.15)).abs() < 1e-9);
+        assert_eq!(
+            experiment.meta.resolved_thermal_mode(),
+            ExperimentThermalMode::Isothermal
+        );
+        assert_eq!(experiment.dataset.schema.temperature.as_deref(), Some("T"));
+        assert!(
+            model
+                .message
+                .contains(&format!("{valid_count} valid measurements"))
+        );
+        assert!(model.message.contains("K"));
+    }
+
+    #[test]
+    fn stale_sensor_mean_option_is_ignored_after_switching_to_nonisothermal() {
+        let mut model = fixture_model();
+        let exp_id = model.list_of_experiments()[0].clone();
+        let mut dialog = NewExperimentDialogState::new();
+        dialog.thermal_mode = ExperimentThermalMode::NonIsothermal;
+        dialog.use_measured_temperature_mean = true;
+        dialog.isothermal_temp_input = "523".into();
+        dialog.select_thermal_mode(ExperimentThermalMode::Isothermal);
+        dialog.use_measured_temperature_mean = true;
+        dialog.isothermal_temp_input = "523".into();
+        dialog.select_thermal_mode(ExperimentThermalMode::NonIsothermal);
+        assert!(!dialog.use_measured_temperature_mean);
+        assert!(dialog.isothermal_temp_input.is_empty());
+        dialog.heating_rate_input = "5.0".into();
+        dialog.bind_time_input = "t".into();
+        dialog.bind_temperature_input = "T".into();
+        dialog.bind_mass_input = "m".into();
+        dialog.bind_time_unit = Unit::Second;
+        dialog.bind_temperature_unit = Unit::Celsius;
+        dialog.bind_mass_unit = Unit::MilliVolt;
+        model
+            .series
+            .try_mutate_by_id(&exp_id, |experiment| {
+                experiment.meta.thermal_mode = ExperimentThermalMode::NonIsothermal;
+                experiment.meta.heating_rate = Some(5.0);
+                experiment.meta.isothermal_temperature = None;
+                Ok(())
+            })
+            .unwrap();
+
+        dialog
+            .finish_new_experiment_import(&mut model, &exp_id)
+            .unwrap();
+
+        let experiment = model.series.get_experiment_by_id(&exp_id).unwrap();
+        assert_eq!(
+            experiment.meta.resolved_thermal_mode(),
+            ExperimentThermalMode::NonIsothermal
+        );
+        assert_eq!(experiment.meta.heating_rate, Some(5.0));
+        assert!(experiment.meta.isothermal_temperature.is_none());
+    }
+
+    #[test]
+    fn switching_from_nonisothermal_to_isothermal_import_uses_only_setpoint() {
+        let mut model = fixture_model();
+        let exp_id = model.list_of_experiments()[0].clone();
+        let mut dialog = NewExperimentDialogState::new();
+        dialog.thermal_mode = ExperimentThermalMode::NonIsothermal;
+        dialog.heating_rate_input = "5.0".into();
+        dialog.select_thermal_mode(ExperimentThermalMode::Isothermal);
+        assert!(dialog.heating_rate_input.is_empty());
+        dialog.isothermal_temp_input = "523.15".into();
+        dialog.bind_time_input = "t".into();
+        dialog.bind_temperature_input = "T".into();
+        dialog.bind_mass_input = "m".into();
+        dialog.bind_time_unit = Unit::Second;
+        dialog.bind_temperature_unit = Unit::Celsius;
+        dialog.bind_mass_unit = Unit::MilliVolt;
+        model
+            .series
+            .try_mutate_by_id(&exp_id, |experiment| {
+                experiment.meta.thermal_mode = ExperimentThermalMode::Isothermal;
+                experiment.meta.isothermal_temperature = Some(523.15);
+                experiment.meta.heating_rate = None;
+                Ok(())
+            })
+            .unwrap();
+
+        dialog
+            .finish_new_experiment_import(&mut model, &exp_id)
+            .unwrap();
+
+        let experiment = model.series.get_experiment_by_id(&exp_id).unwrap();
+        assert_eq!(
+            experiment.meta.thermal_mode,
+            ExperimentThermalMode::Isothermal
+        );
+        assert_eq!(experiment.meta.isothermal_temperature, Some(523.15));
+        assert!(experiment.meta.heating_rate.is_none());
     }
 }

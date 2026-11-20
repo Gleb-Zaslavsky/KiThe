@@ -32,7 +32,10 @@ impl std::fmt::Display for TGAGUIError {
                 formatter.write_str(message)
             }
             Self::PostCommitWarning(message) => {
-                write!(formatter, "Warning: data changes were committed, but plot refresh failed: {message}")
+                write!(
+                    formatter,
+                    "Warning: data changes were committed, but plot refresh failed: {message}"
+                )
             }
         }
     }

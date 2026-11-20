@@ -87,6 +87,7 @@ pub mod is_this_a_sublimation;
 pub mod isoconversion;
 pub mod kinetic_regression;
 use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
+use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode;
 use crate::Kinetics::experimental_kinetics::experiment_series2::UnitedDataset;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     ColumnNature, TGADomainError,
@@ -217,12 +218,25 @@ impl KineticDataView {
     /// Returns an error if any column is missing for any experiment.
     pub fn from_united_dataset(ds: &UnitedDataset) -> Result<Self, TGADomainError> {
         let mut experiments = Vec::new();
+        let has_temperature_column = ds
+            .frame
+            .clone()
+            .collect_schema()?
+            .get(UnitedDataset::canonical_column_name(
+                ColumnNature::Temperature,
+            ))
+            .is_some();
 
         for meta in &ds.meta {
             let time = ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::Time)?;
 
-            let temperature =
-                ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::Temperature)?;
+            let temperature = if has_temperature_column {
+                ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::Temperature)?
+            } else if meta.resolved_thermal_mode() == ExperimentThermalMode::Isothermal {
+                Vec::new()
+            } else {
+                ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::Temperature)?
+            };
 
             let conversion =
                 ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::Conversion)?;
@@ -240,6 +254,15 @@ impl KineticDataView {
                 mass_rate: None,
             };
             Self::normalize_experiment_units(&mut experiment, ds.units_for(&meta.id))?;
+            if experiment.temperature.is_empty()
+                && meta.resolved_thermal_mode() == ExperimentThermalMode::Isothermal
+            {
+                if let Some(temperature) = meta.isothermal_temperature {
+                    if temperature.is_finite() && temperature > 0.0 {
+                        experiment.temperature = vec![temperature; experiment.time.len()];
+                    }
+                }
+            }
             experiment.validate_lengths()?;
             experiments.push(experiment);
         }
@@ -251,6 +274,14 @@ impl KineticDataView {
         nature: Vec<ColumnNature>,
     ) -> Result<Self, TGADomainError> {
         let mut experiments = Vec::new();
+        let has_temperature_column = ds
+            .frame
+            .clone()
+            .collect_schema()?
+            .get(UnitedDataset::canonical_column_name(
+                ColumnNature::Temperature,
+            ))
+            .is_some();
 
         for meta in &ds.meta {
             let time = if nature.contains(&ColumnNature::Time) {
@@ -259,11 +290,12 @@ impl KineticDataView {
                 Vec::new()
             };
 
-            let temperature = if nature.contains(&ColumnNature::Temperature) {
-                ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::Temperature)?
-            } else {
-                Vec::new()
-            };
+            let temperature =
+                if nature.contains(&ColumnNature::Temperature) && has_temperature_column {
+                    ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::Temperature)?
+                } else {
+                    Vec::new()
+                };
 
             let conversion = if nature.contains(&ColumnNature::Conversion) {
                 ds.materialize_vertical_column_by_nature(&meta.id, ColumnNature::Conversion)?
@@ -298,6 +330,15 @@ impl KineticDataView {
                 mass_rate,
             };
             Self::normalize_experiment_units(&mut experiment, ds.units_for(&meta.id))?;
+            if experiment.temperature.is_empty()
+                && meta.resolved_thermal_mode() == ExperimentThermalMode::Isothermal
+            {
+                if let Some(temperature) = meta.isothermal_temperature {
+                    if temperature.is_finite() && temperature > 0.0 {
+                        experiment.temperature = vec![temperature; experiment.time.len()];
+                    }
+                }
+            }
             experiment.validate_lengths()?;
             experiments.push(experiment);
         }
@@ -405,6 +446,11 @@ pub trait KineticMethod {
     fn required_columns_by_nature(&self) -> Vec<ColumnNature> {
         Vec::new()
     }
+
+    /// True for methods that use a setpoint temperature rather than a measured T curve.
+    fn is_isothermal_method(&self) -> bool {
+        false
+    }
 }
 
 impl<O> dyn KineticMethod<Output = O> {
@@ -450,13 +496,33 @@ pub fn require_heating_rates(data: &KineticDataView) -> Result<(), TGADomainErro
 /// Required by isothermal methods (Integral Friedman).
 pub fn require_isothermal(data: &KineticDataView) -> Result<(), TGADomainError> {
     for exp in &data.experiments {
-        if exp.meta.isothermal_temperature.is_none() {
+        if exp.meta.resolved_thermal_mode() != ExperimentThermalMode::Isothermal
+            || !exp
+                .meta
+                .isothermal_temperature
+                .is_some_and(|temperature| temperature.is_finite() && temperature > 0.0)
+        {
             return Err(TGADomainError::InvalidOperation(
-                "Method requires isothermal experiments".into(),
+                "Method requires isothermal experiments with a finite setpoint above 0 K".into(),
             ));
         }
     }
 
+    Ok(())
+}
+
+/// Reject explicitly isothermal input before a non-isothermal solver runs.
+/// Unspecified legacy metadata remains accepted and is validated by existing
+/// required-column and heating-rate checks.
+pub fn require_nonisothermal(data: &KineticDataView) -> Result<(), TGADomainError> {
+    if let Some(experiment) = data.experiments.iter().find(|experiment| {
+        experiment.meta.resolved_thermal_mode() == ExperimentThermalMode::Isothermal
+    }) {
+        return Err(TGADomainError::InvalidOperation(format!(
+            "Non-isothermal method cannot be applied to explicitly isothermal experiment '{}'",
+            experiment.meta.id
+        )));
+    }
     Ok(())
 }
 
@@ -955,13 +1021,22 @@ impl ConversionGridBuilder {
                 }
             }
 
+            let mut terminal_suffix_start = exp.conversion.len();
+            let mut terminal_suffix_is_complete = true;
+            for index in (0..exp.conversion.len()).rev() {
+                terminal_suffix_is_complete &= exp.conversion[index] >= 1.0 - 1e-12;
+                if terminal_suffix_is_complete {
+                    terminal_suffix_start = index;
+                }
+            }
+
+            // Keep forward validation so the reported violation remains the
+            // first bad pair, while suffix membership is precomputed in O(n).
             for (index, &value) in exp.conversion.iter().enumerate() {
                 let terminal_complete_conversion_plateau = index > 0
                     && value == exp.conversion[index - 1]
                     && value >= 1.0 - 1e-12
-                    && exp.conversion[index..]
-                        .iter()
-                        .all(|&tail| tail >= 1.0 - 1e-12);
+                    && index >= terminal_suffix_start;
                 if index > 0
                     && value <= exp.conversion[index - 1]
                     && !terminal_complete_conversion_plateau
@@ -1024,6 +1099,7 @@ impl ConversionGridBuilder {
         eta_min += self.margin_left;
         eta_max -= self.margin_right;
         Self::validate_eta_range(eta_min, eta_max)?;
+        Self::validate_experiments_cover_range(data, eta_min, eta_max)?;
 
         let eta_grid = Self::build_eta_grid(eta_min, eta_max, self.segments)?;
 
@@ -1096,6 +1172,7 @@ impl ConversionGridBuilder {
         eta_max -= self.margin_right;
 
         Self::validate_eta_range(eta_min, eta_max)?;
+        Self::validate_experiments_cover_range(data, eta_min, eta_max)?;
         let eta_grid = Self::build_eta_grid(eta_min, eta_max, self.segments)?;
 
         let n_exp = data.experiments.len();
@@ -1164,6 +1241,37 @@ impl ConversionGridBuilder {
     fn validate_eta_range(min: f64, max: f64) -> Result<(), TGADomainError> {
         if !min.is_finite() || !max.is_finite() || min < 0.0 || max > 1.0 || max <= min {
             return Err(TGADomainError::InvalidConversionRange);
+        }
+        Ok(())
+    }
+
+    /// A requested grid range must be measured by every experiment; grid
+    /// interpolation never silently extrapolates conversion values.
+    fn validate_experiments_cover_range(
+        data: &KineticDataView,
+        min: f64,
+        max: f64,
+    ) -> Result<(), TGADomainError> {
+        for (index, exp) in data.experiments.iter().enumerate() {
+            let measured_min = exp.conversion[0];
+            let measured_max = exp
+                .conversion
+                .last()
+                .copied()
+                .ok_or(TGADomainError::InvalidConversionRange)?;
+            if min < measured_min || max > measured_max {
+                return Err(TGADomainError::ConversionRangeNotCovered {
+                    experiment_id: if exp.meta.id.is_empty() {
+                        format!("index {index}")
+                    } else {
+                        exp.meta.id.clone()
+                    },
+                    requested_min: min,
+                    requested_max: max,
+                    available_min: measured_min,
+                    available_max: measured_max,
+                });
+            }
         }
         Ok(())
     }
@@ -1251,6 +1359,7 @@ impl ConversionGridBuilder {
         eta_max -= self.margin_right;
 
         Self::validate_eta_range(eta_min, eta_max)?;
+        Self::validate_experiments_cover_range(data, eta_min, eta_max)?;
         let eta_grid = Self::build_eta_grid(eta_min, eta_max, self.segments)?;
 
         let n_exp = data.experiments.len();
@@ -1322,6 +1431,42 @@ impl ConversionGridBuilder {
     }
 }
 
+/// Rejects conversion grids outside the measured interval before any
+/// interpolation implementation is allowed to evaluate them.
+fn validate_interpolation_range(
+    exp: &ExperimentData,
+    eta_grid: &[f64],
+) -> Result<(), TGADomainError> {
+    let eta = &exp.conversion;
+    let (Some(&measured_min), Some(&measured_max)) = (eta.first(), eta.last()) else {
+        return Err(TGADomainError::InvalidOperation(
+            "Cannot interpolate an empty conversion series".into(),
+        ));
+    };
+    if eta_grid.iter().any(|value| !value.is_finite()) {
+        return Err(TGADomainError::InvalidConversionRange);
+    }
+    if eta_grid
+        .iter()
+        .any(|&value| value < measured_min || value > measured_max)
+    {
+        let requested_min = eta_grid.iter().copied().fold(f64::INFINITY, f64::min);
+        let requested_max = eta_grid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        return Err(TGADomainError::ConversionRangeNotCovered {
+            experiment_id: if exp.meta.id.is_empty() {
+                "<unknown>".to_string()
+            } else {
+                exp.meta.id.clone()
+            },
+            requested_min,
+            requested_max,
+            available_min: measured_min,
+            available_max: measured_max,
+        });
+    }
+    Ok(())
+}
+
 /// Linear interpolation of time, temperature, and rate onto `eta_grid`.
 ///
 /// Allocating variant; used by `build_withcopy`.
@@ -1333,6 +1478,8 @@ pub fn interpolate_linear(
     let time = &exp.time;
     let temp = &exp.temperature;
     let rate = &exp.conversion_rate;
+
+    validate_interpolation_range(exp, eta_grid)?;
 
     let mut out_t = Vec::with_capacity(eta_grid.len());
     let mut out_T = Vec::with_capacity(eta_grid.len());
@@ -1370,6 +1517,7 @@ pub fn interpolate_spline(
     eta_grid: &[f64],
 ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), TGADomainError> {
     let eta = &exp.conversion;
+    validate_interpolation_range(exp, eta_grid)?;
 
     let interp = if eta.len() < 4 {
         Interpolation::Linear
@@ -1434,6 +1582,7 @@ pub fn interpolate_linear_into(
     let time = &exp.time;
     let temp = &exp.temperature;
     let rate = &exp.conversion_rate;
+    validate_interpolation_range(exp, eta_grid)?;
     if !eta.windows(2).all(|w| w[0] <= w[1]) {
         return Err(TGADomainError::InvalidOperation(
             "Conversion must be  monotonic".into(),
@@ -1492,6 +1641,7 @@ fn interpolate_spline_into(
     r_out: &mut ndarray::ArrayViewMut1<f64>,
 ) -> Result<(), TGADomainError> {
     let eta = &exp.conversion;
+    validate_interpolation_range(exp, eta_grid)?;
     if !eta.windows(2).all(|w| w[0] <= w[1]) {
         return Err(TGADomainError::InvalidOperation(
             "Conversion must be monotonic".into(),
@@ -1561,6 +1711,8 @@ pub fn interpolate_time_linear_only(
     let eta = &exp.conversion;
     let time = &exp.time;
 
+    validate_interpolation_range(exp, eta_grid)?;
+
     if !eta.windows(2).all(|w| w[0] <= w[1]) {
         return Err(TGADomainError::InvalidOperation(
             "Conversion must be monotonic".into(),
@@ -1600,6 +1752,8 @@ fn interpolate_time_spline_only(
 ) -> Result<(), TGADomainError> {
     let eta = &exp.conversion;
     let time = &exp.time;
+
+    validate_interpolation_range(exp, eta_grid)?;
 
     if eta.len() < 3 {
         return Err(TGADomainError::InvalidOperation(

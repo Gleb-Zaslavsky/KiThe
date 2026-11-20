@@ -3,7 +3,9 @@ use super::super::solid_state_kinetics_IVP::{IVPSolution, KineticModelIVP, Kinet
 
 use super::kinetic_methods::{ConversionGridBuilder, ExperimentData, KineticDataView};
 use super::one_experiment_dataset::TGADomainError;
-use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentMeta;
+use crate::Kinetics::experimental_kinetics::experiment_series_main::{
+    ExperimentMeta, ExperimentThermalMode,
+};
 use RustedSciThe::numerical::StiffAPI::StiffSolverKind;
 
 pub fn solution_to_experiment(sol: IVPSolution, heating_rate: f64, id: &str) -> ExperimentData {
@@ -12,6 +14,7 @@ pub fn solution_to_experiment(sol: IVPSolution, heating_rate: f64, id: &str) -> 
             id: id.to_string(),
             heating_rate: Some(heating_rate),
             isothermal_temperature: None,
+            thermal_mode: ExperimentThermalMode::NonIsothermal,
             comment: None,
         },
 
@@ -101,6 +104,7 @@ fn test_conversion_grid_build() {
                 id: id.to_string(),
                 heating_rate: Some(beta),
                 isothermal_temperature: None,
+                thermal_mode: ExperimentThermalMode::NonIsothermal,
                 comment: None,
             },
             time,

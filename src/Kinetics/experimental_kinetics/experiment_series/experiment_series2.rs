@@ -855,6 +855,7 @@ mod tests {
                 id: "exp1".to_string(),
                 heating_rate: Some(5.0),
                 isothermal_temperature: None,
+                thermal_mode: crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::NonIsothermal,
                 comment: Some("test".to_string()),
             },
         };

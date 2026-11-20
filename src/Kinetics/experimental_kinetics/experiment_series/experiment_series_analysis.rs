@@ -518,8 +518,16 @@ impl TGAExperiment {
 
     pub fn apply_golden_pipeline(
         self,
-        config: GoldenPipelineConfig,
+        mut config: GoldenPipelineConfig,
     ) -> Result<(Self, Vec<String>), TGADomainError> {
+        if self.meta.resolved_thermal_mode() == super::ExperimentThermalMode::Isothermal {
+            config.isothermal_temperature =
+                Some(self.meta.isothermal_temperature.ok_or_else(|| {
+                    TGADomainError::InvalidOperation(
+                        "Isothermal experiment has no setpoint temperature in metadata".into(),
+                    )
+                })?);
+        }
         let (dataset, vec_of_new) = self.dataset.apply_golden_pipeline(config)?;
         let exp = Self {
             dataset,

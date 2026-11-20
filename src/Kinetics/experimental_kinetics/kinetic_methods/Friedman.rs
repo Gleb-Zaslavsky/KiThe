@@ -210,10 +210,13 @@ impl KineticMethod for DifferentialFriedman {
     fn required_columns_by_nature(&self) -> Vec<ColumnNature> {
         vec![
             ColumnNature::Conversion,
-            ColumnNature::Temperature,
             ColumnNature::Time,
             ColumnNature::ConversionRate,
         ]
+    }
+
+    fn is_isothermal_method(&self) -> bool {
+        true
     }
 }
 //================================================================================================================================

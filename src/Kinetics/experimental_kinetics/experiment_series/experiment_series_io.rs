@@ -17,6 +17,7 @@ struct SeriesExperimentRecord {
     id: String,
     heating_rate: Option<f64>,
     isothermal_temperature: Option<f64>,
+    thermal_mode: Option<ExperimentThermalMode>,
     comment: Option<String>,
     len: usize,
     columns: Vec<SeriesColumnRecord>,
@@ -52,10 +53,11 @@ pub(super) fn to_csv_series_impl(series: &TGASeries, path: &Path) -> Result<(), 
         let exp_id_token = escape_meta_field(&exp_id);
 
         meta_lines.push(format!(
-            "#META\tEXP\t{}\t{}\t{}\t{}",
+            "#META\tEXP\t{}\t{}\t{}\t{}\t{}",
             exp_id_token,
             encode_opt_f64(exp.meta.heating_rate),
             encode_opt_f64(exp.meta.isothermal_temperature),
+            thermal_mode_tag(exp.meta.resolved_thermal_mode()),
             encode_opt_string(exp.meta.comment.as_deref()),
         ));
         meta_lines.push(format!("#META\tLEN\t{}\t{}", exp_id_token, df.height()));
@@ -327,6 +329,9 @@ pub(super) fn from_csv_series_impl(path: &Path) -> Result<TGASeries, TGADomainEr
                 id: rec.id,
                 heating_rate: rec.heating_rate,
                 isothermal_temperature: rec.isothermal_temperature,
+                thermal_mode: rec
+                    .thermal_mode
+                    .unwrap_or(ExperimentThermalMode::Unspecified),
                 comment: rec.comment,
             },
         };
@@ -348,7 +353,7 @@ fn parse_series_meta_line(
 
     match parts[0] {
         "EXP" => {
-            if parts.len() != 5 {
+            if parts.len() != 5 && parts.len() != 6 {
                 return Err(TGADomainError::InvalidOperation(format!(
                     "Invalid EXP metadata line: '{}'",
                     payload
@@ -367,7 +372,12 @@ fn parse_series_meta_line(
             rec.id = id;
             rec.heating_rate = decode_opt_f64(parts[2])?;
             rec.isothermal_temperature = decode_opt_f64(parts[3])?;
-            rec.comment = decode_opt_string(parts[4])?;
+            if parts.len() == 6 {
+                rec.thermal_mode = Some(parse_thermal_mode(parts[4])?);
+                rec.comment = decode_opt_string(parts[5])?;
+            } else {
+                rec.comment = decode_opt_string(parts[4])?;
+            }
         }
         "LEN" => {
             if parts.len() != 3 {
@@ -649,6 +659,25 @@ fn decode_opt_f64(token: &str) -> Result<Option<f64>, TGADomainError> {
     raw.parse::<f64>().map(Some).map_err(|e| {
         TGADomainError::InvalidOperation(format!("Invalid optional-f64 value '{}': {}", raw, e))
     })
+}
+
+fn thermal_mode_tag(mode: ExperimentThermalMode) -> &'static str {
+    match mode {
+        ExperimentThermalMode::Unspecified => "unspecified",
+        ExperimentThermalMode::Isothermal => "isothermal",
+        ExperimentThermalMode::NonIsothermal => "non_isothermal",
+    }
+}
+
+fn parse_thermal_mode(token: &str) -> Result<ExperimentThermalMode, TGADomainError> {
+    match token {
+        "unspecified" => Ok(ExperimentThermalMode::Unspecified),
+        "isothermal" => Ok(ExperimentThermalMode::Isothermal),
+        "non_isothermal" => Ok(ExperimentThermalMode::NonIsothermal),
+        _ => Err(TGADomainError::InvalidOperation(format!(
+            "Unknown experiment thermal mode '{token}'"
+        ))),
+    }
 }
 
 fn encode_opt_string(v: Option<&str>) -> String {

@@ -123,6 +123,27 @@ pub enum TGADomainError {
         method: String,
         details: String,
     },
+    InsufficientData {
+        available: usize,
+        required: usize,
+    },
+    DegenerateRegression {
+        details: String,
+    },
+    FittingInputLengthMismatch {
+        x_len: usize,
+        y_len: usize,
+    },
+    InvalidFittingConfiguration {
+        details: String,
+    },
+    ConversionRangeNotCovered {
+        experiment_id: String,
+        requested_min: f64,
+        requested_max: f64,
+        available_min: f64,
+        available_max: f64,
+    },
     OperationContext {
         experiment_id: Option<String>,
         column: Option<String>,
@@ -226,6 +247,33 @@ impl std::fmt::Display for TGADomainError {
             Self::NoConvergence { method, details } => {
                 write!(f, "{method} did not produce a valid result: {details}")
             }
+            Self::InsufficientData {
+                available,
+                required,
+            } => write!(
+                f,
+                "Insufficient observations: {available} available, {required} required"
+            ),
+            Self::DegenerateRegression { details } => {
+                write!(f, "Regression is degenerate: {details}")
+            }
+            Self::FittingInputLengthMismatch { x_len, y_len } => write!(
+                f,
+                "Fitting X/Y columns have different lengths ({x_len} vs {y_len})"
+            ),
+            Self::InvalidFittingConfiguration { details } => {
+                write!(f, "Invalid fitting configuration: {details}")
+            }
+            Self::ConversionRangeNotCovered {
+                experiment_id,
+                requested_min,
+                requested_max,
+                available_min,
+                available_max,
+            } => write!(
+                f,
+                "Experiment '{experiment_id}' covers conversion [{available_min}, {available_max}], but requested [{requested_min}, {requested_max}]"
+            ),
             Self::DatasetColumnLengthMismatch {
                 column,
                 expected,
@@ -514,6 +562,29 @@ pub enum ColumnNature {
     PredexFactor,
     R2,
     FittedCurve,
+}
+
+/// Controls when a numerical derivative is withheld across a large time gap.
+///
+/// Derivatives use the bound time column's stored values, so `MaxInterval` is
+/// expressed in that column's unit (for example, seconds or hours).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TimeGapPolicy {
+    /// Mark a derivative as null when either adjacent interval exceeds this
+    /// multiple of the median positive sampling interval.
+    MedianStepMultiple(f64),
+    /// Mark a derivative as null when either adjacent interval exceeds this
+    /// absolute duration in the bound time unit.
+    MaxInterval(f64),
+    /// Do not reject large intervals; still reject non-positive or non-finite
+    /// intervals.
+    Allow,
+}
+
+impl Default for TimeGapPolicy {
+    fn default() -> Self {
+        Self::MedianStepMultiple(5.0)
+    }
 }
 /// Columns Origin
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2461,10 +2532,21 @@ impl TGADataset {
     // RATES
     /// Вычисление производной с заданными параметрами
     pub fn derive_rate0(
+        self,
+        source_col: &str,
+        new_col: &str,
+        out_meta: ColumnMeta,
+    ) -> Result<Self, TGADomainError> {
+        self.derive_rate0_with_gap_policy(source_col, new_col, out_meta, TimeGapPolicy::default())
+    }
+
+    /// Derive a column with an explicit policy for large gaps in the bound time axis.
+    pub fn derive_rate0_with_gap_policy(
         mut self,
         source_col: &str,
         new_col: &str,
         out_meta: ColumnMeta,
+        gap_policy: TimeGapPolicy,
     ) -> Result<Self, TGADomainError> {
         self.ensure_column_name_is_available(new_col)?;
         let time = self
@@ -2480,11 +2562,11 @@ impl TGADataset {
             .map(|meta| meta.unit)
             .ok_or(TGADomainError::ColumnNotFound(time.clone()))?;
 
-        println!("\n column: {} ", source_col);
-        let dv = col(source_col).shift(lit(-1)) - col(source_col).shift(lit(1));
-        println!("\n column: {} ", time);
-        let dt = col(&time).shift(lit(-1)) - col(time).shift(lit(1));
-        let rate_expr = (dv.clone() / dt.clone()).alias(new_col);
+        self.schema
+            .columns
+            .get(source_col)
+            .ok_or(TGADomainError::ColumnNotFound(source_col.into()))?;
+        let rate_expr = self.derivative_expr(source_col, &time, new_col, gap_policy)?;
         self.push_undo_snapshot();
         self.frame = self.frame.with_column(rate_expr.clone());
 
@@ -2498,8 +2580,8 @@ impl TGADataset {
             AffectedColumns::Specific(vec![new_col.to_string()]),
             Some(rate_expr),
             format!(
-                "Computed rate {} from {} with unit {:?}",
-                new_col, source_col, out_unit
+                "Computed rate {} from {} with unit {:?}; time-gap policy {:?}",
+                new_col, source_col, out_unit, gap_policy
             ),
             true,
         );
@@ -2508,10 +2590,26 @@ impl TGADataset {
     }
     /// Вычисление производной с автоматическим определением единиц измерения
     pub fn derive_rate(
+        self,
+        source_col: &str,
+        new_col: &str,
+        new_col_nature: ColumnNature,
+    ) -> Result<Self, TGADomainError> {
+        self.derive_rate_with_gap_policy(
+            source_col,
+            new_col,
+            new_col_nature,
+            TimeGapPolicy::default(),
+        )
+    }
+
+    /// Derive a rate with an explicit policy for large gaps in the bound time axis.
+    pub fn derive_rate_with_gap_policy(
         mut self,
         source_col: &str,
         new_col: &str,
         new_col_nature: ColumnNature,
+        gap_policy: TimeGapPolicy,
     ) -> Result<Self, TGADomainError> {
         self.ensure_column_name_is_available(new_col)?;
         let time = self
@@ -2534,11 +2632,7 @@ impl TGADataset {
             .ok_or(TGADomainError::ColumnNotFound(source_col.into()))?;
 
         let out_unit = src_meta.unit.for_time_base(time_unit)?;
-        println!("\n column: {} ", source_col);
-        let dv = col(source_col).shift(lit(-1)) - col(source_col).shift(lit(1));
-        println!("\n column: {} ", time);
-        let dt = col(&time).shift(lit(-1)) - col(time).shift(lit(1));
-        let rate_expr = (dv.clone() / dt.clone()).alias(new_col);
+        let rate_expr = self.derivative_expr(source_col, &time, new_col, gap_policy)?;
         self.push_undo_snapshot();
         self.frame = self.frame.with_column(rate_expr.clone());
 
@@ -2572,13 +2666,124 @@ impl TGADataset {
             AffectedColumns::Specific(vec![new_col.to_string()]),
             Some(rate_expr),
             format!(
-                "Computed rate {} from {} with unit {:?}",
-                new_col, source_col, out_unit
+                "Computed rate {} from {} with unit {:?}; time-gap policy {:?}",
+                new_col, source_col, out_unit, gap_policy
             ),
             true,
         );
 
         Ok(self)
+    }
+
+    /// Build a nonuniform three-point derivative expression without dropping rows.
+    fn derivative_expr(
+        &self,
+        source_col: &str,
+        time_col: &str,
+        new_col: &str,
+        gap_policy: TimeGapPolicy,
+    ) -> Result<Expr, TGADomainError> {
+        let max_interval = match gap_policy {
+            TimeGapPolicy::MedianStepMultiple(factor) => {
+                if !factor.is_finite() || factor <= 0.0 {
+                    return Err(TGADomainError::InvalidFilterParameters {
+                        filter: "time derivative".into(),
+                        details: "median-step gap factor must be finite and positive".into(),
+                    });
+                }
+                let limit = self.median_time_step(time_col)? * factor;
+                if !limit.is_finite() || limit <= 0.0 {
+                    return Err(TGADomainError::InvalidFilterParameters {
+                        filter: "time derivative".into(),
+                        details: "computed maximum time interval is not finite and positive".into(),
+                    });
+                }
+                Some(limit)
+            }
+            TimeGapPolicy::MaxInterval(interval) => {
+                if !interval.is_finite() || interval <= 0.0 {
+                    return Err(TGADomainError::InvalidFilterParameters {
+                        filter: "time derivative".into(),
+                        details: "maximum time interval must be finite and positive".into(),
+                    });
+                }
+                Some(interval)
+            }
+            TimeGapPolicy::Allow => None,
+        };
+
+        let previous_step = col(time_col) - col(time_col).shift(lit(1));
+        let next_step = col(time_col).shift(lit(-1)) - col(time_col);
+        let previous_value = col(source_col).shift(lit(1));
+        let current_value = col(source_col);
+        let next_value = col(source_col).shift(lit(-1));
+        let sum_steps = previous_step.clone() + next_step.clone();
+
+        let mut valid = previous_step
+            .clone()
+            .gt(lit(0.0))
+            .and(previous_step.clone().lt(lit(f64::INFINITY)))
+            .and(next_step.clone().gt(lit(0.0)))
+            .and(next_step.clone().lt(lit(f64::INFINITY)));
+        if let Some(max_interval) = max_interval {
+            valid = valid
+                .and(previous_step.clone().lt_eq(lit(max_interval)))
+                .and(next_step.clone().lt_eq(lit(max_interval)));
+        }
+        valid = valid
+            .and(sum_steps.clone().gt(lit(0.0)))
+            .and(sum_steps.clone().lt(lit(f64::INFINITY)));
+
+        let first_weight = -next_step.clone() / (previous_step.clone() * sum_steps.clone());
+        let center_weight = (next_step.clone() - previous_step.clone())
+            / (previous_step.clone() * next_step.clone());
+        let last_weight = previous_step.clone() / (next_step.clone() * sum_steps);
+        let derivative = first_weight * previous_value
+            + center_weight * current_value
+            + last_weight * next_value;
+        valid = valid
+            .and(derivative.clone().gt(lit(-f64::MAX)))
+            .and(derivative.clone().lt(lit(f64::MAX)));
+
+        Ok(when(valid)
+            .then(derivative)
+            .otherwise(lit(NULL))
+            .alias(new_col))
+    }
+
+    /// Median positive interval between adjacent finite time values.
+    fn median_time_step(&self, time_col: &str) -> Result<f64, TGADomainError> {
+        let frame = self
+            .frame
+            .clone()
+            .select([col(time_col).cast(DataType::Float64)])
+            .collect()?;
+        let values = frame.column(time_col)?.f64()?;
+        let mut intervals = Vec::with_capacity(values.len().saturating_sub(1));
+        let mut previous: Option<f64> = None;
+        for index in 0..values.len() {
+            match values.get(index).filter(|value| value.is_finite()) {
+                Some(current) => {
+                    if let Some(previous) = previous {
+                        let interval = current - previous;
+                        if interval.is_finite() && interval > 0.0 {
+                            intervals.push(interval);
+                        }
+                    }
+                    previous = Some(current);
+                }
+                None => previous = None,
+            }
+        }
+
+        if intervals.is_empty() {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "Cannot infer typical sampling interval from time column '{time_col}'"
+            )));
+        }
+        let middle = intervals.len() / 2;
+        intervals.select_nth_unstable_by(middle, f64::total_cmp);
+        Ok(intervals[middle])
     }
 
     /// Вычисление скорости изменения массы

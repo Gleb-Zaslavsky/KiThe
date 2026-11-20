@@ -11,18 +11,18 @@ use crate::Kinetics::experimental_kinetics::one_experiment_dataset::ColumnRole;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::History;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     ColumnHistory, ColumnMeta, ColumnNature, ColumnOrigin, OperationRecord, TGADataset,
-    TGADomainError, TGASchema, UnaryOp, Unit,
+    TGADomainError, TGASchema, TimeGapPolicy, UnaryOp, Unit,
 };
 use crate::Kinetics::experimental_kinetics::testing_mod::VirtualTGA;
+use RustedSciThe::numerical::data_processing::LSQSplines::SolverKind;
+use RustedSciThe::numerical::data_processing::lowess_wrapper::LowessConfig;
+use RustedSciThe::numerical::data_processing::splines::SplineKind;
 use polars::prelude::{
     Column, CsvWriter, DataFrame, DataType, IntoLazy, NamedFrom, SerWriter, Series,
 };
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
-use RustedSciThe::numerical::data_processing::lowess_wrapper::LowessConfig;
-use RustedSciThe::numerical::data_processing::splines::SplineKind;
-use RustedSciThe::numerical::data_processing::LSQSplines::SolverKind;
 
 #[path = "experiment_series_core.rs"]
 mod experiment_series_core;
@@ -153,9 +153,24 @@ pub struct ExperimentMeta {
     /// Isothermal temperature (K)
     pub isothermal_temperature: Option<f64>,
 
+    /// Declared thermal regime. `Unspecified` is retained for incomplete or
+    /// legacy experiments; `resolved_thermal_mode` interprets old metadata.
+    pub thermal_mode: ExperimentThermalMode,
+
     /// Free-form user comment
     pub comment: Option<String>,
 }
+
+/// Thermal regime is independent of whether an instrument temperature column
+/// is present. Isothermal runs may carry a measured T series or only a setpoint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExperimentThermalMode {
+    #[default]
+    Unspecified,
+    Isothermal,
+    NonIsothermal,
+}
+
 impl ExperimentMeta {
     /// new API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
@@ -165,7 +180,21 @@ impl ExperimentMeta {
             id: String::new(),
             heating_rate: None,
             isothermal_temperature: None,
+            thermal_mode: ExperimentThermalMode::Unspecified,
             comment: None,
+        }
+    }
+
+    /// Resolve explicit mode first, then infer the legacy mode from old metadata.
+    pub fn resolved_thermal_mode(&self) -> ExperimentThermalMode {
+        match self.thermal_mode {
+            ExperimentThermalMode::Unspecified if self.isothermal_temperature.is_some() => {
+                ExperimentThermalMode::Isothermal
+            }
+            ExperimentThermalMode::Unspecified if self.heating_rate.is_some() => {
+                ExperimentThermalMode::NonIsothermal
+            }
+            mode => mode,
         }
     }
 }
@@ -203,6 +232,7 @@ impl TGAExperiment {
     /// to dataset and engine modules in experimental kinetics.
     pub fn with_heating_rate(mut self, beta: f64) -> Self {
         self.meta.heating_rate = Some(beta);
+        self.meta.thermal_mode = ExperimentThermalMode::NonIsothermal;
         self
     }
 
@@ -211,6 +241,7 @@ impl TGAExperiment {
     /// to dataset and engine modules in experimental kinetics.
     pub fn with_isothermal_temperature(mut self, t: f64) -> Self {
         self.meta.isothermal_temperature = Some(t);
+        self.meta.thermal_mode = ExperimentThermalMode::Isothermal;
         self
     }
 
@@ -413,6 +444,8 @@ impl TGAExperiment {
     tgaexperiment_forward_result! {
         pub fn derive_rate0(self, source_col: &str, new_col: &str, out_meta: ColumnMeta) -> Result<Self, TGADomainError> => derive_rate0;
         pub fn derive_rate(self, source_col: &str, new_col: &str, new_col_nature: ColumnNature) -> Result<Self, TGADomainError> => derive_rate;
+        pub fn derive_rate0_with_gap_policy(self, source_col: &str, new_col: &str, out_meta: ColumnMeta, gap_policy: TimeGapPolicy) -> Result<Self, TGADomainError> => derive_rate0_with_gap_policy;
+        pub fn derive_rate_with_gap_policy(self, source_col: &str, new_col: &str, new_col_nature: ColumnNature, gap_policy: TimeGapPolicy) -> Result<Self, TGADomainError> => derive_rate_with_gap_policy;
         pub fn derive_mass_rate(self, new_col: &str) -> Result<Self, TGADomainError> => derive_mass_rate;
         pub fn derive_temperature_rate(self, new_col: &str) -> Result<Self, TGADomainError> => derive_temperature_rate;
         pub fn derive_dimensionless_rate(self, col_name: &str, out_name: &str) -> Result<Self, TGADomainError> => derive_dimensionless_rate;
@@ -1143,6 +1176,20 @@ impl TGASeries {
         self.try_transform_by_id(id, |exp| exp.derive_rate0(source_col, new_col, out_meta))
     }
 
+    /// Derive a rate with an explicit large-gap policy for one experiment.
+    pub fn derive_rate0_with_gap_policy(
+        &mut self,
+        id: &str,
+        source_col: &str,
+        new_col: &str,
+        out_meta: ColumnMeta,
+        gap_policy: TimeGapPolicy,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.derive_rate0_with_gap_policy(source_col, new_col, out_meta, gap_policy)
+        })
+    }
+
     /// derive_rate API method in the experiment/series facade.
     /// It keeps call-sites ergonomic while delegating core logic
     /// to dataset and engine modules in experimental kinetics.
@@ -1155,6 +1202,20 @@ impl TGASeries {
     ) -> Result<(), TGADomainError> {
         self.try_transform_by_id(id, |exp| {
             exp.derive_rate(source_col, new_col, new_col_nature)
+        })
+    }
+
+    /// Derive a rate with an explicit large-gap policy for one experiment.
+    pub fn derive_rate_with_gap_policy(
+        &mut self,
+        id: &str,
+        source_col: &str,
+        new_col: &str,
+        new_col_nature: ColumnNature,
+        gap_policy: TimeGapPolicy,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| {
+            exp.derive_rate_with_gap_policy(source_col, new_col, new_col_nature, gap_policy)
         })
     }
 

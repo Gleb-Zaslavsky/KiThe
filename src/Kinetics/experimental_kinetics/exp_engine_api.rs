@@ -677,12 +677,27 @@ impl TGADataset {
         config: GoldenPipelineConfig,
     ) -> Result<(Self, Vec<String>), TGADomainError> {
         let time_col = self.get_time_col()?;
-        info!(
-            "Starting golden pipeline for time='{}', temp='{}', mass='{}'",
-            time_col,
-            self.get_temperature_col()?,
-            self.get_mass_col()?
-        );
+        let isothermal_temperature = config.isothermal_temperature;
+        let temperature_col = self.schema.temperature.clone();
+        let mass_col = self.get_mass_col()?;
+        if let Some(temperature) = isothermal_temperature {
+            if !temperature.is_finite() || temperature <= 0.0 {
+                return Err(TGADomainError::InvalidOperation(
+                    "Isothermal temperature must be finite and above 0 K".into(),
+                ));
+            }
+            info!(
+                "Starting isothermal golden pipeline for time='{}', mass='{}', setpoint={} K, measured_temperature={:?}",
+                time_col, mass_col, temperature, temperature_col
+            );
+        } else {
+            info!(
+                "Starting non-isothermal golden pipeline for time='{}', temp='{}', mass='{}'",
+                time_col,
+                self.get_temperature_col()?,
+                mass_col
+            );
+        }
 
         let ds = match self.monotony_of_time_check() {
             Ok(vector_of_non_monotonic_points) if vector_of_non_monotonic_points.is_empty() => {
@@ -736,8 +751,7 @@ impl TGADataset {
 
         let initial_list_columns = ds.list_of_columns();
 
-        let temp_col = ds.get_temperature_col()?;
-        let mass_col = ds.get_mass_col()?;
+        let temp_col = temperature_col;
 
         let ds = ds.calibrate_mass(k, b, &mass_col)?; // calibration
         // trim startup
@@ -752,25 +766,34 @@ impl TGADataset {
             ds
         };
 
-        let ds = ds
-            .celsius_to_kelvin()? // units
+        let mut ds = ds
             .seconds_to_hours()?
-            .move_time_to_zero()? // time moved to zero
-            .sg_filter_column(&mass_col, window_size, poly_degree, deriv, delta)? // smoothing
+            .move_time_to_zero()?
+            .sg_filter_column(&mass_col, window_size, poly_degree, deriv, delta)?
             .dimensionless_mass(0.0, averaging_time / 3600.0, "alpha")?
-            .conversion(0.0, averaging_time / 3600.0, "eta")?
+            .conversion(0.0, averaging_time / 3600.0, "eta")?;
+
+        let mut resample_columns = vec![mass_col.as_str(), "alpha", "eta"];
+        if let Some(temp_col) = temp_col.as_deref() {
+            ds = ds.celsius_to_kelvin()?;
+            resample_columns.push(temp_col);
+        }
+        ds = ds
             .lsq_spline_resample_columns_as(
                 &time_col,
                 "time_splined",
-                &[&mass_col, &temp_col, "alpha", "eta"],
-                &[None; 4],
+                &resample_columns,
+                &vec![None; resample_columns.len()],
                 n_points,
                 degree,
                 n_internal_points,
                 SolverKind::Banded,
             )?
-            .trim_null_edges()?
-            .derive_temperature_rate("dT/dt")?
+            .trim_null_edges()?;
+        if isothermal_temperature.is_none() {
+            ds = ds.derive_temperature_rate("dT/dt")?;
+        }
+        let ds = ds
             .derive_dalpha_dt("dalpha_dt")?
             .derive_deta_dt("deta_dt")?;
 
@@ -843,6 +866,8 @@ pub struct GoldenPipelineConfig {
     pub time_cut_after: Option<f64>,
     pub sav_gol_config: SavGolConfig,
     pub averaging_time: f64,
+    /// Set for an explicitly isothermal experiment; then a measured T column is optional.
+    pub isothermal_temperature: Option<f64>,
     pub spline_config: SplineConfig,
     pub save_to_new_experiment: bool,
     pub del_old_experiment: bool,
@@ -856,6 +881,7 @@ impl Default for GoldenPipelineConfig {
             time_cut_after: None,
             sav_gol_config: SavGolConfig::default(),
             averaging_time: 1000.0,
+            isothermal_temperature: None,
             spline_config: SplineConfig::default(),
             save_to_new_experiment: true,
             del_old_experiment: true,

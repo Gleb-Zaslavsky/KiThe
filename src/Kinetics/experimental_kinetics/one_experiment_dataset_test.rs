@@ -1290,6 +1290,88 @@ pub mod tests {
     }
 
     #[test]
+    fn derivative_is_exact_for_quadratic_signal_on_nonuniform_time_grid() {
+        let csv = make_csv(3, 791);
+        let mut ds = ds_from_csv(&csv);
+        ds.frame = df!(
+            "time" => [0.0, 1.0, 3.0],
+            "temperature" => [300.0, 301.0, 303.0],
+            "mass" => [0.0, 1.0, 9.0]
+        )
+        .unwrap()
+        .lazy();
+
+        let df = ds
+            .derive_rate("mass", "mass_rate", ColumnNature::MassRate)
+            .unwrap()
+            .frame
+            .collect()
+            .unwrap();
+        let rate = df.column("mass_rate").unwrap().f64().unwrap();
+        assert_eq!(rate.get(0), None);
+        assert!((rate.get(1).unwrap() - 2.0).abs() < 1e-12);
+        assert_eq!(rate.get(2), None);
+    }
+
+    #[test]
+    fn derivative_marks_both_sides_of_large_time_gap_null_by_default() {
+        let time = [0.0, 1.0, 2.0, 3.0, 23.0, 24.0, 25.0];
+        let csv = make_csv(time.len(), 792);
+        let mut ds = ds_from_csv(&csv);
+        ds.frame = df!(
+            "time" => time,
+            "temperature" => [300.0, 301.0, 302.0, 303.0, 323.0, 324.0, 325.0],
+            "mass" => time.map(|t| t * t)
+        )
+        .unwrap()
+        .lazy();
+
+        let df = ds
+            .derive_rate("mass", "mass_rate", ColumnNature::MassRate)
+            .unwrap()
+            .frame
+            .collect()
+            .unwrap();
+        let rate = df.column("mass_rate").unwrap().f64().unwrap();
+
+        assert_eq!(rate.get(0), None);
+        assert!((rate.get(2).unwrap() - 4.0).abs() < 1e-12);
+        assert_eq!(rate.get(3), None);
+        assert_eq!(rate.get(4), None);
+        assert!((rate.get(5).unwrap() - 48.0).abs() < 1e-12);
+        assert_eq!(rate.get(6), None);
+    }
+
+    #[test]
+    fn derivative_gap_policy_can_explicitly_allow_long_intervals() {
+        let time = [0.0, 1.0, 2.0, 3.0, 23.0, 24.0, 25.0];
+        let csv = make_csv(time.len(), 793);
+        let mut ds = ds_from_csv(&csv);
+        ds.frame = df!(
+            "time" => time,
+            "temperature" => [300.0, 301.0, 302.0, 303.0, 323.0, 324.0, 325.0],
+            "mass" => time.map(|t| t * t)
+        )
+        .unwrap()
+        .lazy();
+
+        let df = ds
+            .derive_rate_with_gap_policy(
+                "mass",
+                "mass_rate",
+                ColumnNature::MassRate,
+                TimeGapPolicy::Allow,
+            )
+            .unwrap()
+            .frame
+            .collect()
+            .unwrap();
+        let rate = df.column("mass_rate").unwrap().f64().unwrap();
+        assert!((rate.get(3).unwrap() - 6.0).abs() < 1e-12);
+        assert!((rate.get(4).unwrap() - 46.0).abs() < 1e-12);
+    }
+
+    #[test]
     fn derive_conversion_rate_uses_time_unit_in_metadata() {
         let csv = make_csv(600, 790);
         let ds_alpha = ds_from_csv(&csv)
@@ -1325,6 +1407,11 @@ pub mod tests {
             ds_eta.schema.columns.get("deta_dt").unwrap().nature,
             ColumnNature::ConversionRate
         );
+
+        let deta_dt_series = ds_eta.frame.clone().collect().unwrap();
+        let deta_dt_series = deta_dt_series.column("deta_dt").unwrap().f64().unwrap();
+        assert_eq!(deta_dt_series.get(0), None);
+        assert_eq!(deta_dt_series.get(deta_dt_series.len() - 1), None);
 
         let dalpha_dt: Vec<f64> = ds_alpha
             .frame

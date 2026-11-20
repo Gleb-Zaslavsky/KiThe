@@ -13,6 +13,9 @@
 //! 3. User selects columns via checkboxes
 //! 4. Buttons trigger operations on selected columns
 
+use crate::Kinetics::experimental_kinetics::experiment_series_main::{
+    ExperimentThermalMode, TGASeries,
+};
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::PreviewRows;
 use crate::gui::experimental_kinetics_gui::controller_methods::KineticMethodsWindowState;
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
@@ -672,19 +675,25 @@ impl ColumnManagerState {
             }
         }
 
+        let show_row_index = !self.compare_mode;
         ui.push_id("column_manager_table", |ui| {
             egui::ScrollArea::both()
                 .id_salt("column_manager_table_scroll")
-                .max_height(ui.available_height().max(180.0))
+                .auto_shrink([false, false])
+                .max_height(ui.available_height().max(1.0))
                 .show(ui, |ui| {
-                    TableBuilder::new(ui)
-                        .striped(true)
-                        .column(Column::auto().resizable(true))
+                    let mut table = TableBuilder::new(ui).striped(true);
+                    if show_row_index {
+                        table = table.column(Column::auto().resizable(true));
+                    }
+                    table
                         .columns(Column::auto().resizable(true), all_columns.len())
                         .header(40.0, |mut header| {
-                            header.col(|ui| {
-                                ui.heading("Row");
-                            });
+                            if show_row_index {
+                                header.col(|ui| {
+                                    ui.heading("Row");
+                                });
+                            }
                             // Each column header: checkbox + clickable title.
                             for (exp_id, col_name) in &all_columns {
                                 header.col(|ui| {
@@ -741,31 +750,22 @@ impl ColumnManagerState {
 
                             for row_idx in 0..row_count {
                                 body.row(18.0, |mut row| {
-                                    row.col(|ui| {
-                                        let indices = experiments
-                                            .iter()
-                                            .filter_map(|id| {
-                                                let preview = self.cached_samples.get(id)?;
-                                                let sample_idx =
-                                                    if self.compare_mode && row_count > 1 {
-                                                        row_idx
-                                                            * preview
-                                                                .row_indices
-                                                                .len()
-                                                                .saturating_sub(1)
-                                                            / (row_count - 1)
-                                                    } else {
-                                                        row_idx
-                                                    };
-                                                preview
-                                                    .row_indices
-                                                    .get(sample_idx)
-                                                    .map(|source_row| format!("{id}:{source_row}"))
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join(" | ");
-                                        ui.label(indices);
-                                    });
+                                    if show_row_index {
+                                        row.col(|ui| {
+                                            let indices = experiments
+                                                .iter()
+                                                .filter_map(|id| {
+                                                    let preview = self.cached_samples.get(id)?;
+                                                    preview
+                                                        .row_indices
+                                                        .get(row_idx)
+                                                        .map(|source_row| source_row.to_string())
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join(" | ");
+                                            ui.label(indices);
+                                        });
+                                    }
                                     for (exp_id, col_name) in &all_columns {
                                         row.col(|ui| {
                                             if let Some(preview) = self.cached_samples.get(exp_id) {
@@ -963,9 +963,7 @@ impl ColumnManagerState {
             .show(ctx, |ui| {
                 let experiments = model.list_of_experiments();
 
-                ui.label("Select Experiment:")
-                    .on_hover_text("Choose which experiment's metadata is being edited.");
-                egui::ComboBox::from_id_salt("exp_selector")
+                egui::ComboBox::from_label("Select Experiment")
                     .selected_text(self.selected_experiment.as_deref().unwrap_or("None"))
                     .show_ui(ui, |ui| {
                         for exp_id in &experiments {
@@ -979,20 +977,23 @@ impl ColumnManagerState {
 
                 ui.separator();
 
-                ui.label("Comment:").on_hover_text(
+                let comment_label = ui.label("Comment:").on_hover_text(
                     "Optional experiment note. Leave blank to keep the current comment.",
                 );
-                ui.text_edit_multiline(&mut self.comment_input);
+                ui.text_edit_multiline(&mut self.comment_input)
+                    .labelled_by(comment_label.id);
 
-                ui.label("Heating Rate (K/min):").on_hover_text(
+                let rate_label = ui.label("Heating Rate (K/min):").on_hover_text(
                     "Optional numeric metadata in K/min; leave blank to keep the current value.",
                 );
-                ui.text_edit_singleline(&mut self.heating_rate_input);
+                ui.text_edit_singleline(&mut self.heating_rate_input)
+                    .labelled_by(rate_label.id);
 
-                ui.label("Temperature (K):").on_hover_text(
+                let temperature_label = ui.label("Temperature (K):").on_hover_text(
                     "Optional numeric metadata in K; leave blank to keep the current value.",
                 );
-                ui.text_edit_singleline(&mut self.temperature_input);
+                ui.text_edit_singleline(&mut self.temperature_input)
+                    .labelled_by(temperature_label.id);
 
                 ui.separator();
 
@@ -1004,63 +1005,260 @@ impl ColumnManagerState {
                     .clicked()
                 {
                     if let Some(exp_id) = self.selected_experiment.clone() {
-                        let mut success = true;
-
-                        if !self.comment_input.trim().is_empty() {
-                            if let Err(e) = model.set_comment(&exp_id, self.comment_input.trim()) {
+                        match apply_metadata_draft(
+                            &mut model.series,
+                            &exp_id,
+                            &self.comment_input,
+                            &self.heating_rate_input,
+                            &self.temperature_input,
+                        ) {
+                            Ok(()) => {
                                 self.set_message(
-                                    MessageKind::Error,
-                                    format!("Could not set comment: {e:?}"),
+                                    MessageKind::Success,
+                                    "Metadata updated successfully",
                                 );
-                                success = false;
+                                self.metadata_window_open = false;
                             }
-                        }
-
-                        if !self.heating_rate_input.trim().is_empty() {
-                            if let Ok(rate) = self.heating_rate_input.trim().parse::<f64>() {
-                                if let Err(e) = model.set_heating_rate(&exp_id, rate) {
-                                    self.set_message(
-                                        MessageKind::Error,
-                                        format!("Could not set heating rate: {e:?}"),
-                                    );
-                                    success = false;
-                                }
-                            } else {
-                                self.set_message(
-                                    MessageKind::Error,
-                                    "Heating rate must be a number",
-                                );
-                                success = false;
-                            }
-                        }
-
-                        if !self.temperature_input.trim().is_empty() {
-                            if let Ok(temp) = self.temperature_input.trim().parse::<f64>() {
-                                if let Err(e) = model.set_experiment_temperature(&exp_id, temp) {
-                                    self.set_message(
-                                        MessageKind::Error,
-                                        format!("Could not set temperature: {e:?}"),
-                                    );
-                                    success = false;
-                                }
-                            } else {
-                                self.set_message(
-                                    MessageKind::Error,
-                                    "Temperature must be a number",
-                                );
-                                success = false;
-                            }
-                        }
-
-                        if success {
-                            self.set_message(MessageKind::Success, "Metadata updated successfully");
-                            self.metadata_window_open = false;
+                            Err(error) => self.set_message(
+                                MessageKind::Error,
+                                format!("Metadata update failed: {error}"),
+                            ),
                         }
                     } else {
                         self.set_message(MessageKind::Error, "Select an experiment first");
                     }
                 }
             });
+    }
+}
+
+fn parse_optional_finite_positive(input: &str, label: &str) -> Result<Option<f64>, String> {
+    if input.trim().is_empty() {
+        return Ok(None);
+    }
+    let value = input
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("{label} must be a number"))?;
+    if !value.is_finite() || value <= 0.0 {
+        return Err(format!("{label} must be finite and greater than zero"));
+    }
+    Ok(Some(value))
+}
+
+fn apply_metadata_draft(
+    series: &mut TGASeries,
+    experiment_id: &str,
+    comment: &str,
+    heating_rate_input: &str,
+    temperature_input: &str,
+) -> Result<(), String> {
+    // Parse the complete draft before touching the experiment, then commit once.
+    let heating_rate = parse_optional_finite_positive(heating_rate_input, "Heating rate")?;
+    let temperature = parse_optional_finite_positive(temperature_input, "Temperature")?;
+    if heating_rate.is_some() && temperature.is_some() {
+        return Err("Set either heating rate or isothermal temperature, not both".to_string());
+    }
+
+    series
+        .try_mutate_by_id(experiment_id, |experiment| {
+            if !comment.trim().is_empty() {
+                experiment.meta.comment = Some(comment.trim().to_string());
+            }
+            if let Some(rate) = heating_rate {
+                experiment.meta.heating_rate = Some(rate);
+                experiment.meta.thermal_mode = ExperimentThermalMode::NonIsothermal;
+                experiment.meta.isothermal_temperature = None;
+            }
+            if let Some(temperature) = temperature {
+                experiment.meta.isothermal_temperature = Some(temperature);
+                experiment.meta.thermal_mode = ExperimentThermalMode::Isothermal;
+                experiment.meta.heating_rate = None;
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod metadata_input_tests {
+    use super::{apply_metadata_draft, parse_optional_finite_positive};
+    use crate::Kinetics::experimental_kinetics::experiment_series_main::{
+        ExperimentMeta, ExperimentThermalMode, TGAExperiment, TGASeries,
+    };
+    use crate::Kinetics::experimental_kinetics::testing_mod::VirtualTGA;
+    use crate::gui::experimental_kinetics_gui::model::PlotModel;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    struct MetadataUiState {
+        model: PlotModel,
+        manager: super::ColumnManagerState,
+    }
+
+    fn series_with_metadata() -> TGASeries {
+        let mut series = TGASeries::new();
+        let data = VirtualTGA {
+            time: vec![0.0, 1.0, 2.0],
+            temperature: vec![500.0; 3],
+            mass: vec![10.0, 9.0, 8.0],
+        };
+        let dataset = crate::Kinetics::experimental_kinetics::one_experiment_dataset::TGADataset::create_from_synthetic_data(&data).unwrap();
+        series
+            .push(TGAExperiment::new(dataset).with_id("meta"))
+            .unwrap();
+        series
+            .try_mutate_by_id("meta", |experiment| {
+                experiment.meta = ExperimentMeta {
+                    id: "meta".into(),
+                    heating_rate: Some(4.0),
+                    isothermal_temperature: None,
+                    thermal_mode: ExperimentThermalMode::NonIsothermal,
+                    comment: Some("keep me".into()),
+                };
+                Ok(())
+            })
+            .unwrap();
+        series
+    }
+
+    #[test]
+    fn metadata_numeric_inputs_reject_invalid_values_before_commit() {
+        assert_eq!(
+            parse_optional_finite_positive("", "Temperature").unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_optional_finite_positive("523.15", "Temperature").unwrap(),
+            Some(523.15)
+        );
+        for input in ["abc", "NaN", "inf", "0", "-2"] {
+            assert!(
+                parse_optional_finite_positive(input, "Temperature").is_err(),
+                "accepted {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_metadata_draft_preserves_all_existing_fields() {
+        let mut series = series_with_metadata();
+        let before = series.get_experiment_by_id("meta").unwrap().meta.clone();
+
+        let error = apply_metadata_draft(&mut series, "meta", "changed", "5", "NaN").unwrap_err();
+
+        assert!(error.contains("finite and greater than zero"));
+        let after = &series.get_experiment_by_id("meta").unwrap().meta;
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.heating_rate, before.heating_rate);
+        assert_eq!(after.isothermal_temperature, before.isothermal_temperature);
+        assert_eq!(after.thermal_mode, before.thermal_mode);
+        assert_eq!(after.comment, before.comment);
+    }
+
+    #[test]
+    fn valid_metadata_draft_commits_mode_and_comment_together() {
+        let mut series = series_with_metadata();
+        apply_metadata_draft(&mut series, "meta", "  updated  ", "", "523.15").unwrap();
+
+        let meta = &series.get_experiment_by_id("meta").unwrap().meta;
+        assert_eq!(meta.comment.as_deref(), Some("updated"));
+        assert_eq!(meta.thermal_mode, ExperimentThermalMode::Isothermal);
+        assert_eq!(meta.isothermal_temperature, Some(523.15));
+        assert!(meta.heating_rate.is_none());
+    }
+
+    #[test]
+    fn egui_apply_with_invalid_metadata_keeps_the_original_record() {
+        let mut model = PlotModel::default();
+        model.series = series_with_metadata();
+        let mut manager = super::ColumnManagerState::new();
+        manager.metadata_window_open = true;
+        manager.selected_experiment = Some("meta".into());
+        manager.comment_input = "must not partially apply".into();
+        manager.heating_rate_input = "5".into();
+        manager.temperature_input = "NaN".into();
+        let before = model
+            .series
+            .get_experiment_by_id("meta")
+            .unwrap()
+            .meta
+            .clone();
+        let mut harness = Harness::new_ui_state(
+            |ui, state: &mut MetadataUiState| {
+                state
+                    .manager
+                    .show_metadata_window(ui.ctx(), &mut state.model);
+            },
+            MetadataUiState { model, manager },
+        );
+
+        harness.get_by_label("Apply").click();
+        harness.run();
+
+        let state = harness.state();
+        let after = &state
+            .model
+            .series
+            .get_experiment_by_id("meta")
+            .unwrap()
+            .meta;
+        assert_eq!(after.comment, before.comment);
+        assert_eq!(after.heating_rate, before.heating_rate);
+        assert_eq!(after.isothermal_temperature, before.isothermal_temperature);
+        assert_eq!(after.thermal_mode, before.thermal_mode);
+        assert!(
+            state
+                .manager
+                .system_message
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("Metadata update failed")
+        );
+    }
+
+    #[test]
+    fn egui_apply_commits_valid_metadata_and_comment_together() {
+        let mut model = PlotModel::default();
+        model.series = series_with_metadata();
+        let mut manager = super::ColumnManagerState::new();
+        manager.metadata_window_open = true;
+        manager.selected_experiment = Some("meta".into());
+        manager.comment_input = "updated from GUI".into();
+        manager.temperature_input = "523.15".into();
+        let mut harness = Harness::new_ui_state(
+            |ui, state: &mut MetadataUiState| {
+                state
+                    .manager
+                    .show_metadata_window(ui.ctx(), &mut state.model);
+            },
+            MetadataUiState { model, manager },
+        );
+
+        harness.get_by_label("Apply").click();
+        harness.run();
+
+        let state = harness.state();
+        let meta = &state
+            .model
+            .series
+            .get_experiment_by_id("meta")
+            .unwrap()
+            .meta;
+        assert_eq!(meta.comment.as_deref(), Some("updated from GUI"));
+        assert_eq!(meta.thermal_mode, ExperimentThermalMode::Isothermal);
+        assert_eq!(meta.isothermal_temperature, Some(523.15));
+        assert!(meta.heating_rate.is_none());
+        assert!(
+            state
+                .manager
+                .system_message
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("Metadata updated successfully")
+        );
     }
 }
 
@@ -1255,10 +1453,10 @@ pub fn show_column_manager_window(
             }
 
             state.render_controls(ui, model);
-            let max_samples_height = (ui.available_height() * 0.42).clamp(150.0, 560.0);
+            let max_samples_height = (ui.available_height() - 120.0).clamp(180.0, 760.0);
             egui::Resize::default()
                 .id_salt("column_manager_samples_resize")
-                .default_height(150.0)
+                .default_height((max_samples_height * 0.72).max(180.0))
                 .min_size(egui::vec2(300.0, 110.0))
                 .max_height(max_samples_height)
                 .resizable(egui::Vec2b::new(false, true))

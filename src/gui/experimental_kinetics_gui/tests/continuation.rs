@@ -102,3 +102,52 @@ fn story_continue_experiment_from_second_file_and_reject_bad_time_order_atomical
         );
     });
 }
+
+#[test]
+fn story_append_to_isothermal_experiment_without_temperature_preserves_thermal_metadata() {
+    let dir = tempdir().unwrap();
+    let first = dir.path().join("iso_a.csv");
+    let second = dir.path().join("iso_b.csv");
+    std::fs::write(&first, "t,m\n0.0,10.0\n1.0,9.8\n2.0,9.6\n").unwrap();
+    std::fs::write(&second, "t,m\n0.0,9.4\n1.0,9.2\n").unwrap();
+
+    with_app(empty_app(), |harness| {
+        import_csv(harness, &first, "iso_segment_a", Some(523.15), None);
+        super::support::click_menu_entry(harness, "File Manager", "Append to experiment");
+        harness.get_by_label("[F] iso_b.csv").click();
+        harness.run();
+        harness.get_by_label("Preview continuation").click();
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .app
+                .new_experiment_dialog
+                .last_error
+                .is_none(),
+            "append preview failed: {:?}",
+            harness.state().app.new_experiment_dialog.last_error
+        );
+        harness.get_by_label("Add combined experiment").click();
+        harness.run();
+        harness.run();
+
+        let combined = harness
+            .state()
+            .app
+            .model
+            .series
+            .get_experiment_by_id("iso_segment_a_continued")
+            .unwrap();
+        assert_eq!(combined.dataset.schema.temperature, None);
+        assert_eq!(combined.meta.isothermal_temperature, Some(523.15));
+        assert_eq!(
+            combined.meta.resolved_thermal_mode(),
+            crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::Isothermal
+        );
+        assert_eq!(
+            super::support::read_column(&harness.state().app.model, "iso_segment_a_continued", "t"),
+            vec![0.0, 1.0, 2.0, 3.0, 4.0]
+        );
+    });
+}

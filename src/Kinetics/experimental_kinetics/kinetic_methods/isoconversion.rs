@@ -24,7 +24,7 @@ use crate::Kinetics::experimental_kinetics::kinetic_methods::integral_isoconvers
 };
 use crate::Kinetics::experimental_kinetics::kinetic_methods::{
     ConversionGrid, ConversionGridBuilder, KineticDataView, KineticMethod, KineticRequirements,
-    TGADomainError, check_requirements,
+    TGADomainError, check_requirements, require_isothermal, require_nonisothermal,
 };
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::ColumnNature;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -119,7 +119,6 @@ impl IsoconversionalMethod {
                 vec![
                     ColumnNature::Conversion,
                     ColumnNature::Time,
-                    ColumnNature::Temperature,
                     ColumnNature::ConversionRate,
                 ]
             }
@@ -189,6 +188,7 @@ impl KineticMethod for IsoconversionalKineticMethod {
     }
 
     fn compute(&self, data: &KineticDataView) -> Result<Self::Output, TGADomainError> {
+        self.check_input(data)?;
         let compute_dt = matches!(self.method, IsoconversionalMethod::Vyazovkin);
 
         let grid = match self.method {
@@ -230,8 +230,16 @@ impl KineticMethod for IsoconversionalKineticMethod {
         self.method.required_columns_by_nature()
     }
 
+    fn is_isothermal_method(&self) -> bool {
+        matches!(self.method, IsoconversionalMethod::FriedmanIntegral)
+    }
+
     fn check_input(&self, data: &KineticDataView) -> Result<(), TGADomainError> {
         let req = self.method.requirements();
-        check_requirements(data, &req)
+        check_requirements(data, &req)?;
+        match self.method {
+            IsoconversionalMethod::FriedmanIntegral => require_isothermal(data),
+            _ => require_nonisothermal(data),
+        }
     }
 }

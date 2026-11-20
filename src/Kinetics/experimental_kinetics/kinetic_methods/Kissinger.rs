@@ -135,6 +135,7 @@ impl KineticMethod for Kissinger {
     /// Builds the grid, extracts peaks, runs the Kissinger regression, and
     /// wraps the single result in an [`IsoconversionalResult`].
     fn compute(&self, data: &KineticDataView) -> Result<Self::Output, TGADomainError> {
+        require_nonisothermal(data)?;
         let grid = ConversionGridBuilder::new().build_nonisothermal(data)?;
 
         let layer = KissingerSolver::solve(&grid)?;

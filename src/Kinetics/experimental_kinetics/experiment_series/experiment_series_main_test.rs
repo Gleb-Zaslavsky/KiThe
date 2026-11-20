@@ -534,6 +534,7 @@ mod tests {
                 delta: 1.0,
             },
             averaging_time: 1.0,
+            isothermal_temperature: None,
             spline_config: SplineConfig {
                 n_points: 300,
                 n_internal_points: 200,
@@ -542,6 +543,85 @@ mod tests {
             save_to_new_experiment,
             del_old_experiment,
         }
+    }
+
+    #[test]
+    fn isothermal_golden_pipeline_accepts_dataset_without_temperature_column() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut csv = String::from("time,mass\n");
+        for index in 0..1200 {
+            let time = index as f64;
+            let mass = 100.0 * (-0.0002 * time).exp();
+            csv.push_str(&format!("{time:.1},{mass:.8}\n"));
+        }
+        std::fs::write(file.path(), csv).unwrap();
+
+        let dataset = TGADataset::from_csv_raw(file.path())
+            .unwrap()
+            .bind_time("time", Unit::Second)
+            .unwrap()
+            .bind_mass("mass", Unit::Milligram)
+            .unwrap();
+        let experiment = TGAExperiment::new(dataset.clone())
+            .with_id("isothermal_without_sensor")
+            .with_isothermal_temperature(523.15);
+        let mut config = golden_cfg(false, false);
+        config.spline_config.n_points = 250;
+        config.spline_config.n_internal_points = 1000;
+
+        let missing_mode = TGAExperiment::new(dataset.clone())
+            .with_id("missing_thermal_metadata")
+            .apply_golden_pipeline(config.clone());
+        assert!(matches!(
+            missing_mode,
+            Err(TGADomainError::TemperatureNotBound)
+        ));
+
+        let (processed, _) = experiment.apply_golden_pipeline(config).unwrap();
+        let columns = processed.dataset.list_of_columns();
+        assert!(columns.iter().any(|column| column == "dalpha_dt"));
+        assert!(columns.iter().any(|column| column == "deta_dt"));
+        assert!(!columns.iter().any(|column| column == "dT/dt"));
+        assert!(processed.dataset.schema.temperature.is_none());
+        assert_eq!(
+            processed.meta.resolved_thermal_mode(),
+            ExperimentThermalMode::Isothermal
+        );
+    }
+
+    #[test]
+    fn isothermal_golden_pipeline_preserves_measured_temperature_without_dT_dt() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut csv = String::from("time,temperature,mass\n");
+        for index in 0..1200 {
+            let time = index as f64;
+            let temperature = 523.15 + 0.02 * (time / 60.0).sin();
+            let mass = 100.0 * (-0.0002 * time).exp();
+            csv.push_str(&format!("{time:.1},{temperature:.5},{mass:.8}\n"));
+        }
+        std::fs::write(file.path(), csv).unwrap();
+
+        let dataset = TGADataset::from_csv_raw(file.path())
+            .unwrap()
+            .bind_time("time", Unit::Second)
+            .unwrap()
+            .bind_temperature("temperature", Unit::Kelvin)
+            .unwrap()
+            .bind_mass("mass", Unit::Milligram)
+            .unwrap();
+        let experiment = TGAExperiment::new(dataset)
+            .with_id("isothermal_with_sensor")
+            .with_isothermal_temperature(523.15);
+        let mut config = golden_cfg(false, false);
+        config.spline_config.n_points = 250;
+        config.spline_config.n_internal_points = 1000;
+
+        let (processed, _) = experiment.apply_golden_pipeline(config).unwrap();
+        let columns = processed.dataset.list_of_columns();
+        assert!(columns.iter().any(|column| column == "temperature"));
+        assert!(processed.dataset.schema.temperature.is_some());
+        assert!(!columns.iter().any(|column| column == "dT/dt"));
+        assert!(columns.iter().any(|column| column == "deta_dt"));
     }
 
     #[test]
@@ -702,7 +782,11 @@ mod tests {
         ds.schema.columns.get_mut("fit_curve").unwrap().provenance = provenance;
 
         let mut series = TGASeries::new();
-        series.push(TGAExperiment::new(ds).with_id("exp1")).unwrap();
+        let mut experiment = TGAExperiment::new(ds).with_id("exp1");
+        experiment.meta.heating_rate = None;
+        experiment.meta.isothermal_temperature = Some(523.15);
+        experiment.meta.thermal_mode = ExperimentThermalMode::Isothermal;
+        series.push(experiment).unwrap();
 
         let out = tempfile::NamedTempFile::new().unwrap();
         series.to_csv_series(out.path()).unwrap();
@@ -712,9 +796,15 @@ mod tests {
         assert!(content.contains("Minute"));
         assert!(content.contains("Unknown"));
         assert!(content.contains("Dimensionless"));
+        assert!(content.contains("isothermal"));
 
         let restored = TGASeries::from_csv_series(out.path()).unwrap();
         let exp = &restored.experiments()[0];
+        assert_eq!(exp.meta.thermal_mode, ExperimentThermalMode::Isothermal);
+        assert_eq!(
+            exp.meta.resolved_thermal_mode(),
+            ExperimentThermalMode::Isothermal
+        );
         assert!(
             exp.dataset
                 .history_of_operations
@@ -781,6 +871,18 @@ mod tests {
                 if line.starts_with("#META\tPROV\t") {
                     return None;
                 }
+                if line.starts_with("#META\tEXP\t") {
+                    let parts = line.split('\t').collect::<Vec<_>>();
+                    return Some(
+                        parts
+                            .iter()
+                            .take(5)
+                            .chain(parts.iter().skip(6))
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join("\t"),
+                    );
+                }
                 if line == "# format_version=2" {
                     return Some("# format_version=1".to_string());
                 }
@@ -795,6 +897,12 @@ mod tests {
         let legacy_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(legacy_file.path(), legacy).unwrap();
         let restored_legacy = TGASeries::from_csv_series(legacy_file.path()).unwrap();
+        assert_eq!(
+            restored_legacy.experiments()[0]
+                .meta
+                .resolved_thermal_mode(),
+            ExperimentThermalMode::Isothermal
+        );
         let legacy_dataset = &restored_legacy.experiments()[0].dataset;
         assert_eq!(
             legacy_dataset.schema.columns["time"].nature,

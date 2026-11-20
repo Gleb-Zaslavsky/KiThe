@@ -25,7 +25,14 @@ exclude = [
     "/plans/**",
     "/plots/**",
     "/pic/**",
+    "/test_reports/**",
     "/.vscode/**",
+
+    # Local archives, generated Python bytecode, and office documents
+    "**/*.rar",
+    "**/*.pyc",
+    "**/__pycache__/**",
+    "**/*.docx",
 
     "/*.png",
     "**/*.pickle",

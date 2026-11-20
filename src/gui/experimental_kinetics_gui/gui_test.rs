@@ -567,11 +567,11 @@ mod tests {
     // ============================================================================
 
     #[test]
-    fn tier2_file_manager_new_experiment_sets_dialog_open() {
+    fn tier2_file_manager_import_entry_opens_shared_import_dialog() {
         let app = PlotApp::for_testing(load_model_with_one_curve());
         with_plot_app_state_harness(app, |harness| {
             harness.run();
-            click_menu_entry(harness, "File Manager", "New experiment");
+            click_menu_entry(harness, "File Manager", "Import Data");
             assert!(harness.state().app.new_experiment_dialog.open);
         });
     }
@@ -954,6 +954,188 @@ mod tests {
     }
 
     #[test]
+    fn tier3_sublimation_window_fits_selected_experiment_with_optional_x_bounds() {
+        let mut model = PlotModel::new();
+        model
+            .generate_synthetic_data_from_config(&non_isothermal_series_config())
+            .expect("failed to generate sublimation fixture");
+
+        let ids = model.list_of_experiments();
+        let selected_id = ids[0].clone();
+        let t_end = last_value_for(&model, &selected_id, "time");
+        model
+            .conversion_for_experiment(selected_id.clone(), t_end, "eta")
+            .expect("failed to prepare conversion");
+        model
+            .derive_deta_dt(&selected_id, Some("deta_dt"))
+            .expect("failed to prepare conversion rate");
+        let conversion = model
+            .series
+            .get_experiment_by_id(&selected_id)
+            .unwrap()
+            .dataset
+            .materialize("time", &["eta"])
+            .unwrap()
+            .columns["eta"]
+            .clone();
+        let lower = conversion.iter().copied().fold(f64::INFINITY, f64::min);
+        let upper = conversion.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        model.set_x(&selected_id, "eta").unwrap();
+        model.set_y(&selected_id, "deta_dt").unwrap();
+        model.create_points_for_curve(&selected_id).unwrap();
+        model.select_curve(model.plots.len() - 1);
+
+        let app = PlotApp::for_testing(model);
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            click_menu_entry(harness, "Kinetic Methods", "Is this a sublimation?");
+            harness.run();
+            harness.get_by_label("Conversion X min (optional):");
+            harness.get_by_label("max:");
+
+            {
+                let state = &mut harness.state_mut().app.kinetic_methods_state;
+                state.sublimation_x_min = lower.to_string();
+                state.sublimation_x_max = upper.to_string();
+            }
+            harness.get_by_label("Calculate").click();
+            harness.run();
+
+            let state = harness.state();
+            assert!(
+                state
+                    .app
+                    .kinetic_methods_state
+                    .sublimation_status
+                    .starts_with("Done."),
+                "sublimation calculation failed: {}",
+                state.app.kinetic_methods_state.sublimation_status
+            );
+            assert!(state.app.kinetic_methods_state.sublimation_ea_kj.is_some());
+            assert!(
+                state
+                    .app
+                    .model
+                    .list_of_columns(&selected_id)
+                    .unwrap()
+                    .contains(&"fitted_sublim_rate".to_string())
+            );
+            let selected_dataset = &state
+                .app
+                .model
+                .series
+                .get_experiment_by_id(&selected_id)
+                .unwrap()
+                .dataset;
+            let fitted_frame = selected_dataset.frame.clone().collect().unwrap();
+            let fitted_column = fitted_frame
+                .column("fitted_sublim_rate")
+                .unwrap()
+                .f64()
+                .unwrap();
+            assert_eq!(fitted_column.len(), fitted_frame.height());
+            assert_eq!(fitted_column.null_count(), 0);
+            assert!(
+                ids.iter().skip(1).all(|id| !state
+                    .app
+                    .model
+                    .list_of_columns(id)
+                    .unwrap()
+                    .contains(&"fitted_sublim_rate".to_string())),
+                "diagnostic must not mutate experiments other than the selected one"
+            );
+        });
+    }
+
+    #[test]
+    fn tier2_sublimation_rejects_only_one_entered_x_bound() {
+        let mut model = PlotModel::new();
+        model
+            .generate_synthetic_data_from_config(&non_isothermal_series_config())
+            .expect("failed to generate sublimation fixture");
+        let selected_id = model.list_of_experiments()[0].clone();
+        let t_end = last_value_for(&model, &selected_id, "time");
+        model
+            .conversion_for_experiment(selected_id.clone(), t_end, "eta")
+            .unwrap();
+        model.derive_deta_dt(&selected_id, Some("deta_dt")).unwrap();
+        model.set_x(&selected_id, "eta").unwrap();
+        model.set_y(&selected_id, "deta_dt").unwrap();
+        model.create_points_for_curve(&selected_id).unwrap();
+        model.select_curve(model.plots.len() - 1);
+
+        let mut app = PlotApp::for_testing(model);
+        app.kinetic_methods_state.sublimation_check_open = true;
+        app.kinetic_methods_state.sublimation_x_min = "0.2".into();
+        let before = app.model.list_of_columns(&selected_id).unwrap();
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            harness.get_by_label("Calculate").click();
+            harness.run();
+
+            let state = harness.state();
+            assert!(
+                state
+                    .app
+                    .kinetic_methods_state
+                    .sublimation_status
+                    .contains("Enter both conversion X bounds")
+            );
+            assert_eq!(
+                state.app.model.list_of_columns(&selected_id).unwrap(),
+                before
+            );
+        });
+    }
+
+    #[test]
+    fn tier2_sublimation_rejects_selection_intersecting_multiple_curves() {
+        let mut model = PlotModel::new();
+        model
+            .generate_synthetic_data_from_config(&non_isothermal_series_config())
+            .expect("failed to generate sublimation fixture");
+        let selected_id = model.list_of_experiments()[0].clone();
+        let t_end = last_value_for(&model, &selected_id, "time");
+        model
+            .conversion_for_experiment(selected_id.clone(), t_end, "eta")
+            .unwrap();
+        model.derive_deta_dt(&selected_id, Some("deta_dt")).unwrap();
+        model.set_x(&selected_id, "eta").unwrap();
+        model.set_y(&selected_id, "deta_dt").unwrap();
+        model.create_points_for_curve(&selected_id).unwrap();
+
+        let mut second_curve = model.plots[0].clone();
+        second_curve.selected = false;
+        model.plots[0].highlighted = true;
+        second_curve.highlighted = true;
+        model.plots.push(second_curve);
+        model.select_curve(0);
+        model.interaction.selection_rect = Some(SelectionRect::new([0.2, 0.0], [0.8, 1.0]));
+
+        let mut app = PlotApp::for_testing(model);
+        app.kinetic_methods_state.sublimation_check_open = true;
+        let before = app.model.list_of_columns(&selected_id).unwrap();
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            harness.get_by_label("Calculate").click();
+            harness.run();
+
+            let state = harness.state();
+            assert!(
+                state
+                    .app
+                    .kinetic_methods_state
+                    .sublimation_status
+                    .contains("intersects 2 plotted curves")
+            );
+            assert_eq!(
+                state.app.model.list_of_columns(&selected_id).unwrap(),
+                before
+            );
+        });
+    }
+
+    #[test]
     fn golden_pipeline_failure_reaches_main_system_message() {
         let mut app = PlotApp::for_testing(PlotModel::new());
         app.quick_actions_state.golden_pipeline_dialog.open();
@@ -1075,6 +1257,7 @@ mod tests {
             harness.run();
             harness.get_by_label("Compare experiments").click();
             harness.run();
+            assert!(harness.query_by_label("Row").is_none());
             harness.get_by_label("Experiments to compare");
             harness.get_by_label("(unnamed experiment)").click();
             harness.get_by_label("comparison_two").click();

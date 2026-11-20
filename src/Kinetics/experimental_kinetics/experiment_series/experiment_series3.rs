@@ -97,11 +97,18 @@ impl TGASeries {
                     .push(col(source_col).alias(UnitedDataset::canonical_column_name(*nature)));
             }
 
+            let complete_case = all_horizontal(
+                what_cols_take
+                    .iter()
+                    .map(|nature| col(UnitedDataset::canonical_column_name(*nature)).is_not_null())
+                    .collect::<Vec<_>>(),
+            );
             let selected = exp
                 .dataset
                 .frame
                 .clone()
                 .select(select_exprs)
+                .filter(complete_case?)
                 .with_column(lit(exp.meta.id.clone()).alias("exp_id"));
 
             frames.push(selected);
@@ -172,6 +179,31 @@ impl TGASeries {
         what_exp_to_take: Option<&[&str]>,
         method: &IsoconversionalMethod,
     ) -> Result<KineticDataView, TGADomainError> {
+        use crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode;
+
+        let experiments = self.select_experiments(what_exp_to_take)?;
+        let isothermal_method = matches!(method, IsoconversionalMethod::FriedmanIntegral);
+        for experiment in &experiments {
+            let isothermal =
+                experiment.meta.resolved_thermal_mode() == ExperimentThermalMode::Isothermal;
+            if isothermal != isothermal_method {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Method '{:?}' is {}, but experiment '{}' is declared {}",
+                    method,
+                    if isothermal_method {
+                        "isothermal"
+                    } else {
+                        "non-isothermal"
+                    },
+                    experiment.meta.id,
+                    if isothermal {
+                        "isothermal"
+                    } else {
+                        "not isothermal"
+                    },
+                )));
+            }
+        }
         let what_cols_take = method.required_columns_by_nature();
         self.create_kinetic_data_view(what_exp_to_take, what_cols_take)
     }
@@ -245,6 +277,96 @@ mod tests {
             .push(TGAExperiment::new(d2).with_id("exp_2"))
             .unwrap();
         series
+    }
+
+    #[test]
+    fn nonisothermal_method_is_rejected_for_explicit_isothermal_experiment() {
+        let mut series = build_series();
+        series
+            .try_mutate_by_id("exp_1", |experiment| {
+                experiment.meta.isothermal_temperature = Some(500.0);
+                experiment.meta.thermal_mode =
+                    crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::Isothermal;
+                Ok(())
+            })
+            .unwrap();
+
+        let error = series
+            .create_kinetic_data_view_for_method(None, &IsoconversionalMethod::KAS)
+            .unwrap_err();
+        assert!(format!("{error}").contains("declared isothermal"));
+    }
+
+    #[test]
+    fn friedman_integral_builds_view_for_isothermal_series_without_t_columns() {
+        use crate::Kinetics::experimental_kinetics::kinetic_methods::Friedman::FriedmanIntegral;
+        use crate::Kinetics::experimental_kinetics::kinetic_methods::KineticMethod;
+
+        let mut series = build_series();
+        let third = VirtualTGA {
+            time: vec![0.0, 1.0, 2.0],
+            temperature: vec![320.0, 321.0, 322.0],
+            mass: vec![7.0, 6.9, 6.8],
+        };
+        let dataset = crate::Kinetics::experimental_kinetics::one_experiment_dataset::TGADataset::create_from_synthetic_data(&third).unwrap();
+        series
+            .push(TGAExperiment::new(dataset).with_id("exp_3"))
+            .unwrap();
+
+        for (index, id) in series.ids().into_iter().enumerate() {
+            series
+                .try_transform_by_id(&id, |experiment| {
+                    let mut dataset = experiment
+                        .dataset
+                        .add_column_from_vec(
+                            "eta",
+                            Unit::Dimensionless,
+                            ColumnNature::Conversion,
+                            vec![0.1, 0.5, 0.9],
+                        )?
+                        .add_column_from_vec(
+                            "deta_dt",
+                            Unit::PerSecond,
+                            ColumnNature::ConversionRate,
+                            vec![0.1, 0.08, 0.04],
+                        )?
+                        .drop_column("temperature")?;
+                    dataset.schema.eta = Some("eta".into());
+                    dataset.schema.deta_dt = Some("deta_dt".into());
+                    let mut meta = experiment.meta;
+                    meta.isothermal_temperature = Some(500.0 + index as f64 * 20.0);
+                    meta.thermal_mode = crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::Isothermal;
+                    Ok(TGAExperiment {
+                        dataset,
+                        meta,
+                    })
+                })
+                .unwrap();
+        }
+
+        let view = series
+            .create_kinetic_data_view_for_method(None, &IsoconversionalMethod::FriedmanIntegral)
+            .unwrap();
+        assert_eq!(view.experiments.len(), 3);
+        for experiment in &view.experiments {
+            assert!(
+                !series
+                    .get_experiment_by_id(&experiment.meta.id)
+                    .unwrap()
+                    .dataset
+                    .list_of_columns()
+                    .contains(&"temperature".to_string())
+            );
+            assert_eq!(experiment.temperature.len(), experiment.time.len());
+            assert!(
+                experiment
+                    .temperature
+                    .iter()
+                    .all(|temperature| *temperature
+                        == experiment.meta.isothermal_temperature.unwrap())
+            );
+        }
+        FriedmanIntegral.check_input(&view).unwrap();
     }
 
     #[test]
@@ -334,6 +456,40 @@ mod tests {
             .unwrap();
 
         assert_eq!(mass, vec![7.0, 6.0, 5.0]);
+    }
+
+    #[test]
+    fn vertical_stack_applies_one_complete_case_mask_to_rate_edges() {
+        let mut series = build_series();
+        series
+            .derive_rate("exp_1", "mass", "mass_rate", ColumnNature::MassRate)
+            .unwrap();
+
+        let united = series
+            .concat_into_vertical_stack(
+                Some(&["exp_1"]),
+                vec![
+                    ColumnNature::Time,
+                    ColumnNature::Mass,
+                    ColumnNature::MassRate,
+                ],
+            )
+            .unwrap();
+        let view = KineticDataView::from_united_dataset_by_nature(
+            &united,
+            vec![
+                ColumnNature::Time,
+                ColumnNature::Mass,
+                ColumnNature::MassRate,
+            ],
+        )
+        .unwrap();
+        let experiment = &view.experiments[0];
+
+        assert_eq!(experiment.time, vec![1.0]);
+        assert_eq!(experiment.mass.as_deref(), Some(&[9.8][..]));
+        assert_eq!(experiment.mass_rate.as_deref().unwrap().len(), 1);
+        assert!(experiment.mass_rate.as_deref().unwrap()[0].is_finite());
     }
 
     #[test]

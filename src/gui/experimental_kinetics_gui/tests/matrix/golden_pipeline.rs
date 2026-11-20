@@ -53,6 +53,7 @@ fn golden_config(window: usize, input_rows: usize) -> GoldenPipelineConfig {
             delta: 1.0,
         },
         averaging_time: 10.0,
+        isothermal_temperature: None,
         spline_config: SplineConfig {
             n_points: input_rows * 2 / 3,
             n_internal_points: 12,
@@ -247,9 +248,13 @@ fn golden_pipeline_dialog_runs_quantitative_filtering_matrix() {
                 let mut app = empty_app();
                 app.model = baseline_model;
                 app.model.settings.set_calibration_coeffs(1.0, 0.0);
+                let mut config = golden_config(window, noisy.virtual_tga.time.len());
+                if matches!(scenario, ThermalScenario::Isothermal) {
+                    config.isothermal_temperature = noisy.meta.isothermal_temperature;
+                }
                 let result = run_golden_pipeline_from_gui(
                     app,
-                    golden_config(window, noisy.virtual_tga.time.len()),
+                    config,
                     scenario,
                     noise,
                     seed,
