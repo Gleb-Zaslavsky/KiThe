@@ -140,8 +140,12 @@ impl TopDropDownMenues {
             );
 
             ui.menu_button("Direct Problem", |ui| {
-                if ui.button("Solve IVP").clicked() {
+                if ui.button("Simple One-Step Kinetics").clicked() {
                     direct_problem_state.open();
+                    ui.close();
+                }
+                if ui.button("Complex Direct Problem").on_hover_text("Solve a reaction network for a series of temperatures or heating rates and add the runs as experiments.").clicked() {
+                    direct_problem_state.network_open = true;
                     ui.close();
                 }
             });

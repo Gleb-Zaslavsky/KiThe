@@ -1,13 +1,15 @@
 use crate::gui::experimental_kinetics_gui::model::{Colours, PlotModel};
 use crate::gui::ivp_common::{IvpTaskState, ivp_result_to_experiment};
+use crate::gui::network_ivp_gui::NetworkIvpApp;
 
-#[derive(Debug, Clone)]
 pub struct DirectProblemDialogState {
     pub open: bool,
     pub task: IvpTaskState,
     pub output_experiment_id: String,
     pub last_error: Option<String>,
     pub last_success: Option<String>,
+    pub network_open: bool,
+    pub network_app: NetworkIvpApp,
 }
 
 impl Default for DirectProblemDialogState {
@@ -34,6 +36,8 @@ impl DirectProblemDialogState {
             output_experiment_id: String::from("ivp_result"),
             last_error: None,
             last_success: None,
+            network_open: false,
+            network_app: NetworkIvpApp::new_for_experimental_kinetics(),
         }
     }
 
@@ -65,12 +69,9 @@ impl DirectProblemDialogState {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
-        if !self.open {
-            return;
-        }
-
-        let mut open = self.open;
-        egui::Window::new("Direct Problem")
+        if self.open {
+            let mut open = self.open;
+            egui::Window::new("Direct Problem")
             .open(&mut open)
             .default_size([1100.0, 760.0])
             .show(ctx, |ui| {
@@ -141,7 +142,75 @@ impl DirectProblemDialogState {
                     ui.separator();
                     ui.label(format!("Error: {}", err));
                 }
-            });
-        self.open = open;
+                });
+            self.open = open;
+        }
+        self.network_app
+            .set_existing_experiment_ids(model.list_of_experiments());
+        self.network_app.show(ctx, &mut self.network_open);
+        if let Some((prefix, network_description, solutions)) =
+            self.network_app.take_publish_request()
+        {
+            let mut runs = Vec::with_capacity(solutions.len());
+            let mut seen = std::collections::HashSet::new();
+            let existing: std::collections::HashSet<_> =
+                model.list_of_experiments().into_iter().collect();
+            let mut id_error = None;
+            for solution in solutions {
+                let id = solution.run_metadata.temperature_binding.map_or_else(
+                    || {
+                        format!(
+                            "{}_symbolic",
+                            if prefix.is_empty() {
+                                "network"
+                            } else {
+                                &prefix
+                            }
+                        )
+                    },
+                    |binding| {
+                        crate::gui::network_ivp_gui::network_condition_experiment_id(
+                            &prefix, binding,
+                        )
+                    },
+                );
+                if existing.contains(&id) || !seen.insert(id.clone()) {
+                    id_error = Some(format!(
+                        "Experiment ID '{id}' already exists or repeats in this batch"
+                    ));
+                    break;
+                }
+                let y_columns = crate::gui::ivp_common::network_solution_species_columns(&solution);
+                match crate::gui::ivp_common::network_solution_to_experiment(
+                    &solution,
+                    id.clone(),
+                    &network_description,
+                ) {
+                    Ok(experiment) => runs.push((experiment, y_columns)),
+                    Err(error) => {
+                        id_error = Some(error.to_string());
+                        break;
+                    }
+                }
+            }
+            if let Some(error) = id_error {
+                let _ =
+                    model.push_message(&format!("Reaction-network series was not added: {error}"));
+            } else {
+                match model.push_network_series_and_create_plots(runs) {
+                    Ok(()) => {
+                    let _ = model.push_message(
+                        "Reaction-network condition series added to the experiment list",
+                    );
+                    }
+                    Err(crate::gui::experimental_kinetics_gui::model::TGAGUIError::PostCommitWarning(warning)) => {
+                        let _ = model.push_message(&format!("Reaction-network series added; plot warning: {warning}"));
+                    }
+                    Err(error) => {
+                        let _ = model.push_message(&format!("Reaction-network series was not added: {error}"));
+                    }
+                }
+            }
+        }
     }
 }

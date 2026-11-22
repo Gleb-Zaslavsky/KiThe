@@ -797,7 +797,7 @@ mod tests {
         let app = PlotApp::for_testing(PlotModel::new());
         with_plot_app_state_harness(app, |harness| {
             harness.run();
-            click_menu_entry(harness, "Direct Problem", "Solve IVP");
+            click_menu_entry(harness, "Direct Problem", "Simple One-Step Kinetics");
 
             assert!(harness.state().app.direct_problem_state.open);
             {
@@ -878,6 +878,72 @@ mod tests {
                     .iter()
                     .any(|curve| curve.experiment_id == "ivp_result")
             );
+        });
+    }
+
+    #[test]
+    fn tier3_network_direct_problem_publishes_an_isothermal_series() {
+        let app = PlotApp::for_testing(PlotModel::new());
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            click_menu_entry(harness, "Direct Problem", "Complex Direct Problem");
+            harness.run();
+            harness.get_by_label("Run").click();
+            for _ in 0..80 {
+                harness.run();
+                if harness
+                    .state()
+                    .app
+                    .direct_problem_state
+                    .network_app
+                    .completed_run_count()
+                    .is_some()
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(
+                harness
+                    .state()
+                    .app
+                    .direct_problem_state
+                    .network_app
+                    .completed_run_count(),
+                Some(3)
+            );
+            harness
+                .get_by_label("Add all runs to Experimental Kinetics")
+                .click();
+            harness.run();
+
+            let state = harness.state();
+            let model = &state.app.model;
+            for temperature in [400, 500, 600] {
+                let id = format!("network_{temperature}K");
+                let experiment = model.series.get_experiment_by_id(&id).unwrap();
+                assert_eq!(
+                    experiment.meta.isothermal_temperature,
+                    Some(temperature as f64)
+                );
+                assert_eq!(experiment.dataset.schema.time.as_deref(), Some("time"));
+                assert_eq!(
+                    experiment.dataset.schema.temperature.as_deref(),
+                    Some("temperature")
+                );
+                let concentration = experiment
+                    .dataset
+                    .schema
+                    .columns
+                    .get("concentration_A")
+                    .unwrap();
+                assert_eq!(concentration.unit, Unit::MolePerCubicMeter);
+                assert_eq!(concentration.origin, crate::Kinetics::experimental_kinetics::one_experiment_dataset::ColumnOrigin::Simulated);
+                assert!(model.plots.iter().any(|curve| curve.experiment_id == id
+                    && curve.y_name == "concentration_A"
+                    && curve.is_shown()));
+            }
+            assert!(model.list_of_experiments().len() == 3);
         });
     }
 

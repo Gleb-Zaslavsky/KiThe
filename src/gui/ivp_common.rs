@@ -1,12 +1,14 @@
+use crate::Kinetics::experimental_kinetics::column_provenance::ColumnProvenance;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    ColumnMeta, ColumnNature, History, TGADataset, TGADomainError, TGASchema, Unit,
+    ColumnMeta, ColumnNature, ColumnOrigin, History, TGADataset, TGADomainError, TGASchema, Unit,
 };
+use crate::Kinetics::reaction_network_ivp::{NetworkIvpSolution, TemperatureBinding};
 use crate::Kinetics::solid_state_kinetics_IVP::{KineticModelIVP, KineticModelNames};
 use RustedSciThe::numerical::StiffAPI::StiffSolverKind;
 use egui_extras::{Column as TableColumn, TableBuilder};
 use nalgebra::{DMatrix, DVector};
 use polars::prelude::{Column as PolarsColumn, DataFrame, IntoLazy};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
@@ -353,6 +355,193 @@ pub fn ivp_result_to_experiment(
         crate::Kinetics::experimental_kinetics::experiment_series_main::TGAExperiment::new(dataset)
             .with_id(experiment_id),
     )
+}
+
+/// Convert one accepted reaction-network trajectory into a typed experiment.
+/// Species concentrations remain concentrations; they are never inferred to
+/// be TGA mass or conversion.
+pub fn network_solution_to_experiment(
+    solution: &NetworkIvpSolution,
+    experiment_id: String,
+    network_description: &str,
+) -> Result<
+    crate::Kinetics::experimental_kinetics::experiment_series_main::TGAExperiment,
+    TGADomainError,
+> {
+    use crate::Kinetics::experimental_kinetics::column_provenance::{
+        ColumnTransformKind, ColumnTransformStep,
+    };
+    use crate::Kinetics::experimental_kinetics::experiment_series_main::TGAExperiment;
+
+    let n = solution.time_seconds.len();
+    if n < 2
+        || solution.temperature_kelvin.len() != n
+        || solution.concentrations.len() != n
+        || solution.conversions.len() != n
+        || solution
+            .concentrations
+            .iter()
+            .any(|row| row.len() != solution.species_ids.len())
+        || solution
+            .conversions
+            .iter()
+            .any(|row| row.len() != solution.solid_state_reaction_ids.len())
+    {
+        return Err(TGADomainError::InvalidOperation(
+            "reaction-network result has inconsistent trajectory dimensions".to_string(),
+        ));
+    }
+
+    let mut columns = Vec::with_capacity(
+        2 + solution.species_ids.len() + solution.solid_state_reaction_ids.len(),
+    );
+    let mut schema_columns = HashMap::new();
+    let mut add_column = |name: String, values: Vec<f64>, unit: Unit, nature: ColumnNature| {
+        columns.push(PolarsColumn::new(name.clone().into(), values.as_slice()));
+        let details = Some(format!("conditions: {:?}", solution.run_metadata));
+        let provenance = ColumnProvenance {
+            root_columns: Vec::new(),
+            steps: vec![ColumnTransformStep::new(
+                Vec::new(),
+                name.clone(),
+                ColumnTransformKind::Manual {
+                    operation: "reaction_network_ivp".into(),
+                    details,
+                },
+                None,
+                None,
+                false,
+            )],
+        };
+        schema_columns.insert(
+            name.clone(),
+            ColumnMeta::new(name, unit, ColumnOrigin::Simulated, nature, provenance),
+        );
+    };
+
+    add_column(
+        "time".into(),
+        solution.time_seconds.clone(),
+        Unit::Second,
+        ColumnNature::Time,
+    );
+    add_column(
+        "temperature".into(),
+        solution.temperature_kelvin.clone(),
+        Unit::Kelvin,
+        ColumnNature::Temperature,
+    );
+    let species_columns = network_solution_species_columns(solution);
+    let mut names: HashSet<String> = species_columns
+        .iter()
+        .cloned()
+        .chain(["time".into(), "temperature".into()])
+        .collect();
+    for (index, name) in species_columns.into_iter().enumerate() {
+        let values = solution
+            .concentrations
+            .iter()
+            .map(|row| row[index])
+            .collect();
+        add_column(
+            name,
+            values,
+            Unit::MolePerCubicMeter,
+            ColumnNature::Concentration,
+        );
+    }
+    for (index, reaction) in solution.solid_state_reaction_ids.iter().enumerate() {
+        let base = format!("conversion_{}", safe_column_suffix(reaction));
+        let name = unique_column_name(base, &mut names);
+        let values = solution.conversions.iter().map(|row| row[index]).collect();
+        add_column(name, values, Unit::Dimensionless, ColumnNature::Conversion);
+    }
+
+    let frame = DataFrame::new(n, columns)?.lazy();
+    let mut dataset = TGADataset {
+        frame,
+        schema: TGASchema {
+            columns: schema_columns,
+            time: Some("time".to_string()),
+            temperature: Some("temperature".to_string()),
+            ..TGASchema::default()
+        },
+        oneframeplot: None,
+        history_of_operations: History::new(),
+        undo_stack: Default::default(),
+        undo_snapshot_latch: false,
+    };
+    dataset.initialize_column_provenance();
+
+    let metadata = &solution.run_metadata;
+    let experiment = TGAExperiment::new(dataset).with_id(experiment_id);
+    let (experiment, condition_comment) = match metadata.temperature_binding {
+        Some(TemperatureBinding::Constant(kelvin)) => (
+            experiment.with_isothermal_temperature(kelvin),
+            format!("Isothermal at {kelvin} K"),
+        ),
+        Some(TemperatureBinding::Linear {
+            initial_kelvin,
+            kelvin_per_second,
+        }) => (
+            experiment.with_heating_rate(kelvin_per_second * 60.0),
+            format!(
+                "Linear heating from {initial_kelvin} K at {} K/min",
+                kelvin_per_second * 60.0
+            ),
+        ),
+        None => (experiment, "Fixed symbolic temperature".into()),
+    };
+    Ok(experiment.with_comment(format!(
+        "Reaction-network IVP; {condition_comment}; interval {:?} s; initial concentrations {:?}; rate coefficients {:?}; model: {network_description}",
+        metadata.time_interval_seconds, metadata.initial_concentrations, metadata.rate_coefficients
+    )))
+}
+
+pub fn network_solution_species_columns(solution: &NetworkIvpSolution) -> Vec<String> {
+    let mut names = HashSet::from(["time".to_string(), "temperature".to_string()]);
+    solution
+        .species_ids
+        .iter()
+        .map(|species| {
+            unique_column_name(
+                format!("concentration_{}", safe_column_suffix(species)),
+                &mut names,
+            )
+        })
+        .collect()
+}
+
+fn safe_column_suffix(value: &str) -> String {
+    let suffix: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if suffix.is_empty() {
+        "unnamed".into()
+    } else {
+        suffix
+    }
+}
+
+fn unique_column_name(base: String, names: &mut HashSet<String>) -> String {
+    if names.insert(base.clone()) {
+        return base;
+    }
+    let mut index = 2;
+    loop {
+        let candidate = format!("{base}_{index}");
+        if names.insert(candidate.clone()) {
+            return candidate;
+        }
+        index += 1;
+    }
 }
 
 #[cfg(test)]

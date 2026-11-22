@@ -740,8 +740,16 @@ mod tests {
                 vec![0.99; 200].into(),
                 ColumnNature::R2,
             )
+            .unwrap()
+            .add_numeric_column(
+                "concentration_A",
+                Unit::MolePerCubicMeter,
+                vec![0.5; 200].into(),
+                ColumnNature::Concentration,
+            )
             .unwrap();
         ds.schema.R2 = Some("fit_r2".to_string());
+        ds.schema.columns.get_mut("concentration_A").unwrap().origin = ColumnOrigin::Simulated;
 
         let mut provenance =
             crate::Kinetics::experimental_kinetics::column_provenance::ColumnProvenance::raw(
@@ -852,6 +860,18 @@ mod tests {
         assert_eq!(
             exp.dataset.schema.columns["fit_r2"].nature,
             ColumnNature::R2
+        );
+        assert_eq!(
+            exp.dataset.schema.columns["concentration_A"].unit,
+            Unit::MolePerCubicMeter
+        );
+        assert_eq!(
+            exp.dataset.schema.columns["concentration_A"].nature,
+            ColumnNature::Concentration
+        );
+        assert_eq!(
+            exp.dataset.schema.columns["concentration_A"].origin,
+            ColumnOrigin::Simulated
         );
         let fit_provenance = &exp.dataset.schema.columns["fit_curve"].provenance;
         assert_eq!(fit_provenance.steps.len(), 2);

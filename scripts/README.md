@@ -1,5 +1,17 @@
 # Equilibrium campaign runner
 
+## Git staging helper
+
+Stage the crate manifest and source, example, benchmark, and script trees before
+publishing to Git:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\git_stage_before_push.ps1
+```
+
+The helper stages only `Cargo.toml`, `scripts/`, `examples/`, `benches/`, and
+`src/`. It does not commit or push.
+
 `Invoke-EquilibriumCampaign.ps1` runs the maintained equilibrium story-test and
 benchmark matrix as individual Cargo processes. It continues after a failed
 step and keeps each step's Cargo output in its own log.
@@ -82,3 +94,23 @@ Each run writes a unique `test_reports/reactor-bvp-*/` directory containing a
 Tabled summary, JSON manifest, and separate raw logs under `technical/`.
 Use `-PlanOnly` to inspect the command queue without running Cargo or creating
 reports.
+
+## Reaction-network IVP release matrix
+
+`Invoke-ReactionNetworkIvpCampaign.ps1` builds the release lib-test executable
+once, checks the public example, runs the module's correctness stories, and
+then runs the Criterion baseline. Steps are sequential and failures are
+recorded without stopping later steps. The benchmark prints a separate Tabled
+stage-attribution matrix and measures cold preparation versus warm prepared
+reruns with telemetry Off.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Invoke-ReactionNetworkIvpCampaign.ps1 -PlanOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Invoke-ReactionNetworkIvpCampaign.ps1 -Suite correctness -BuildJobs 1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Invoke-ReactionNetworkIvpCampaign.ps1 -Suite performance -BuildJobs 1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Invoke-ReactionNetworkIvpCampaign.ps1 -Suite all -BuildJobs 1 -FailOnAny
+```
+
+Each run stores a summary and JSON manifest in a unique
+`test_reports/reaction-network-ivp-*/reports` folder and raw command output in
+`technical/`. `-PlanOnly` does not invoke Cargo or create report directories.

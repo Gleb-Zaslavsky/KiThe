@@ -489,6 +489,65 @@ impl PlotModel {
         Ok(())
     }
 
+    /// Publish a prepared batch of simulated experiments and plot their
+    /// concentration columns against time. Data publication is preflighted so
+    /// an ID collision cannot leave only part of the requested batch inserted.
+    pub fn push_network_series_and_create_plots(
+        &mut self,
+        runs: Vec<(TGAExperiment, Vec<String>)>,
+    ) -> Result<(), TGAGUIError> {
+        let mut ids: HashSet<String> = self.series.ids().into_iter().collect();
+        for (experiment, _) in &runs {
+            if !ids.insert(experiment.meta.id.clone()) {
+                return Err(TGAGUIError::BindingError(format!(
+                    "Experiment '{}' already exists in the series",
+                    experiment.meta.id
+                )));
+            }
+        }
+        let plot_specs: Vec<(String, Vec<String>)> = runs
+            .iter()
+            .map(|(experiment, columns)| (experiment.meta.id.clone(), columns.clone()))
+            .collect();
+        for (experiment, _) in runs {
+            self.series.push(experiment)?;
+        }
+
+        let palette = [
+            Colours::Blue,
+            Colours::Red,
+            Colours::Green,
+            Colours::Orange,
+            Colours::Purple,
+            Colours::Cyan,
+            Colours::Magenta,
+            Colours::Gray,
+        ];
+        let mut plot_warnings = Vec::new();
+        for (id, y_columns) in plot_specs {
+            let result = (|| -> Result<(), TGAGUIError> {
+                self.series.set_oneframeplot_x(&id, "time")?;
+                for (index, y) in y_columns.iter().enumerate() {
+                    self.series.set_oneframeplot_y(&id, y)?;
+                    self.create_points_for_curve_with_builder(&id, palette[index % palette.len()])?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                self.plots.retain(|curve| curve.experiment_id != id);
+                plot_warnings.push(format!("{id}: {error}"));
+            }
+        }
+        self.reset_view();
+        if !plot_warnings.is_empty() {
+            return Err(TGAGUIError::post_commit_warning(format!(
+                "The simulated series was added, but some plots could not be created: {}",
+                plot_warnings.join("; ")
+            )));
+        }
+        Ok(())
+    }
+
     //========================================================================
     //////////////////////////////////////////////////////////////////////////////////
     //========================================================================

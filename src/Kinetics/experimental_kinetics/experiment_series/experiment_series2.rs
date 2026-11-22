@@ -72,6 +72,7 @@ impl UnitedDataset {
             ColumnNature::Time => "time",
             ColumnNature::Temperature => "temperature",
             ColumnNature::Mass => "mass",
+            ColumnNature::Concentration => "concentration",
             ColumnNature::Conversion => "conversion",
             ColumnNature::DimensionlessMass => "dimensionless_mass",
             ColumnNature::MassRate => "mass_rate",

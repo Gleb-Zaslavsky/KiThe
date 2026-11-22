@@ -331,7 +331,21 @@ impl TestOptions {
     pub(crate) fn reload_help(&mut self) -> Result<(), String> {
         let path = self.current_help_path();
         match std::fs::read_to_string(&path) {
-            Ok(contents) => {
+            Ok(mut contents) => {
+                let (marker, workflow) = match self.help_lang {
+                    HelpLanguage::Eng => (
+                        "## Typical Workflows",
+                        include_str!("../../assets/help_workflows_eng.md"),
+                    ),
+                    HelpLanguage::Rus => (
+                        "## Типовые рабочие процессы",
+                        include_str!("../../assets/help_workflows_rus.md"),
+                    ),
+                };
+                if !contents.contains(marker) {
+                    contents.push_str("\n\n");
+                    contents.push_str(workflow);
+                }
                 self.parsed_help = parse_help_markdown(&contents);
                 self.help_editor_buffer = contents;
                 self.help_error = None;
@@ -645,4 +659,38 @@ fn block_matches_query(block: &HelpBlock, query: &str) -> bool {
 
 fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+#[cfg(test)]
+mod workflow_help_tests {
+    use super::{HelpLanguage, TestOptions};
+
+    #[test]
+    fn workflow_help_is_loaded_for_both_languages() {
+        for (language, marker, required_text) in [
+            (
+                HelpLanguage::Eng,
+                "Typical Workflows",
+                "isothermal temperature metadata",
+            ),
+            (
+                HelpLanguage::Rus,
+                "Типовые рабочие процессы",
+                "Изотермический опыт",
+            ),
+        ] {
+            let mut options = TestOptions::new();
+            options.help_lang = language;
+            options.reload_help().unwrap();
+            assert!(options.parsed_help.raw_markdown.contains(marker));
+            assert!(options.parsed_help.raw_markdown.contains(required_text));
+            assert!(
+                options
+                    .parsed_help
+                    .sections
+                    .iter()
+                    .any(|section| section.title.contains(marker))
+            );
+        }
+    }
 }

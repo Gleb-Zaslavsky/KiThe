@@ -1,6 +1,6 @@
 [package]
 name = "KiThe"
-version = "0.3.18"
+version = "0.3.19"
 edition = "2024"
 author = "Gleb Zaslavsky"
 license = "MIT"
@@ -150,6 +150,10 @@ harness = false
 
 [[bench]]
 name = "reactor_bvp_baseline"
+harness = false
+
+[[bench]]
+name = "reaction_network_ivp_baseline"
 harness = false
 
 

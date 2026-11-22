@@ -347,6 +347,7 @@ pub enum Unit {
 
     MilliVolt,
     Milligram,
+    MolePerCubicMeter,
     MilligramPerSecond,
     MilligramPerMinute,
     MilligramPerHour,
@@ -452,6 +453,7 @@ impl Unit {
             "K" => Ok(Unit::Kelvin),
             "mV" => Ok(Unit::MilliVolt),
             "mg" => Ok(Unit::Milligram),
+            "mol/m^3" => Ok(Unit::MolePerCubicMeter),
             "mg/s" => Ok(Unit::MilligramPerSecond),
             "mg/min" => Ok(Unit::MilligramPerMinute),
             "mg/h" => Ok(Unit::MilligramPerHour),
@@ -486,6 +488,7 @@ impl Unit {
             Unit::Celsius => "C".to_string(),
             Unit::MilliVolt => "mV".to_string(),
             Unit::Milligram => "mg".to_string(),
+            Unit::MolePerCubicMeter => "mol/m^3".to_string(),
             Unit::MilligramPerSecond => "mg/s".to_string(),
             Unit::MilligramPerMinute => "mg/min".to_string(),
             Unit::MilligramPerHour => "mg/h".to_string(),
@@ -515,6 +518,7 @@ impl std::fmt::Display for Unit {
             Unit::Celsius => write!(f, "C"),
             Unit::MilliVolt => write!(f, "mV"),
             Unit::Milligram => write!(f, "mg"),
+            Unit::MolePerCubicMeter => write!(f, "mol/m^3"),
             Unit::MilligramPerSecond => write!(f, "mg/s"),
             Unit::MilligramPerMinute => write!(f, "mg/min"),
             Unit::MilligramPerHour => write!(f, "mg/h"),
@@ -549,6 +553,7 @@ pub enum ColumnNature {
     Time,
     Temperature,
     Mass,
+    Concentration,
     // alpha = relative mass m/m0
     Conversion,
     // eta = 1 - alpha
@@ -593,6 +598,7 @@ pub enum ColumnOrigin {
     PolarsDerived,
     NumericDerived,
     Imported,
+    Simulated,
 }
 /// Column  metadata
 #[derive(Debug, Clone)]
@@ -1467,13 +1473,13 @@ impl TGADataset {
                     ColumnOrigin::Imported => {
                         ColumnProvenance::imported(name.clone(), name.clone())
                     }
-                    ColumnOrigin::PolarsDerived | ColumnOrigin::NumericDerived => {
-                        ColumnProvenance::manual(
-                            name.clone(),
-                            "initialize_column_provenance",
-                            Some("backfilled provenance".to_string()),
-                        )
-                    }
+                    ColumnOrigin::PolarsDerived
+                    | ColumnOrigin::NumericDerived
+                    | ColumnOrigin::Simulated => ColumnProvenance::manual(
+                        name.clone(),
+                        "initialize_column_provenance",
+                        Some("backfilled provenance".to_string()),
+                    ),
                 };
             }
         }
@@ -2939,6 +2945,7 @@ impl TGADataset {
             ColumnNature::Time => Some(self.schema.time.as_deref()),
             ColumnNature::Temperature => Some(self.schema.temperature.as_deref()),
             ColumnNature::Mass => Some(self.schema.mass.as_deref()),
+            ColumnNature::Concentration => None,
             ColumnNature::DimensionlessMass => Some(self.schema.alpha.as_deref()),
             ColumnNature::Conversion => Some(self.schema.eta.as_deref()),
             ColumnNature::MassRate => Some(self.schema.dm_dt.as_deref()),

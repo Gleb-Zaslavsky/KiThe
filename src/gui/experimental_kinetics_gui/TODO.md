@@ -369,3 +369,19 @@ lines with quality metrics and recovered parameters.
   Manager latency benchmarks before optimizing its sample cache.
 - [x] Final verification: focused regressions, complete
   `gui::experimental_kinetics_gui` tests, and `git diff --check`.
+
+## Reaction-Network Direct-Problem Series
+
+- [x] Add `Complex Direct Problem` alongside `Simple One-Step Kinetics`.
+- [x] Support isothermal temperature lists and linear heating-rate lists in
+  K/min, with shared time bounds and independent runs from the same initial
+  concentrations.
+- [x] Convert accepted runs to separate experiments with explicit simulated
+  provenance, temperature/concentration units, and run-condition metadata.
+- [x] Preflight experiment IDs and publish the batch only after every solve and
+  conversion succeeds; create visible concentration-vs-time curves afterward.
+- [x] Cover isothermal GUI publication and heating-rate parsing with tests.
+- [ ] Deferred: add native mid-solve cancellation when `StiffAPI` supports
+  combining parameter rebinding and `CancellationToken`.
+- [ ] Deferred: support condition-specific time intervals if a concrete
+  workflow requires equal final temperatures at different heating rates.

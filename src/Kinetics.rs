@@ -117,4 +117,5 @@ pub mod experimental_kinetics;
 /// ```
 ///
 pub mod molmass;
+pub mod reaction_network_ivp;
 pub mod solid_state_kinetics_IVP;

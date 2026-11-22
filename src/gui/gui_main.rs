@@ -6,6 +6,7 @@ use crate::gui::experimental_kinetics_gui::experimental_kinetics_gui_main;
 use crate::gui::gui_main::egui::IconData;
 use crate::gui::gui_solid_ivp;
 use crate::gui::kinetics_gui;
+use crate::gui::network_ivp_gui;
 use crate::gui::reactor_ivp_gui;
 use crate::gui::settings_gui;
 use crate::gui::thermochemistry_gui;
@@ -87,6 +88,8 @@ struct MainApp {
     reactor_ivp_app: Option<reactor_ivp_gui::ReactorIvpApp>,
     solid_ivp_open: bool,
     solid_ivp_app: Option<gui_solid_ivp::SolidIVPApp>,
+    network_ivp_open: bool,
+    network_ivp_app: Option<network_ivp_gui::NetworkIvpApp>,
     experimental_kinetics_open: bool,
     experimental_kinetics_app: Option<experimental_kinetics_gui_main::PlotApp>,
     equilibrium_open: bool,
@@ -118,6 +121,8 @@ impl MainApp {
             reactor_ivp_app: None,
             solid_ivp_open: false,
             solid_ivp_app: None,
+            network_ivp_open: false,
+            network_ivp_app: None,
             experimental_kinetics_open: false,
             experimental_kinetics_app: None,
             equilibrium_open: false,
@@ -225,6 +230,25 @@ mod tests {
         assert!(main.borrow().equilibrium_open);
         assert!(main.borrow().equilibrium_app.is_some());
     }
+
+    #[test]
+    fn network_ivp_menu_opens_a_separate_working_window() {
+        let main = Rc::new(RefCell::new(MainApp::default()));
+        let main_for_ui = Rc::clone(&main);
+        let mut harness = Harness::new_ui(move |ui| {
+            main_for_ui.borrow_mut().render(ui);
+        });
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Reaction network IVP")
+            .click_accesskit();
+        harness.run();
+        harness.get_by_role_and_label(Role::Window, "Reaction network IVP");
+        let main = main.borrow();
+        assert!(main.network_ivp_open);
+        assert!(main.network_ivp_app.is_some());
+        assert!(main.reactor_ivp_app.is_none());
+    }
 }
 
 impl MainApp {
@@ -276,6 +300,13 @@ impl MainApp {
                         ui.horizontal(|ui| {
                             if ui.add_sized([200.0, 60.0], egui::Button::new("Chemical equilibrium")).clicked() {
                                 self.open_equilibrium();
+                            }
+                            ui.add_space(20.0);
+                            if ui.add_sized([200.0, 60.0], egui::Button::new("Reaction network IVP")).clicked() {
+                                self.network_ivp_open = true;
+                                if self.network_ivp_app.is_none() {
+                                    self.network_ivp_app = Some(network_ivp_gui::NetworkIvpApp::new());
+                                }
                             }
                         });
                         ui.add_space(20.0);
@@ -410,6 +441,12 @@ impl MainApp {
         if self.solid_ivp_open {
             if let Some(solid_ivp_app) = &mut self.solid_ivp_app {
                 solid_ivp_app.show(&ctx, &mut self.solid_ivp_open);
+            }
+        }
+
+        if self.network_ivp_open {
+            if let Some(app) = &mut self.network_ivp_app {
+                app.show(&ctx, &mut self.network_ivp_open);
             }
         }
 

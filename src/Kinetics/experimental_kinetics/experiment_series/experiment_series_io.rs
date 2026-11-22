@@ -528,6 +528,7 @@ fn unit_tag(unit: Unit) -> &'static str {
         Unit::Celsius => "Celsius",
         Unit::MilliVolt => "MilliVolt",
         Unit::Milligram => "Milligram",
+        Unit::MolePerCubicMeter => "MolePerCubicMeter",
         Unit::MilligramPerSecond => "MilligramPerSecond",
         Unit::MilligramPerMinute => "MilligramPerMinute",
         Unit::MilligramPerHour => "MilligramPerHour",
@@ -555,6 +556,7 @@ fn parse_unit_tag(tag: &str) -> Result<Unit, TGADomainError> {
         "Celsius" => Ok(Unit::Celsius),
         "MilliVolt" => Ok(Unit::MilliVolt),
         "Milligram" => Ok(Unit::Milligram),
+        "MolePerCubicMeter" => Ok(Unit::MolePerCubicMeter),
         "MilligramPerSecond" => Ok(Unit::MilligramPerSecond),
         "MilligramPerMinute" => Ok(Unit::MilligramPerMinute),
         "MilligramPerHour" => Ok(Unit::MilligramPerHour),
@@ -584,6 +586,7 @@ fn origin_tag(origin: ColumnOrigin) -> &'static str {
         ColumnOrigin::PolarsDerived => "PolarsDerived",
         ColumnOrigin::NumericDerived => "NumericDerived",
         ColumnOrigin::Imported => "Imported",
+        ColumnOrigin::Simulated => "Simulated",
     }
 }
 
@@ -593,6 +596,7 @@ fn parse_origin_tag(tag: &str) -> Result<ColumnOrigin, TGADomainError> {
         "PolarsDerived" => Ok(ColumnOrigin::PolarsDerived),
         "NumericDerived" => Ok(ColumnOrigin::NumericDerived),
         "Imported" => Ok(ColumnOrigin::Imported),
+        "Simulated" => Ok(ColumnOrigin::Simulated),
         _ => Err(TGADomainError::InvalidOperation(format!(
             "Unknown column origin tag '{}'",
             tag
@@ -605,6 +609,7 @@ fn nature_tag(nature: ColumnNature) -> &'static str {
         ColumnNature::Time => "Time",
         ColumnNature::Temperature => "Temperature",
         ColumnNature::Mass => "Mass",
+        ColumnNature::Concentration => "Concentration",
         ColumnNature::Conversion => "Conversion",
         ColumnNature::DimensionlessMass => "DimensionlessMass",
         ColumnNature::MassRate => "MassRate",
@@ -624,6 +629,7 @@ fn parse_nature_tag(tag: &str) -> Result<ColumnNature, TGADomainError> {
         "Time" => Ok(ColumnNature::Time),
         "Temperature" => Ok(ColumnNature::Temperature),
         "Mass" => Ok(ColumnNature::Mass),
+        "Concentration" => Ok(ColumnNature::Concentration),
         "Conversion" => Ok(ColumnNature::Conversion),
         "DimensionlessMass" => Ok(ColumnNature::DimensionlessMass),
         "MassRate" => Ok(ColumnNature::MassRate),

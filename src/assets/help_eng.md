@@ -252,3 +252,41 @@ Computes the derivative of temperature with respect to time (dT/dt).
 
 # Arithmetic operations
 Buttons "Add", "Sub", "Mul", "Divide", "ln", "exp" apply the corresponding mathematical operation to the selected column using the value from the "Input value" field. First you need to select a column (X or Y) and optionally check "apply only to the selected chart".
+
+## Typical Workflows
+
+### One experiment
+
+#### Import and inspect
+
+1. Open **File Manager > Import Data** for a raw TXT/CSV file with a header row, or use **New Experiment** when you also want to enter experiment metadata. Select the file and bind the time column (`t`), mass/signal column (`m`), and temperature column (`T`) when present. Check the displayed units before importing.
+2. For an isothermal experiment without a measured temperature column, enter its known temperature in the isothermal metadata. A temperature column is not required. If the instrument recorded a nearly constant temperature, bind that column instead; you can calculate its average later.
+3. Click **Import experiment** / **Select**. The standard `m vs t` and, when temperature is bound, `T vs t` plots are created. Inspect the curves before transforming data.
+
+#### Clean and prepare
+
+1. Remove startup or shutdown portions that are not part of the experiment. Select the unwanted plot interval and use **Cut selected**, or use **Cut before time** for a known boundary. These operations remove rows from the experiment; they do not fill missing measurements.
+2. Use **Move time to zero** when the experiment should start at `t = 0`. Check the plot again after each row or time transformation.
+3. If the instrument column is voltage, select that signal and use **From mV to mg**. The calibration coefficients must already be configured. This creates a calibrated mass column; retain the voltage column when you want to compare the original signal with the calibration result.
+4. Calculate conversion from the mass column you intend to analyze. Choose a nonzero baseline interval in the `Input value` field: the mean mass up to that time is used as the initial mass. A value of `0` is rejected because it would select only the first sample. Relative mass and conversion are dimensionless quantities; they have opposite direction conventions.
+5. Apply filters and smoothers to the intended source column. Savitzky-Golay (SG) is useful for local polynomial smoothing; LSQ spline resampling is useful when a smooth curve on a chosen time grid is needed. Prefer a separate output column so the source remains available for comparison. For SG and rolling-window methods, inspect the time span covered by the chosen point window; for splines, inspect knot spacing and the resampled time range.
+6. Open **Column Manager** and inspect the sample values, units, active bindings, transformation provenance, and quality comparison. Confirm that the new column contains numeric values and that the smoothing did not erase meaningful trend or distort the result.
+7. Save the prepared experiment as the typed CSV format. It preserves column metadata and bindings, unlike a raw text export. Reopen the saved file when you need to verify the round trip.
+
+#### Isothermal versus non-isothermal
+
+- **Isothermal:** set the known temperature in experiment metadata if no temperature trace exists. If a temperature trace was measured, bind it and optionally use **Average on column** over the selected whole range to inspect or record its representative value. Use isothermal kinetic methods; do not infer a heating rate from a constant-temperature experiment.
+- **Non-isothermal:** bind the measured temperature trace and record the heating rate in K/min. Convert Celsius to Kelvin when necessary before kinetic calculations. Inspect `T vs t` and its units; non-isothermal kinetic methods require a valid temperature history, not only a metadata setpoint.
+
+### Series of experiments
+
+1. Import each run as a separate experiment with a unique ID that identifies its condition, for example `iso_500K` or `ramp_2Kmin`. Bind each file's columns and record its isothermal temperature or heating rate. Do not concatenate distinct runs into one experiment merely to make them look like a series.
+2. Process runs one at a time: trim invalid beginning/end regions, shift time if appropriate, calibrate voltage to mass if required, calculate relative mass/conversion, then apply the chosen smoothing or resampling. Keep the same physical meaning, units, and transformation choices across runs when comparing them.
+3. In **Column Manager**, inspect each experiment's bindings, samples, and provenance. Use the compare-samples view to compare selected columns across runs; different adaptive/resampled grids do not need to be forced to equal lengths for plotting.
+4. Save the typed experiment series after processing. Before running a series kinetic method, verify that every experiment has the required inputs: isothermal temperature metadata for isothermal methods, or bound temperature data and heating-rate metadata for non-isothermal methods.
+
+#### Isothermal and non-isothermal series
+
+- **Isothermal series:** create one experiment per temperature, with the temperature stored in metadata (a `T` column is optional). Apply mass calibration, conversion, and smoothing independently to each run. Confirm IDs and temperatures, then run an isothermal series method.
+- **Non-isothermal series:** create one experiment per heating rate, bind its temperature trace, and store the heating rate in K/min. Apply the same preprocessing sequence to each run, checking the valid conversion range and temperature units. Then run a non-isothermal series method.
+- Keep the two regimes separate. A missing `T` trace is valid for an explicitly isothermal run, but it is not a substitute for a temperature program in a non-isothermal run.
