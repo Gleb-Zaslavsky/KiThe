@@ -163,6 +163,28 @@ impl PlotModel {
         Ok(())
     }
 
+    pub fn to_csv_series_selected(
+        &self,
+        path: &Path,
+        experiment_ids: &[String],
+        columns_by_experiment: &HashMap<String, Vec<String>>,
+    ) -> Result<(), TGAGUIError> {
+        self.series
+            .to_csv_series_selected(path, experiment_ids, columns_by_experiment)?;
+        Ok(())
+    }
+
+    pub fn to_plain_txt_experiment(
+        &self,
+        experiment_id: &str,
+        path: &Path,
+        columns: &[String],
+    ) -> Result<(), TGAGUIError> {
+        self.series
+            .to_plain_txt_experiment(experiment_id, path, columns)?;
+        Ok(())
+    }
+
     pub fn from_csv_series(&mut self, path: &Path) -> Result<(), TGAGUIError> {
         self.series = TGASeries::from_csv_series(path)?;
         Ok(())

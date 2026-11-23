@@ -496,6 +496,33 @@ impl TGASeries {
         experiment_series_io::to_csv_series_impl(self, path)
     }
 
+    /// Save a selected set of experiments and columns as a typed KiThe series CSV.
+    /// Each experiment keeps its metadata; bindings to omitted columns are cleared on import.
+    pub fn to_csv_series_selected(
+        &self,
+        path: &Path,
+        experiment_ids: &[String],
+        columns_by_experiment: &HashMap<String, Vec<String>>,
+    ) -> Result<(), TGADomainError> {
+        experiment_series_io::to_csv_series_selected_impl(
+            self,
+            path,
+            Some(experiment_ids),
+            Some(columns_by_experiment),
+        )
+    }
+
+    /// Save one experiment as a tab-delimited numeric table without KiThe metadata.
+    pub fn to_plain_txt_experiment(
+        &self,
+        id: &str,
+        path: &Path,
+        columns: &[String],
+    ) -> Result<(), TGADomainError> {
+        let experiment = self.get_experiment_by_id(id)?;
+        experiment_series_io::to_plain_txt_selected_impl(&experiment.dataset, path, columns)
+    }
+
     /// Read the CSV format produced by `to_csv_series` and reconstruct `TGASeries`.
     pub fn from_csv_series(path: &Path) -> Result<Self, TGADomainError> {
         experiment_series_io::from_csv_series_impl(path)

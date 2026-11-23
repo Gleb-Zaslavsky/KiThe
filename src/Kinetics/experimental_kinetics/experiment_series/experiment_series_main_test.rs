@@ -1004,6 +1004,81 @@ mod tests {
     }
 
     #[test]
+    fn selected_series_csv_preserves_only_selected_experiment_columns_and_metadata() {
+        let mut series = TGASeries::new();
+        let selected_source = make_csv(24, 801);
+        let omitted_source = make_csv(19, 802);
+        let mut selected = TGAExperiment::new(ds_from_csv(&selected_source)).with_id("selected");
+        selected.meta.isothermal_temperature = Some(523.15);
+        selected.meta.thermal_mode = ExperimentThermalMode::Isothermal;
+        selected.meta.comment = Some("kept metadata".to_string());
+        series.push(selected).unwrap();
+        series
+            .push(TGAExperiment::new(ds_from_csv(&omitted_source)).with_id("omitted"))
+            .unwrap();
+
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let experiment_ids = vec!["selected".to_string()];
+        let columns = std::collections::HashMap::from([(
+            "selected".to_string(),
+            vec!["time".to_string(), "mass".to_string()],
+        )]);
+        series
+            .to_csv_series_selected(path.path(), &experiment_ids, &columns)
+            .unwrap();
+
+        let restored = TGASeries::from_csv_series(path.path()).unwrap();
+        assert_eq!(
+            restored
+                .experiments()
+                .iter()
+                .map(|experiment| experiment.meta.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["selected"]
+        );
+        let experiment = restored.get_experiment_by_id("selected").unwrap();
+        assert_eq!(experiment.meta.isothermal_temperature, Some(523.15));
+        assert_eq!(
+            experiment.meta.thermal_mode,
+            ExperimentThermalMode::Isothermal
+        );
+        assert_eq!(experiment.meta.comment.as_deref(), Some("kept metadata"));
+        assert_eq!(experiment.dataset.schema.time.as_deref(), Some("time"));
+        assert_eq!(experiment.dataset.schema.mass.as_deref(), Some("mass"));
+        assert_eq!(experiment.dataset.schema.temperature, None);
+        let frame = experiment.dataset.frame.clone().collect().unwrap();
+        assert_eq!(frame.width(), 2);
+        assert_eq!(frame.height(), 24);
+    }
+
+    #[test]
+    fn plain_txt_export_is_tab_delimited_and_rejects_empty_column_selection() {
+        let mut series = TGASeries::new();
+        let source = make_csv(12, 803);
+        series
+            .push(TGAExperiment::new(ds_from_csv(&source)).with_id("plain"))
+            .unwrap();
+
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let selected = vec!["time".to_string(), "mass".to_string()];
+        series
+            .to_plain_txt_experiment("plain", path.path(), &selected)
+            .unwrap();
+        let text = std::fs::read_to_string(path.path()).unwrap();
+        assert!(text.lines().next().unwrap().contains("time\tmass"));
+        assert!(!text.contains("#META"));
+        assert!(!text.contains("KiThe TGA"));
+        assert_eq!(text.lines().count(), 13);
+
+        let empty_path = tempfile::tempdir().unwrap().path().join("empty.txt");
+        assert!(matches!(
+            series.to_plain_txt_experiment("plain", &empty_path, &[]),
+            Err(TGADomainError::InvalidOperation(message)) if message.contains("at least one column")
+        ));
+        assert!(!empty_path.exists());
+    }
+
+    #[test]
     fn series_csv_roundtrip_preserves_all_column_metadata_variants() {
         let units = [
             Unit::Second,

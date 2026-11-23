@@ -70,8 +70,9 @@ use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_problem::{
     build_phase_equilibrium_problem_with_timing,
 };
 use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
-    EquilibriumSolveOptions, PhaseControlPolicy, PhaseEquilibriumPipelineError,
-    PhaseEquilibriumPipelineRequest, ResolvedPhaseEquilibriumRequest, solve_resolved_pt,
+    EquilibriumSolveOptions, ExtensiveNormalizationPolicy, PhaseControlPolicy,
+    PhaseEquilibriumPipelineError, PhaseEquilibriumPipelineRequest,
+    ResolvedPhaseEquilibriumRequest, solve_resolved_pt,
 };
 use crate::Thermodynamics::User_PhaseOrSolution::{
     ResolvedPhaseSystem, SubstanceSystemFactory, SubstanceSystemSpec, SubstanceSystemSpecBuilder,
@@ -5533,4 +5534,131 @@ struct LivePhValidationRow {
     status: String,
     #[tabled(rename = "Detail")]
     detail: String,
+}
+
+/// Paired debug characterization of proactive small-scale P,H
+/// preconditioning versus failure-triggered normalization on identical live
+/// systems and target enthalpies. This reports preparation counts separately
+/// from physical correctness and intentionally does not gate build counts.
+#[test]
+#[ignore = "paired debug characterization of small-scale P,H normalization policies"]
+fn live_nested_ph_small_scale_normalization_policy_comparison() {
+    let before = live_library_file_snapshot();
+    let pressure = 101_325.0;
+    let temperatures = [1_005.0, 1_050.0, 1_095.0];
+    let solver_policy = SolverPolicy::native_default(Solvers::NR);
+    let policies = [
+        (
+            "proactive",
+            ExtensiveNormalizationPolicy::OnNumericalFailureAndSmallScalePhPreconditioning,
+        ),
+        (
+            "failure-only",
+            ExtensiveNormalizationPolicy::OnNumericalFailure,
+        ),
+    ];
+
+    println!("paired live nested P,H small-scale policy comparison");
+    println!(
+        "fixture | policy | point | inventory_mol | T_error_K | H_error_J | max_balance | normalization | builds | reuses"
+    );
+    for (fixture, species_count) in [("small", 5usize), ("medium", 20), ("large", 100)] {
+        let (selected, resolved) = live_element_limited_gas_resolved_up_to(species_count);
+        let layout = MultiphaseEquilibriumLayout::new(resolved.phase_specs().to_vec())
+            .expect("paired-policy layout must validate");
+        let initial = MultiphaseInitialComposition::from_dense(&layout, vec![1e-3; selected.len()])
+            .expect("paired-policy initial composition must validate");
+        let inventory_mol = initial.moles().iter().sum::<f64>();
+        let thermochemistry = ResolvedThermochemistry::from_resolved_system(&resolved)
+            .expect("paired-policy thermochemistry must resolve");
+        let mut targets = temperatures
+            .into_iter()
+            .map(|temperature| {
+                let pt = solve_resolved_pt(
+                    ResolvedPhaseEquilibriumRequest::new(
+                        &resolved,
+                        EquilibriumConditions::new(temperature, pressure, pressure)
+                            .expect("paired P,T conditions must validate"),
+                        initial.clone(),
+                    )
+                    .with_solve_options(
+                        EquilibriumSolveOptions::new()
+                            .with_solver_policy(solver_policy.clone())
+                            .expect("paired solver policy must validate"),
+                    ),
+                )
+                .expect("paired P,T oracle must solve");
+                let h = thermochemistry
+                    .enthalpy_model()
+                    .evaluate_total(pt.component_moles(), temperature)
+                    .expect("paired P,T oracle enthalpy must be finite");
+                (h, temperature)
+            })
+            .collect::<Vec<_>>();
+        targets.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        for (policy_name, normalization_policy) in policies {
+            let options = EquilibriumSolveOptions::new()
+                .with_solver_policy(solver_policy.clone())
+                .expect("paired solver policy must validate")
+                .with_extensive_normalization_policy(normalization_policy);
+            let range = PhRangeRequest::from_resolved_thermochemistry(
+                &resolved,
+                initial.clone(),
+                pressure,
+                pressure,
+                PhEnthalpyGrid::new(targets.iter().map(|pair| pair.0).collect())
+                    .expect("paired target grid must validate"),
+                TemperatureBounds::new(1_000.0, 1_100.0)
+                    .expect("paired temperature bounds must validate"),
+                targets[0].1,
+                thermochemistry.clone(),
+            )
+            .expect("paired P,H range must validate")
+            .with_ph_solve_mode(PhSolveMode::NestedTemperature)
+            .with_solve_options(options)
+            .solve()
+            .unwrap_or_else(|error| panic!("{fixture}/{policy_name} P,H range failed: {error}"));
+
+            for (index, (point, (target_h, reference_t))) in
+                range.points().iter().zip(&targets).enumerate()
+            {
+                let solution = point.solution();
+                let eq = solution.equilibrium();
+                let validation = eq.accepted_solution().validation();
+                let balance_scale = eq.component_moles().iter().map(|n| n.abs()).sum::<f64>();
+                assert!(solution.temperature().is_finite());
+                assert!(
+                    solution.enthalpy_error().abs() <= solution.enthalpy_error_limit_joules(),
+                    "{fixture}/{policy_name}/{index} physical enthalpy gate failed: {} > {}",
+                    solution.enthalpy_error().abs(),
+                    solution.enthalpy_error_limit_joules()
+                );
+                assert!(
+                    validation.max_abs_element_balance_error <= 1e-6 + 1e-6 * balance_scale,
+                    "{fixture}/{policy_name}/{index} physical balance gate failed: {}",
+                    validation.max_abs_element_balance_error
+                );
+                let normalization = eq
+                    .extensive_normalization_recovery()
+                    .map(|evidence| format!("{:?}", evidence.trigger))
+                    .unwrap_or_else(|| "none".to_string());
+                println!(
+                    "{fixture} | {policy_name} | {index} | {inventory_mol:.3e} | {:.3e} | {:.3e} | {:.3e} | {normalization} | {} | {}",
+                    (solution.temperature() - reference_t).abs(),
+                    (solution.calculated_enthalpy() - target_h).abs(),
+                    validation.max_abs_element_balance_error,
+                    point.report().formulation_builds(),
+                    point.report().formulation_reuses(),
+                );
+            }
+            println!(
+                "range summary | {fixture} | {policy_name} | builds={} | reuses={} | continuation={}",
+                range.report().formulation_builds(),
+                range.report().formulation_reuses(),
+                range.report().continuation_points(),
+            );
+        }
+    }
+    assert_eq!(before, live_library_file_snapshot());
 }

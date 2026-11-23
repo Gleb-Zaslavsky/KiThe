@@ -9,7 +9,8 @@ use crate::Kinetics::experimental_kinetics::column_provenance::ColumnProvenance;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
     ColumnMeta, ColumnNature, ColumnOrigin, TGADataset, TGASchema, Unit,
 };
-use polars::prelude::{CsvReader, SerReader};
+use polars::prelude::{CsvReader, SerReader, col};
+use std::collections::HashSet;
 use std::io::Cursor;
 
 #[derive(Clone, Debug, Default)]
@@ -35,21 +36,96 @@ struct SeriesColumnRecord {
 }
 
 pub(super) fn to_csv_series_impl(series: &TGASeries, path: &Path) -> Result<(), TGADomainError> {
-    let mut collected: Vec<DataFrame> = Vec::with_capacity(series.experiments.len());
+    to_csv_series_selected_impl(series, path, None, None)
+}
+
+pub(super) fn to_csv_series_selected_impl(
+    series: &TGASeries,
+    path: &Path,
+    experiment_ids: Option<&[String]>,
+    columns_by_experiment: Option<&HashMap<String, Vec<String>>>,
+) -> Result<(), TGADomainError> {
+    let selected_experiments = if let Some(ids) = experiment_ids {
+        if ids.is_empty() {
+            return Err(TGADomainError::InvalidOperation(
+                "Select at least one experiment to export".to_string(),
+            ));
+        }
+        let mut seen_ids = HashSet::with_capacity(ids.len());
+        ids.iter()
+            .map(|id| {
+                if !seen_ids.insert(id) {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Experiment '{}' was selected more than once",
+                        id
+                    )));
+                }
+                series
+                    .experiments
+                    .iter()
+                    .find(|experiment| experiment.meta.id == *id)
+                    .ok_or_else(|| TGADomainError::ExperimentNotFound(id.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        series.experiments.iter().collect()
+    };
+
+    let mut collected: Vec<DataFrame> = Vec::with_capacity(selected_experiments.len());
     let mut max_height = 0usize;
-    for exp in &series.experiments {
+    let mut selected_column_count = 0usize;
+    for exp in &selected_experiments {
         let df = exp.dataset.frame.clone().collect()?;
+        if let Some(columns_by_experiment) = columns_by_experiment {
+            let selected_names = columns_by_experiment.get(&exp.meta.id).ok_or_else(|| {
+                TGADomainError::InvalidOperation(format!(
+                    "No column selection was provided for experiment '{}'",
+                    exp.meta.id
+                ))
+            })?;
+            if selected_names.is_empty() {
+                return Err(TGADomainError::InvalidOperation(format!(
+                    "Select at least one column for experiment '{}'",
+                    exp.meta.id
+                )));
+            }
+            let mut seen_names = HashSet::with_capacity(selected_names.len());
+            for name in selected_names {
+                if !seen_names.insert(name) {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Column '{}' was selected more than once for experiment '{}'",
+                        name, exp.meta.id
+                    )));
+                }
+                if !df
+                    .get_column_names()
+                    .iter()
+                    .any(|column| column.as_str() == name)
+                {
+                    return Err(TGADomainError::ColumnNotFound(name.clone()));
+                }
+            }
+            selected_column_count += selected_names.len();
+        } else {
+            selected_column_count += df.width();
+        }
         max_height = max_height.max(df.height());
         collected.push(df);
+    }
+    if columns_by_experiment.is_some() && selected_column_count == 0 {
+        return Err(TGADomainError::InvalidOperation(
+            "Select at least one column to export".to_string(),
+        ));
     }
 
     let mut meta_lines: Vec<String> = Vec::new();
     let mut export_columns: Vec<Column> = Vec::new();
     let mut header_counts: HashMap<String, usize> = HashMap::new();
 
-    for (idx, exp) in series.experiments.iter().enumerate() {
+    for (idx, exp) in selected_experiments.iter().enumerate() {
         let df = &collected[idx];
         let exp_id = exp.meta.id.clone();
+        let selected_names = columns_by_experiment.and_then(|columns| columns.get(&exp_id));
         let exp_id_token = escape_meta_field(&exp_id);
 
         meta_lines.push(format!(
@@ -75,6 +151,8 @@ pub(super) fn to_csv_series_impl(series: &TGASeries, path: &Path) -> Result<(), 
             ("E", exp.dataset.schema.E.as_ref()),
             ("R2", exp.dataset.schema.R2.as_ref()),
         ] {
+            let bind_value = bind_value
+                .filter(|name| selected_names.is_none_or(|selected| selected.contains(name)));
             meta_lines.push(format!(
                 "#META\tBIND\t{}\t{}\t{}",
                 exp_id_token,
@@ -85,6 +163,9 @@ pub(super) fn to_csv_series_impl(series: &TGASeries, path: &Path) -> Result<(), 
 
         for col in df.columns() {
             let col_name = col.name().to_string();
+            if selected_names.is_some_and(|names| !names.contains(&col_name)) {
+                continue;
+            }
             let header_name =
                 build_unique_series_header(&mut header_counts, &exp_id, &col_name, idx);
             let meta = exp.dataset.schema.columns.get(&col_name);
@@ -167,6 +248,50 @@ pub(super) fn to_csv_series_impl(series: &TGASeries, path: &Path) -> Result<(), 
             .finish(&mut df)?;
     }
 
+    Ok(())
+}
+
+pub(super) fn to_plain_txt_selected_impl(
+    dataset: &TGADataset,
+    path: &Path,
+    columns: &[String],
+) -> Result<(), TGADomainError> {
+    if columns.is_empty() {
+        return Err(TGADomainError::InvalidOperation(
+            "Select at least one column to export".to_string(),
+        ));
+    }
+
+    let schema = dataset.frame.clone().collect_schema()?;
+    let mut seen = HashSet::with_capacity(columns.len());
+    for name in columns {
+        if !seen.insert(name) {
+            return Err(TGADomainError::InvalidOperation(format!(
+                "Column '{}' was selected more than once",
+                name
+            )));
+        }
+        if !schema
+            .iter_names()
+            .any(|existing| existing.as_str() == name)
+        {
+            return Err(TGADomainError::ColumnNotFound(name.clone()));
+        }
+    }
+
+    let expressions = columns.iter().map(|name| col(name)).collect::<Vec<_>>();
+    let mut frame = dataset.frame.clone().select(expressions).collect()?;
+    let mut file = std::fs::File::create(path).map_err(|error| {
+        TGADomainError::InvalidOperation(format!(
+            "Failed to create text export '{}': {}",
+            path.display(),
+            error
+        ))
+    })?;
+    CsvWriter::new(&mut file)
+        .include_header(true)
+        .with_separator(b'\t')
+        .finish(&mut frame)?;
     Ok(())
 }
 

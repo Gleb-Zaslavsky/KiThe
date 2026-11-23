@@ -597,16 +597,147 @@ mod tests {
     }
 
     #[test]
+    fn tier3_typed_csv_exports_one_experiment_with_selected_columns_and_metadata() {
+        let mut model = load_model_with_one_curve();
+        let experiment_id = model.list_of_experiments()[0].clone();
+        model
+            .series
+            .try_mutate_by_id(&experiment_id, |experiment| {
+                experiment.meta.isothermal_temperature = Some(510.0);
+                experiment.meta.thermal_mode =
+                    crate::Kinetics::experimental_kinetics::experiment_series_main::ExperimentThermalMode::Isothermal;
+                experiment.meta.comment = Some("single experiment export".to_string());
+                Ok(())
+            })
+            .unwrap();
+
+        let export_dir = unique_temp_dir("typed_single_export");
+        fs::create_dir_all(&export_dir).unwrap();
+        let mut app = PlotApp::for_testing(model);
+        app.new_experiment_dialog.current_dir = export_dir.clone();
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            click_menu_entry(harness, "File Manager", "Save As CSV");
+            harness.get_by_label("One experiment").click();
+            harness.run();
+            harness.get_by_label("Clear column selection").click();
+            harness.run();
+            for column in ["t", "m"] {
+                let label = format!("{experiment_id}::{column}");
+                harness.get_by_label(&label).click();
+                harness.run();
+            }
+            harness.get_by_label("Export").click();
+            harness.run();
+
+            let path = export_dir.join("series_export.csv");
+            assert!(path.is_file());
+            let mut restored = PlotModel::new();
+            restored.from_csv_series(&path).unwrap();
+            assert_eq!(restored.list_of_experiments(), vec![experiment_id.clone()]);
+            let experiment = restored
+                .series
+                .get_experiment_by_id(&experiment_id)
+                .unwrap();
+            assert_eq!(experiment.meta.isothermal_temperature, Some(510.0));
+            assert_eq!(
+                experiment.meta.comment.as_deref(),
+                Some("single experiment export")
+            );
+            assert_eq!(experiment.dataset.schema.time.as_deref(), Some("t"));
+            assert_eq!(experiment.dataset.schema.mass.as_deref(), Some("m"));
+            assert_eq!(experiment.dataset.schema.temperature, None);
+            assert_eq!(
+                experiment.dataset.frame.clone().collect().unwrap().width(),
+                2
+            );
+        });
+        fs::remove_dir_all(export_dir).unwrap();
+    }
+
+    #[test]
+    fn tier3_plain_txt_exports_only_selected_columns_without_kithe_metadata() {
+        let model = load_model_with_one_curve();
+        let experiment_id = model.list_of_experiments()[0].clone();
+        let export_dir = unique_temp_dir("plain_txt_export");
+        fs::create_dir_all(&export_dir).unwrap();
+        let mut app = PlotApp::for_testing(model);
+        app.new_experiment_dialog.current_dir = export_dir.clone();
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            click_menu_entry(harness, "File Manager", "Save As TXT");
+            harness.get_by_label("Clear column selection").click();
+            harness.run();
+            for column in ["t", "m"] {
+                let label = format!("{experiment_id}::{column}");
+                harness.get_by_label(&label).click();
+                harness.run();
+            }
+            harness.get_by_label("Export").click();
+            harness.run();
+
+            let path = export_dir.join(if experiment_id.trim().is_empty() {
+                "experiment_export.txt".to_string()
+            } else {
+                format!("{experiment_id}_export.txt")
+            });
+            assert!(path.is_file());
+            let text = fs::read_to_string(path).unwrap();
+            let header = text
+                .lines()
+                .next()
+                .unwrap()
+                .split('\t')
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(header, std::collections::HashSet::from(["t", "m"]));
+            assert!(!text.contains("#META"));
+            assert!(!text.contains("KiThe TGA"));
+        });
+        fs::remove_dir_all(export_dir).unwrap();
+    }
+
+    #[test]
+    fn tier3_export_rejects_empty_column_selection_without_closing_dialog() {
+        let model = load_model_with_one_curve();
+        let export_dir = unique_temp_dir("empty_export_selection");
+        fs::create_dir_all(&export_dir).unwrap();
+        let mut app = PlotApp::for_testing(model);
+        app.new_experiment_dialog.current_dir = export_dir.clone();
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            click_menu_entry(harness, "File Manager", "Save As TXT");
+            harness.get_by_label("Clear column selection").click();
+            harness.run();
+            harness.get_by_label("Export").click();
+            harness.run();
+
+            assert!(harness.state().app.new_experiment_dialog.save_series_open);
+            assert!(
+                harness
+                    .state()
+                    .app
+                    .new_experiment_dialog
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|message| message.contains("at least one column"))
+            );
+            assert_eq!(fs::read_dir(&export_dir).unwrap().count(), 0);
+        });
+        fs::remove_dir_all(export_dir).unwrap();
+    }
+
+    #[test]
     fn tier3_import_file_through_gui_creates_bound_experiment_and_curves() {
-        let app = PlotApp::for_testing(PlotModel::new());
+        let import_dir = unique_temp_dir("gui_import");
+        fs::create_dir_all(&import_dir).expect("failed to create import fixture directory");
+        fs::copy(test_data_path(), import_dir.join("TGAexample.txt"))
+            .expect("failed to copy raw import fixture");
+
+        let mut app = PlotApp::for_testing(PlotModel::new());
+        app.new_experiment_dialog.current_dir = import_dir.clone();
         with_plot_app_state_harness(app, |harness| {
             harness.run();
             click_menu_entry(harness, "File Manager", "Import Data");
-            harness.state_mut().app.new_experiment_dialog.current_dir = test_data_path()
-                .parent()
-                .expect("fixture should have a parent directory")
-                .to_path_buf();
-            harness.run();
 
             harness.get_by_label("[F] TGAexample.txt").click();
             harness.run();
@@ -634,6 +765,7 @@ mod tests {
             );
             assert!(!harness.state().app.new_experiment_dialog.open);
         });
+        fs::remove_dir_all(import_dir).expect("failed to remove import fixture directory");
     }
 
     #[test]
@@ -1449,7 +1581,7 @@ mod tests {
     }
 
     #[test]
-    fn tier3_keyboard_save_reuses_last_saved_series_path() {
+    fn tier3_keyboard_save_reuses_last_export_configuration() {
         let app = PlotApp::for_testing(load_model_with_one_curve());
         with_plot_app_state_harness(app, |harness| {
             let export_dir = unique_temp_dir("gui_keyboard_save");
@@ -1459,7 +1591,7 @@ mod tests {
 
             harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
             harness.run();
-            harness.get_by_label("Save").click();
+            harness.get_by_label("Export").click();
             harness.run();
 
             let export_file = export_dir.join("series_export.csv");
@@ -1478,6 +1610,39 @@ mod tests {
 
             let _ = fs::remove_file(&export_file);
             let _ = fs::remove_dir_all(&export_dir);
+        });
+    }
+
+    #[test]
+    fn tier3_keyboard_save_keeps_plain_txt_format_and_single_experiment_scope() {
+        let model = load_model_with_one_curve();
+        let experiment_id = model.list_of_experiments()[0].clone();
+        let app = PlotApp::for_testing(model);
+        with_plot_app_state_harness(app, |harness| {
+            let export_dir = unique_temp_dir("gui_keyboard_txt");
+            fs::create_dir_all(&export_dir).expect("failed to create export directory");
+            harness.state_mut().app.new_experiment_dialog.current_dir = export_dir.clone();
+            harness.run();
+
+            click_menu_entry(harness, "File Manager", "Save As TXT");
+            harness.get_by_label("Export").click();
+            harness.run();
+            let export_file = export_dir.join(if experiment_id.trim().is_empty() {
+                "experiment_export.txt".to_string()
+            } else {
+                format!("{experiment_id}_export.txt")
+            });
+            assert!(export_file.is_file());
+            assert!(!fs::read_to_string(&export_file).unwrap().contains("#META"));
+
+            harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
+            harness.run();
+            assert!(!harness.state().app.new_experiment_dialog.save_series_open);
+            let text = fs::read_to_string(&export_file).unwrap();
+            assert!(!text.contains("#META"));
+            assert!(!text.contains("KiThe TGA"));
+
+            fs::remove_dir_all(export_dir).expect("failed to remove export directory");
         });
     }
 
@@ -3417,7 +3582,7 @@ mod tests {
             fs::create_dir_all(&export_dir).expect("failed to create export dir");
             harness.state_mut().app.new_experiment_dialog.current_dir = export_dir.clone();
             harness.run();
-            harness.get_by_label("Save").click();
+            harness.get_by_label("Export").click();
             harness.run();
 
             let export_file = export_dir.join("series_export.csv");

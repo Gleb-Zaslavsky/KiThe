@@ -24,6 +24,7 @@ use crate::gui::experimental_kinetics_gui::test_options::TestOptions;
 use eframe::egui;
 use log::{info, warn};
 use polars::prelude::col;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
 use std::{
@@ -241,18 +242,18 @@ impl FileManager {
         }
         if ui
             .button("Save As CSV")
-            .on_hover_text("Choose a path and export the series as CSV.")
+            .on_hover_text("Export the full series or one experiment as a typed KiThe CSV.")
             .clicked()
         {
-            new_experiment_dialog.open_save_series_dialog(SaveSeriesFormat::Csv);
+            new_experiment_dialog.open_save_series_dialog(SaveSeriesFormat::Csv, model);
             ui.ctx().request_repaint();
         }
         if ui
             .button("Save As TXT")
-            .on_hover_text("Choose a path and export the series as TXT.")
+            .on_hover_text("Export selected columns of one experiment as plain tab-delimited text.")
             .clicked()
         {
-            new_experiment_dialog.open_save_series_dialog(SaveSeriesFormat::Txt);
+            new_experiment_dialog.open_save_series_dialog(SaveSeriesFormat::Txt, model);
             ui.ctx().request_repaint();
         }
         if ui
@@ -843,10 +844,26 @@ impl SaveSeriesFormat {
 
     fn dialog_title(self) -> &'static str {
         match self {
-            Self::Csv => "Save Series As CSV",
-            Self::Txt => "Save Series As TXT",
+            Self::Csv => "Export Typed CSV",
+            Self::Txt => "Export Plain TXT",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SaveScope {
+    #[default]
+    Series,
+    Experiment,
+}
+
+#[derive(Clone, Debug)]
+struct LastSavedExport {
+    path: PathBuf,
+    format: SaveSeriesFormat,
+    scope: SaveScope,
+    experiment_id: Option<String>,
+    columns_by_experiment: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -901,7 +918,10 @@ pub struct NewExperimentDialogState {
     save_series_format: SaveSeriesFormat,
     save_series_filename_input: String,
     save_series_last_status: Option<String>,
-    last_saved_series_path: Option<PathBuf>,
+    save_scope: SaveScope,
+    save_experiment_id: Option<String>,
+    save_selected_columns: HashMap<String, HashSet<String>>,
+    last_saved_export: Option<LastSavedExport>,
     heating_rate_input: String,
     isothermal_temp_input: String,
     thermal_mode: ExperimentThermalMode,
@@ -946,7 +966,7 @@ impl NewExperimentDialogState {
             }
         }
         if self.save_series_open
-            && ["Save Series As CSV", "Save Series As TXT"]
+            && ["Export Typed CSV", "Export Plain TXT"]
                 .into_iter()
                 .any(|title| layer.id == egui::Id::unique(Some(title)))
         {
@@ -971,7 +991,10 @@ impl NewExperimentDialogState {
             save_series_format: SaveSeriesFormat::Csv,
             save_series_filename_input: "series_export.csv".to_string(),
             save_series_last_status: None,
-            last_saved_series_path: None,
+            save_scope: SaveScope::Series,
+            save_experiment_id: None,
+            save_selected_columns: HashMap::new(),
+            last_saved_export: None,
             heating_rate_input: String::new(),
             isothermal_temp_input: String::new(),
             thermal_mode: ExperimentThermalMode::Unspecified,
@@ -2153,14 +2176,27 @@ impl NewExperimentDialogState {
         }
     }
 
-    fn open_save_series_dialog(&mut self, format: SaveSeriesFormat) {
+    fn open_save_series_dialog(&mut self, format: SaveSeriesFormat, model: &PlotModel) {
         self.save_series_open = true;
         self.save_series_format = format;
+        self.save_scope = if format == SaveSeriesFormat::Csv {
+            SaveScope::Series
+        } else {
+            SaveScope::Experiment
+        };
+        self.save_experiment_id = model.list_of_experiments().first().cloned();
+        self.save_selected_columns.clear();
+        self.sync_export_columns(model);
         self.save_series_last_status = None;
         self.last_error = None;
         self.save_series_filename_input = match format {
             SaveSeriesFormat::Csv => "series_export.csv".to_string(),
-            SaveSeriesFormat::Txt => "series_export.txt".to_string(),
+            SaveSeriesFormat::Txt => self
+                .save_experiment_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+                .map(|id| format!("{id}_export.txt"))
+                .unwrap_or_else(|| "experiment_export.txt".to_string()),
         };
     }
 
@@ -2238,26 +2274,146 @@ impl NewExperimentDialogState {
         }
     }
 
+    fn export_experiment_ids(&self, model: &PlotModel) -> Result<Vec<String>, String> {
+        match self.save_scope {
+            SaveScope::Series if self.save_series_format == SaveSeriesFormat::Csv => {
+                let ids = model.list_of_experiments();
+                if ids.is_empty() {
+                    Err("There are no experiments to export".to_string())
+                } else {
+                    Ok(ids)
+                }
+            }
+            SaveScope::Series => Err("Plain TXT export supports one experiment at a time".into()),
+            SaveScope::Experiment => self
+                .save_experiment_id
+                .as_ref()
+                .filter(|id| model.list_of_experiments().contains(id))
+                .cloned()
+                .map(|id| vec![id])
+                .ok_or_else(|| "Select an experiment to export".to_string()),
+        }
+    }
+
+    fn sync_export_columns(&mut self, model: &PlotModel) {
+        let experiment_ids = model.list_of_experiments();
+        self.save_selected_columns
+            .retain(|id, _| experiment_ids.contains(id));
+        for id in experiment_ids {
+            let columns = model.list_of_columns(&id).unwrap_or_default();
+            let selected = self
+                .save_selected_columns
+                .entry(id)
+                .or_insert_with(|| columns.iter().cloned().collect());
+            selected.retain(|name| columns.contains(name));
+        }
+    }
+
+    fn selected_export_columns(
+        &self,
+        model: &PlotModel,
+    ) -> Result<HashMap<String, Vec<String>>, String> {
+        let mut result = HashMap::new();
+        for id in self.export_experiment_ids(model)? {
+            let all_columns = model
+                .list_of_columns(&id)
+                .map_err(|error| error.to_string())?;
+            let selected = self
+                .save_selected_columns
+                .get(&id)
+                .ok_or_else(|| format!("No columns are selected for experiment '{id}'"))?;
+            let columns = all_columns
+                .into_iter()
+                .filter(|name| selected.contains(name))
+                .collect::<Vec<_>>();
+            if columns.is_empty() {
+                return Err(format!("Select at least one column for experiment '{id}'"));
+            }
+            result.insert(id, columns);
+        }
+        Ok(result)
+    }
+
+    fn write_export(
+        &self,
+        model: &PlotModel,
+        path: &Path,
+    ) -> Result<HashMap<String, Vec<String>>, String> {
+        let columns_by_experiment = self.selected_export_columns(model)?;
+        match self.save_series_format {
+            SaveSeriesFormat::Csv => {
+                let ids = self.export_experiment_ids(model)?;
+                model
+                    .to_csv_series_selected(path, &ids, &columns_by_experiment)
+                    .map_err(|error| error.to_string())?;
+            }
+            SaveSeriesFormat::Txt => {
+                let id = self
+                    .save_experiment_id
+                    .as_ref()
+                    .ok_or_else(|| "Select an experiment to export".to_string())?;
+                model
+                    .to_plain_txt_experiment(id, path, &columns_by_experiment[id])
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(columns_by_experiment)
+    }
+
+    fn set_save_format(&mut self, format: SaveSeriesFormat) {
+        if self.save_series_format == format {
+            return;
+        }
+        self.save_series_format = format;
+        if format == SaveSeriesFormat::Txt {
+            self.save_scope = SaveScope::Experiment;
+        }
+        let stem = Path::new(self.save_series_filename_input.trim())
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("export");
+        self.save_series_filename_input = format!("{stem}.{}", format.extension());
+    }
+
     fn save_series_shortcut(&mut self, model: &mut PlotModel, save_as: bool) {
         if save_as {
-            self.open_save_series_dialog(SaveSeriesFormat::Csv);
+            self.open_save_series_dialog(SaveSeriesFormat::Csv, model);
             return;
         }
 
-        let Some(path) = self.last_saved_series_path.clone() else {
-            self.open_save_series_dialog(SaveSeriesFormat::Csv);
+        let Some(last_export) = self.last_saved_export.clone() else {
+            self.open_save_series_dialog(SaveSeriesFormat::Csv, model);
             return;
         };
 
-        match model.to_csv_series(&path) {
-            Ok(()) => {
+        self.save_series_format = last_export.format;
+        self.save_scope = last_export.scope;
+        self.save_experiment_id = last_export.experiment_id;
+        self.save_selected_columns = last_export
+            .columns_by_experiment
+            .iter()
+            .map(|(id, columns)| (id.clone(), columns.iter().cloned().collect()))
+            .collect();
+        self.sync_export_columns(model);
+
+        match self.write_export(model, &last_export.path) {
+            Ok(columns_by_experiment) => {
                 self.last_error = None;
-                let _ = model.push_message(&format!("Series saved to {}", path.display()));
-                info!("Series saved to {}", path.display());
+                let _ =
+                    model.push_message(&format!("Data saved to {}", last_export.path.display()));
+                info!("Data saved to {}", last_export.path.display());
+                self.last_saved_export = Some(LastSavedExport {
+                    path: last_export.path,
+                    format: self.save_series_format,
+                    scope: self.save_scope,
+                    experiment_id: self.save_experiment_id.clone(),
+                    columns_by_experiment,
+                });
             }
             Err(err) => {
-                self.last_error = Some(format!("Failed to save series: {err}"));
-                let _ = model.push_message(&format!("Saving series failed: {err}"));
+                self.last_error = Some(format!("Failed to export data: {err}"));
+                let _ = model.push_message(&format!("Data export failed: {err}"));
                 self.save_series_open = true;
             }
         }
@@ -2268,13 +2424,14 @@ impl NewExperimentDialogState {
             return;
         }
 
-        let mut should_save_series = false;
+        self.sync_export_columns(model);
+        let mut should_export = false;
         let mut dialog_open = self.save_series_open;
 
         egui::Window::new(self.save_series_format.dialog_title())
             .open(&mut dialog_open)
             .resizable(true)
-            .default_size([700.0, 420.0])
+            .default_size([850.0, 570.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Current directory:");
@@ -2292,29 +2449,157 @@ impl NewExperimentDialogState {
 
                 egui::Panel::left("save_series_dir_browser")
                     .resizable(true)
-                    .default_size(360.0)
-                    .show(ui, |ui| {
-                        self.show_directory_browser(ui);
-                    });
+                    .default_size(350.0)
+                    .show(ui, |ui| self.show_directory_browser(ui));
 
                 egui::Panel::right("save_series_meta_panel")
                     .resizable(true)
-                    .default_size(280.0)
+                    .default_size(430.0)
                     .show(ui, |ui| {
-                        ui.heading("Save Options");
+                        ui.heading("Export Options");
                         ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(
+                                    self.save_series_format == SaveSeriesFormat::Csv,
+                                    "Typed CSV",
+                                )
+                                .clicked()
+                            {
+                                self.set_save_format(SaveSeriesFormat::Csv);
+                            }
+                            if ui
+                                .selectable_label(
+                                    self.save_series_format == SaveSeriesFormat::Txt,
+                                    "Plain TXT",
+                                )
+                                .clicked()
+                            {
+                                self.set_save_format(SaveSeriesFormat::Txt);
+                            }
+                        });
+                        ui.label(match self.save_series_format {
+                            SaveSeriesFormat::Csv => "KiThe metadata and bindings are preserved.",
+                            SaveSeriesFormat::Txt => {
+                                "Tab-delimited values only; no KiThe metadata."
+                            }
+                        });
+
+                        let experiment_ids = model.list_of_experiments();
+                        if self.save_series_format == SaveSeriesFormat::Csv {
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(
+                                    &mut self.save_scope,
+                                    SaveScope::Series,
+                                    "Entire series",
+                                );
+                                ui.selectable_value(
+                                    &mut self.save_scope,
+                                    SaveScope::Experiment,
+                                    "One experiment",
+                                );
+                            });
+                        } else {
+                            self.save_scope = SaveScope::Experiment;
+                        }
+
+                        if self.save_scope == SaveScope::Experiment {
+                            if let Some(first_id) = experiment_ids.first() {
+                                if self
+                                    .save_experiment_id
+                                    .as_ref()
+                                    .is_none_or(|id| !experiment_ids.contains(id))
+                                {
+                                    self.save_experiment_id = Some(first_id.clone());
+                                }
+                            }
+                            egui::ComboBox::from_label("Experiment")
+                                .selected_text(
+                                    self.save_experiment_id
+                                        .as_deref()
+                                        .unwrap_or("Select experiment"),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for id in &experiment_ids {
+                                        ui.selectable_value(
+                                            &mut self.save_experiment_id,
+                                            Some(id.clone()),
+                                            id,
+                                        );
+                                    }
+                                });
+                        }
+
+                        let visible_ids = match self.save_scope {
+                            SaveScope::Series => experiment_ids.clone(),
+                            SaveScope::Experiment => {
+                                self.save_experiment_id.iter().cloned().collect()
+                            }
+                        };
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Select all columns").clicked() {
+                                for id in &visible_ids {
+                                    if let (Some(selected), Ok(columns)) = (
+                                        self.save_selected_columns.get_mut(id),
+                                        model.list_of_columns(id),
+                                    ) {
+                                        selected.extend(columns);
+                                    }
+                                }
+                            }
+                            if ui.small_button("Clear column selection").clicked() {
+                                for id in &visible_ids {
+                                    if let Some(selected) = self.save_selected_columns.get_mut(id) {
+                                        selected.clear();
+                                    }
+                                }
+                            }
+                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("export_column_selection")
+                            .max_height(190.0)
+                            .show(ui, |ui| {
+                                for id in &visible_ids {
+                                    let Ok(columns) = model.list_of_columns(id) else {
+                                        continue;
+                                    };
+                                    ui.strong(id);
+                                    ui.horizontal_wrapped(|ui| {
+                                        for column in columns {
+                                            if let Some(selected) =
+                                                self.save_selected_columns.get_mut(id)
+                                            {
+                                                let mut checked = selected.contains(&column);
+                                                if ui
+                                                    .checkbox(
+                                                        &mut checked,
+                                                        format!("{id}::{column}"),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    if checked {
+                                                        selected.insert(column);
+                                                    } else {
+                                                        selected.remove(&column);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+                                    ui.separator();
+                                }
+                            });
+
                         ui.label("Directory:");
                         ui.label(self.current_dir.to_string_lossy().as_ref());
-                        ui.add_space(8.0);
-
+                        ui.add_space(6.0);
                         let label = ui.label("File name:");
                         let input = ui.text_edit_singleline(&mut self.save_series_filename_input);
                         let _ = input.labelled_by(label.id);
                         ui.label(format!(
-                            "Extension will be: .{}",
+                            "Extension: .{}",
                             self.save_series_format.extension()
                         ));
-                        ui.add_space(8.0);
 
                         if let Some(status) = &self.save_series_last_status {
                             ui.colored_label(egui::Color32::GREEN, status);
@@ -2323,39 +2608,41 @@ impl NewExperimentDialogState {
                             ui.colored_label(egui::Color32::RED, err);
                         }
                         ui.add_space(6.0);
-
-                        if ui.button("Save").clicked() {
-                            should_save_series = true;
+                        if ui.button("Export").clicked() {
+                            should_export = true;
                         }
                     });
             });
 
         self.save_series_open = dialog_open;
-
-        if should_save_series {
+        if should_export {
             let filename = self.save_series_filename_input.trim();
             if filename.is_empty() {
                 self.last_error = Some("File name cannot be empty".to_string());
                 return;
             }
-
-            let output_file_name =
-                Self::with_extension(filename, self.save_series_format.extension());
-            let mut save_path = self.current_dir.clone();
-            save_path.push(output_file_name);
-
-            match model.to_csv_series(&save_path) {
-                Ok(()) => {
+            let output_name = Self::with_extension(filename, self.save_series_format.extension());
+            let save_path = self.current_dir.join(output_name);
+            match self.write_export(model, &save_path) {
+                Ok(columns_by_experiment) => {
                     self.last_error = None;
-                    self.last_saved_series_path = Some(save_path.clone());
+                    self.last_saved_export = Some(LastSavedExport {
+                        path: save_path.clone(),
+                        format: self.save_series_format,
+                        scope: self.save_scope,
+                        experiment_id: self.save_experiment_id.clone(),
+                        columns_by_experiment,
+                    });
                     self.save_series_last_status =
-                        Some(format!("Saved to {}", save_path.to_string_lossy()));
+                        Some(format!("Saved to {}", save_path.display()));
+                    let _ =
+                        model.push_message(&format!("Data exported to {}", save_path.display()));
                     self.save_series_open = false;
                 }
                 Err(err) => {
                     self.save_series_last_status = None;
-                    self.last_error = Some(format!("Failed to save series: {err}"));
-                    let _ = model.push_message(&format!("Saving series failed: {err}"));
+                    self.last_error = Some(format!("Failed to export data: {err}"));
+                    let _ = model.push_message(&format!("Data export failed: {err}"));
                 }
             }
         }

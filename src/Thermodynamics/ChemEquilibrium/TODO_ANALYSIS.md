@@ -10154,3 +10154,71 @@ settings failures.**
   or relax the physical acceptance criteria.
 Русская копия инструкции:
 [`plans/rusted_scithe_numerical_backend_task_ru.md`](../../../plans/rusted_scithe_numerical_backend_task_ru.md).
+
+## P,H small-scale normalization and prepared-range reuse audit (2026-11-22)
+
+### Observed failures
+
+The debug rerun of the ignored live P,H stories showed successful point solves,
+then failed on formulation-count assertions:
+
+- `live_large_element_limited_nested_ph_target_range_story`: all 9 target
+  points solve and continuation count is accepted, but the range reports 9
+  formulation builds rather than the historical expected 1.
+- `live_nested_ph_inner_pt_cascade_release_matrix`: its small fixture reports
+  3 builds for 3 targets rather than 1; execution stops here, so medium/large
+  rows have not yet been characterized on this revision.
+- `catalog_covers_every_frozen_pair_with_exact_identity_kind_version_and_row_count`
+  fails independently because `nist_webbook/water_gas_shomate.metadata.json`
+  exists on disk but is absent from the frozen catalog.
+
+The P,H fixtures use initial concentrations of `1e-3 mol` per species. Their
+physical inventories (`0.005`, `0.02`, and `0.1 mol` for 5/20/100 species) are
+below the proactive preconditioning threshold of `1 mol`. `PhRangeRequest::solve`
+deliberately skips range-owned prepared nested state while small-scale
+preconditioning is active. This explains the extra builds, but does not show
+whether accuracy or physical balances changed. Previous Story Test timings
+predate this interaction and are not current evidence.
+
+### Plan
+
+- [x] Run a paired debug correctness characterization on the same small,
+  medium, and large P,H fixtures with production-default
+  `OnNumericalFailureAndSmallScalePhPreconditioning` and existing
+  `OnNumericalFailure`. Keep species, inventories, pressure, targets,
+  temperature bounds, solver policy, initial seed, and acceptance tolerances
+  identical.
+- [x] For every accepted target record temperature error against its paired
+  fixed-P,T oracle, physical-Joule enthalpy error, balance against the original
+  physical inventory, phase/topology, normalization evidence, solve path,
+  formulation builds/reuses, and continuation provenance. Run correctness
+  assertions before comparing build/reuse counts.
+- [x] Verify that each next target receives only the previous accepted physical
+  composition and temperature, never normalized internal values or rejected
+  trials; preserve all-or-nothing range publication.
+- [ ] Keep one-template reuse as a gate for ordinary fixed-layout ranges
+  without proactive normalization. For normalized-first small-scale ranges,
+  characterize build/reuse counts rather than freezing repeated preparation as
+  desired behavior.
+- [ ] Do not remove the `!small_scale_preconditioning` guard as a count-only
+  fix. If repeated preparation is material, consider a shared normalized
+  nested template only after proving its normalized inventory and parameters
+  stay invariant across target enthalpies; retain physical reconstruction,
+  verification, and rollback.
+- [x] Reconcile Story Tests with current evidence and rerun the paired
+  characterization in release. Story 129 records both profiles: all 18 points
+  passed in debug and release, build/reuse counts matched, and paired
+  temperature delta stayed below `9e-7 K`. The release run took `0.29 s` after
+  compilation, but did not isolate policy wall time; no performance conclusion
+  follows from that total.
+- [ ] Register and verify the orphaned Shomate metadata fixture separately;
+  the catalog completeness failure is unrelated to P,H normalization.
+
+Paired debug and release results are recorded in Story Tests 129. All 18 range
+points passed the physical enthalpy and scale-aware element-balance gates. In
+these three fixtures, proactive normalization produced 3 formulation builds
+per range; failure-only normalization produced 1, with the same 2 continuation
+hand-offs. Temperature differences between policies were at most `9e-7 K`.
+This supports current correctness on the measured fixtures, but is not a
+universal scale guarantee or an isolated performance comparison. The separate
+Shomate catalog registration remains open.

@@ -282,7 +282,7 @@ fn story_non_isothermal_three_rate_workflow_runs_friedman_and_roundtrips_export(
         harness.state_mut().app.new_experiment_dialog.current_dir = export_dir.path().to_path_buf();
         harness.run();
         super::support::click_menu_entry(harness, "File Manager", "Save As CSV");
-        harness.get_by_label("Save").click();
+        harness.get_by_label("Export").click();
         harness.run();
         assert!(export_path.is_file());
         let mut roundtrip = crate::gui::experimental_kinetics_gui::model::PlotModel::new();

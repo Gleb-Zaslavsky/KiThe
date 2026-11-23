@@ -9413,3 +9413,62 @@ direct unwrapped RST path.
 failure. Full failed-iteration, factorization, and linear-system telemetry
 still requires an upstream RST result/error API that carries partial
 `SolveStatistics`.
+
+## Story 129: Paired small-scale P,H normalization policy characterization
+
+**Question / hypothesis:** Does proactive P,H normalization change physical
+acceptance on the existing 5/20/100-species nested ranges, and what is its
+measured formulation-reuse cost compared with failure-triggered normalization?
+
+**Command:**
+
+```powershell
+cargo test --lib --no-default-features live_nested_ph_small_scale_normalization_policy_comparison -- --include-ignored --nocapture --test-threads=1
+```
+
+**Method:** Each fixture uses the same local NASA species, `1e-3 mol` initial
+concentration per species, pressure, three target enthalpies derived from
+fixed-P,T oracle points at 1005/1050/1095 K, temperature bounds, native NR
+policy, and unchanged physical enthalpy/balance acceptance. Only
+`ExtensiveNormalizationPolicy` differs. The report counts per-point physical
+temperature error, physical-Joule enthalpy error, absolute physical balance,
+normalization trigger, and formulation builds/reuses.
+
+**Debug result:**
+
+| Fixture | Policy | Max `|T-Tref|` K | Max `|H-Htarget|` J | Max abs balance | Builds | Reuses | Continuations |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 5 species | proactive small-scale | 3.456e-4 | 3.668e-6 | 2.849e-11 | 3 | 30 | 2 |
+| 5 species | failure-triggered only | 3.452e-4 | 2.318e-6 | 7.642e-11 | 1 | 32 | 2 |
+| 20 species | proactive small-scale | 4.859e-4 | 2.200e-5 | 9.907e-11 | 3 | 55 | 2 |
+| 20 species | failure-triggered only | 4.850e-4 | 2.200e-5 | 9.907e-11 | 1 | 57 | 2 |
+| 100 species | proactive small-scale | 2.464e-6 | 7.988e-5 | 3.674e-10 | 3 | 32 | 2 |
+| 100 species | failure-triggered only | 2.464e-6 | 7.988e-5 | 3.674e-10 | 1 | 34 | 2 |
+
+All 18 point solves passed physical enthalpy acceptance and scale-aware
+element-balance acceptance. Pointwise temperature differences between the two
+policies were at most `9e-7 K`. Proactive recovery evidence was present on all
+proactive points; failure-only runs had no normalization evidence because
+their physical attempts were accepted.
+
+**Release confirmation:** The same command was run with `--release` on
+2026-11-22. All 18 point solves passed the same physical enthalpy and
+scale-aware element-balance gates. Per-range formulation counts and reuses
+matched the debug run exactly: proactive/failure-only were `3/1` builds for
+each fixture and `30/32`, `55/57`, and `32/34` reuses for 5/20/100 species.
+The maximum paired temperature difference remained below `9e-7 K`; the
+largest observed temperature error versus the fixed-P,T oracle was
+`4.859e-4 K`, largest physical enthalpy error was `7.988e-5 J`, and largest
+absolute balance error was `3.674e-10 mol`. The filtered test itself finished
+in `0.29 s` after compilation. This is not a timing comparison between
+policies: the test does not isolate their wall times.
+
+**Conclusion:** On these three fixtures, proactive normalization showed no
+material correctness advantage over failure-triggered-only normalization,
+while the range reported three formulation builds instead of one. Debug and
+release correctness evidence agree, but neither establishes a universal scale
+guarantee or the performance cost of repeated preparation. Keep the production
+default unchanged pending broader correctness review and an isolated
+preparation-time measurement. Do not relax tolerances. The paired test is a
+diagnostic story and does not replace the separate production-default
+acceptance gates.
