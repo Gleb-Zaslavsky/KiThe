@@ -19,6 +19,17 @@ use crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::{
 };
 use crate::Thermodynamics::thermo_lib_api::ThermoCatalogConsistencyReport;
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String is infallible");
+    }
+    encoded
+}
+
 /// Current JSON-compatible capsule schema.
 pub const EQUILIBRIUM_REPRODUCIBILITY_SCHEMA_VERSION: u32 = 2;
 pub const THERMO_DATA_CONTENT_MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -102,7 +113,7 @@ impl ThermoDataContentManifest {
                 path: path.clone(),
                 source,
             })?;
-            let actual = format!("{:x}", Sha256::digest(bytes));
+            let actual = sha256_hex(&bytes);
             if actual != asset.sha256 {
                 return Err(ThermoDataManifestError::HashMismatch {
                     path: asset.path.clone(),

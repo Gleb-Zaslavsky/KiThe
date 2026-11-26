@@ -7,7 +7,7 @@ use crate::Kinetics::experimental_kinetics::experiment_series_main::{
     ExperimentMeta, ExperimentThermalMode, TGAExperiment, TGASeries,
 };
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    TGADataset, TGADomainError, Unit,
+    ColumnNature, TGADataset, TGADomainError, Unit,
 };
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
 use crate::gui::experimental_kinetics_gui::model::TGAGUIError;
@@ -31,6 +31,27 @@ use std::{
     fs::File,
     io::{BufRead, BufReader},
 };
+
+fn write_atomically<T>(
+    path: &Path,
+    write: impl FnOnce(&Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let temporary_file = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|error| format!("Could not create temporary file: {error}"))?;
+    let result = write(temporary_file.path())?;
+    temporary_file
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("Could not flush temporary file: {error}"))?;
+    temporary_file
+        .persist(path)
+        .map_err(|error| format!("Could not replace '{}': {}", path.display(), error.error))?;
+    Ok(result)
+}
 
 //===================================================================================
 //  DROP DOWN MENUE AT THE TOP OF WINDOW
@@ -96,7 +117,7 @@ impl TopDropDownMenues {
             requested_menu = requested_menu_key;
 
             if open_import {
-                new_experiment_dialog.open_import_dialog();
+                new_experiment_dialog.open_document_dialog(model);
             }
             if save || save_as {
                 new_experiment_dialog.save_series_shortcut(model, save_as);
@@ -207,19 +228,26 @@ impl FileManager {
         kithe_plot_window: &mut KiThePlotWindowState,
     ) {
         if ui
+            .button("Open Document")
+            .on_hover_text("Choose a typed KiThe series CSV to replace the current document after the unsaved-changes check. Raw files and typed datasets belong in Import Data. Shortcut: Ctrl/Cmd+O.")
+            .clicked()
+        {
+            new_experiment_dialog.open_document_dialog(model);
+        }
+        if ui
             .button("Import Data")
             .on_hover_text(
-                "Import raw TXT/CSV with manual bindings or restore a typed KiThe CSV. Shortcut: Ctrl/Cmd+O.",
+                "Import raw TXT/CSV with manual bindings or add experiments from a typed KiThe series.",
             )
             .clicked()
         {
-            new_experiment_dialog.open_import_dialog();
+            new_experiment_dialog.choose_import_file();
         }
         if ui.button("Append to experiment")
             .on_hover_text("Import a continuation, preview its time alignment, then append it or replace the selected experiment.")
             .clicked()
         {
-            new_experiment_dialog.open_append_dialog(model);
+            new_experiment_dialog.choose_append_file(model);
         }
 
         if ui
@@ -231,29 +259,50 @@ impl FileManager {
             ui.ctx().request_repaint();
         }
         ui.separator();
+        let save_label = if new_experiment_dialog.is_document_dirty(model) {
+            "Save *"
+        } else {
+            "Save"
+        };
         if ui
-            .button("Save")
+            .button(save_label)
             .on_hover_text(
-                "Save the current experiment series to its current file. Shortcut: Ctrl/Cmd+S.",
+                "Save the complete current document, including every experiment and column. Shortcut: Ctrl/Cmd+S.",
             )
             .clicked()
         {
             new_experiment_dialog.save_series_shortcut(model, false);
         }
         if ui
-            .button("Save As CSV")
-            .on_hover_text("Export the full series or one experiment as a typed KiThe CSV.")
+            .button("Save As")
+            .on_hover_text("Choose a destination for the complete typed KiThe document.")
             .clicked()
         {
-            new_experiment_dialog.open_save_series_dialog(SaveSeriesFormat::Csv, model);
+            new_experiment_dialog.open_save_document_dialog(model);
             ui.ctx().request_repaint();
         }
         if ui
-            .button("Save As TXT")
+            .button("Export CSV")
+            .on_hover_text("Export the full series or one experiment as a typed KiThe CSV.")
+            .clicked()
+        {
+            new_experiment_dialog.open_export_dialog(SaveSeriesFormat::Csv, model);
+            ui.ctx().request_repaint();
+        }
+        if ui
+            .button("Export TXT")
             .on_hover_text("Export selected columns of one experiment as plain tab-delimited text.")
             .clicked()
         {
-            new_experiment_dialog.open_save_series_dialog(SaveSeriesFormat::Txt, model);
+            new_experiment_dialog.open_export_dialog(SaveSeriesFormat::Txt, model);
+            ui.ctx().request_repaint();
+        }
+        if ui
+            .button("Export Excel")
+            .on_hover_text("Export selected experiments and columns to an Excel workbook (.xlsx), one worksheet per experiment.")
+            .clicked()
+        {
+            new_experiment_dialog.open_export_dialog(SaveSeriesFormat::Xlsx, model);
             ui.ctx().request_repaint();
         }
         if ui
@@ -263,12 +312,16 @@ impl FileManager {
             )
             .clicked()
         {
-            Self::save_as_image(model, kithe_plot_window);
+            Self::save_as_image(ui.ctx(), model, kithe_plot_window);
         }
     }
 
-    fn save_as_image(model: &mut PlotModel, kithe_plot_window: &mut KiThePlotWindowState) {
-        match kithe_plot_window.open_from_model(model) {
+    fn save_as_image(
+        ctx: &egui::Context,
+        model: &mut PlotModel,
+        kithe_plot_window: &mut KiThePlotWindowState,
+    ) {
+        match kithe_plot_window.open_from_model(ctx, model) {
             Ok(()) => {
                 let _ = model.push_message("KiThe Plot Redactor window opened");
             }
@@ -312,7 +365,7 @@ impl WrightPanelControllers {
                 "Uses Input value as the time threshold. Removes earlier rows from the selected experiment in place; no new column."
             }
             "cut selected" => {
-                "Choose X or Y, then select a plot range. Removes rows outside that range in place; no new column."
+                "Choose X or Y, then select a plot range. Removes rows inside that range (including its boundaries) from the selected experiment in place; no new column."
             }
             "Zoom To Selection" => "Fit the plot view to the selected region; no data changes.",
             "move time to zero" => {
@@ -591,7 +644,7 @@ impl WrightPanelControllers {
             &mut state.apply_only_to_selected_chart,
             "apply only to the selected chart.",
         )
-        .on_hover_text("When enabled, arithmetic changes only the selected curve's X/Y values inside its plotted range; otherwise it changes the whole selected column.");
+        .on_hover_text("When enabled, Add/Sub/Mul/Divide affect only the selected column inside the selected plot's X range. ln and exp always transform the entire selected column; without the toggle, arithmetic also affects the entire column.");
         ui.separator();
         Ok(())
     }
@@ -730,13 +783,23 @@ impl WrightPanelControllers {
 
             "average on column" => {
                 let column = Self::resolve_selected_column(model, state)?;
-                info!("averaging column {}", column);
                 let r = if state.apply_only_to_selected_chart {
-                    model.mean_on_interval_on_own_range_for_selected()?
+                    let id = model.get_experiment_by_selected_curve()?;
+                    let range = model.interaction.selection_rect.ok_or_else(|| {
+                        TGAGUIError::BindingError(
+                            "Select a plot region before averaging a range.".into(),
+                        )
+                    })?;
+                    let bounds = range.bounds();
+                    let x_col = model.selected_curve_axis_name(XY::X)?;
+                    model.mean_on_interval(&id, &column, &x_col, bounds.0, bounds.1)?
                 } else {
-                    model.mean_on_column_for_selected()?
+                    let id = model.get_experiment_by_selected_curve()?;
+                    model.mean_on_column(&id, &column)?
                 };
-                info!("AVERAGE ON COLUMN {} =  {}", column, r);
+                let message = format!("Mean of '{column}' = {r:.8}");
+                info!("{message}");
+                let _ = model.push_message(&message);
             }
 
             "conversion rate" => {
@@ -832,6 +895,7 @@ impl WrightPanelControllers {
 enum SaveSeriesFormat {
     Csv,
     Txt,
+    Xlsx,
 }
 
 impl SaveSeriesFormat {
@@ -839,6 +903,7 @@ impl SaveSeriesFormat {
         match self {
             Self::Csv => "csv",
             Self::Txt => "txt",
+            Self::Xlsx => "xlsx",
         }
     }
 
@@ -846,7 +911,154 @@ impl SaveSeriesFormat {
         match self {
             Self::Csv => "Export Typed CSV",
             Self::Txt => "Export Plain TXT",
+            Self::Xlsx => "Export Excel Workbook",
         }
+    }
+}
+
+fn excel_sheet_name(experiment_id: &str, used_names: &mut HashSet<String>) -> String {
+    let sanitized = experiment_id
+        .chars()
+        .filter(|character| {
+            !matches!(character, ':' | '\\' | '/' | '?' | '*' | '[' | ']')
+                && !character.is_control()
+        })
+        .collect::<String>();
+    let base = sanitized.trim_matches('\'').trim();
+    let base = if base.is_empty() { "Experiment" } else { base };
+
+    for suffix_index in 1.. {
+        let suffix = if suffix_index == 1 {
+            String::new()
+        } else {
+            format!(" ({suffix_index})")
+        };
+        let max_base_chars = 31usize.saturating_sub(suffix.chars().count());
+        let prefix = base.chars().take(max_base_chars).collect::<String>();
+        let candidate = format!("{prefix}{suffix}");
+        if used_names.insert(candidate.to_lowercase()) {
+            return candidate;
+        }
+    }
+    unreachable!("the suffix index always produces a unique worksheet name")
+}
+
+fn write_xlsx_export(
+    model: &PlotModel,
+    path: &Path,
+    experiment_ids: &[String],
+    columns_by_experiment: &HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    let mut workbook = rust_xlsxwriter::Workbook::new();
+    let mut used_sheet_names = HashSet::with_capacity(experiment_ids.len());
+
+    for experiment_id in experiment_ids {
+        let columns = columns_by_experiment
+            .get(experiment_id)
+            .ok_or_else(|| format!("No columns are selected for experiment '{experiment_id}'"))?;
+        let experiment = model
+            .series
+            .get_experiment_by_id(experiment_id)
+            .map_err(|error| error.to_string())?;
+        let expressions = columns
+            .iter()
+            .map(|name| col(name.as_str()))
+            .collect::<Vec<_>>();
+        let frame = experiment
+            .dataset
+            .frame
+            .clone()
+            .select(expressions)
+            .collect()
+            .map_err(|error| format!("Could not read experiment '{experiment_id}': {error}"))?;
+        let numeric_columns = columns
+            .iter()
+            .map(|name| {
+                frame
+                    .column(name)
+                    .and_then(|column| column.f64())
+                    .map(|values| (name.as_str(), values))
+                    .map_err(|error| {
+                        format!("Column '{name}' in experiment '{experiment_id}' is not numeric: {error}")
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if numeric_columns.len() > 16_384 {
+            return Err(format!(
+                "Experiment '{experiment_id}' has more than Excel's 16,384-column worksheet limit"
+            ));
+        }
+        if frame.height() > 1_048_575 {
+            return Err(format!(
+                "Experiment '{experiment_id}' has more rows than Excel's worksheet limit allows with a header"
+            ));
+        }
+
+        let worksheet = workbook.add_worksheet();
+        let sheet_name = excel_sheet_name(experiment_id, &mut used_sheet_names);
+        worksheet
+            .set_name(&sheet_name)
+            .map_err(|error| format!("Could not name worksheet '{sheet_name}': {error}"))?;
+        for (column_index, (name, _)) in numeric_columns.iter().enumerate() {
+            let column_index = u16::try_from(column_index).map_err(|_| {
+                "Excel export supports at most 16,384 columns per experiment".to_string()
+            })?;
+            worksheet
+                .write_string(0, column_index, *name)
+                .map_err(|error| error.to_string())?;
+        }
+
+        for row_index in 0..frame.height() {
+            let row = u32::try_from(row_index + 1)
+                .map_err(|_| "Excel export exceeds the worksheet row limit".to_string())?;
+            for (column_index, (_, values)) in numeric_columns.iter().enumerate() {
+                let column_index = u16::try_from(column_index).map_err(|_| {
+                    "Excel export supports at most 16,384 columns per experiment".to_string()
+                })?;
+                if let Some(value) = values.get(row_index) {
+                    if value.is_finite() {
+                        worksheet
+                            .write_number(row, column_index, value)
+                            .map_err(|error| error.to_string())?;
+                    } else {
+                        let label = if value.is_nan() {
+                            "NaN".to_string()
+                        } else if value.is_sign_positive() {
+                            "Infinity".to_string()
+                        } else {
+                            "-Infinity".to_string()
+                        };
+                        worksheet
+                            .write_string(row, column_index, label)
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+            }
+        }
+    }
+
+    workbook
+        .save(path)
+        .map_err(|error| format!("Could not write Excel workbook: {error}"))
+}
+
+fn column_nature_label(nature: ColumnNature) -> &'static str {
+    match nature {
+        ColumnNature::Time => "Time",
+        ColumnNature::Temperature => "Temperature",
+        ColumnNature::Mass => "Mass",
+        ColumnNature::Concentration => "Concentration",
+        ColumnNature::Conversion => "Conversion",
+        ColumnNature::DimensionlessMass => "Relative mass",
+        ColumnNature::MassRate => "Mass rate",
+        ColumnNature::ConversionRate => "Conversion rate",
+        ColumnNature::TemperatureRate => "Temperature rate",
+        ColumnNature::DimensionlessMassRate => "Relative-mass rate",
+        ColumnNature::Unknown => "Unclassified",
+        ColumnNature::ActivationEnergy => "Activation energy",
+        ColumnNature::PredexFactor => "Pre-exponential factor",
+        ColumnNature::R2 => "R2",
+        ColumnNature::FittedCurve => "Fitted curve",
     }
 }
 
@@ -854,15 +1066,28 @@ impl SaveSeriesFormat {
 enum SaveScope {
     #[default]
     Series,
+    SelectedExperiments,
     Experiment,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SaveDialogPurpose {
+    Document,
+    #[default]
+    Export,
+}
+
 #[derive(Clone, Debug)]
-struct LastSavedExport {
+struct PendingFileWrite {
     path: PathBuf,
+    purpose: SaveDialogPurpose,
+    export: Option<ExportRequest>,
+}
+
+#[derive(Clone, Debug)]
+struct ExportRequest {
     format: SaveSeriesFormat,
-    scope: SaveScope,
-    experiment_id: Option<String>,
+    experiment_ids: Vec<String>,
     columns_by_experiment: HashMap<String, Vec<String>>,
 }
 
@@ -896,6 +1121,7 @@ fn detect_import_file_format(path: &Path) -> Result<ImportFileFormat, String> {
         Ok(ImportFileFormat::Raw)
     }
 }
+
 /// State for the new experiment file selection dialog
 #[derive(Clone, Debug, Default)]
 pub struct PlotConfig {
@@ -910,18 +1136,24 @@ pub struct NewExperimentDialogState {
     pub manage_plot_open: bool,
     pub column_manager_open: bool,
     pub save_series_open: bool,
+    save_dialog_purpose: SaveDialogPurpose,
     pub current_dir: PathBuf,
     pub selected_file: Option<PathBuf>,
     file_path_input: String,
-    browse_disks_level: bool,
     pub last_error: Option<String>,
     save_series_format: SaveSeriesFormat,
     save_series_filename_input: String,
     save_series_last_status: Option<String>,
     save_scope: SaveScope,
     save_experiment_id: Option<String>,
+    save_selected_experiments: HashSet<String>,
     save_selected_columns: HashMap<String, HashSet<String>>,
-    last_saved_export: Option<LastSavedExport>,
+    current_document_path: Option<PathBuf>,
+    document_generation: u64,
+    saved_data_revision: u64,
+    pending_file_write: Option<PendingFileWrite>,
+    pending_open_series: Option<PathBuf>,
+    unsaved_changes_open: bool,
     heating_rate_input: String,
     isothermal_temp_input: String,
     thermal_mode: ExperimentThermalMode,
@@ -940,8 +1172,13 @@ pub struct NewExperimentDialogState {
     append_result_id: String,
     append_preview: Option<TGADataset>,
     append_preview_rows: Option<usize>,
+    append_preview_signature: Option<String>,
     import_file_format: Option<ImportFileFormat>,
     replace_series_on_import: bool,
+    #[cfg(test)]
+    pub(crate) test_next_open_file: Option<PathBuf>,
+    #[cfg(test)]
+    pub(crate) test_next_save_file: Option<PathBuf>,
 }
 
 impl NewExperimentDialogState {
@@ -966,9 +1203,13 @@ impl NewExperimentDialogState {
             }
         }
         if self.save_series_open
-            && ["Export Typed CSV", "Export Plain TXT"]
-                .into_iter()
-                .any(|title| layer.id == egui::Id::unique(Some(title)))
+            && [
+                "Export Typed CSV",
+                "Export Plain TXT",
+                "Export Excel Workbook",
+            ]
+            .into_iter()
+            .any(|title| layer.id == egui::Id::unique(Some(title)))
         {
             self.save_series_open = false;
             return true;
@@ -983,18 +1224,24 @@ impl NewExperimentDialogState {
             manage_plot_open: false,
             column_manager_open: false,
             save_series_open: false,
+            save_dialog_purpose: SaveDialogPurpose::Export,
             current_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             selected_file: None,
             file_path_input: String::new(),
-            browse_disks_level: false,
             last_error: None,
             save_series_format: SaveSeriesFormat::Csv,
             save_series_filename_input: "series_export.csv".to_string(),
             save_series_last_status: None,
             save_scope: SaveScope::Series,
             save_experiment_id: None,
+            save_selected_experiments: HashSet::new(),
             save_selected_columns: HashMap::new(),
-            last_saved_export: None,
+            current_document_path: None,
+            document_generation: 0,
+            saved_data_revision: 0,
+            pending_file_write: None,
+            pending_open_series: None,
+            unsaved_changes_open: false,
             heating_rate_input: String::new(),
             isothermal_temp_input: String::new(),
             thermal_mode: ExperimentThermalMode::Unspecified,
@@ -1013,8 +1260,13 @@ impl NewExperimentDialogState {
             append_result_id: String::new(),
             append_preview: None,
             append_preview_rows: None,
+            append_preview_signature: None,
             import_file_format: None,
             replace_series_on_import: false,
+            #[cfg(test)]
+            test_next_open_file: None,
+            #[cfg(test)]
+            test_next_save_file: None,
         }
     }
 
@@ -1367,7 +1619,7 @@ impl NewExperimentDialogState {
     }
 
     fn import_typed_series_file(
-        &self,
+        &mut self,
         model: &mut PlotModel,
         path: &Path,
     ) -> Result<Vec<String>, TGAGUIError> {
@@ -1381,9 +1633,16 @@ impl NewExperimentDialogState {
 
         if self.replace_series_on_import {
             model.series = imported;
+            self.document_generation = self.document_generation.wrapping_add(1);
+            self.pending_file_write = None;
+            self.append_preview = None;
+            self.append_preview_rows = None;
+            self.append_preview_signature = None;
             model.plots.clear();
             model.active_mass_sources.clear();
             model.active_temperature_sources.clear();
+            self.current_document_path = Some(path.to_path_buf());
+            self.saved_data_revision = model.series.data_revision();
         } else {
             let mut candidate = model.series.clone();
             for experiment in imported.experiments().iter().cloned() {
@@ -1415,27 +1674,92 @@ impl NewExperimentDialogState {
         Ok(imported_ids)
     }
 
+    fn request_open_typed_series(&mut self, model: &mut PlotModel, path: &Path) {
+        if self.is_document_dirty(model) {
+            self.pending_open_series = Some(path.to_path_buf());
+            self.unsaved_changes_open = true;
+            self.open = false;
+        } else {
+            self.load_typed_series_document(model, path);
+        }
+    }
+
+    fn load_typed_series_document(&mut self, model: &mut PlotModel, path: &Path) {
+        self.replace_series_on_import = true;
+        match self.import_typed_series_file(model, path) {
+            Ok(ids) => {
+                info!("Opened typed KiThe document with {} experiments", ids.len());
+                self.open = false;
+                self.last_error = None;
+            }
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                let _ = model.push_message(&format!("Open document failed: {error}"));
+            }
+        }
+        self.replace_series_on_import = false;
+    }
+
+    pub fn show_unsaved_changes_dialog(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
+        if !self.unsaved_changes_open {
+            return;
+        }
+        let mut save = false;
+        let mut discard = false;
+        let mut cancel = false;
+        egui::Window::new("Unsaved document changes")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("The current document has unsaved changes. Save them before opening another document?");
+                ui.horizontal(|ui| {
+                    save = ui.button("Save").clicked();
+                    discard = ui.button("Discard").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+
+        if cancel {
+            self.pending_open_series = None;
+            self.unsaved_changes_open = false;
+        } else if discard {
+            self.unsaved_changes_open = false;
+            if let Some(path) = self.pending_open_series.take() {
+                self.load_typed_series_document(model, &path);
+            }
+        } else if save {
+            self.unsaved_changes_open = false;
+            if let Some(path) = self.current_document_path.clone() {
+                self.write_document(model, &path);
+            } else {
+                self.open_save_document_dialog(model);
+            }
+        }
+    }
+
     /// Show the new experiment dialog
     pub fn show_new_experiment_dialogue(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
         let mut should_load_experiment = false;
         let mut commit_append = false;
+        let mut choose_another_file = false;
 
         if self.open {
             let mut dialog_open = self.open;
             egui::Window::new(if self.append_mode { "Append to Experiment" } else { "Import Data" })
                 .open(&mut dialog_open)
                 .resizable(true)
-                .default_size(if self.append_mode { [760.0, 640.0] } else { [600.0, 400.0] })
+                .default_size(if self.append_mode { [760.0, 520.0] } else { [700.0, 480.0] })
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("📁 Current directory:");
-                        if ui.button("Up").clicked() {
-                            self.move_up();
-                        }
-                        if self.browse_disks_level {
-                            ui.label("<Disks>");
-                        } else {
-                            ui.label(self.current_dir.to_string_lossy().as_ref());
+                        ui.label("Selected file:");
+                        ui.label(
+                            self.selected_file
+                                .as_deref()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|| "No file selected".to_string()),
+                        );
+                        if ui.button("Choose another...").clicked() {
+                            choose_another_file = true;
                         }
                     });
 
@@ -1454,39 +1778,30 @@ impl NewExperimentDialogState {
                         });
                     }
 
-                    // File browser panel (left side)
-                    egui::Panel::left("file_browser")
-                        .resizable(true)
-                        .default_size(300.0)
-                        .show(ui, |ui| {
-                            self.show_file_browser(ui);
-                        });
-
                     // Metadata panel (right side)
                     egui::Panel::right("metadata_panel")
                         .resizable(true)
                         .default_size(250.0)
                         .show(ui, |ui| {
-                            let content_height = (ui.available_height() - 64.0).max(120.0);
-                            egui::ScrollArea::vertical()
-                                .auto_shrink([false, false])
-                                .max_height(content_height)
-                                .show(ui, |ui| {
-                            ui.heading("📝 Metadata");
+                            ui.heading("Metadata");
                             ui.separator();
-
                             if self.append_mode {
                                 let experiments = model.list_of_experiments();
                                 if self.append_target_id.as_ref().is_none_or(|id| !experiments.contains(id)) {
                                     self.append_target_id = experiments.first().cloned();
                                 }
-                                egui::ComboBox::from_label("Append to")
+                                let target_changed = egui::ComboBox::from_label("Append to")
                                     .selected_text(self.append_target_id.as_deref().unwrap_or("Select experiment"))
                                     .show_ui(ui, |ui| {
                                         for id in &experiments {
                                             ui.selectable_value(&mut self.append_target_id, Some(id.clone()), id);
                                         }
-                                    });
+                                    }).response.changed();
+                                if target_changed {
+                                    self.append_preview = None;
+                                    self.append_preview_rows = None;
+                                    self.append_preview_signature = None;
+                                }
                                 ui.checkbox(&mut self.append_replace_target, "Replace the original experiment");
                                 if !self.append_replace_target {
                                     let label = ui.label("New experiment ID:");
@@ -1494,7 +1809,16 @@ impl NewExperimentDialogState {
                                     let _ = input.labelled_by(label.id);
                                 }
                                 ui.label("Incoming columns must match the selected experiment's column names and order. Time is preserved if already continuous; otherwise the segment is shifted to the next typical time step.");
+                                ui.separator();
                             }
+                            let footer_height = 64.0 + if self.last_error.is_some() { 40.0 } else { 0.0 };
+                            let content_height = (ui.available_height() - footer_height).max(100.0);
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .max_height(content_height)
+                                .show(ui, |ui| {
+                            ui.heading("📝 Metadata");
+                            ui.separator();
 
                             let label = ui.label("File path:");
                             let input = ui.text_edit_singleline(&mut self.file_path_input);
@@ -1508,11 +1832,19 @@ impl NewExperimentDialogState {
                             if self.import_file_format == Some(ImportFileFormat::TypedSeries)
                                 && !self.append_mode
                             {
-                                ui.label("KiThe series CSV detected. Experiment metadata, bindings, units, and provenance will be restored from the file.");
-                                ui.checkbox(
-                                    &mut self.replace_series_on_import,
-                                    "Replace the current series",
-                                );
+                                ui.label("KiThe series CSV detected. Experiment metadata, bindings, units, provenance, operation history, and the archived calibration line are read from the file. Archived coefficients do not replace current application Settings.");
+                                ui.horizontal(|ui| {
+                                    ui.selectable_value(
+                                        &mut self.replace_series_on_import,
+                                        true,
+                                        "Open as document",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.replace_series_on_import,
+                                        false,
+                                        "Add to current series",
+                                    );
+                                });
                             } else if !self.append_mode {
                                 if self.import_file_format == Some(ImportFileFormat::TypedDataset) {
                                     ui.label("KiThe dataset CSV detected. Column metadata, units, and bindings will be restored from the file.");
@@ -1568,11 +1900,30 @@ impl NewExperimentDialogState {
                             }
                                 });
 
-                            ui.add_space(12.0);
+                            if let Some(err) = &self.last_error {
+                                let mut preview = err.chars().take(80).collect::<String>();
+                                if err.chars().count() > 80 {
+                                    preview.push_str("...");
+                                }
+                                ui.add_sized(
+                                    [ui.available_width(), 36.0],
+                                    egui::Label::new(
+                                        egui::RichText::new(preview).color(egui::Color32::RED),
+                                    ),
+                                )
+                                .on_hover_text(err);
+                                ui.add_space(4.0);
+                            } else {
+                                ui.add_space(12.0);
+                            }
                             let action_label = if self.append_mode {
                                 "Preview continuation"
                             } else if self.import_file_format == Some(ImportFileFormat::TypedSeries) {
-                                "Import series"
+                                if self.replace_series_on_import {
+                                    "Open series"
+                                } else {
+                                    "Import series into current document"
+                                }
                             } else {
                                 "Import experiment"
                             };
@@ -1585,7 +1936,11 @@ impl NewExperimentDialogState {
                             let action_tooltip = if self.append_mode {
                                 "Preview aligned rows, then choose whether to append or replace the experiment."
                             } else if self.import_file_format == Some(ImportFileFormat::TypedSeries) {
-                                "Restore the series and its metadata. By default it is added to the current series; enable Replace to discard the current series."
+                                if self.replace_series_on_import {
+                                    "Replace the current document with this typed series after the unsaved-changes prompt. Save will target this file."
+                                } else {
+                                    "Add these experiments to the current document without changing its Save path."
+                                }
                             } else if self.import_file_format == Some(ImportFileFormat::TypedDataset) {
                                 "Import this typed dataset as a new experiment; column bindings and units are restored from the file."
                             } else {
@@ -1598,13 +1953,23 @@ impl NewExperimentDialogState {
                                 should_load_experiment = true;
                             }
 
-                            if let Some(err) = &self.last_error {
-                                ui.colored_label(egui::Color32::RED, err);
-                                ui.add_space(5.0);
-                            }
                         });
                 });
             self.open = dialog_open;
+
+            if choose_another_file {
+                let title = if self.append_mode {
+                    "Append to Experiment"
+                } else {
+                    "Import Data"
+                };
+                if let Some(path) = self.pick_open_file(title, false) {
+                    self.set_import_file(path);
+                    self.append_preview = None;
+                    self.append_preview_rows = None;
+                    self.append_preview_signature = None;
+                }
+            }
 
             // Resolve the selected format when a path was entered manually.
             if should_load_experiment && !self.append_mode {
@@ -1771,9 +2136,10 @@ impl NewExperimentDialogState {
                                 .map_err(|e| e.to_string())?
                                 .height(),
                         );
+                        self.file_path_input = path.to_string_lossy().to_string();
                         self.append_preview = Some(candidate);
                         self.append_result_id = format!("{}_continued", target_id);
-                        self.file_path_input = path.to_string_lossy().to_string();
+                        self.append_preview_signature = Some(self.append_signature(model));
                         Ok(())
                     })();
                     self.last_error = result.err();
@@ -1789,19 +2155,24 @@ impl NewExperimentDialogState {
                     };
                     match path {
                         Some(path) if path.is_file() => {
-                            match self.import_typed_series_file(model, &path) {
-                                Ok(ids) => {
-                                    info!(
-                                        "Restored typed KiThe CSV with {} experiments",
-                                        ids.len()
-                                    );
-                                    self.open = false;
-                                    self.last_error = None;
-                                }
-                                Err(error) => {
-                                    self.last_error = Some(error.to_string());
-                                    let _ = model
-                                        .push_message(&format!("Series import failed: {error}"));
+                            if self.replace_series_on_import {
+                                self.request_open_typed_series(model, &path);
+                            } else {
+                                match self.import_typed_series_file(model, &path) {
+                                    Ok(ids) => {
+                                        info!(
+                                            "Imported typed KiThe CSV with {} experiments",
+                                            ids.len()
+                                        );
+                                        self.open = false;
+                                        self.last_error = None;
+                                    }
+                                    Err(error) => {
+                                        self.last_error = Some(error.to_string());
+                                        let _ = model.push_message(&format!(
+                                            "Series import failed: {error}"
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -1977,6 +2348,14 @@ impl NewExperimentDialogState {
 
             if commit_append {
                 let result = (|| -> Result<(String, Option<String>), String> {
+                    let current_signature = self.append_signature(model);
+                    if self.append_preview_signature.as_deref() != Some(current_signature.as_str())
+                    {
+                        self.append_preview = None;
+                        self.append_preview_rows = None;
+                        self.append_preview_signature = None;
+                        return Err("Preview is stale. Rebuild it after changing the file, bindings, target, or data.".into());
+                    }
                     let target_id = self
                         .append_target_id
                         .clone()
@@ -2058,114 +2437,6 @@ impl NewExperimentDialogState {
         }
     }
 
-    fn move_up(&mut self) {
-        if self.browse_disks_level {
-            return;
-        }
-        if let Some(parent) = self.current_dir.parent() {
-            self.current_dir = parent.to_path_buf();
-        } else {
-            self.browse_disks_level = true;
-        }
-        self.selected_file = None;
-    }
-
-    fn list_windows_disks() -> Vec<PathBuf> {
-        let mut disks = Vec::new();
-        for letter in b'A'..=b'Z' {
-            let drive = format!("{}:\\", letter as char);
-            let drive_path = PathBuf::from(drive);
-            if Path::new(&drive_path).exists() {
-                disks.push(drive_path);
-            }
-        }
-        disks
-    }
-
-    fn show_file_browser(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Files");
-        ui.separator();
-
-        if self.browse_disks_level {
-            ui.label("Available disks:");
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for disk in Self::list_windows_disks() {
-                    let disk_label = disk.to_string_lossy().to_string();
-                    if ui.button(disk_label).clicked() {
-                        self.current_dir = disk;
-                        self.browse_disks_level = false;
-                        self.selected_file = None;
-                    }
-                }
-            });
-            return;
-        }
-
-        if let Ok(entries) = std::fs::read_dir(&self.current_dir) {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for entry in entries.filter_map(Result::ok) {
-                    let path = entry.path();
-                    let file_name_str = entry.file_name().to_string_lossy().to_string();
-
-                    if path.is_dir() {
-                        if ui.button(format!("[D] {}", file_name_str)).clicked() {
-                            self.current_dir = path;
-                            self.selected_file = None;
-                        }
-                    } else {
-                        let is_selected = self.selected_file.as_ref() == Some(&path);
-                        if ui
-                            .selectable_label(is_selected, format!("[F] {}", file_name_str))
-                            .clicked()
-                        {
-                            self.file_path_input = path.to_string_lossy().to_string();
-                            self.update_import_file_format(&path);
-                            self.selected_file = Some(path);
-                        }
-                    }
-                }
-            });
-        } else {
-            ui.label("Unable to read directory");
-        }
-    }
-
-    fn show_directory_browser(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Directories");
-        ui.separator();
-
-        if self.browse_disks_level {
-            ui.label("Available disks:");
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for disk in Self::list_windows_disks() {
-                    let disk_label = disk.to_string_lossy().to_string();
-                    if ui.button(disk_label).clicked() {
-                        self.current_dir = disk;
-                        self.browse_disks_level = false;
-                    }
-                }
-            });
-            return;
-        }
-
-        if let Ok(entries) = std::fs::read_dir(&self.current_dir) {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for entry in entries.filter_map(Result::ok) {
-                    let path = entry.path();
-                    if !path.is_dir() {
-                        continue;
-                    }
-                    let file_name_str = entry.file_name().to_string_lossy().to_string();
-                    if ui.button(format!("[D] {}", file_name_str)).clicked() {
-                        self.current_dir = path;
-                    }
-                }
-            });
-        } else {
-            ui.label("Unable to read directory");
-        }
-    }
-
     fn with_extension(filename: &str, ext: &str) -> String {
         let trimmed = filename.trim();
         let required_suffix = format!(".{}", ext);
@@ -2176,15 +2447,47 @@ impl NewExperimentDialogState {
         }
     }
 
-    fn open_save_series_dialog(&mut self, format: SaveSeriesFormat, model: &PlotModel) {
+    fn open_save_document_dialog(&mut self, model: &PlotModel) {
         self.save_series_open = true;
+        self.save_dialog_purpose = SaveDialogPurpose::Document;
+        self.save_series_format = SaveSeriesFormat::Csv;
+        self.save_scope = SaveScope::Series;
+        self.save_series_last_status = None;
+        self.last_error = None;
+        if let Some(path) = &self.current_document_path {
+            if let Some(parent) = path.parent() {
+                self.current_dir = parent.to_path_buf();
+            }
+            self.save_series_filename_input = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("session.csv")
+                .to_string();
+        } else {
+            let stem = model
+                .list_of_experiments()
+                .first()
+                .filter(|id| !id.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| "kinetics_session".to_string());
+            self.save_series_filename_input = format!("{stem}.csv");
+        }
+    }
+
+    fn open_export_dialog(&mut self, format: SaveSeriesFormat, model: &PlotModel) {
+        self.save_series_open = true;
+        self.save_dialog_purpose = SaveDialogPurpose::Export;
         self.save_series_format = format;
-        self.save_scope = if format == SaveSeriesFormat::Csv {
+        self.save_scope = if matches!(format, SaveSeriesFormat::Csv | SaveSeriesFormat::Xlsx) {
             SaveScope::Series
         } else {
             SaveScope::Experiment
         };
         self.save_experiment_id = model.list_of_experiments().first().cloned();
+        self.save_selected_experiments.clear();
+        if let Some(id) = &self.save_experiment_id {
+            self.save_selected_experiments.insert(id.clone());
+        }
         self.save_selected_columns.clear();
         self.sync_export_columns(model);
         self.save_series_last_status = None;
@@ -2197,7 +2500,71 @@ impl NewExperimentDialogState {
                 .filter(|id| !id.trim().is_empty())
                 .map(|id| format!("{id}_export.txt"))
                 .unwrap_or_else(|| "experiment_export.txt".to_string()),
+            SaveSeriesFormat::Xlsx => "series_export.xlsx".to_string(),
         };
+    }
+
+    fn pick_open_file(&mut self, title: &str, typed_series_only: bool) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            let _ = (title, typed_series_only);
+            return self.test_next_open_file.take();
+        }
+        #[cfg(not(test))]
+        {
+            let mut picker = rfd::FileDialog::new()
+                .set_title(title)
+                .set_directory(&self.current_dir);
+            picker = if typed_series_only {
+                picker.add_filter("KiThe series document", &["csv"])
+            } else {
+                picker.add_filter("CSV and text data", &["csv", "txt"])
+            };
+            picker.pick_file()
+        }
+    }
+
+    fn pick_save_file(&mut self, title: &str, extension: &str) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            let _ = (title, extension);
+            return self.test_next_save_file.take();
+        }
+        #[cfg(not(test))]
+        {
+            rfd::FileDialog::new()
+                .set_title(title)
+                .set_directory(&self.current_dir)
+                .set_file_name(&self.save_series_filename_input)
+                .add_filter(
+                    &format!("{} file", extension.to_ascii_uppercase()),
+                    &[extension],
+                )
+                .save_file()
+        }
+    }
+
+    fn set_import_file(&mut self, path: PathBuf) {
+        if let Some(parent) = path.parent() {
+            self.current_dir = parent.to_path_buf();
+        }
+        self.file_path_input = path.to_string_lossy().to_string();
+        self.update_import_file_format(&path);
+        self.selected_file = Some(path.clone());
+        if self.meta.id.trim().is_empty() {
+            self.meta.id = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .filter(|stem| !stem.trim().is_empty())
+                .unwrap_or_else(|| "experiment".to_string());
+        }
+    }
+
+    fn choose_import_file(&mut self) {
+        if let Some(path) = self.pick_open_file("Import Data", false) {
+            self.set_import_file(path);
+            self.open_import_dialog();
+        }
     }
 
     fn open_import_dialog(&mut self) {
@@ -2211,9 +2578,51 @@ impl NewExperimentDialogState {
         self.last_error = None;
     }
 
+    fn open_document_dialog(&mut self, model: &mut PlotModel) {
+        let Some(path) = self.pick_open_file("Open KiThe Document", true) else {
+            return;
+        };
+        if detect_import_file_format(&path).ok() != Some(ImportFileFormat::TypedSeries) {
+            let message = "Open Document accepts typed KiThe series CSV files. Use Import Data for raw files or typed datasets.";
+            self.last_error = Some(message.to_string());
+            let _ = model.push_message(message);
+            return;
+        }
+        if let Some(parent) = path.parent() {
+            self.current_dir = parent.to_path_buf();
+        }
+        self.request_open_typed_series(model, &path);
+    }
+
     fn update_import_file_format(&mut self, path: &Path) {
         self.import_file_format = detect_import_file_format(path).ok();
-        self.replace_series_on_import = false;
+    }
+
+    fn append_signature(&self, model: &PlotModel) -> String {
+        format!(
+            "{}|{}|{}|{}|{}|{:?}|{:?}|{}|{}|{}",
+            self.append_target_id.as_deref().unwrap_or_default(),
+            self.selected_file
+                .as_deref()
+                .unwrap_or_else(|| Path::new(""))
+                .display(),
+            self.file_path_input.trim(),
+            self.bind_time_input.trim(),
+            self.bind_temperature_input.trim(),
+            self.bind_time_unit,
+            self.bind_temperature_unit,
+            self.bind_mass_input.trim(),
+            self.bind_mass_unit,
+            model.series.data_revision(),
+        )
+    }
+
+    fn choose_append_file(&mut self, model: &PlotModel) {
+        let Some(path) = self.pick_open_file("Append to Experiment", false) else {
+            return;
+        };
+        self.open_append_dialog(model);
+        self.set_import_file(path);
     }
 
     fn open_append_dialog(&mut self, model: &PlotModel) {
@@ -2222,6 +2631,7 @@ impl NewExperimentDialogState {
         self.last_error = None;
         self.append_preview = None;
         self.append_preview_rows = None;
+        self.append_preview_signature = None;
         self.append_target_id = model
             .get_experiment_by_selected_curve()
             .ok()
@@ -2276,13 +2686,38 @@ impl NewExperimentDialogState {
 
     fn export_experiment_ids(&self, model: &PlotModel) -> Result<Vec<String>, String> {
         match self.save_scope {
-            SaveScope::Series if self.save_series_format == SaveSeriesFormat::Csv => {
+            SaveScope::Series
+                if matches!(
+                    self.save_series_format,
+                    SaveSeriesFormat::Csv | SaveSeriesFormat::Xlsx
+                ) =>
+            {
                 let ids = model.list_of_experiments();
                 if ids.is_empty() {
                     Err("There are no experiments to export".to_string())
                 } else {
                     Ok(ids)
                 }
+            }
+            SaveScope::SelectedExperiments
+                if matches!(
+                    self.save_series_format,
+                    SaveSeriesFormat::Csv | SaveSeriesFormat::Xlsx
+                ) =>
+            {
+                let ids = model
+                    .list_of_experiments()
+                    .into_iter()
+                    .filter(|id| self.save_selected_experiments.contains(id))
+                    .collect::<Vec<_>>();
+                if ids.is_empty() {
+                    Err("Select at least one experiment to export".to_string())
+                } else {
+                    Ok(ids)
+                }
+            }
+            SaveScope::SelectedExperiments => {
+                Err("Selected-experiment scope requires CSV or Excel export".to_string())
             }
             SaveScope::Series => Err("Plain TXT export supports one experiment at a time".into()),
             SaveScope::Experiment => self
@@ -2334,30 +2769,82 @@ impl NewExperimentDialogState {
         Ok(result)
     }
 
+    fn export_column_label(&self, model: &PlotModel, id: &str, column: &str) -> String {
+        let metadata = model
+            .series
+            .get_experiment_by_id(id)
+            .ok()
+            .and_then(|experiment| experiment.dataset.schema.columns.get(column));
+        let nature = metadata
+            .map(|meta| column_nature_label(meta.nature))
+            .unwrap_or("Unclassified");
+        let unit = metadata
+            .map(|meta| meta.unit.to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+        let binding = model
+            .series
+            .get_experiment_by_id(id)
+            .ok()
+            .and_then(|experiment| {
+                let schema = &experiment.dataset.schema;
+                [
+                    ("time", schema.time.as_deref()),
+                    ("temperature", schema.temperature.as_deref()),
+                    ("mass", schema.mass.as_deref()),
+                    ("relative mass", schema.alpha.as_deref()),
+                    ("conversion", schema.eta.as_deref()),
+                    ("mass rate", schema.dm_dt.as_deref()),
+                    ("relative-mass rate", schema.dalpha_dt.as_deref()),
+                    ("conversion rate", schema.deta_dt.as_deref()),
+                    ("temperature rate", schema.dT_dt.as_deref()),
+                    ("activation energy", schema.E.as_deref()),
+                    ("R2", schema.R2.as_deref()),
+                ]
+                .into_iter()
+                .find_map(|(role, bound_name)| (bound_name == Some(column)).then_some(role))
+            });
+        let binding = binding
+            .map(|role| format!(" · active: {role}"))
+            .unwrap_or_default();
+
+        format!("{id}::{column} · {nature} · {unit}{binding}")
+    }
+
     fn write_export(
         &self,
         model: &PlotModel,
         path: &Path,
+        request: &ExportRequest,
     ) -> Result<HashMap<String, Vec<String>>, String> {
-        let columns_by_experiment = self.selected_export_columns(model)?;
-        match self.save_series_format {
+        let columns_by_experiment = &request.columns_by_experiment;
+        match request.format {
             SaveSeriesFormat::Csv => {
-                let ids = self.export_experiment_ids(model)?;
                 model
-                    .to_csv_series_selected(path, &ids, &columns_by_experiment)
+                    .to_csv_series_selected(path, &request.experiment_ids, columns_by_experiment)
                     .map_err(|error| error.to_string())?;
             }
             SaveSeriesFormat::Txt => {
-                let id = self
-                    .save_experiment_id
-                    .as_ref()
+                let id = request
+                    .experiment_ids
+                    .first()
                     .ok_or_else(|| "Select an experiment to export".to_string())?;
                 model
                     .to_plain_txt_experiment(id, path, &columns_by_experiment[id])
                     .map_err(|error| error.to_string())?;
             }
+            SaveSeriesFormat::Xlsx => {
+                write_xlsx_export(model, path, &request.experiment_ids, columns_by_experiment)?;
+            }
         }
-        Ok(columns_by_experiment)
+        Ok(columns_by_experiment.clone())
+    }
+
+    fn prepare_export(&self, model: &PlotModel) -> Result<ExportRequest, String> {
+        Ok(ExportRequest {
+            format: self.save_series_format,
+            experiment_ids: self.export_experiment_ids(model)?,
+            columns_by_experiment: self.selected_export_columns(model)?,
+        })
     }
 
     fn set_save_format(&mut self, format: SaveSeriesFormat) {
@@ -2377,44 +2864,92 @@ impl NewExperimentDialogState {
     }
 
     fn save_series_shortcut(&mut self, model: &mut PlotModel, save_as: bool) {
-        if save_as {
-            self.open_save_series_dialog(SaveSeriesFormat::Csv, model);
+        if save_as || self.current_document_path.is_none() {
+            self.open_save_document_dialog(model);
+            return;
+        }
+        if let Some(path) = self.current_document_path.clone() {
+            self.write_document(model, &path);
+        }
+    }
+
+    fn is_document_dirty(&self, model: &PlotModel) -> bool {
+        model.series.data_revision() != self.saved_data_revision
+    }
+
+    pub(crate) fn document_generation(&self) -> u64 {
+        self.document_generation
+    }
+
+    pub(crate) fn reset_save_target_after_external_replacement(&mut self, model: &PlotModel) {
+        self.current_document_path = None;
+        self.saved_data_revision = model.series.data_revision();
+        self.pending_file_write = None;
+        self.pending_open_series = None;
+        self.append_preview = None;
+        self.append_preview_rows = None;
+        self.append_preview_signature = None;
+        self.document_generation = self.document_generation.wrapping_add(1);
+    }
+
+    fn write_document(&mut self, model: &mut PlotModel, path: &Path) -> bool {
+        let result = write_atomically(path, |temporary_path| {
+            model
+                .to_csv_series(temporary_path)
+                .map_err(|error| error.to_string())
+        });
+        match result {
+            Ok(()) => {
+                self.current_document_path = Some(path.to_path_buf());
+                self.saved_data_revision = model.series.data_revision();
+                self.last_error = None;
+                let _ = model.push_message(&format!("Document saved to {}", path.display()));
+                info!("Document saved to {}", path.display());
+                if let Some(next_path) = self.pending_open_series.take() {
+                    self.load_typed_series_document(model, &next_path);
+                }
+                true
+            }
+            Err(error) => {
+                self.last_error = Some(format!("Failed to save document: {error}"));
+                let _ = model.push_message(&format!("Document save failed: {error}"));
+                false
+            }
+        }
+    }
+
+    fn commit_file_write(
+        &mut self,
+        model: &mut PlotModel,
+        path: &Path,
+        purpose: SaveDialogPurpose,
+        export: Option<ExportRequest>,
+    ) {
+        if purpose == SaveDialogPurpose::Document {
+            if self.write_document(model, path) {
+                self.save_series_open = false;
+            }
             return;
         }
 
-        let Some(last_export) = self.last_saved_export.clone() else {
-            self.open_save_series_dialog(SaveSeriesFormat::Csv, model);
-            return;
-        };
-
-        self.save_series_format = last_export.format;
-        self.save_scope = last_export.scope;
-        self.save_experiment_id = last_export.experiment_id;
-        self.save_selected_columns = last_export
-            .columns_by_experiment
-            .iter()
-            .map(|(id, columns)| (id.clone(), columns.iter().cloned().collect()))
-            .collect();
-        self.sync_export_columns(model);
-
-        match self.write_export(model, &last_export.path) {
-            Ok(columns_by_experiment) => {
+        let result = export
+            .ok_or_else(|| "Export request was not captured".to_string())
+            .and_then(|request| {
+                write_atomically(path, |temporary_path| {
+                    self.write_export(model, temporary_path, &request)
+                })
+            });
+        match result {
+            Ok(_) => {
                 self.last_error = None;
-                let _ =
-                    model.push_message(&format!("Data saved to {}", last_export.path.display()));
-                info!("Data saved to {}", last_export.path.display());
-                self.last_saved_export = Some(LastSavedExport {
-                    path: last_export.path,
-                    format: self.save_series_format,
-                    scope: self.save_scope,
-                    experiment_id: self.save_experiment_id.clone(),
-                    columns_by_experiment,
-                });
+                self.save_series_last_status = Some(format!("Exported to {}", path.display()));
+                let _ = model.push_message(&format!("Data exported to {}", path.display()));
+                self.save_series_open = false;
             }
-            Err(err) => {
-                self.last_error = Some(format!("Failed to export data: {err}"));
-                let _ = model.push_message(&format!("Data export failed: {err}"));
-                self.save_series_open = true;
+            Err(error) => {
+                self.save_series_last_status = None;
+                self.last_error = Some(format!("Export failed: {error}"));
+                let _ = model.push_message(&format!("Data export failed: {error}"));
             }
         }
     }
@@ -2428,36 +2963,23 @@ impl NewExperimentDialogState {
         let mut should_export = false;
         let mut dialog_open = self.save_series_open;
 
-        egui::Window::new(self.save_series_format.dialog_title())
+        let is_document = self.save_dialog_purpose == SaveDialogPurpose::Document;
+        egui::Window::new(if is_document {
+            "Save Document As"
+        } else {
+            self.save_series_format.dialog_title()
+        })
             .open(&mut dialog_open)
             .resizable(true)
             .default_size([850.0, 570.0])
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Current directory:");
-                    if ui.button("Up").clicked() {
-                        self.move_up();
-                    }
-                    if self.browse_disks_level {
-                        ui.label("<Disks>");
-                    } else {
-                        ui.label(self.current_dir.to_string_lossy().as_ref());
-                    }
-                });
-
-                ui.separator();
-
-                egui::Panel::left("save_series_dir_browser")
-                    .resizable(true)
-                    .default_size(350.0)
-                    .show(ui, |ui| self.show_directory_browser(ui));
-
-                egui::Panel::right("save_series_meta_panel")
-                    .resizable(true)
-                    .default_size(430.0)
-                    .show(ui, |ui| {
-                        ui.heading("Export Options");
+                ui.vertical(|ui| {
+                        ui.heading(if is_document { "Document" } else { "Export Options" });
                         ui.separator();
+                        if is_document {
+                            ui.label("Save the complete series, all columns, metadata, bindings, provenance, and operation history.");
+                            ui.label("Undo snapshots and plot display state are not part of the document.");
+                        } else {
                         ui.horizontal(|ui| {
                             if ui
                                 .selectable_label(
@@ -2477,21 +2999,38 @@ impl NewExperimentDialogState {
                             {
                                 self.set_save_format(SaveSeriesFormat::Txt);
                             }
+                            if ui
+                                .selectable_label(
+                                    self.save_series_format == SaveSeriesFormat::Xlsx,
+                                    "Excel XLSX",
+                                )
+                                .clicked()
+                            {
+                                self.set_save_format(SaveSeriesFormat::Xlsx);
+                            }
                         });
                         ui.label(match self.save_series_format {
                             SaveSeriesFormat::Csv => "KiThe metadata and bindings are preserved.",
                             SaveSeriesFormat::Txt => {
                                 "Tab-delimited values only; no KiThe metadata."
                             }
+                            SaveSeriesFormat::Xlsx => {
+                                "Selected numeric columns are written to one worksheet per experiment; no KiThe metadata."
+                            }
                         });
 
                         let experiment_ids = model.list_of_experiments();
-                        if self.save_series_format == SaveSeriesFormat::Csv {
+                        if matches!(self.save_series_format, SaveSeriesFormat::Csv | SaveSeriesFormat::Xlsx) {
                             ui.horizontal(|ui| {
                                 ui.selectable_value(
                                     &mut self.save_scope,
                                     SaveScope::Series,
                                     "Entire series",
+                                );
+                                ui.selectable_value(
+                                    &mut self.save_scope,
+                                    SaveScope::SelectedExperiments,
+                                    "Selected experiments",
                                 );
                                 ui.selectable_value(
                                     &mut self.save_scope,
@@ -2530,8 +3069,46 @@ impl NewExperimentDialogState {
                                 });
                         }
 
+                        if self.save_scope == SaveScope::SelectedExperiments {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Select all experiments").clicked() {
+                                    self.save_selected_experiments
+                                        .extend(experiment_ids.iter().cloned());
+                                }
+                                if ui.small_button("Clear experiment selection").clicked() {
+                                    self.save_selected_experiments.clear();
+                                }
+                            });
+                            egui::ScrollArea::vertical()
+                                .id_salt("export_experiment_selection")
+                                .max_height(60.0)
+                                .show(ui, |ui| {
+                                    for id in &experiment_ids {
+                                        let mut selected =
+                                            self.save_selected_experiments.contains(id);
+                                        let display_id = if id.trim().is_empty() {
+                                            "(unnamed experiment)"
+                                        } else {
+                                            id.as_str()
+                                        };
+                                        if ui.checkbox(&mut selected, display_id).changed() {
+                                            if selected {
+                                                self.save_selected_experiments.insert(id.clone());
+                                            } else {
+                                                self.save_selected_experiments.remove(id);
+                                            }
+                                        }
+                                    }
+                                });
+                        }
+
                         let visible_ids = match self.save_scope {
                             SaveScope::Series => experiment_ids.clone(),
+                            SaveScope::SelectedExperiments => experiment_ids
+                                .iter()
+                                .filter(|id| self.save_selected_experiments.contains(*id))
+                                .cloned()
+                                .collect(),
                             SaveScope::Experiment => {
                                 self.save_experiment_id.iter().cloned().collect()
                             }
@@ -2557,7 +3134,7 @@ impl NewExperimentDialogState {
                         });
                         egui::ScrollArea::vertical()
                             .id_salt("export_column_selection")
-                            .max_height(190.0)
+                            .max_height(110.0)
                             .show(ui, |ui| {
                                 for id in &visible_ids {
                                     let Ok(columns) = model.list_of_columns(id) else {
@@ -2566,6 +3143,8 @@ impl NewExperimentDialogState {
                                     ui.strong(id);
                                     ui.horizontal_wrapped(|ui| {
                                         for column in columns {
+                                            let label =
+                                                self.export_column_label(model, id, &column);
                                             if let Some(selected) =
                                                 self.save_selected_columns.get_mut(id)
                                             {
@@ -2573,7 +3152,7 @@ impl NewExperimentDialogState {
                                                 if ui
                                                     .checkbox(
                                                         &mut checked,
-                                                        format!("{id}::{column}"),
+                                                        label,
                                                     )
                                                     .changed()
                                                 {
@@ -2589,17 +3168,14 @@ impl NewExperimentDialogState {
                                     ui.separator();
                                 }
                             });
+                        }
 
-                        ui.label("Directory:");
-                        ui.label(self.current_dir.to_string_lossy().as_ref());
+                        ui.label("The system save dialog will choose the destination folder.");
                         ui.add_space(6.0);
                         let label = ui.label("File name:");
                         let input = ui.text_edit_singleline(&mut self.save_series_filename_input);
                         let _ = input.labelled_by(label.id);
-                        ui.label(format!(
-                            "Extension: .{}",
-                            self.save_series_format.extension()
-                        ));
+                        ui.label(format!("Extension: .{}", self.save_series_format.extension()));
 
                         if let Some(status) = &self.save_series_last_status {
                             ui.colored_label(egui::Color32::GREEN, status);
@@ -2608,42 +3184,101 @@ impl NewExperimentDialogState {
                             ui.colored_label(egui::Color32::RED, err);
                         }
                         ui.add_space(6.0);
-                        if ui.button("Export").clicked() {
+                        if ui.button(if is_document { "Save Document" } else { "Export" }).clicked() {
                             should_export = true;
                         }
-                    });
+                });
             });
 
+        let document_dialog_cancelled = self.save_dialog_purpose == SaveDialogPurpose::Document
+            && self.save_series_open
+            && !dialog_open
+            && !should_export;
         self.save_series_open = dialog_open;
+        if document_dialog_cancelled && self.pending_open_series.is_some() {
+            self.pending_open_series = None;
+            self.unsaved_changes_open = false;
+        }
         if should_export {
+            let export_request = if self.save_dialog_purpose == SaveDialogPurpose::Export {
+                match self.prepare_export(model) {
+                    Ok(request) => Some(request),
+                    Err(error) => {
+                        self.last_error = Some(error.clone());
+                        let _ = model.push_message(&format!("Export failed: {error}"));
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
             let filename = self.save_series_filename_input.trim();
             if filename.is_empty() {
                 self.last_error = Some("File name cannot be empty".to_string());
                 return;
             }
-            let output_name = Self::with_extension(filename, self.save_series_format.extension());
-            let save_path = self.current_dir.join(output_name);
-            match self.write_export(model, &save_path) {
-                Ok(columns_by_experiment) => {
-                    self.last_error = None;
-                    self.last_saved_export = Some(LastSavedExport {
-                        path: save_path.clone(),
-                        format: self.save_series_format,
-                        scope: self.save_scope,
-                        experiment_id: self.save_experiment_id.clone(),
-                        columns_by_experiment,
+            let extension = if self.save_dialog_purpose == SaveDialogPurpose::Document {
+                "csv"
+            } else {
+                self.save_series_format.extension()
+            };
+            let suggested_name = Self::with_extension(filename, extension);
+            self.save_series_filename_input = suggested_name.clone();
+            let title = if self.save_dialog_purpose == SaveDialogPurpose::Document {
+                "Save KiThe Document"
+            } else {
+                self.save_series_format.dialog_title()
+            };
+            if let Some(mut save_path) = self.pick_save_file(title, extension) {
+                if !save_path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
+                {
+                    save_path.set_extension(extension);
+                }
+                if let Some(parent) = save_path.parent() {
+                    self.current_dir = parent.to_path_buf();
+                }
+                if save_path.exists() {
+                    self.pending_file_write = Some(PendingFileWrite {
+                        path: save_path,
+                        purpose: self.save_dialog_purpose,
+                        export: export_request,
                     });
-                    self.save_series_last_status =
-                        Some(format!("Saved to {}", save_path.display()));
-                    let _ =
-                        model.push_message(&format!("Data exported to {}", save_path.display()));
-                    self.save_series_open = false;
+                } else {
+                    self.commit_file_write(
+                        model,
+                        &save_path,
+                        self.save_dialog_purpose,
+                        export_request,
+                    );
                 }
-                Err(err) => {
-                    self.save_series_last_status = None;
-                    self.last_error = Some(format!("Failed to export data: {err}"));
-                    let _ = model.push_message(&format!("Data export failed: {err}"));
-                }
+            }
+        }
+
+        let mut confirm_overwrite = false;
+        let mut cancel_overwrite = false;
+        if let Some(pending) = &self.pending_file_write {
+            egui::Window::new("Confirm overwrite")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "'{}' already exists. Replace it?",
+                        pending.path.display()
+                    ));
+                    ui.horizontal(|ui| {
+                        confirm_overwrite = ui.button("Replace file").clicked();
+                        cancel_overwrite = ui.button("Cancel").clicked();
+                    });
+                });
+        }
+        if cancel_overwrite {
+            self.pending_file_write = None;
+        } else if confirm_overwrite {
+            if let Some(pending) = self.pending_file_write.take() {
+                self.commit_file_write(model, &pending.path, pending.purpose, pending.export);
             }
         }
     }
@@ -2810,7 +3445,9 @@ impl NewExperimentDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Kinetics::experimental_kinetics::experiment_series_main::TGAExperiment;
+    use crate::Kinetics::experimental_kinetics::experiment_series_main::{
+        CalibrationSnapshot, TGAExperiment,
+    };
     use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
     use crate::Kinetics::experimental_kinetics::testing_mod::VirtualTGA;
     use std::path::Path;
@@ -2858,6 +3495,53 @@ mod tests {
     }
 
     #[test]
+    fn export_request_keeps_format_and_selection_snapshot() {
+        let mut model = PlotModel::default();
+        model.series = typed_series();
+        let mut dialog = NewExperimentDialogState::new();
+        dialog.save_series_format = SaveSeriesFormat::Csv;
+        dialog.save_scope = SaveScope::SelectedExperiments;
+        dialog.save_selected_experiments = ["typed_a".to_string()].into_iter().collect();
+        dialog.save_selected_columns.insert(
+            "typed_a".to_string(),
+            ["time".to_string(), "mass".to_string()]
+                .into_iter()
+                .collect(),
+        );
+
+        let request = dialog.prepare_export(&model).unwrap();
+        dialog.save_series_format = SaveSeriesFormat::Txt;
+        dialog.save_selected_experiments.clear();
+        dialog.save_selected_columns.clear();
+
+        assert_eq!(request.format, SaveSeriesFormat::Csv);
+        assert_eq!(request.experiment_ids, ["typed_a"]);
+        let mut selected_columns = request.columns_by_experiment["typed_a"].clone();
+        selected_columns.sort();
+        assert_eq!(selected_columns, ["mass", "time"]);
+    }
+
+    #[test]
+    fn append_preview_signature_changes_when_target_or_binding_changes() {
+        let mut model = PlotModel::default();
+        model.series = typed_series();
+        let mut dialog = NewExperimentDialogState::new();
+        dialog.append_target_id = Some("typed_a".into());
+        dialog.selected_file = Some(PathBuf::from("continuation.csv"));
+        dialog.file_path_input = "continuation.csv".into();
+        dialog.bind_time_input = "t".into();
+        dialog.bind_temperature_input = "T".into();
+        dialog.bind_mass_input = "m".into();
+        let initial = dialog.append_signature(&model);
+
+        dialog.append_target_id = Some("typed_b".into());
+        assert_ne!(initial, dialog.append_signature(&model));
+        dialog.append_target_id = Some("typed_a".into());
+        dialog.bind_mass_input = "signal".into();
+        assert_ne!(initial, dialog.append_signature(&model));
+    }
+
+    #[test]
     fn import_format_detection_distinguishes_raw_and_both_typed_csv_formats() {
         let raw = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(raw.path(), "t,T,m\n0,500,10\n1,501,9\n").unwrap();
@@ -2886,7 +3570,62 @@ mod tests {
         let mut dialog = NewExperimentDialogState::new();
         dialog.replace_series_on_import = true;
         dialog.update_import_file_format(raw.path());
+        assert!(dialog.replace_series_on_import);
+        dialog.open_import_dialog();
         assert!(!dialog.replace_series_on_import);
+    }
+
+    #[test]
+    fn open_document_loads_only_typed_series_without_opening_import_form() {
+        let series = write_typed_series();
+        let mut dialog = NewExperimentDialogState::new();
+        let mut model = PlotModel::new();
+        dialog.test_next_open_file = Some(series.path().to_path_buf());
+
+        dialog.open_document_dialog(&mut model);
+
+        assert!(!dialog.open);
+        assert!(!dialog.append_mode);
+        assert_eq!(model.series.len(), 2);
+        assert_eq!(dialog.current_document_path.as_deref(), Some(series.path()));
+        assert!(dialog.last_error.is_none());
+    }
+
+    #[test]
+    fn open_document_rejects_raw_file_without_showing_binding_form() {
+        let raw = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(raw.path(), "t,T,m\n0,500,10\n1,501,9\n").unwrap();
+        let mut dialog = NewExperimentDialogState::new();
+        let mut model = PlotModel::new();
+        dialog.test_next_open_file = Some(raw.path().to_path_buf());
+
+        dialog.open_document_dialog(&mut model);
+
+        assert!(!dialog.open);
+        assert_eq!(model.series.len(), 0);
+        assert!(
+            dialog
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("Import Data")
+        );
+    }
+
+    #[test]
+    fn failed_atomic_writer_leaves_previous_destination_untouched() {
+        let destination = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(destination.path(), "original contents").unwrap();
+
+        let result = write_atomically(destination.path(), |_temporary_path| {
+            Err::<(), _>("injected serialization failure".to_string())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(destination.path()).unwrap(),
+            "original contents"
+        );
     }
 
     #[test]
@@ -2894,7 +3633,7 @@ mod tests {
         let file = write_typed_series();
         let mut model = PlotModel::new();
         model.series.push(existing_experiment("existing")).unwrap();
-        let dialog = NewExperimentDialogState::new();
+        let mut dialog = NewExperimentDialogState::new();
 
         let imported_ids = dialog
             .import_typed_series_file(&mut model, file.path())
@@ -2929,6 +3668,33 @@ mod tests {
     }
 
     #[test]
+    fn typed_document_archives_calibration_without_overwriting_current_settings() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let mut source_model = PlotModel::new();
+        source_model.settings.set_calibration_coeffs(-2.5, 17.0);
+        source_model.series = typed_series();
+        source_model.to_csv_series(path.path()).unwrap();
+
+        let mut model = PlotModel::new();
+        model.settings.set_calibration_coeffs(3.25, 8.0);
+        let mut dialog = NewExperimentDialogState::new();
+        dialog.replace_series_on_import = true;
+        dialog
+            .import_typed_series_file(&mut model, path.path())
+            .unwrap();
+
+        let active_calibration = model.settings.calibration_line().unwrap();
+        assert_eq!(active_calibration.k(), 3.25);
+        assert_eq!(active_calibration.b(), 8.0);
+        assert_eq!(
+            model.series.calibration_snapshot(),
+            Some(CalibrationSnapshot::new(-2.5, 17.0))
+        );
+        let contents = std::fs::read_to_string(path.path()).unwrap();
+        assert!(contents.contains("#META\tCALIBRATION\t-2.5\t17"));
+    }
+
+    #[test]
     fn typed_series_id_conflict_does_not_partially_modify_current_series() {
         let file = write_typed_series();
         let mut model = PlotModel::new();
@@ -2940,7 +3706,7 @@ mod tests {
             .unwrap()
             .meta
             .clone();
-        let dialog = NewExperimentDialogState::new();
+        let mut dialog = NewExperimentDialogState::new();
 
         assert!(
             dialog
@@ -3031,7 +3797,7 @@ mod tests {
     fn fixture_model() -> PlotModel {
         let mut model = PlotModel::new();
         model
-            .push_from_file(Path::new("src/assets/TGAexample.txt"))
+            .push_from_file(&Path::new(env!("CARGO_MANIFEST_DIR")).join("TGAexample.txt"))
             .expect("failed to load fixture");
         model
     }

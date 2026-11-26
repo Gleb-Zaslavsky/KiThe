@@ -5029,9 +5029,9 @@ fn live_reactive_and_water_ph_target_range_route_matrix() {
 ///
 /// Nine enthalpy targets exercise accepted-state hand-off repeatedly while
 /// twenty local NASA records make every inner `P,T` solve a nontrivial
-/// reaction-basis problem. The fixture deliberately uses the nested route:
-/// it characterizes reusable fixed-P,T preparation separately from coupled
-/// monolithic P,H backend behavior.
+/// reaction-basis problem. Its sub-mole inventory selects normalized-first
+/// P,H solving, so each target builds its own normalized preparation while
+/// accepted physical states still continue between targets.
 #[test]
 #[ignore = "release large real-data nested P,H target-range story"]
 fn live_large_element_limited_nested_ph_target_range_story() {
@@ -5096,10 +5096,10 @@ fn live_large_element_limited_nested_ph_target_range_story() {
 
     assert_eq!(range.points().len(), targets.len());
     assert_eq!(range.report().continuation_points(), targets.len() - 1);
-    assert_eq!(range.report().formulation_builds(), 1);
-    assert!(
-        range.report().formulation_reuses() >= targets.len() - 1,
-        "the large nested range must reuse its fixed P,T template"
+    assert_eq!(
+        range.report().formulation_builds(),
+        targets.len(),
+        "proactive normalized-first P,H currently prepares one inner formulation per target"
     );
     for (index, (point, (_, expected_temperature))) in
         range.points().iter().zip(targets.iter()).enumerate()
@@ -5146,12 +5146,11 @@ fn live_large_element_limited_nested_ph_target_range_story() {
     assert_eq!(before, live_library_file_snapshot());
 }
 
-/// Release-only characterization of the nested P,H route on three real-data
-/// scales. Each row reuses one prepared inner P,T formulation and uses the
-/// ordered legacy fallback cascade; this measures lifecycle behavior and
-/// backend evidence, not a production-backend selection decision. RST-first
-/// behavior is characterized separately because its acceptance and
-/// monotonicity evidence has a different contract.
+/// Release-oriented characterization of nested P,H on three real-data sizes.
+/// All inventories are below the proactive threshold, so every target builds
+/// a normalized inner formulation. Reported reuses are within target solves,
+/// not reuse of one range-owned template. This measures lifecycle and backend
+/// evidence, not backend selection.
 #[test]
 #[ignore = "release nested P,H inner P,T cascade characterization matrix"]
 fn live_nested_ph_inner_pt_cascade_release_matrix() {
@@ -5213,8 +5212,12 @@ fn live_nested_ph_inner_pt_cascade_release_matrix() {
         .expect("nested cascade range must solve");
 
         assert_eq!(range.points().len(), temperatures.len());
-        assert_eq!(range.report().formulation_builds(), 1);
-        assert!(range.report().formulation_reuses() >= temperatures.len() - 1);
+        assert_eq!(range.report().continuation_points(), temperatures.len() - 1);
+        assert_eq!(
+            range.report().formulation_builds(),
+            temperatures.len(),
+            "{fixture}: proactive normalized-first path builds one inner formulation per target"
+        );
 
         let mut outer_evaluations = 0usize;
         let mut inner_attempts = 0usize;

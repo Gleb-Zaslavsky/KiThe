@@ -1,7 +1,7 @@
 use crate::Kinetics::experimental_kinetics::exp_engine_api::GoldenPipelineConfig;
 use crate::Kinetics::experimental_kinetics::exp_engine_api::{PlotSeries, Ranges, ViewRange, XY};
 use crate::Kinetics::experimental_kinetics::experiment_series_main::{
-    ExperimentMeta, TGAExperiment, TGASeries,
+    CalibrationSnapshot, ExperimentMeta, TGAExperiment, TGASeries,
 };
 use crate::Kinetics::experimental_kinetics::experiment_series2::SampledColumns;
 use crate::Kinetics::experimental_kinetics::kinetic_methods::KineticDataView;
@@ -159,7 +159,12 @@ impl PlotModel {
         Ok(())
     }
     pub fn to_csv_series(&self, path: &Path) -> Result<(), TGAGUIError> {
-        self.series.to_csv_series(path)?;
+        let calibration = self
+            .settings
+            .calibration_line()
+            .map(|line| CalibrationSnapshot::new(line.k(), line.b()));
+        self.series
+            .to_csv_series_with_calibration(path, calibration)?;
         Ok(())
     }
 
@@ -169,8 +174,16 @@ impl PlotModel {
         experiment_ids: &[String],
         columns_by_experiment: &HashMap<String, Vec<String>>,
     ) -> Result<(), TGAGUIError> {
-        self.series
-            .to_csv_series_selected(path, experiment_ids, columns_by_experiment)?;
+        let calibration = self
+            .settings
+            .calibration_line()
+            .map(|line| CalibrationSnapshot::new(line.k(), line.b()));
+        self.series.to_csv_series_selected_with_calibration(
+            path,
+            experiment_ids,
+            columns_by_experiment,
+            calibration,
+        )?;
         Ok(())
     }
 
@@ -1314,13 +1327,15 @@ impl PlotModel {
             match axis {
                 XY::X => {
                     info!("cutting range {:?} on X axe", (x_min, x_max));
+                    let column = self.selected_curve_axis_name(XY::X)?;
                     self.series
-                        .cut_range_inverse_x_or_y(id, XY::X, x_min, x_max)?;
+                        .cut_range_inverse_on_column(id, &column, x_min, x_max)?;
                 }
                 XY::Y => {
                     info!("cutting range {:?} on Y axe", (y_min, y_max));
+                    let column = self.selected_curve_axis_name(XY::Y)?;
                     self.series
-                        .cut_range_inverse_x_or_y(id, XY::Y, y_min, y_max)?;
+                        .cut_range_inverse_on_column(id, &column, y_min, y_max)?;
                 }
             }
             self.rebuild_plots_for_experiment(id)?;
@@ -1515,7 +1530,7 @@ impl PlotModel {
     //===================================================================================
     //  X or Y column operations
     //===================================================================================
-    fn selected_curve_axis_name(&self, axis: XY) -> Result<String, TGAGUIError> {
+    pub(crate) fn selected_curve_axis_name(&self, axis: XY) -> Result<String, TGAGUIError> {
         let selected_index = self.get_selected_curve_index().or_else(|| {
             if self.is_only_one_shown() {
                 self.plots.iter().position(|curve| curve.is_shown())
@@ -1721,6 +1736,11 @@ impl PlotModel {
     }
 
     pub fn div_column_of_selected(&mut self, col: &str, factor: f64) -> Result<(), TGAGUIError> {
+        if !factor.is_finite() || factor == 0.0 {
+            return Err(TGAGUIError::BindingError(
+                "Division requires a finite, non-zero value.".to_string(),
+            ));
+        }
         info!("division for column {} by factor {}", col, factor);
         self.scale_column_of_selected(col, 1.0 / factor)
     }
@@ -1775,6 +1795,11 @@ impl PlotModel {
         colmn: &str,
         scale: f64,
     ) -> Result<(), TGAGUIError> {
+        if !scale.is_finite() || scale == 0.0 {
+            return Err(TGAGUIError::BindingError(
+                "Division requires a finite, non-zero value.".to_string(),
+            ));
+        }
         self.scale_column_in_its_range_for_selected(colmn, 1.0 / scale)
     }
     /// нужно чтобы график был выбран
@@ -1953,10 +1978,25 @@ impl PlotModel {
         out_col: Option<&str>,
     ) -> Result<(), TGAGUIError> {
         let id = self.get_experiment_by_selected_curve()?;
+        if deriv > 0 && out_col == Some(col) {
+            let is_active_source = self
+                .active_mass_source_for_experiment(&id)
+                .is_ok_and(|source| source == col)
+                || self
+                    .active_temperature_source_for_experiment(&id)
+                    .is_ok_and(|source| source == col);
+            if is_active_source {
+                return Err(TGAGUIError::BindingError(format!(
+                    "Refusing to overwrite active signal column '{col}' with its derivative. Choose a new output column."
+                )));
+            }
+        }
         let old_cols = self.list_of_columns(&id)?;
         self.series
             .sg_filter_column_as(&id, col, window, poly_order, deriv, delta, out_col)?;
-        if let Some(produced) = out_col {
+        if deriv > 0 {
+            self.create_plots_with_new_columns(&id, old_cols, None)?;
+        } else if let Some(produced) = out_col {
             if produced == col {
                 self.refresh_plots_after_in_place_mutation(&id)?;
             } else {
@@ -1978,7 +2018,6 @@ impl PlotModel {
         let id = self.get_experiment_by_selected_curve()?;
         let old_cols = self.list_of_columns(&id)?;
         self.series.rolling_mean(&id, col_name, window)?;
-        self.series.trim_null_edges(&id)?;
         if old_cols.iter().any(|name| name == col_name) {
             self.refresh_plots_after_in_place_mutation(&id)?;
         } else {
@@ -1997,7 +2036,6 @@ impl PlotModel {
         let old_cols = self.list_of_columns(&id)?;
         self.series
             .rolling_mean_as(&id, col_name, window, out_col)?;
-        self.series.trim_null_edges(&id)?;
         if let Some(produced) = out_col {
             if produced != col_name {
                 self.remap_active_sources_for_experiment(&id, col_name, produced);
@@ -2068,14 +2106,19 @@ impl PlotModel {
         new_col: Option<&str>,
     ) -> Result<(), TGAGUIError> {
         let id = self.get_experiment_by_selected_curve()?;
+        let selected_x = self.this_is_x()?;
+        let selected_y = self.this_is_y()?;
         let old_cols = self.list_of_columns(&id)?;
-        let selected_y = self
-            .get_selected_curve_index()
-            .and_then(|idx| self.plots.get(idx))
-            .map(|curve| curve.y_name.clone());
-        self.series
-            .spline_resample_oneframeplot_as(&id, new_time_col, n_points, kind, new_col)?;
-        if let (Some(selected_y), Some(produced)) = (selected_y, new_col) {
+        self.series.spline_resample_columns_as(
+            &id,
+            &selected_x,
+            new_time_col,
+            &[selected_y.as_str()],
+            &[new_col],
+            n_points,
+            kind,
+        )?;
+        if let Some(produced) = new_col {
             self.remap_active_sources_for_experiment(&id, &selected_y, produced);
         }
         self.create_plots_with_new_columns(&id, old_cols, Some(new_time_col))?;
@@ -2417,39 +2460,41 @@ impl PlotModel {
     /// Behavior:
     /// 1. Writes a new experiment into the series under the provided `id`.
     /// 2. Sets X = "eta" and Y = "Ea".
-    /// 3. Hides all currently shown plots.
-    /// 4. Creates a new curve in red and makes it visible.
+    /// 3. Builds the result plot before changing visibility or selection.
+    /// 4. On success, shows and selects only the new result curve.
     pub fn push_isoconversional_result(
         &mut self,
         result: &IsoconversionalResult,
         id: &str,
     ) -> Result<(), TGAGUIError> {
-        self.series.push_isoconversional_result(result, id)?;
-
-        // Make sure the new result is the only visible curve on the screen.
-        for curve in &mut self.plots {
-            curve.shown = false;
-        }
-
+        // Prepare the dataset and its plot on a candidate model. A failed plot
+        // must not leave the series mutated or hide the user's existing curves.
+        let mut candidate = self.clone();
+        candidate.series.push_isoconversional_result(result, id)?;
         let x_col = "eta";
         let y_col = "Ea";
-
-        self.set_x(id, x_col)?;
-        self.set_y(id, y_col)?;
-
-        self.create_points_for_curve_with_builder(id, Colours::Red)?;
+        candidate.set_x(id, x_col)?;
+        candidate.set_y(id, y_col)?;
+        candidate.create_points_for_curve_with_builder(id, Colours::Red)?;
 
         // Ensure the newly created curve is visible even if we replaced an older one.
-        let short_name = self.create_plot_short_name(id, &x_col.to_string(), &y_col.to_string());
-        if let Some(curve) = self
+        let short_name =
+            candidate.create_plot_short_name(id, &x_col.to_string(), &y_col.to_string());
+        for curve in &mut candidate.plots {
+            curve.shown = false;
+            curve.selected = false;
+        }
+        if let Some(curve) = candidate
             .plots
             .iter_mut()
             .find(|curve| curve.plot_short_name == short_name)
         {
             curve.shown = true;
+            curve.selected = true;
         }
 
-        self.reset_view();
+        candidate.reset_view();
+        *self = candidate;
 
         Ok(())
     }
@@ -2488,6 +2533,16 @@ mod fitting_gui_model_tests {
             0.0
         };
         (0..len).map(|idx| start + idx as f64 * step).collect()
+    }
+
+    #[test]
+    fn division_rejects_zero_and_non_finite_factors_before_mutation() {
+        let mut model = PlotModel::default();
+        for factor in [0.0, f64::NAN, f64::INFINITY] {
+            let error = model.div_column_of_selected("mass", factor).unwrap_err();
+            assert!(error.to_string().contains("finite, non-zero"));
+            assert!(model.series.is_empty());
+        }
     }
 
     #[test]

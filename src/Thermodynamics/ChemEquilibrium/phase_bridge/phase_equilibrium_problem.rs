@@ -1093,7 +1093,7 @@ impl PreparedPhaseControlTemplate {
     pub(crate) fn phase_stability_geometry_cache_statistics(
         &self,
     ) -> crate::Thermodynamics::ChemEquilibrium::equilibrium_phase_stability::PhaseStabilityGeometryCacheStats
-    {
+{
         self.runner.phase_stability_geometry_cache_statistics()
     }
 
@@ -1206,7 +1206,7 @@ impl PreparedPhaseControlTemplate {
                 PreparedActiveSetCandidate,
             ReactionExtentError,
         >,
-    {
+{
         let started = Instant::now();
         *self.runner.configure_solver() = settings;
         let outcome = self.runner.solve_with_fixed_active_solver(

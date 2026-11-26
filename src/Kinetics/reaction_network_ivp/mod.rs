@@ -20,7 +20,8 @@ pub use problem::{NetworkProblem, ReactionSpec, SpeciesSpec, StoichTerm};
 pub use rate_law::{KineticOrder, RateCoefficient, RateCoefficientBinding, RateLaw};
 pub use solver::{PreparedNetworkIvp, solve_network};
 pub use solver_backend::{
-    NetworkIvpOptions, NetworkIvpPartialTrajectory, NetworkIvpRunMetadata, NetworkIvpSolution,
+    NetworkIvpAttemptDiagnostics, NetworkIvpAttemptOutcome, NetworkIvpOptions,
+    NetworkIvpPartialTrajectory, NetworkIvpRunMetadata, NetworkIvpSolution,
 };
 pub use temperature::{TemperatureBinding, TemperatureProgram};
 

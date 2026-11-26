@@ -19,6 +19,70 @@ pub struct PlotSeries {
     pub y: Vec<f64>,
 }
 
+/// Reduce plotted samples while retaining local minima and maxima from each bucket.
+/// This keeps narrow spikes visible in interactive plots without changing source data.
+fn downsample_min_max(points: Vec<(f64, f64)>, max_points: usize) -> Vec<(f64, f64)> {
+    let len = points.len();
+    if len <= max_points || max_points == 0 {
+        return points;
+    }
+    if max_points == 1 {
+        return vec![points[0]];
+    }
+    if max_points == 2 {
+        return vec![points[0], points[len - 1]];
+    }
+    if max_points == 3 {
+        let first_y = points[0].1;
+        let last_y = points[len - 1].1;
+        let extreme = (1..len - 1)
+            .max_by(|&a, &b| {
+                let deviation = |index: usize| {
+                    let baseline = first_y + (last_y - first_y) * index as f64 / (len - 1) as f64;
+                    (points[index].1 - baseline).abs()
+                };
+                deviation(a).total_cmp(&deviation(b))
+            })
+            .unwrap_or(1);
+        let mut indices = [0, extreme, len - 1];
+        indices.sort_unstable();
+        return indices.into_iter().map(|index| points[index]).collect();
+    }
+
+    let bucket_count = ((max_points - 2) / 2).max(1);
+    let interior_len = len - 2;
+    let mut indices = Vec::with_capacity(max_points);
+    indices.push(0);
+
+    for bucket in 0..bucket_count {
+        let start = 1 + bucket * interior_len / bucket_count;
+        let end = 1 + (bucket + 1) * interior_len / bucket_count;
+        if start >= end {
+            continue;
+        }
+
+        let mut min_index = start;
+        let mut max_index = start;
+        for index in (start + 1)..end {
+            if points[index].1 < points[min_index].1 {
+                min_index = index;
+            }
+            if points[index].1 > points[max_index].1 {
+                max_index = index;
+            }
+        }
+        if min_index <= max_index {
+            indices.extend([min_index, max_index]);
+        } else {
+            indices.extend([max_index, min_index]);
+        }
+    }
+
+    indices.push(len - 1);
+    indices.dedup();
+    indices.into_iter().map(|index| points[index]).collect()
+}
+
 /// Selects which axis column from `oneframeplot` is used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XY {
@@ -373,6 +437,11 @@ impl TGADataset {
         })
     }
 
+    /// Removes rows inside a range on an explicitly selected column.
+    pub fn cut_range_inverse_on_column(self, column: &str, from: f64, to: f64) -> Self {
+        self.trim_range_inverse(column, from, to)
+    }
+
     /// Returns the smallest Euclidean distance from `point` to the nearest
     /// data point formed by configured `oneframeplot` `(x, y)` columns.
     ///
@@ -589,6 +658,11 @@ impl TGADataset {
         range: Option<ViewRange>,
         max_points: usize,
     ) -> Result<Vec<PlotSeries>, TGADomainError> {
+        if max_points == 0 {
+            return Err(TGADomainError::InvalidOperation(
+                "plot sampling requires max_points > 0".to_string(),
+            ));
+        }
         println!("\n column: {} ", time_col);
         for &col in value_cols {
             println!("\n column: {} ", col);
@@ -621,8 +695,7 @@ impl TGADataset {
                 continue;
             }
 
-            let step = (points.len() as f64 / max_points as f64).ceil().max(1.0) as usize;
-            points = points.into_iter().step_by(step).collect();
+            points = downsample_min_max(points, max_points);
             let (x, y): (Vec<f64>, Vec<f64>) = points.into_iter().unzip();
 
             out.push(PlotSeries {
@@ -823,6 +896,48 @@ impl TGADataset {
         info!("collcted new columns in {} ms", start.elapsed().as_millis());
         println!("\n new columns added by golden pipeline: {:?}", new_columns);
         Ok((ds, new_columns))
+    }
+}
+
+#[cfg(test)]
+mod plot_sampling_tests {
+    use super::downsample_min_max;
+
+    #[test]
+    fn min_max_sampling_keeps_narrow_positive_and_negative_spikes() {
+        let points: Vec<_> = (0..10_000)
+            .map(|index| {
+                let value = match index {
+                    4_321 => 100.0,
+                    7_654 => -80.0,
+                    _ => 0.0,
+                };
+                (index as f64, value)
+            })
+            .collect();
+
+        let sampled = downsample_min_max(points, 1_000);
+
+        assert!(sampled.len() <= 1_000);
+        assert_eq!(sampled.first(), Some(&(0.0, 0.0)));
+        assert_eq!(sampled.last(), Some(&(9_999.0, 0.0)));
+        assert!(sampled.contains(&(4_321.0, 100.0)));
+        assert!(sampled.contains(&(7_654.0, -80.0)));
+        assert!(sampled.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    }
+
+    #[test]
+    fn min_max_sampling_obeys_small_point_budgets_and_keeps_endpoints() {
+        let points = vec![(0.0, 0.0), (1.0, 4.0), (2.0, -3.0), (3.0, 0.0)];
+
+        for budget in 1..=3 {
+            let sampled = downsample_min_max(points.clone(), budget);
+            assert!(sampled.len() <= budget);
+            assert_eq!(sampled.first(), Some(&points[0]));
+            if budget >= 2 {
+                assert_eq!(sampled.last(), Some(&points[3]));
+            }
+        }
     }
 }
 #[derive(Debug, Clone)]

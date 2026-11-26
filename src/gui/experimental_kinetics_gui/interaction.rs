@@ -102,6 +102,8 @@ pub struct InteractionState {
     pub view_range: (f64, f64),
     /// Диапазон отображения по оси Y (минимум и максимум)
     pub view_y_range: (f64, f64),
+    /// Текущие координаты курсора в системе координат графика.
+    pub pointer_coordinate: Option<[f64; 2]>,
 }
 
 impl InteractionState {
@@ -114,6 +116,7 @@ impl InteractionState {
             last_pan_pos: None,             // Нет последней позиции панорамирования
             view_range: DEFAULT_VIEW_RANGE, // Диапазон отображения по умолчанию
             view_y_range: (-1.5, 1.5),      // Диапазон отображения по Y
+            pointer_coordinate: None,
         }
     }
     /// Сдвигает отображение по оси X

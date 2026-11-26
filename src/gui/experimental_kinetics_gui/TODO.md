@@ -1,5 +1,193 @@
 # GUI: тестирование workflow, UX и клавиатурное управление
 
+## Повторное GUI-ревью: план исправлений без изменения численных алгоритмов
+
+Область: основной KiThe, `src/gui/experimental_kinetics_gui/` и только необходимые
+доменные точки подключения. Учебный standalone-проект не затрагивать.
+Это план будущей реализации: запись пункта не означает, что исправление уже сделано.
+Повторное ревью выявило незакрытые пути в ранее отмеченных задачах; актуальные
+критерии приёмки ниже имеют приоритет над историческими отметками выполнения.
+Не менять математику фильтров, фиттинга и кинетических методов ради исправления GUI.
+
+### P0. Восстановить проверяемость GUI-набора
+
+- [ ] Исправить тест повторного открытия Plot Editor под фактически используемый API
+  egui: сейчас два вызова `Context::run` в `kitheplot_wrapper.rs` дают `E0599`,
+  поэтому GUI-тесты не доходят до запуска. Не ослаблять проверку сохранения сессии:
+  проверять сохранность пользовательского состояния, а не только адрес поля `Option`.
+- [ ] Синхронизировать GUI-тесты с текущими подписями: тест ширины фильтра всё ещё ищет
+  `Plot-based estimate:`, тогда как интерфейс показывает `Input-grid width:`.
+  Проверять физический шаг и независимость от прореживания, не только наличие текста.
+- [ ] После исправления сборки выполнить `cargo test --lib gui::experimental_kinetics_gui
+  -- --test-threads=1`; отдельно фиксировать прошедшие, упавшие и не запускавшиеся тесты.
+  Не считать успешную компиляцию или один smoke-тест подтверждением всего workflow.
+
+### P1. Test Options: демонстрационные данные и переносимый exe
+
+- [ ] Устранить неявную полную замену `PlotModel` кнопкой `Load testing data`.
+  Минимальный контракт: загрузка примера не уничтожает текущую серию и не наследует
+  её путь сохранения без явного решения пользователя. Предпочесть добавление примера
+  как опыта с проверкой ID; если оставлять замену, провести её через общий guard
+  Save/Discard/Cancel и сброс состояния документа, как при Open.
+- [ ] Перенести `TGAexample.txt` из `src/assets/` в корень репозитория; в переносимой
+  поставке размещать `TGAexample.txt` рядом с `KiThe.exe`, без каталогов `src/assets/`.
+  Проверить все ссылки на fixture и обновить их согласованно при реализации переноса.
+- [ ] Для собранного приложения искать пример относительно каталога исполняемого файла,
+  а не только текущей рабочей директории: запуск через ярлык из другого каталога тоже
+  должен работать. Для dev/test разрешить явно определённый путь к корню репозитория.
+  Не добавлять обход произвольных каталогов машины или неявный выбор чужого файла.
+- [ ] Убрать `expect` из пользовательского пути загрузки примера. Отсутствие, повреждение
+  или ошибка чтения файла должны давать диагностическое сообщение с искомым путём
+  и не менять серию, графики, настройки либо текущий документ.
+- [ ] Регрессии: открыть рабочий CSV → загрузить пример → Ctrl+S; исходный документ
+  не должен неожиданно стать демонстрационными данными. Проверить Cancel, конфликт ID,
+  отсутствие примера и запуск portable-поставки без дерева исходников.
+- [ ] Обновить инструкцию комплектации переносимого приложения: пример находится
+  в корне рядом с exe; отдельно перечислить необходимые конфиги, не смешивая их
+  с исходниками и тестовыми артефактами.
+
+### P1. Math: однозначные источники и отсутствие скрытых потерь данных
+
+- [ ] Для обычного `Splines` фиксировать `(experiment_id, x_column, y_column)`
+  выбранной кривой один раз на Apply. Передавать эти же источники в домен, построение
+  результата и remap активной массы/температуры; не читать общий `oneframeplot`
+  вместо выбранной кривой. При недоступном источнике возвращать ошибку до мутации.
+- [ ] Регрессия Splines: создать `m(t)` и `T(t)` с различимыми значениями, оставить
+  `oneframeplot` настроенным на массу, выбрать температурную кривую и применить сплайн.
+  Результат должен происходить из T; активная температура не может стать сплайном m.
+  Повторить с обратным выбором, несколькими опытами и пользовательским именем выхода.
+- [ ] Убрать неявный `trim_null_edges` всего опыта после GUI Rolling mean.
+  Новая колонка не должна удалять строки исходных t/T/m или других веток обработки.
+  Для графика использовать штатное совместное выделение валидных X/Y; физическое
+  удаление измерений оставить отдельным явным действием пользователя.
+- [ ] Не допускать арифметического переполнения при вычислении границ обрезки
+  `height - left - right`: полностью null-колонка и перекрывающиеся края должны
+  обрабатываться явно. Это защита программного контракта, не изменение фильтра.
+- [ ] Регрессии Rolling mean: добавить новую колонку при наличии производной с краевыми
+  null, resampled-колонки с длинным хвостом null и полностью null вспомогательной
+  колонки. Проверять точную сохранность числа и значений исходных строк, соседних
+  опытов, History/undo и всех живых графиков, а не только наличие результата.
+- [ ] При SG `deriv > 0` не назначать результат активной массой/температурой как при
+  сглаживании. Автопереключение исходной роли допустимо для `deriv == 0`;
+  производная должна оставаться отдельным результатом с однозначным назначением.
+- [ ] Регрессии SG: активная масса → SG derivative → Conversion должна использовать
+  массу, не её производную. Аналогично проверить температуру и последующий T rate.
+  Обычный SG smoothing должен сохранять ожидаемое переключение активной ветки.
+
+### P1. Смена документа и отложенные действия
+
+- [ ] Довести единый lifecycle замены документа: проверка поколения сейчас охватывает
+  лишь часть render-пути. Сброс должен происходить при каждом успешном Open/Replace,
+  включая прямое меню, Import → Open, Discard и Save-before-Open, до обработки
+  подтверждений старого документа, независимо от порядка отрисовки окон.
+- [ ] Сбрасывать либо привязывать к поколению документа все отложенные мутации:
+  удаление колонок/опытов/всего workspace, Append Preview, ожидающую запись файла,
+  сохранённые fit-сессии и готовый `fit_pending_batch`. Не ограничиваться очисткой
+  одного `fit_sessions`; старый reconstruction preview тоже нельзя применять к новому документу.
+- [ ] Регрессия: оставить подтверждение удаления в A → открыть B с совпадающими ID →
+  подтвердить старое действие. В B не должны исчезнуть данные. Повторить все пути
+  открытия, Cancel/ошибку загрузки, подтверждение экспорта и готовую реконструкцию.
+
+### P2. Fit Model: Evaluate и актуальность preview
+
+- [ ] Привязать Evaluate к выбранному в форме опыту и общей X-колонке, а не ко всему
+  глобальному `fit_sessions`. Не терять модели других опытов и не смешивать их;
+  явно показывать ID источника и колонки, которые будут оценены совместно.
+- [ ] При отсутствии моделей текущего источника выдавать понятный отказ, не выполнять
+  оценку единственной сохранившейся модели другого опыта как неявный fallback.
+- [ ] При новом запросе Evaluate инвалидировать предыдущий preview до расчёта;
+  если новый запрос неудачен, старый batch не должен оставаться доступным для Commit
+  под сообщением о неудаче. Изменение источника/параметров должно явно помечать preview
+  устаревшим либо убирать возможность его применения.
+- [ ] Регрессии: fit A и B с одинаковыми t/m → Evaluate B; fit только A → выбрать B →
+  Evaluate; успешный preview → неудачная повторная оценка → Column Manager.
+  Проверять источник batch и отсутствие возможности подтвердить устаревший результат.
+
+### P2. Kinetic Methods: видимость, выбор и границы
+
+- [ ] При публикации Isoconversional не оставлять выбранной скрытую исходную кривую.
+  Если интерфейс переключается на Ea(eta), выбрать новую кривую либо явно снять
+  старый выбор; Quick Actions не должны молча действовать на невидимый опыт.
+- [ ] Не скрывать все исправные графики до успешного создания результирующей кривой.
+  Если данные уже записаны, но построение не удалось, сохранить результат и прежние
+  графики, сообщить post-commit warning вместо впечатления полного отказа метода.
+- [ ] Регрессии: Calculate → видимый результат → Quick Action, а также искусственный
+  отказ построения графика после записи результата; сверить selection/shown и данные.
+- [ ] В `Is this a sublimation?` не превращать координаты прямоугольника в ручные
+  x_min/x_max без явного действия пользователя. Ручные границы имеют приоритет только
+  когда введены пользователем; иначе каждый Calculate использует текущее выделение.
+  Фактически использованный интервал показывать отдельно от редактируемых полей.
+- [ ] Регрессия: Calculate по участку A → новое выделение B → Calculate использует B;
+  очистка выделения возвращает полный диапазон, ручные границы сохраняют приоритет.
+- [ ] Для Kissinger и Combined хранить явную актуальность численных результатов:
+  после изменения входов или неудачного Calculate очищать значения либо помечать их
+  как предыдущий результат с источниками/параметрами. Не оставлять старые Ea/R2
+  визуально текущими рядом с ошибкой нового расчёта.
+
+### P2. Обратная связь, закрытие окон и восстановление графиков
+
+- [ ] В `Mathematics::finalize_success` не удалять все кривые опыта при отказе повторного
+  построения одной кривой. Сохранять корректные соседние графики и UI-состояние;
+  для действительно устаревших кривых использовать точечное обновление/инвалидацию.
+- [ ] Проверить общий post-commit контракт Math: если frame уже изменён, ошибка
+  визуализации не означает отмену фильтра; главное сообщение должно явно сообщать,
+  что данные сохранены и какая именно кривая не построена.
+- [ ] Исправить Close в фильтрах, Settings и Create Synthetic Data: изменение флага
+  кнопкой не должно перезаписываться прежним локальным `open` после `.show(...)`.
+  Проверить также остальные окна с таким шаблоном. Кнопка Close, крестик и Escape
+  должны согласованно закрывать только нужное окно, без изменения данных.
+- [ ] Регрессии: открыть каждое окно → Close → следующий кадр окна не содержит;
+  при ошибке перерисовки фильтра соседние кривые остаются, результат доступен
+  в Column Manager, системный лейбл содержит предупреждение, а не молчание.
+
+### Итоговые gates
+
+- [ ] В первую очередь закрепить три критических сценария: демоданные не могут
+  неожиданно перезаписать рабочий документ; сплайн T(t) использует выбранную T,
+  а не соседнюю m; добавление rolling_m не удаляет исходные измерения.
+- [ ] Все тесты мутаций проверяют адресацию опыта/колонок, точные данные и число строк,
+  активные источники, schema/provenance/History, графики и системное сообщение.
+  Отказы до Commit не меняют состояние; отказы графики после Commit не теряют данные.
+- [ ] По завершении прогнать полный GUI-набор и затронутые доменные регрессии,
+  `cargo check --lib` и `git diff --check`. Старые тесты править только при осознанной
+  смене контракта, не подгонять проверки под неправильное поведение.
+- [ ] Обновить help/tooltips и отметки TODO по реально подтверждённым сценариям.
+  Не удалять предыдущую диагностику: отмечать, какие пункты были переоткрыты и почему.
+
+## Последствия GUI-ревью: целостность данных и соответствие действий
+
+- [x] Привязать Append Preview к выбранному опыту, файлу, binding-полям и ревизии серии;
+  при несовпадении сигнатуры Commit отклоняется и просит построить Preview заново.
+- [x] Уточнить контракт `cut selected`: подпись должна соответствовать включению или
+  удалению выделенного диапазона; передавать конкретную X/Y-колонку выбранной кривой,
+  особенно если у опыта несколько графиков. Проверить границы и сохранность соседних
+  колонок/опытов.
+- [x] Запретить деление на ноль и нечисловые коэффициенты до изменения frame/History;
+  сообщать об отказе в системном сообщении. Проверить оба режима: вся колонка и диапазон.
+- [x] Зафиксировать параметры экспорта до подтверждения перезаписи: формат, путь,
+  эксперимент(ы) и набор колонок должны быть теми же, что пользователь подтвердил.
+- [ ] Сбрасывать отложенные подтверждения/операции старого документа при Open/Replace,
+  чтобы они не могли примениться к новому документу с совпадающими ID.
+  Переоткрыто повторным ревью: текущая проверка поколения пропускает часть путей
+  открытия и не очищает готовый reconstruction batch; см. новый план выше.
+- [x] При отмене Save As очищать ожидающее Open; закрывать окно сохранения только после
+  успешной записи, а не по совпадению пути.
+- [x] Привести `average on column` к выбранной колонке и выбранному X-интервалу;
+  публиковать результат в системном сообщении.
+- [x] Явно определить поведение `ln`/`exp` при включённом режиме диапазона и проверить,
+  что UI не обещает ограничение, которое операция игнорирует.
+- [x] Различать fit-сессии по эксперименту и источникам; показывать ID опыта в таблице
+  сохранённых fit-моделей и не терять модель другого опыта с теми же именами колонок.
+- [x] Настройки калибровки применять атомарно: ошибка записи конфигурации не должна
+  менять коэффициенты, используемые последующими операциями.
+- [x] Оценивать физическую ширину окна фильтра по фактической входной временной сетке,
+  а не по прореженным точкам графика; избегать пересчёта сетки каждый UI-кадр.
+- [x] Повторное открытие Plot Editor должно фокусировать существующую сессию либо
+  явно предупреждать о замене несохранённого оформления.
+- [ ] Добавить egui_kittest регрессии на последовательности действий, а не только
+  наличие кнопок; проверять точные данные, сохранность соседних опытов и отсутствие
+  частичных изменений после ошибки/отмены.
+
 Цель: GUI является основным способом работы с движком экспериментальной кинетики, поэтому
 проверяем не только наличие виджетов, но и завершённые пользовательские маршруты: от загрузки
 данных до преобразования, анализа и сохранения результата. Тесты должны запускать настоящее
@@ -400,3 +588,135 @@ lines with quality metrics and recovered parameters.
   combining parameter rebinding and `CancellationToken`.
 - [ ] Deferred: support condition-specific time intervals if a concrete
   workflow requires equal final temperatures at different heating rates.
+
+## Current Document and Session Persistence
+
+The current document is the complete scientific working set, not the last
+export configuration. Persist the full experiment series and its processing
+state. Undo snapshots and transient plot/view state are intentionally excluded.
+
+- [x] Define a document session state separate from export-dialog state:
+  current document path, saved data revision, and dirty/clean status. Do not
+  infer the document path from the last CSV/TXT export.
+- [x] Track data revisions through centralized `TGASeries` mutations, including
+  experiment/column operations, bindings, imports, and metadata changes. A
+  failed or rolled-back operation must not mark the document dirty.
+- [x] Make `Save` and Ctrl/Cmd+S save the complete current series as typed
+  KiThe CSV: every experiment and every column, including raw and derived
+  columns, experiment metadata, bindings, units, column origin/nature, and
+  provenance. The first Save opens Save As; later Saves reuse only the current
+  document path.
+- [x] Keep `Export CSV` and `Export TXT` as export actions. Their experiment
+  and column selections must never change the current document path or the
+  contents selected by ordinary Save. Rename UI labels/tooltips if needed to
+  make Save versus Export unmistakable.
+- [x] Persist the operation audit history in the typed document format. Store
+  durable operation descriptions and affected-column information; do not
+  attempt to serialize runtime Polars expressions or the bounded undo stack.
+- [x] Archive the active voltage-to-mass calibration coefficients (`k`, `b`)
+  in typed CSV metadata. Restore them only as document metadata; never overwrite
+  the application's current calibration settings when opening a file.
+- [x] Version the typed document metadata format and retain compatibility with
+  existing typed-series CSV files that do not contain persisted operation
+  history.
+- [x] Distinguish Open from Import. Opening a typed series replaces the current
+  document only after an unsaved-changes decision; importing a typed series
+  adds its experiments to the current document. Raw files and typed single-
+  dataset files are imported as experiments and never become the Save target.
+- [x] Add an unsaved-changes guard before replacing/clearing the current
+  document. Offer Save, Discard, and Cancel; Save must complete successfully
+  before a destructive transition proceeds.
+- [x] Confirm overwriting an existing destination. Write to a temporary file
+  in the destination directory, flush/close it, and replace the destination
+  only after serialization succeeds. On failure, keep the previous file intact
+  and report the error in the system-message area.
+- [x] Add domain round-trip tests for complete series data, metadata, bindings,
+  provenance, operation history, and calibration snapshot; verify legacy typed
+  CSV import remains valid, current Settings remain unchanged on open, and undo
+  state is empty after load.
+- [x] Add GUI lifecycle tests for first Save/Save As, repeated Ctrl/Cmd+S,
+  Save after a partial CSV/TXT export, independent export/document paths,
+  dirty-state transitions, Open versus Import, raw import not targeting its
+  source file, overwrite confirmation/cancellation, and failed atomic writes.
+- [x] Update help text and File Manager labels/tooltips to explain document
+  persistence versus data export and the behavior of Open, Import, Save, and
+  Save As.
+
+## Export and File Browser Usability (Previous Implementation)
+
+- [x] Replace the typed-series replace checkbox with explicit Open as document
+  and Add to current series choices; keep Open Document and Import Data as
+  distinct entry points.
+- [x] Allow typed CSV export of a selected subset of experiments, retaining
+  per-experiment column selection and metadata.
+- [x] Show each export column's classification, unit, and active schema binding.
+- [x] Earlier custom-browser iteration added filename search, CSV/TXT filtering,
+  and deterministic sorting. This browser has since been replaced by native
+  file dialogs; see the current plan below.
+- [x] Cover these interaction paths with egui_kittest and rerun the complete
+  experimental-kinetics GUI suite.
+
+## Native File Dialogs and Document Import
+
+- [x] Replace the in-app disk/directory browsers with native OS file dialogs
+  for Open Document, Import Data, Append to Experiment, Save, and Save As/export.
+- [x] Keep the last used directory as a starting location, use task-specific
+  file filters and suggested names, and treat picker cancellation as a no-op.
+- [x] Make Open Document select only typed KiThe series documents. Load the
+  selected series through the existing unsaved-changes guard; never show raw
+  import bindings, thermal-mode fields, or import metadata in this workflow.
+- [x] Keep Import Data as the raw TXT/CSV and typed-dataset workflow. After the
+  native picker returns, preserve the existing binding, thermal metadata, and
+  typed-series Open/Add choices where applicable.
+- [x] Keep Append to Experiment's validation and preview workflow, but select
+  its input file through the native picker.
+- [x] Keep Save and Save As semantics independent from partial CSV/TXT exports.
+  Retain export scope/column controls in KiThe, then obtain the destination via
+  the native save dialog. Preserve overwrite confirmation and atomic writes.
+- [x] Add a test-only path-injection seam so egui_kittest can exercise picker
+  routing, cancellation, typed Open without import controls, raw Import with
+  bindings, append, save/export paths, and overwrite behavior without opening
+  real OS dialogs.
+- [x] Remove obsolete custom browser state/helpers and replace its tests with
+  native-dialog routing and workflow tests. Run the complete experimental
+  kinetics GUI test suite.
+- Verification: `cargo check --lib` passed; all 153 experimental-kinetics GUI
+  tests passed with `--test-threads=1`.
+
+## Fit Model Workflow
+
+- [x] Make **Fit** publish the fitted curve as a new column in the same
+  experiment, plot it immediately, and continue retaining the fitted runtime
+  model for later evaluation. Never overwrite the measured source column.
+- [x] Preserve fit-range and excluded-gap settings when publishing the curve;
+  validate output length and reject conflicting output names without partial
+  frame, provenance, History, or plot changes.
+- [x] Separate the UI sections: fitting data/range and fit quality belong to
+  **Fit**; evaluation-grid settings belong to **Evaluate**. Explain that gap
+  evaluation and extrapolation create a reconstruction preview for a new
+  experiment, rather than being required to inspect an ordinary fit.
+- [x] Keep multi-column reconstruction usable after each Fit publishes its own
+  fitted column; validate common source X/data and reject genuinely stale
+  reconstruction results.
+- [x] Add domain tests for publishing a fitted session, provenance/History,
+  output conflicts, and multi-column evaluation after successive fits.
+- [x] Add egui_kittest coverage proving Fit adds and displays a fitted curve in
+  the source experiment, while Evaluate remains a separate reconstruction step.
+
+## Follow-up GUI Review: Five P1 Regressions
+
+- [x] `Load testing data` now requires explicit confirmation, reports fixture
+  loading errors in the system message, and clears the previous Save target.
+- [x] Move `TGAexample.txt` to the repository root. Packaged builds resolve it
+  beside the executable; development/tests use the manifest root as fallback.
+- [x] Run Splines against the selected curve's exact X/Y columns and use the
+  same Y source when remapping the active signal.
+- [x] Remove implicit whole-frame `trim_null_edges` from GUI Rolling mean so
+  nulls in unrelated columns cannot delete measured source rows.
+- [x] Do not remap derivative Savitzky-Golay output as the active mass or
+  temperature signal; reject in-place derivatives of currently active sources.
+- [x] Observe document-generation changes across the entire render workflow,
+  before stale Column Manager confirmations can be applied. Clear fit sessions,
+  fit results, pending reconstruction batches, and selection state on replacement.
+- [x] Add GUI regressions for the five cases, including direct Open and Discard
+  transitions with a pending reconstruction batch.

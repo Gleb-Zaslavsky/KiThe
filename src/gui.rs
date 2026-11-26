@@ -27,11 +27,11 @@ mod equilibrium_gui_story_tests;
 mod equilibrium_gui_tests;
 pub mod experimental_kinetics_gui;
 pub mod gui_main;
-pub mod network_ivp_gui;
 pub mod gui_plot;
 pub mod gui_solid_ivp;
 pub mod ivp_common;
 pub mod kinetics_gui;
+pub mod network_ivp_gui;
 pub mod reactor_ivp_gui;
 #[cfg(test)]
 mod reactor_ivp_gui_lifecycle_tests;

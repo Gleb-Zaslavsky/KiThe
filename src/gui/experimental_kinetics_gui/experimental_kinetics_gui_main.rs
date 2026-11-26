@@ -148,11 +148,13 @@ impl PlotApp {
             .show(ctx, |ui| {
                 self.render_ui(ui);
             });
+        self.kithe_plot_window.show(ctx);
     }
 
     /// Отрисовка пользовательского интерфейса
     fn render_ui(&mut self, ui: &mut egui::Ui) {
         self.handle_escape(ui.ctx());
+        let document_generation = self.new_experiment_dialog.document_generation();
         // Top drop-down menus (File Manager, Math, Kinetic Methods, ...)
         TopDropDownMenues::top_menus(
             ui,
@@ -170,13 +172,47 @@ impl PlotApp {
             .show_manage_plot_dialog(ui.ctx(), &mut self.model);
         self.new_experiment_dialog
             .show_save_series_dialog(ui.ctx(), &mut self.model);
-        show_column_manager_window(
+        self.new_experiment_dialog
+            .show_unsaved_changes_dialog(ui.ctx(), &mut self.model);
+        self.test_options.show_load_testing_data_confirmation(
+            ui.ctx(),
+            &mut self.model,
+            &mut self.new_experiment_dialog,
+        );
+        if self.new_experiment_dialog.document_generation() != document_generation {
+            self.column_manager_state.clear_pending_confirmations();
+            self.kinetic_methods_state.fit_sessions.clear();
+            self.kinetic_methods_state.fit_pending_batch = None;
+            self.kinetic_methods_state.fit_model_result = None;
+            self.kinetic_methods_state.fit_model_status.clear();
+            self.kinetic_methods_state.fit_model_experiment_id.clear();
+            self.kinetic_methods_state.fit_model_x_col.clear();
+            self.kinetic_methods_state.fit_model_y_col.clear();
+            self.kinetic_methods_state
+                .fit_reconstructed_experiment_id
+                .clear();
+            self.kinetic_methods_state
+                .isoconversional_selected_experiments
+                .clear();
+        }
+        let workspace_cleared = show_column_manager_window(
             ui.ctx(),
             &mut self.model,
             &mut self.column_manager_state,
             &mut self.kinetic_methods_state,
             &mut self.new_experiment_dialog.column_manager_open,
         );
+        if workspace_cleared {
+            self.quick_actions_state = QuickActionPanelState::default();
+            self.new_experiment_dialog = NewExperimentDialogState::new();
+            self.mathematics = Mathematics::new();
+            self.test_options = TestOptions::new();
+            self.kinetic_methods_state = KineticMethodsWindowState::default();
+            self.column_manager_state = ColumnManagerState::default();
+            self.kithe_plot_window = KiThePlotWindowState::default();
+            self.direct_problem_state = DirectProblemDialogState::new();
+            self.keyboard_input_focused_last_frame = false;
+        }
 
         // Show settings window if open
         if self.test_options.is_settings_window_open() {
@@ -238,7 +274,6 @@ impl PlotApp {
             });
         });
 
-        self.kithe_plot_window.show(ui.ctx());
         self.direct_problem_state.show(ui.ctx(), &mut self.model);
         self.keyboard_input_focused_last_frame = ui.ctx().egui_wants_keyboard_input();
     }

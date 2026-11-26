@@ -459,7 +459,6 @@ pub fn evaluate_fit_batch(
             || &session.result.x_col != x_col
             || session.training_range != training_range
             || session.excluded_range != excluded_range
-            || session.source_history_len != first.source_history_len
             || session.source_x != *source_x
         {
             return Err(TGADomainError::InvalidOperation(
@@ -606,7 +605,14 @@ pub fn evaluate_fit_batch(
 
     Ok(FittedEvaluationBatch {
         source_experiment_id: source_id.clone(),
-        source_history_len: first.source_history_len,
+        // Successive fits publish their own output columns and therefore have
+        // different History lengths. The newest session marks the common
+        // source revision; source X/Y equality below remains the data check.
+        source_history_len: sessions
+            .iter()
+            .map(|session| session.source_history_len)
+            .max()
+            .unwrap_or(first.source_history_len),
         x_col: x_col.clone(),
         x_unit: first.x_unit,
         x_nature: first.x_nature,
@@ -1171,6 +1177,75 @@ impl TGASeries {
             y_unit: y_meta.unit,
             y_nature: y_meta.nature,
         })
+    }
+
+    /// Fit one column pair, publish predictions at the source X coordinates,
+    /// and retain the fitted model for later reconstruction/evaluation.
+    ///
+    /// The measured Y column is never modified. A conflicting output name or
+    /// an output vector that cannot align with the frame fails transactionally.
+    pub fn fit_column_and_retain_session(
+        &mut self,
+        request: FitColumnRequest,
+    ) -> Result<FitColumnSession, TGADomainError> {
+        let output_col = request
+            .output_col
+            .clone()
+            .unwrap_or_else(|| default_fit_output_name(request.kinetic_model, &request.y_col));
+        let experiment = self.get_experiment_by_id(&request.experiment_id)?;
+        experiment
+            .dataset
+            .ensure_column_name_is_available(&output_col)?;
+
+        let mut session = self.fit_column_for_evaluation(request)?;
+        let evaluated = session
+            .fitted_model
+            .evaluate_at(&session.source_x)
+            .map_err(|err| {
+                TGADomainError::InvalidOperation(format!(
+                    "Could not evaluate fitted curve for publication: {err}"
+                ))
+            })?;
+        let fitted_y = evaluated
+            .values
+            .column(0)
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        if fitted_y.len() != session.source_x.len()
+            || fitted_y.iter().any(|value| !value.is_finite())
+        {
+            return Err(TGADomainError::InvalidOperation(
+                "Fit produced non-finite values or an output length different from its source X"
+                    .to_string(),
+            ));
+        }
+
+        let result = session.result.clone();
+        let experiment_id = result.experiment_id.clone();
+        let y_unit = session.y_unit;
+        self.try_transform_by_id(&experiment_id, move |experiment| {
+            let dataset = experiment.dataset.add_column_from_vec(
+                &result.output_col,
+                y_unit,
+                ColumnNature::FittedCurve,
+                fitted_y,
+            )?;
+            let mut updated = TGAExperiment {
+                dataset,
+                meta: experiment.meta,
+            };
+            attach_fit_provenance(&mut updated, &result, y_unit);
+            Ok(updated)
+        })?;
+
+        session.source_history_len = self
+            .get_experiment_by_id(&session.result.experiment_id)?
+            .dataset
+            .history_of_operations
+            .vector_of_operations
+            .len();
+        Ok(session)
     }
 
     /// Insert a fully evaluated batch as a new experiment, leaving its source untouched.
@@ -2518,6 +2593,78 @@ mod tests {
     }
 
     #[test]
+    fn published_fit_session_adds_a_visible_curve_column_and_rejects_name_conflicts() {
+        let (mut series, exp_id, _, _) = single_component_fit_series();
+        let original_mass = series
+            .get_experiment_by_id(&exp_id)
+            .unwrap()
+            .dataset
+            .materialize("time", &["mass"])
+            .unwrap()
+            .columns["mass"]
+            .clone();
+
+        let session = series
+            .fit_column_and_retain_session(
+                fit_request(&exp_id, FittingModelName::DecExp).with_output_col("fit_mass"),
+            )
+            .unwrap();
+        let experiment = series.get_experiment_by_id(&exp_id).unwrap();
+        let fitted = experiment
+            .dataset
+            .materialize("time", &["fit_mass"])
+            .unwrap();
+        assert_eq!(fitted.columns["fit_mass"].len(), original_mass.len());
+        assert!(session.result.r2 > 0.999_999);
+        assert_eq!(
+            session.source_history_len,
+            experiment
+                .dataset
+                .history_of_operations
+                .vector_of_operations
+                .len()
+        );
+        assert!(
+            experiment
+                .dataset
+                .column_provenance_text("fit_mass")
+                .unwrap()
+                .contains("fitting(model=DecExp")
+        );
+        assert_eq!(
+            experiment
+                .dataset
+                .materialize("time", &["mass"])
+                .unwrap()
+                .columns["mass"],
+            original_mass
+        );
+
+        let history_before_conflict = experiment
+            .dataset
+            .history_of_operations
+            .vector_of_operations
+            .len();
+        let undo_before_conflict = experiment.dataset.undo_depth();
+        assert!(matches!(
+            series.fit_column_and_retain_session(
+                fit_request(&exp_id, FittingModelName::DecExp).with_output_col("fit_mass"),
+            ),
+            Err(TGADomainError::ColumnAlreadyExists(_))
+        ));
+        let after_conflict = series.get_experiment_by_id(&exp_id).unwrap();
+        assert_eq!(
+            after_conflict
+                .dataset
+                .history_of_operations
+                .vector_of_operations
+                .len(),
+            history_before_conflict
+        );
+        assert_eq!(after_conflict.dataset.undo_depth(), undo_before_conflict);
+    }
+
+    #[test]
     fn series_fit_column_two_exp_handles_component_permutation() {
         let (mut series, exp_id, expected) = two_component_fit_series();
 
@@ -2677,7 +2824,7 @@ mod tests {
             .len();
 
         let temperature = series
-            .fit_column_for_evaluation(
+            .fit_column_and_retain_session(
                 FitColumnRequest::new(
                     "gapped_source",
                     "time",
@@ -2689,7 +2836,7 @@ mod tests {
             )
             .unwrap();
         let mass = series
-            .fit_column_for_evaluation(
+            .fit_column_and_retain_session(
                 FitColumnRequest::new("gapped_source", "time", "mass", FittingModelName::Linear)
                     .with_output_col("mass_rebuilt")
                     .excluding_range(3.0, 7.0),
@@ -2740,16 +2887,24 @@ mod tests {
                 .all(|column| column.values.iter().all(|value| value.is_finite()))
         );
 
-        // Preparing and evaluating a fit is non-mutating; the explicit commit creates a sibling run.
+        // Fit columns are published in the source; reconstruction still creates a sibling run.
         let source = series.get_experiment_by_id("gapped_source").unwrap();
-        assert_eq!(
+        assert!(
             source
                 .dataset
                 .history_of_operations
                 .vector_of_operations
-                .len(),
-            source_history
+                .len()
+                > source_history
         );
+        assert!(
+            source
+                .dataset
+                .schema
+                .columns
+                .contains_key("temperature_rebuilt")
+        );
+        assert!(source.dataset.schema.columns.contains_key("mass_rebuilt"));
         assert_eq!(
             source.dataset.frame.clone().collect().unwrap().height(),
             observed_x.len()

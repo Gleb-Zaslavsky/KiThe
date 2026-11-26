@@ -17,9 +17,9 @@
 //! It is intentionally a report, not a benchmark assertion: hardware,
 //! compiler, and repository changes can legitimately move the numbers.
 
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::time::Duration;
-
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
 #[cfg(feature = "equilibrium-benchmark-prettyprint")]
 use tabled::{Table, Tabled};

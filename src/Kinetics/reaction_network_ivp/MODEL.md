@@ -108,12 +108,16 @@ non-negative, time-ordered,
 and cover the requested interval. There is no clipping or renormalization.
 An opt-in cooperative cancellation token reaches StiffAPI. An aborted run
 returns a typed native error and does not replace the last accepted result.
-When telemetry is enabled, available failed-attempt telemetry and at most 32
-raw native partial samples can be inspected separately. They are diagnostic,
-not accepted physical output; pre-cancelled attempts do not inherit old data.
-RST does not currently expose a trustworthy Radau failure snapshot or a
-per-attempt `solve_id` for intermediate callback failures, so the native
-partial samples are best-effort observations, not a provenance guarantee.
+When telemetry is enabled, the latest RST attempt report can be inspected
+separately from the accepted solution. It carries a `solve_id`, cancellation
+disposition, and optional telemetry, typed callback facts, and at most 32
+partial samples. Partial samples are diagnostic, not accepted physical output;
+pre-cancelled and failed retries do not inherit the prior attempt's identity or
+trajectory. On RST 0.5.2, telemetry and partial-state availability for an
+immediate callback failure is family-dependent: Radau and Backward Euler
+provide them in the tested case, while BDF and LSODE2 provide only the attempt
+identity and typed solve error. Trial time/state and complete callback context
+remain unavailable on some native error paths.
 Symbolic T(t) is checked at interval endpoints and returned samples; endpoint
 checks do not prove positivity at every internal solver trial. Invalid domains
 inside the solve are reported by the native backend, not yet enriched with

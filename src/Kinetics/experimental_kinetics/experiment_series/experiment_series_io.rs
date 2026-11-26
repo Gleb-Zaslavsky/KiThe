@@ -6,8 +6,9 @@
 
 use super::*;
 use crate::Kinetics::experimental_kinetics::column_provenance::ColumnProvenance;
+use crate::Kinetics::experimental_kinetics::experiment_series_main::CalibrationSnapshot;
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{
-    ColumnMeta, ColumnNature, ColumnOrigin, TGADataset, TGASchema, Unit,
+    ColumnMeta, ColumnNature, ColumnOrigin, History, OperationRecord, TGADataset, TGASchema, Unit,
 };
 use polars::prelude::{CsvReader, SerReader, col};
 use std::collections::HashSet;
@@ -24,6 +25,7 @@ struct SeriesExperimentRecord {
     columns: Vec<SeriesColumnRecord>,
     binds: HashMap<String, Option<String>>,
     provenance: HashMap<String, ColumnProvenance>,
+    history: Vec<OperationRecord>,
 }
 
 #[derive(Clone, Debug)]
@@ -35,8 +37,12 @@ struct SeriesColumnRecord {
     nature: Option<ColumnNature>,
 }
 
-pub(super) fn to_csv_series_impl(series: &TGASeries, path: &Path) -> Result<(), TGADomainError> {
-    to_csv_series_selected_impl(series, path, None, None)
+pub(super) fn to_csv_series_impl(
+    series: &TGASeries,
+    path: &Path,
+    calibration: Option<CalibrationSnapshot>,
+) -> Result<(), TGADomainError> {
+    to_csv_series_selected_impl(series, path, None, None, calibration)
 }
 
 pub(super) fn to_csv_series_selected_impl(
@@ -44,6 +50,7 @@ pub(super) fn to_csv_series_selected_impl(
     path: &Path,
     experiment_ids: Option<&[String]>,
     columns_by_experiment: Option<&HashMap<String, Vec<String>>>,
+    calibration: Option<CalibrationSnapshot>,
 ) -> Result<(), TGADomainError> {
     let selected_experiments = if let Some(ids) = experiment_ids {
         if ids.is_empty() {
@@ -118,7 +125,10 @@ pub(super) fn to_csv_series_selected_impl(
         ));
     }
 
-    let mut meta_lines: Vec<String> = Vec::new();
+    let mut meta_lines: Vec<String> = vec![match calibration {
+        Some(calibration) => format!("#META\tCALIBRATION\t{}\t{}", calibration.k, calibration.b),
+        None => "#META\tCALIBRATION\tNONE".to_string(),
+    }];
     let mut export_columns: Vec<Column> = Vec::new();
     let mut header_counts: HashMap<String, usize> = HashMap::new();
 
@@ -137,6 +147,18 @@ pub(super) fn to_csv_series_selected_impl(
             encode_opt_string(exp.meta.comment.as_deref()),
         ));
         meta_lines.push(format!("#META\tLEN\t{}\t{}", exp_id_token, df.height()));
+        let history_json =
+            serde_json::to_string(&exp.dataset.history_of_operations.vector_of_operations)
+                .map_err(|error| {
+                    TGADomainError::InvalidOperation(format!(
+                        "Failed to serialize operation history for '{}': {}",
+                        exp_id, error
+                    ))
+                })?;
+        meta_lines.push(format!(
+            "#META\tHISTORY\t{}\t{}",
+            exp_id_token, history_json
+        ));
 
         for (bind_key, bind_value) in [
             ("time", exp.dataset.schema.time.as_ref()),
@@ -224,7 +246,7 @@ pub(super) fn to_csv_series_selected_impl(
             e
         ))
     })?;
-    writeln!(file, "# format_version=2").map_err(|e| {
+    writeln!(file, "# format_version=4").map_err(|e| {
         TGADomainError::InvalidOperation(format!(
             "Failed to write series CSV '{}': {}",
             path.display(),
@@ -308,6 +330,8 @@ pub(super) fn from_csv_series_impl(path: &Path) -> Result<TGASeries, TGADomainEr
     let mut order: Vec<String> = Vec::new();
     let mut csv_data = String::new();
     let mut format_version = None;
+    let mut calibration_snapshot = None;
+    let mut calibration_metadata_seen = false;
 
     for line in text.lines() {
         if let Some(version) = line.strip_prefix("# format_version=") {
@@ -322,7 +346,7 @@ pub(super) fn from_csv_series_impl(path: &Path) -> Result<TGASeries, TGADomainEr
                     version, error
                 ))
             })?;
-            if !(1..=2).contains(&parsed) {
+            if !(1..=4).contains(&parsed) {
                 return Err(TGADomainError::InvalidOperation(format!(
                     "Unsupported series CSV format version '{}'",
                     parsed
@@ -332,7 +356,13 @@ pub(super) fn from_csv_series_impl(path: &Path) -> Result<TGASeries, TGADomainEr
             continue;
         }
         if let Some(meta_payload) = line.strip_prefix("#META\t") {
-            parse_series_meta_line(meta_payload, &mut records, &mut order)?;
+            parse_series_meta_line(
+                meta_payload,
+                &mut records,
+                &mut order,
+                &mut calibration_snapshot,
+                &mut calibration_metadata_seen,
+            )?;
             continue;
         }
         if line.trim().is_empty() || line.starts_with('#') {
@@ -349,6 +379,7 @@ pub(super) fn from_csv_series_impl(path: &Path) -> Result<TGASeries, TGADomainEr
     };
 
     let mut series = TGASeries::new();
+    series.set_calibration_snapshot(calibration_snapshot);
     for id in order {
         let rec = records.get(&id).cloned().ok_or_else(|| {
             TGADomainError::InvalidOperation(format!(
@@ -428,7 +459,10 @@ pub(super) fn from_csv_series_impl(path: &Path) -> Result<TGASeries, TGADomainEr
                 R2: rec.binds.get("R2").cloned().flatten(),
             },
             oneframeplot: None,
-            history_of_operations: History::new(),
+            history_of_operations: History {
+                vector_of_operations: rec.history.clone(),
+                columns_has_changed: Vec::new(),
+            },
             undo_stack: Default::default(),
             undo_snapshot_latch: false,
         };
@@ -448,6 +482,10 @@ pub(super) fn from_csv_series_impl(path: &Path) -> Result<TGASeries, TGADomainEr
             ),
             false,
         );
+        for operation in &mut dataset.history_of_operations.vector_of_operations {
+            operation.expr = None;
+            operation.reversible = false;
+        }
         let experiment = TGAExperiment {
             dataset,
             meta: ExperimentMeta {
@@ -470,6 +508,8 @@ fn parse_series_meta_line(
     payload: &str,
     records: &mut HashMap<String, SeriesExperimentRecord>,
     order: &mut Vec<String>,
+    calibration_snapshot: &mut Option<CalibrationSnapshot>,
+    calibration_metadata_seen: &mut bool,
 ) -> Result<(), TGADomainError> {
     let parts: Vec<&str> = payload.split('\t').collect();
     if parts.is_empty() {
@@ -477,6 +517,38 @@ fn parse_series_meta_line(
     }
 
     match parts[0] {
+        "CALIBRATION" => {
+            if *calibration_metadata_seen {
+                return Err(TGADomainError::InvalidOperation(
+                    "Series CSV contains duplicate calibration metadata".to_string(),
+                ));
+            }
+            *calibration_metadata_seen = true;
+            match parts.as_slice() {
+                ["CALIBRATION", "NONE"] => *calibration_snapshot = None,
+                ["CALIBRATION", k, b] => {
+                    let k = k.parse::<f64>().map_err(|error| {
+                        TGADomainError::InvalidOperation(format!(
+                            "Invalid calibration slope '{}': {}",
+                            k, error
+                        ))
+                    })?;
+                    let b = b.parse::<f64>().map_err(|error| {
+                        TGADomainError::InvalidOperation(format!(
+                            "Invalid calibration intercept '{}': {}",
+                            b, error
+                        ))
+                    })?;
+                    *calibration_snapshot = Some(CalibrationSnapshot::new(k, b));
+                }
+                _ => {
+                    return Err(TGADomainError::InvalidOperation(format!(
+                        "Invalid CALIBRATION metadata line: '{}'",
+                        payload
+                    )));
+                }
+            }
+        }
         "EXP" => {
             if parts.len() != 5 && parts.len() != 6 {
                 return Err(TGADomainError::InvalidOperation(format!(
@@ -598,6 +670,29 @@ fn parse_series_meta_line(
                 ))
             })?;
             rec.provenance.insert(column_name, provenance);
+        }
+        "HISTORY" => {
+            if parts.len() != 3 {
+                return Err(TGADomainError::InvalidOperation(
+                    "Invalid HISTORY metadata line".to_string(),
+                ));
+            }
+            let id = unescape_meta_field(parts[1])?;
+            if !records.contains_key(&id) {
+                order.push(id.clone());
+            }
+            let rec = records
+                .entry(id.clone())
+                .or_insert_with(|| SeriesExperimentRecord {
+                    id,
+                    ..Default::default()
+                });
+            rec.history = serde_json::from_str(parts[2]).map_err(|error| {
+                TGADomainError::InvalidOperation(format!(
+                    "Invalid operation history metadata for '{}': {}",
+                    rec.id, error
+                ))
+            })?;
         }
         _ => {}
     }

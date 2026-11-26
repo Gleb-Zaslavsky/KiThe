@@ -2,42 +2,55 @@ use crate::gui::experimental_kinetics_gui::model::PlotModel;
 
 use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-const TEST_DATA_PATH: &str = "src/assets/TGAexample.txt";
+fn test_data_path() -> PathBuf {
+    let executable_path = std::env::current_exe().ok();
+    let executable_dir = executable_path.as_deref().and_then(Path::parent);
+    let packaged_path = executable_dir.map(|dir| dir.join("TGAexample.txt"));
+    let development_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("TGAexample.txt");
 
-fn test_data_path() -> &'static Path {
-    Path::new(TEST_DATA_PATH)
+    packaged_path
+        .filter(|path| path.is_file())
+        .unwrap_or(development_path)
 }
 
 pub fn load_model_with_one_curve() -> PlotModel {
+    try_load_model_with_one_curve().expect("failed to load test data")
+}
+
+pub fn try_load_model_with_one_curve() -> Result<PlotModel, String> {
     let mut model = PlotModel::new();
 
     model
-        .push_from_file(test_data_path())
-        .expect("failed to load test data");
+        .push_from_file(&test_data_path())
+        .map_err(|error| error.to_string())?;
     let experiments = model.list_of_experiments();
     let exp_id = experiments
         .first()
         .cloned()
-        .expect("no experiments loaded from fixture");
+        .ok_or_else(|| "No experiments loaded from TGAexample.txt".to_string())?;
 
     model
         .bind_time_of_experiment(&exp_id, "t", Unit::Second)
-        .expect("failed to bind time column");
+        .map_err(|error| error.to_string())?;
     model
         .bind_temperature_of_experiment(&exp_id, "T", Unit::Celsius)
-        .expect("failed to bind temperature column");
+        .map_err(|error| error.to_string())?;
     model
         .bind_mass_of_experiment(&exp_id, "m", Unit::MilliVolt)
-        .expect("failed to bind mass column");
-    model.set_x(&exp_id, "t").expect("failed to set x column");
-    model.set_y(&exp_id, "T").expect("failed to set y column");
+        .map_err(|error| error.to_string())?;
+    model
+        .set_x(&exp_id, "t")
+        .map_err(|error| error.to_string())?;
+    model
+        .set_y(&exp_id, "T")
+        .map_err(|error| error.to_string())?;
     model
         .create_points_for_curve(&exp_id)
-        .expect("failed to create points for curve");
+        .map_err(|error| error.to_string())?;
 
-    model
+    Ok(model)
 }
 
 pub fn load_model_with_two_curves() -> PlotModel {
@@ -166,6 +179,48 @@ mod tests {
         harness.run();
     }
 
+    fn queue_open_path(harness: &mut Harness<PlotAppTestState>, path: impl Into<PathBuf>) {
+        harness
+            .state_mut()
+            .app
+            .new_experiment_dialog
+            .test_next_open_file = Some(path.into());
+    }
+
+    fn queue_save_path(harness: &mut Harness<PlotAppTestState>, path: impl Into<PathBuf>) {
+        harness
+            .state_mut()
+            .app
+            .new_experiment_dialog
+            .test_next_save_file = Some(path.into());
+    }
+
+    fn pending_fit_batch(
+        experiment_id: &str,
+    ) -> crate::Kinetics::experimental_kinetics::math::fitting::FittedEvaluationBatch {
+        use crate::Kinetics::experimental_kinetics::math::fitting::{
+            FitEvaluationMode, FittedEvaluationBatch,
+        };
+        use crate::Kinetics::experimental_kinetics::one_experiment_dataset::{ColumnNature, Unit};
+
+        FittedEvaluationBatch {
+            source_experiment_id: experiment_id.to_string(),
+            source_history_len: 0,
+            x_col: "t".to_string(),
+            x_unit: Unit::Second,
+            x_nature: ColumnNature::Time,
+            mode: FitEvaluationMode::Extrapolate {
+                start: 10.0,
+                end: 20.0,
+                points: 2,
+            },
+            evaluation_x: vec![10.0, 20.0],
+            source_x: vec![],
+            x_values: vec![10.0, 20.0],
+            columns: vec![],
+        }
+    }
+
     fn assert_filter_output_via_ui(menu_item: &str, output_column: &str) {
         let mut model = load_model_with_one_curve();
         model.select_curve(0);
@@ -206,6 +261,36 @@ mod tests {
             .expect("system clock before UNIX_EPOCH")
             .as_nanos();
         std::env::temp_dir().join(format!("kithe_{prefix}_{stamp}"))
+    }
+
+    fn export_column_label(model: &PlotModel, experiment_id: &str, column: &str) -> String {
+        let experiment = model.series.get_experiment_by_id(experiment_id).unwrap();
+        let metadata = &experiment.dataset.schema.columns[column];
+        let nature = match metadata.nature {
+            crate::Kinetics::experimental_kinetics::one_experiment_dataset::ColumnNature::Time => {
+                "Time"
+            }
+            crate::Kinetics::experimental_kinetics::one_experiment_dataset::ColumnNature::Mass => {
+                "Mass"
+            }
+            _ => "Unclassified",
+        };
+        let active_binding = if experiment.dataset.schema.time.as_deref() == Some(column) {
+            Some("time")
+        } else if experiment.dataset.schema.mass.as_deref() == Some(column) {
+            Some("mass")
+        } else if experiment.dataset.schema.temperature.as_deref() == Some(column) {
+            Some("temperature")
+        } else {
+            None
+        };
+        let binding = active_binding
+            .map(|role| format!(" · active: {role}"))
+            .unwrap_or_default();
+        format!(
+            "{experiment_id}::{column} · {nature} · {}{binding}",
+            metadata.unit
+        )
     }
 
     fn non_isothermal_series_config() -> AdvancedTGAConfig {
@@ -296,6 +381,28 @@ mod tests {
     }
 
     #[test]
+    fn tier2_hovering_plot_updates_cursor_coordinate_readout() {
+        let app = PlotApp::for_testing(load_model_with_one_curve());
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            let heading_rect = harness.get_by_label("Data Plot").rect();
+            let plot_point = egui::pos2(heading_rect.center().x, heading_rect.bottom() + 200.0);
+            harness.hover_at(plot_point);
+            harness.run();
+
+            assert!(
+                harness
+                    .state()
+                    .app
+                    .model
+                    .interaction
+                    .pointer_coordinate
+                    .is_some()
+            );
+        });
+    }
+
+    #[test]
     fn tier1_smoke_top_menu_buttons_and_entries_clickable() {
         let app = PlotApp::for_testing(load_model_with_one_curve());
         with_plot_app_harness(app, |harness| {
@@ -339,12 +446,37 @@ mod tests {
                 );
             }
             harness.get_by_label("Import Data");
+            harness.get_by_label("Open Document");
             harness.get_by_label("Append to experiment");
             harness.get_by_label("Manage Plot");
-            harness.get_by_label("Save As CSV");
-            harness.get_by_label("Save As TXT");
+            harness.get_by_label("Save As");
+            harness.get_by_label("Export CSV");
+            harness.get_by_label("Export TXT");
             harness.get_by_label("Plot Editor");
             assert!(harness.query_by_label("Save As Image").is_none());
+        });
+    }
+
+    #[test]
+    fn tier3_plot_editor_action_opens_editor_with_loaded_data() {
+        let app = PlotApp::for_testing(load_model_with_one_curve());
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            click_menu_entry(harness, "File Manager", "Plot Editor");
+
+            let state = &harness.state().app;
+            assert!(
+                state.kithe_plot_window.open,
+                "Plot Editor did not open; system message: {}",
+                state.model.message
+            );
+            assert!(state.model.message.contains("Plot Redactor window opened"));
+            harness.run();
+            assert!(harness.state().app.kithe_plot_window.open);
+            assert!(
+                harness.query_by_label("Files").is_some(),
+                "the Plot Editor window should render its own Files menu"
+            );
         });
     }
 
@@ -369,12 +501,12 @@ mod tests {
 
         let app = PlotApp::for_testing(model);
         with_plot_app_state_harness(app, |harness| {
+            harness.set_size(egui::vec2(800.0, 600.0));
             harness.state_mut().app.new_experiment_dialog.current_dir =
                 continuation_dir.path().to_path_buf();
+            queue_open_path(harness, continuation.clone());
             harness.run();
             click_menu_entry(harness, "File Manager", "Append to experiment");
-            harness.get_by_label("[F] continuation.csv").click();
-            harness.run();
             harness.get_by_label("Preview continuation").click();
             harness.run();
             assert!(
@@ -435,17 +567,27 @@ mod tests {
 
         let app = PlotApp::for_testing(model);
         with_plot_app_state_harness(app, |harness| {
+            harness.set_size(egui::vec2(800.0, 600.0));
             harness.state_mut().app.new_experiment_dialog.current_dir =
                 continuation_dir.path().to_path_buf();
+            queue_open_path(harness, continuation.clone());
             harness.run();
             click_menu_entry(harness, "File Manager", "Append to experiment");
-            harness.get_by_label("[F] continuation.csv").click();
-            harness
-                .get_by_label("Replace the original experiment")
-                .click();
+            let replace_checkbox = harness.get_by_label("Replace the original experiment");
+            replace_checkbox.scroll_to_me();
+            replace_checkbox.focus();
+            harness.key_press(egui::Key::Space);
             harness.run();
+            assert!(harness.query_by_label("New experiment ID:").is_none());
             harness.get_by_label("Preview continuation").click();
             harness.run();
+            assert!(
+                harness
+                    .query_by_label("Replace source with combined experiment")
+                    .is_some(),
+                "continuation preview failed: {:?}",
+                harness.state().app.new_experiment_dialog.last_error
+            );
             harness
                 .get_by_label("Replace source with combined experiment")
                 .click();
@@ -567,22 +709,64 @@ mod tests {
     // ============================================================================
 
     #[test]
-    fn tier2_file_manager_import_entry_opens_shared_import_dialog() {
+    fn tier2_import_picker_cancellation_does_not_open_import_form() {
         let app = PlotApp::for_testing(load_model_with_one_curve());
         with_plot_app_state_harness(app, |harness| {
             harness.run();
             click_menu_entry(harness, "File Manager", "Import Data");
-            assert!(harness.state().app.new_experiment_dialog.open);
+            assert!(!harness.state().app.new_experiment_dialog.open);
         });
     }
 
     #[test]
-    fn tier2_file_manager_import_data_opens_import_dialog() {
+    fn tier2_import_picker_selection_opens_raw_import_form() {
+        let source = tempfile::NamedTempFile::new().unwrap();
+        fs::write(source.path(), "t,m\n0,1\n1,0.9\n").unwrap();
         let app = PlotApp::for_testing(PlotModel::new());
         with_plot_app_state_harness(app, |harness| {
             harness.run();
+            queue_open_path(harness, source.path().to_path_buf());
             click_menu_entry(harness, "File Manager", "Import Data");
             assert!(harness.state().app.new_experiment_dialog.open);
+            assert_eq!(
+                harness
+                    .state()
+                    .app
+                    .new_experiment_dialog
+                    .selected_file
+                    .as_deref(),
+                Some(source.path())
+            );
+            harness.get_by_label("Experiment ID:");
+            harness.get_by_label("Thermal regime:");
+        });
+    }
+
+    #[test]
+    fn tier3_open_document_loads_typed_series_without_import_controls() {
+        let source = load_model_with_one_curve();
+        let expected_id = source.list_of_experiments()[0].clone();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        source.to_csv_series(file.path()).unwrap();
+
+        let mut app = PlotApp::for_testing(PlotModel::new());
+        app.kinetic_methods_state.fit_pending_batch = Some(pending_fit_batch("old_document"));
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            queue_open_path(harness, file.path().to_path_buf());
+            click_menu_entry(harness, "File Manager", "Open Document");
+
+            let state = harness.state();
+            assert_eq!(
+                state.app.model.list_of_experiments(),
+                vec![expected_id.clone()]
+            );
+            assert!(!state.app.new_experiment_dialog.open);
+            assert!(state.app.kinetic_methods_state.fit_pending_batch.is_none());
+            assert!(harness.query_by_label("Thermal regime:").is_none());
+            assert!(harness.query_by_label("bind t").is_none());
+            assert!(harness.query_by_label("bind T").is_none());
+            assert!(harness.query_by_label("bind m").is_none());
         });
     }
 
@@ -591,8 +775,23 @@ mod tests {
         let app = PlotApp::for_testing(load_model_with_one_curve());
         with_plot_app_state_harness(app, |harness| {
             harness.run();
-            click_menu_entry(harness, "File Manager", "Save");
+            click_menu_entry(harness, "File Manager", "Save *");
             assert!(harness.state().app.new_experiment_dialog.save_series_open);
+        });
+    }
+
+    #[test]
+    fn tier2_save_picker_cancellation_keeps_save_as_open_without_writing() {
+        let app = PlotApp::for_testing(load_model_with_one_curve());
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            click_menu_entry(harness, "File Manager", "Save As");
+            harness.get_by_label("Save Document").click();
+            harness.run();
+
+            let dialog = &harness.state().app.new_experiment_dialog;
+            assert!(dialog.save_series_open);
+            assert!(dialog.last_error.is_none());
         });
     }
 
@@ -617,21 +816,31 @@ mod tests {
         app.new_experiment_dialog.current_dir = export_dir.clone();
         with_plot_app_state_harness(app, |harness| {
             harness.run();
-            click_menu_entry(harness, "File Manager", "Save As CSV");
+            click_menu_entry(harness, "File Manager", "Export CSV");
             harness.get_by_label("One experiment").click();
             harness.run();
             harness.get_by_label("Clear column selection").click();
             harness.run();
             for column in ["t", "m"] {
-                let label = format!("{experiment_id}::{column}");
+                let label = export_column_label(&harness.state().app.model, &experiment_id, column);
                 harness.get_by_label(&label).click();
                 harness.run();
             }
+            queue_save_path(harness, export_dir.join("series_export.csv"));
             harness.get_by_label("Export").click();
             harness.run();
 
             let path = export_dir.join("series_export.csv");
-            assert!(path.is_file());
+            assert!(
+                path.is_file(),
+                "export failed: {:?}, open={}, files={:?}",
+                harness.state().app.new_experiment_dialog.last_error,
+                harness.state().app.new_experiment_dialog.save_series_open,
+                fs::read_dir(&export_dir)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect::<Vec<_>>()
+            );
             let mut restored = PlotModel::new();
             restored.from_csv_series(&path).unwrap();
             assert_eq!(restored.list_of_experiments(), vec![experiment_id.clone()]);
@@ -656,6 +865,338 @@ mod tests {
     }
 
     #[test]
+    fn tier3_typed_csv_exports_selected_experiments_with_column_metadata_labels() {
+        let mut model = load_model_with_one_curve();
+        let base = model.series.experiments()[0].clone();
+        model
+            .series
+            .push(base.clone().with_id("condition_two"))
+            .unwrap();
+        model.series.push(base.with_id("condition_three")).unwrap();
+        let ids = model.list_of_experiments();
+        let export_dir = unique_temp_dir("typed_selected_experiments");
+        fs::create_dir_all(&export_dir).unwrap();
+
+        let mut app = PlotApp::for_testing(model);
+        app.new_experiment_dialog.current_dir = export_dir.clone();
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            click_menu_entry(harness, "File Manager", "Export CSV");
+            harness.get_by_label("Selected experiments").click();
+            harness.run();
+            harness.get_by_label("condition_two").click();
+            harness.run();
+            queue_save_path(harness, export_dir.join("series_export.csv"));
+            harness.get_by_label("Export").click();
+            harness.run();
+
+            let path = export_dir.join("series_export.csv");
+            assert!(
+                path.is_file(),
+                "export failed: {:?}, open={}, files={:?}",
+                harness.state().app.new_experiment_dialog.last_error,
+                harness.state().app.new_experiment_dialog.save_series_open,
+                fs::read_dir(&export_dir)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect::<Vec<_>>()
+            );
+            let mut restored = PlotModel::new();
+            restored.from_csv_series(&path).unwrap();
+            assert_eq!(
+                restored.list_of_experiments(),
+                vec![ids[0].clone(), "condition_two".to_string()]
+            );
+            assert!(
+                !restored
+                    .list_of_experiments()
+                    .contains(&"condition_three".to_string())
+            );
+        });
+        fs::remove_dir_all(export_dir).unwrap();
+    }
+
+    #[test]
+    fn tier3_excel_export_writes_selected_experiment_and_columns_to_workbook() {
+        use calamine::{Data, Reader, Xlsx, open_workbook};
+
+        let mut model = load_model_with_one_curve();
+        let base_id = model.list_of_experiments()[0].clone();
+        let mut base = model.series.experiments()[0].clone();
+        base.dataset.frame = base.dataset.frame.with_columns([polars::prelude::when(
+            polars::prelude::col("t").eq(polars::prelude::lit(0.0)),
+        )
+        .then(polars::prelude::lit(polars::prelude::NULL))
+        .otherwise(polars::prelude::col("m"))
+        .alias("m")]);
+        model.series.push(base.with_id("condition_two")).unwrap();
+        let export_dir = unique_temp_dir("excel_export");
+        fs::create_dir_all(&export_dir).unwrap();
+
+        let mut app = PlotApp::for_testing(model);
+        app.new_experiment_dialog.current_dir = export_dir.clone();
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            click_menu_entry(harness, "File Manager", "Export Excel");
+            harness.get_by_label("Excel XLSX").click();
+            harness.run();
+            harness.get_by_label("Selected experiments").click();
+            harness.run();
+            harness.get_by_label("Clear experiment selection").click();
+            harness.run();
+            harness.get_by_label("condition_two").click();
+            harness.run();
+            harness.get_by_label("Clear column selection").click();
+            harness.run();
+            for column in ["t", "m"] {
+                let label =
+                    export_column_label(&harness.state().app.model, "condition_two", column);
+                harness.get_by_label(&label).click();
+                harness.run();
+            }
+            queue_save_path(harness, export_dir.join("series_export.xlsx"));
+            harness.get_by_label("Export").click();
+            harness.run();
+
+            let path = export_dir.join("series_export.xlsx");
+            assert!(
+                path.is_file(),
+                "export failed: {:?}",
+                harness.state().app.new_experiment_dialog.last_error
+            );
+            assert!(
+                fs::metadata(&path).unwrap().len() > 0,
+                "Excel export should not produce an empty file"
+            );
+
+            let mut workbook: Xlsx<_> = open_workbook(&path).expect("valid XLSX workbook");
+            assert_eq!(workbook.sheet_names(), vec!["condition_two"]);
+            let sheet = workbook.worksheet_range("condition_two").unwrap();
+            let headers = [
+                sheet.get_value((0, 0)).unwrap().to_string(),
+                sheet.get_value((0, 1)).unwrap().to_string(),
+            ];
+            assert_eq!(
+                headers
+                    .iter()
+                    .filter(|header| header.as_str() == "t")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                headers
+                    .iter()
+                    .filter(|header| header.as_str() == "m")
+                    .count(),
+                1
+            );
+            assert_eq!(sheet.get_value((0, 2)), None);
+
+            let time_column = headers.iter().position(|header| header == "t").unwrap() as u32;
+            let mass_column = headers.iter().position(|header| header == "m").unwrap() as u32;
+            assert_eq!(sheet.get_value((1, time_column)), Some(&Data::Float(0.0)));
+            assert_eq!(sheet.get_value((1, mass_column)), Some(&Data::Empty));
+            assert_eq!(sheet.get_value((2, time_column)), Some(&Data::Float(1.0)));
+            assert_eq!(sheet.get_value((2, mass_column)), Some(&Data::Float(-6.18)));
+            assert!(!workbook.sheet_names().contains(&base_id));
+        });
+        fs::remove_dir_all(export_dir).unwrap();
+    }
+
+    #[test]
+    fn tier3_open_typed_document_prompts_before_discarding_unsaved_series() {
+        let model = load_model_with_one_curve();
+        let original_id = model.list_of_experiments()[0].clone();
+        let mut replacement = model.series.clone();
+        replacement
+            .set_experiment_id(0, "replacement_document")
+            .unwrap();
+
+        let import_dir = unique_temp_dir("open_document_guard");
+        fs::create_dir_all(&import_dir).unwrap();
+        let document_path = import_dir.join("replacement.csv");
+        replacement.to_csv_series(&document_path).unwrap();
+
+        let mut app = PlotApp::for_testing(model);
+        app.kinetic_methods_state.fit_pending_batch = Some(pending_fit_batch(&original_id));
+        app.new_experiment_dialog.current_dir = import_dir.clone();
+        app.new_experiment_dialog.selected_file = Some(document_path.clone());
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            queue_open_path(harness, document_path.clone());
+            click_menu_entry(harness, "File Manager", "Import Data");
+            harness.get_by_label("Open as document").click();
+            harness.run();
+            harness.get_by_label("Open series").click();
+            harness.run();
+
+            harness.get_by_label("Unsaved document changes");
+            harness.get_by_label("Discard").click();
+            harness.run();
+            assert_eq!(
+                harness.state().app.model.list_of_experiments(),
+                vec!["replacement_document"]
+            );
+            assert!(
+                harness
+                    .state()
+                    .app
+                    .model
+                    .series
+                    .get_experiment_by_id(&original_id)
+                    .is_err()
+            );
+            assert!(
+                harness
+                    .state()
+                    .app
+                    .kinetic_methods_state
+                    .fit_pending_batch
+                    .is_none()
+            );
+        });
+        fs::remove_dir_all(import_dir).unwrap();
+    }
+
+    #[test]
+    fn tier3_import_typed_series_adds_experiments_without_changing_document_target() {
+        let model = load_model_with_one_curve();
+        let original_id = model.list_of_experiments()[0].clone();
+        let mut imported = model.series.clone();
+        imported.set_experiment_id(0, "imported_typed").unwrap();
+
+        let import_dir = unique_temp_dir("typed_series_add");
+        fs::create_dir_all(&import_dir).unwrap();
+        let import_path = import_dir.join("incoming_series.csv");
+        imported.to_csv_series(&import_path).unwrap();
+
+        let mut app = PlotApp::for_testing(model);
+        app.new_experiment_dialog.current_dir = import_dir.clone();
+        app.new_experiment_dialog.selected_file = Some(import_path.clone());
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            queue_open_path(harness, import_path.clone());
+            click_menu_entry(harness, "File Manager", "Import Data");
+            harness.get_by_label("Add to current series").click();
+            harness.run();
+            harness
+                .get_by_label("Import series into current document")
+                .click();
+            harness.run();
+
+            assert_eq!(
+                harness.state().app.model.list_of_experiments(),
+                vec![original_id.clone(), "imported_typed".to_string()]
+            );
+            harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
+            harness.run();
+            harness.get_by_label("Save Document");
+            assert!(harness.state().app.new_experiment_dialog.save_series_open);
+        });
+        fs::remove_dir_all(import_dir).unwrap();
+    }
+
+    #[test]
+    fn tier3_open_guard_cancel_preserves_series_and_save_commits_before_open() {
+        let model = load_model_with_one_curve();
+        let original_id = model.list_of_experiments()[0].clone();
+        let mut replacement = model.series.clone();
+        replacement
+            .set_experiment_id(0, "replacement_document")
+            .unwrap();
+
+        let import_dir = unique_temp_dir("open_document_save_guard");
+        fs::create_dir_all(&import_dir).unwrap();
+        let document_path = import_dir.join("replacement.csv");
+        replacement.to_csv_series(&document_path).unwrap();
+
+        let mut app = PlotApp::for_testing(model);
+        app.new_experiment_dialog.current_dir = import_dir.clone();
+        app.new_experiment_dialog.selected_file = Some(document_path.clone());
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            queue_open_path(harness, document_path.clone());
+            click_menu_entry(harness, "File Manager", "Import Data");
+            harness.get_by_label("Open as document").click();
+            harness.run();
+            harness.get_by_label("Open series").click();
+            harness.run();
+            harness.get_by_label("Cancel").click();
+            harness.run();
+            assert_eq!(
+                harness.state().app.model.list_of_experiments(),
+                vec![original_id.clone()]
+            );
+
+            harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
+            harness.run();
+            queue_save_path(harness, import_dir.join("kinetics_session.csv"));
+            harness.get_by_label("Save Document").click();
+            harness.run();
+            let saved_current_path = import_dir.join("kinetics_session.csv");
+            assert!(saved_current_path.is_file());
+
+            harness.state_mut().app.model.series.mark_changed();
+            queue_open_path(harness, document_path.clone());
+            click_menu_entry(harness, "File Manager", "Import Data");
+            harness.get_by_label("Open as document").click();
+            harness.run();
+            harness.get_by_label("Open series").click();
+            harness.run();
+            harness.get_by_label("Save").click();
+            harness.run();
+
+            assert_eq!(
+                harness.state().app.model.list_of_experiments(),
+                vec!["replacement_document"]
+            );
+            let saved_before_open = crate::Kinetics::experimental_kinetics::experiment_series_main::TGASeries::from_csv_series(&saved_current_path).unwrap();
+            assert!(saved_before_open.get_experiment_by_id(&original_id).is_ok());
+            assert!(
+                saved_before_open
+                    .get_experiment_by_id("replacement_document")
+                    .is_err()
+            );
+        });
+        fs::remove_dir_all(import_dir).unwrap();
+    }
+
+    #[test]
+    fn tier3_save_as_confirms_overwrite_and_cancel_keeps_existing_file() {
+        let model = load_model_with_one_curve();
+        let export_dir = unique_temp_dir("session_overwrite");
+        fs::create_dir_all(&export_dir).unwrap();
+        let target = export_dir.join("kinetics_session.csv");
+        fs::write(&target, "keep this file until confirmed").unwrap();
+
+        let mut app = PlotApp::for_testing(model);
+        app.new_experiment_dialog.current_dir = export_dir.clone();
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            click_menu_entry(harness, "File Manager", "Save As");
+            queue_save_path(harness, target.clone());
+            harness.get_by_label("Save Document").click();
+            harness.run();
+            harness.get_by_label("Confirm overwrite");
+            harness.get_by_label("Cancel").click();
+            harness.run();
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "keep this file until confirmed"
+            );
+
+            queue_save_path(harness, target.clone());
+            harness.get_by_label("Save Document").click();
+            harness.run();
+            harness.get_by_label("Replace file").click();
+            harness.run();
+            let content = fs::read_to_string(&target).unwrap();
+            assert!(content.starts_with("# KiThe TGA Series"));
+        });
+        fs::remove_dir_all(export_dir).unwrap();
+    }
+
+    #[test]
     fn tier3_plain_txt_exports_only_selected_columns_without_kithe_metadata() {
         let model = load_model_with_one_curve();
         let experiment_id = model.list_of_experiments()[0].clone();
@@ -665,14 +1206,22 @@ mod tests {
         app.new_experiment_dialog.current_dir = export_dir.clone();
         with_plot_app_state_harness(app, |harness| {
             harness.run();
-            click_menu_entry(harness, "File Manager", "Save As TXT");
+            click_menu_entry(harness, "File Manager", "Export TXT");
             harness.get_by_label("Clear column selection").click();
             harness.run();
             for column in ["t", "m"] {
-                let label = format!("{experiment_id}::{column}");
+                let label = export_column_label(&harness.state().app.model, &experiment_id, column);
                 harness.get_by_label(&label).click();
                 harness.run();
             }
+            queue_save_path(
+                harness,
+                export_dir.join(if experiment_id.trim().is_empty() {
+                    "experiment_export.txt".to_string()
+                } else {
+                    format!("{experiment_id}_export.txt")
+                }),
+            );
             harness.get_by_label("Export").click();
             harness.run();
 
@@ -705,7 +1254,7 @@ mod tests {
         app.new_experiment_dialog.current_dir = export_dir.clone();
         with_plot_app_state_harness(app, |harness| {
             harness.run();
-            click_menu_entry(harness, "File Manager", "Save As TXT");
+            click_menu_entry(harness, "File Manager", "Export TXT");
             harness.get_by_label("Clear column selection").click();
             harness.run();
             harness.get_by_label("Export").click();
@@ -730,17 +1279,16 @@ mod tests {
     fn tier3_import_file_through_gui_creates_bound_experiment_and_curves() {
         let import_dir = unique_temp_dir("gui_import");
         fs::create_dir_all(&import_dir).expect("failed to create import fixture directory");
-        fs::copy(test_data_path(), import_dir.join("TGAexample.txt"))
-            .expect("failed to copy raw import fixture");
+        let raw_path = import_dir.join("TGAexample.txt");
+        fs::copy(test_data_path(), &raw_path).expect("failed to copy raw import fixture");
+        let raw_contents = fs::read(&raw_path).unwrap();
 
         let mut app = PlotApp::for_testing(PlotModel::new());
         app.new_experiment_dialog.current_dir = import_dir.clone();
         with_plot_app_state_harness(app, |harness| {
             harness.run();
+            queue_open_path(harness, raw_path.clone());
             click_menu_entry(harness, "File Manager", "Import Data");
-
-            harness.get_by_label("[F] TGAexample.txt").click();
-            harness.run();
             harness.get_by_label("Import experiment").click();
             harness.run();
 
@@ -764,8 +1312,41 @@ mod tests {
                 "successful import should create default curves"
             );
             assert!(!harness.state().app.new_experiment_dialog.open);
+
+            harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
+            harness.run();
+            harness.get_by_label("Save Document");
+            assert_eq!(fs::read(&raw_path).unwrap(), raw_contents);
         });
         fs::remove_dir_all(import_dir).expect("failed to remove import fixture directory");
+    }
+
+    #[test]
+    fn tier3_import_error_stays_visible_above_the_action_in_compact_dialog() {
+        let mut app = PlotApp::for_testing(PlotModel::new());
+        app.new_experiment_dialog.open = true;
+        app.new_experiment_dialog.last_error = Some("Initial validation error".to_string());
+
+        with_plot_app_state_harness(app, |harness| {
+            harness.set_size(egui::vec2(800.0, 600.0));
+            harness.run();
+            assert!(harness.query_by_label("Initial validation error").is_some());
+
+            harness.get_by_label("Import experiment").click();
+            harness.run();
+
+            assert_eq!(
+                harness
+                    .state()
+                    .app
+                    .new_experiment_dialog
+                    .last_error
+                    .as_deref(),
+                Some("Please select a file")
+            );
+            assert!(harness.query_by_label("Please select a file").is_some());
+            assert!(harness.query_by_label("Import experiment").is_some());
+        });
     }
 
     #[test]
@@ -788,9 +1369,8 @@ mod tests {
         with_plot_app_state_harness(app, |harness| {
             harness.state_mut().app.new_experiment_dialog.current_dir = import_dir.clone();
             harness.run();
+            queue_open_path(harness, import_dir.join("custom_headers.txt"));
             click_menu_entry(harness, "File Manager", "Import Data");
-            harness.get_by_label("[F] custom_headers.txt").click();
-            harness.run();
 
             for (label, column) in [
                 ("bind t", "elapsed"),
@@ -826,9 +1406,8 @@ mod tests {
                     .is_none()
             );
 
+            queue_open_path(harness, import_dir.join("custom_headers.txt"));
             click_menu_entry(harness, "File Manager", "Import Data");
-            harness.get_by_label("[F] custom_headers.txt").click();
-            harness.run();
             harness.get_by_label("Experiment ID:").focus();
             harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
             harness.run();
@@ -863,9 +1442,8 @@ mod tests {
             }));
             let plots_before_duplicate = model.plots.len();
 
+            queue_open_path(harness, import_dir.join("custom_headers.txt"));
             click_menu_entry(harness, "File Manager", "Import Data");
-            harness.get_by_label("[F] custom_headers.txt").click();
-            harness.run();
             harness.get_by_label("Import experiment").click();
             harness.run();
 
@@ -876,6 +1454,30 @@ mod tests {
         });
 
         fs::remove_dir_all(import_dir).expect("failed to remove temporary import fixture");
+    }
+
+    #[test]
+    fn tier3_native_picker_selection_routes_raw_file_into_import_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = dir.path().join("raw.txt");
+        fs::write(&raw, "elapsed probe signal\n0 300 10\n1 301 9\n").unwrap();
+        let app = PlotApp::for_testing(PlotModel::new());
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            queue_open_path(harness, raw.clone());
+            click_menu_entry(harness, "File Manager", "Import Data");
+            harness.get_by_label("Experiment ID:");
+            assert_eq!(
+                harness
+                    .state()
+                    .app
+                    .new_experiment_dialog
+                    .selected_file
+                    .as_deref(),
+                Some(raw.as_path())
+            );
+            assert!(harness.query_by_label("Search files:").is_none());
+        });
     }
 
     #[test]
@@ -1120,7 +1722,16 @@ mod tests {
                     && curve.x_name == "eta"
                     && curve.y_name == "Ea"
                     && curve.is_shown()
+                    && curve.selected
             }));
+            assert!(
+                model
+                    .plots
+                    .iter()
+                    .filter(|curve| curve.experiment_id != result_id)
+                    .all(|curve| !curve.is_shown() && !curve.selected)
+            );
+            assert_eq!(model.get_experiment_by_selected_curve().unwrap(), result_id);
         });
 
         let app = PlotApp::for_testing(PlotModel::new());
@@ -1149,6 +1760,56 @@ mod tests {
             assert!(harness.state().app.model.list_of_experiments().is_empty());
             assert!(harness.state().app.model.plots.is_empty());
         });
+    }
+
+    #[test]
+    fn isoconversional_plot_failure_does_not_commit_result_or_hide_existing_curves() {
+        let mut model = PlotModel::new();
+        model
+            .generate_synthetic_data_from_config(&non_isothermal_series_config())
+            .expect("failed to generate isoconversional fixtures");
+        let ids = model.list_of_experiments();
+        for id in &ids {
+            let t_end = last_value_for(&model, id, "time");
+            model
+                .conversion_for_experiment(id.clone(), t_end, "eta")
+                .unwrap();
+            model.derive_deta_dt(id, Some("deta_dt")).unwrap();
+        }
+        model.set_x(&ids[0], "time").unwrap();
+        model.set_y(&ids[0], "mass").unwrap();
+        model.create_points_for_curve(&ids[0]).unwrap();
+        model.select_curve(0);
+        let original_plots = model.plots.clone();
+
+        let method = IsoconversionalKineticMethod {
+            method: IsoconversionalMethod::OFW,
+        };
+        let view = model
+            .create_kinetic_data_view_for_method(None, &method.method)
+            .unwrap();
+        let result = method.compute(&view).unwrap();
+        model.settings.set_n_points(Some(0));
+
+        assert!(
+            model
+                .push_isoconversional_result(&result, "unplottable_result")
+                .is_err()
+        );
+        assert_eq!(model.list_of_experiments(), ids);
+        assert_eq!(model.plots.len(), original_plots.len());
+        assert!(
+            model
+                .plots
+                .iter()
+                .zip(original_plots)
+                .all(
+                    |(after, before)| after.experiment_id == before.experiment_id
+                        && after.shown == before.shown
+                        && after.selected == before.selected
+                        && after.points == before.points
+                )
+        );
     }
 
     #[test]
@@ -1243,6 +1904,119 @@ mod tests {
                 "diagnostic must not mutate experiments other than the selected one"
             );
         });
+    }
+
+    #[test]
+    fn tier3_sublimation_plot_selection_does_not_overwrite_manual_bounds() {
+        let mut model = PlotModel::new();
+        model
+            .generate_synthetic_data_from_config(&non_isothermal_series_config())
+            .expect("failed to generate sublimation fixture");
+        let selected_id = model.list_of_experiments()[0].clone();
+        let t_end = last_value_for(&model, &selected_id, "time");
+        model
+            .conversion_for_experiment(selected_id.clone(), t_end, "eta")
+            .unwrap();
+        model.derive_deta_dt(&selected_id, Some("deta_dt")).unwrap();
+        let eta = model
+            .series
+            .get_experiment_by_id(&selected_id)
+            .unwrap()
+            .dataset
+            .materialize("time", &["eta"])
+            .unwrap()
+            .columns["eta"]
+            .clone();
+        let eta_min = eta.iter().copied().fold(f64::INFINITY, f64::min);
+        let eta_max = eta.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        model.set_x(&selected_id, "eta").unwrap();
+        model.set_y(&selected_id, "deta_dt").unwrap();
+        model.create_points_for_curve(&selected_id).unwrap();
+        model.select_curve(model.plots.len() - 1);
+        model.plots.last_mut().unwrap().highlighted = true;
+        model.interaction.selection_rect = Some(SelectionRect::new([eta_min, 0.0], [eta_max, 1.0]));
+
+        let mut app = PlotApp::for_testing(model);
+        app.kinetic_methods_state.sublimation_check_open = true;
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            harness.get_by_label("Calculate").click();
+            harness.run();
+
+            let state = harness.state();
+            assert!(
+                state
+                    .app
+                    .kinetic_methods_state
+                    .sublimation_status
+                    .starts_with("Done."),
+                "selection-based calculation failed: {}",
+                state.app.kinetic_methods_state.sublimation_status
+            );
+            assert!(state.app.kinetic_methods_state.sublimation_x_min.is_empty());
+            assert!(state.app.kinetic_methods_state.sublimation_x_max.is_empty());
+        });
+    }
+
+    #[test]
+    fn tier2_failed_kinetic_recalculation_clears_old_result_values() {
+        let app = PlotApp::for_testing(PlotModel::new());
+        let state = PlotAppTestState { app, open: true };
+        let mut harness = Harness::builder()
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, state: &mut PlotAppTestState| state.app.show(ui.ctx(), &mut state.open),
+                state,
+            );
+        {
+            harness.run();
+            click_menu_entry(&mut harness, "Kinetic Methods", "Kissinger");
+            {
+                let state = &mut harness.state_mut().app.kinetic_methods_state;
+                state.kissinger_ea_kj = Some(123.0);
+                state.kissinger_r2 = Some(0.99);
+            }
+            harness.get_by_label("Calculate").click();
+            harness.run();
+            assert!(
+                harness
+                    .state()
+                    .app
+                    .kinetic_methods_state
+                    .kissinger_ea_kj
+                    .is_none()
+            );
+            assert!(
+                harness
+                    .state()
+                    .app
+                    .kinetic_methods_state
+                    .kissinger_r2
+                    .is_none()
+            );
+            harness.state_mut().app.kinetic_methods_state.kissinger_open = false;
+            harness.run();
+
+            click_menu_entry(
+                &mut harness,
+                "Kinetic Methods",
+                "Combined Kinetics Analysis",
+            );
+            {
+                let state = &mut harness.state_mut().app.kinetic_methods_state;
+                state.combined_result_n = Some(1.0);
+                state.combined_result_m = Some(2.0);
+                state.combined_result_ea_kj = Some(123.0);
+                state.combined_result_r2 = Some(0.99);
+            }
+            harness.get_by_label("Calculate").click();
+            harness.run();
+            let state = &harness.state().app.kinetic_methods_state;
+            assert!(state.combined_result_n.is_none());
+            assert!(state.combined_result_m.is_none());
+            assert!(state.combined_result_ea_kj.is_none());
+            assert!(state.combined_result_r2.is_none());
+        }
     }
 
     #[test]
@@ -1362,13 +2136,13 @@ mod tests {
     }
 
     #[test]
-    fn tier2_keyboard_shortcuts_open_import_and_save_dialog() {
+    fn tier2_keyboard_open_cancel_does_not_show_import_form_and_save_opens_dialog() {
         let app = PlotApp::for_testing(load_model_with_one_curve());
         with_plot_app_state_harness(app, |harness| {
             harness.run();
             harness.key_press_modifiers(Modifiers::COMMAND, Key::O);
             harness.run();
-            assert!(harness.state().app.new_experiment_dialog.open);
+            assert!(!harness.state().app.new_experiment_dialog.open);
 
             harness.state_mut().app.new_experiment_dialog.open = false;
             harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
@@ -1466,6 +2240,57 @@ mod tests {
     }
 
     #[test]
+    fn tier3_column_manager_delete_all_requires_confirmation_and_clears_workspace() {
+        let mut model = load_model_with_one_curve();
+        let experiment_id = model.list_of_experiments()[0].clone();
+        model.select_curve(0);
+        model.set_active_mass_source_for_experiment(&experiment_id, "m");
+        model.interaction.selection_rect = Some(SelectionRect::new([1.0, 2.0], [3.0, 4.0]));
+        let app = PlotApp::for_testing(model);
+
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            harness.get_by_label("Column Manager").click();
+            harness.run();
+
+            harness.get_by_label("Delete All").click();
+            harness.run();
+            harness.get_by_label("DELETE ALL WORKSPACE DATA?");
+            assert_eq!(
+                harness.state().app.model.list_of_experiments(),
+                vec![experiment_id.clone()]
+            );
+
+            harness.get_by_label("Cancel").click();
+            harness.run();
+            assert_eq!(
+                harness.state().app.model.list_of_experiments(),
+                vec![experiment_id.clone()]
+            );
+
+            harness.get_by_label("Delete All").click();
+            harness.run();
+            harness.get_by_label("DELETE EVERYTHING").click();
+            harness.run();
+
+            let model = &harness.state().app.model;
+            assert!(model.list_of_experiments().is_empty());
+            assert!(model.plots.is_empty());
+            assert!(model.get_selected_curve_index().is_none());
+            assert!(model.interaction.selection_rect.is_none());
+            assert!(model.active_mass_sources.is_empty());
+            assert!(model.message.contains("Workspace cleared"));
+            assert!(
+                !harness
+                    .state()
+                    .app
+                    .new_experiment_dialog
+                    .column_manager_open
+            );
+        });
+    }
+
+    #[test]
     fn tier3_column_manager_more_actions_explain_effects_on_hover() {
         let app = PlotApp::for_testing(load_model_with_one_curve());
         with_plot_app_state_harness(app, |harness| {
@@ -1505,7 +2330,7 @@ mod tests {
     }
 
     #[test]
-    fn tier2_keyboard_shortcuts_do_not_intercept_text_field_input() {
+    fn tier2_import_shortcuts_do_not_intercept_text_field_input() {
         let mut model = load_model_with_one_curve();
         model.select_curve(0);
         let id = model.list_of_experiments()[0].clone();
@@ -1516,8 +2341,10 @@ mod tests {
         let app = PlotApp::for_testing(model);
         with_plot_app_state_harness(app, |harness| {
             harness.run();
-            harness.key_press_modifiers(Modifiers::COMMAND, Key::O);
-            harness.run();
+            let raw = tempfile::NamedTempFile::new().unwrap();
+            fs::write(raw.path(), "t,T,m\n0,300,10\n1,301,9\n").unwrap();
+            queue_open_path(harness, raw.path().to_path_buf());
+            click_menu_entry(harness, "File Manager", "Import Data");
             harness.get_by_label("Experiment ID:").focus();
             harness.run();
 
@@ -1581,8 +2408,9 @@ mod tests {
     }
 
     #[test]
-    fn tier3_keyboard_save_reuses_last_export_configuration() {
-        let app = PlotApp::for_testing(load_model_with_one_curve());
+    fn tier3_keyboard_save_creates_full_document_independently_of_exports() {
+        let model = load_model_with_one_curve();
+        let app = PlotApp::for_testing(model);
         with_plot_app_state_harness(app, |harness| {
             let export_dir = unique_temp_dir("gui_keyboard_save");
             fs::create_dir_all(&export_dir).expect("failed to create export dir");
@@ -1591,13 +2419,19 @@ mod tests {
 
             harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
             harness.run();
-            harness.get_by_label("Export").click();
+            queue_save_path(harness, export_dir.join("kinetics_session.csv"));
+            harness.get_by_label("Save Document").click();
             harness.run();
 
-            let export_file = export_dir.join("series_export.csv");
+            let export_file = export_dir.join("kinetics_session.csv");
             assert!(
                 export_file.exists(),
-                "first save should create the CSV file"
+                "first save should create the full typed document; dialog error: {:?}; dir: {:?}",
+                harness.state().app.new_experiment_dialog.last_error,
+                fs::read_dir(&export_dir)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect::<Vec<_>>()
             );
             assert!(!harness.state().app.new_experiment_dialog.save_series_open);
 
@@ -1605,7 +2439,7 @@ mod tests {
             harness.run();
             assert!(
                 !harness.state().app.new_experiment_dialog.save_series_open,
-                "subsequent save should write directly to the last saved path"
+                "subsequent save should write directly to the document path"
             );
 
             let _ = fs::remove_file(&export_file);
@@ -1624,7 +2458,15 @@ mod tests {
             harness.state_mut().app.new_experiment_dialog.current_dir = export_dir.clone();
             harness.run();
 
-            click_menu_entry(harness, "File Manager", "Save As TXT");
+            click_menu_entry(harness, "File Manager", "Export TXT");
+            queue_save_path(
+                harness,
+                export_dir.join(if experiment_id.trim().is_empty() {
+                    "experiment_export.txt".to_string()
+                } else {
+                    format!("{experiment_id}_export.txt")
+                }),
+            );
             harness.get_by_label("Export").click();
             harness.run();
             let export_file = export_dir.join(if experiment_id.trim().is_empty() {
@@ -1632,12 +2474,30 @@ mod tests {
             } else {
                 format!("{experiment_id}_export.txt")
             });
-            assert!(export_file.is_file());
+            assert!(
+                export_file.is_file(),
+                "export error: {:?}; files: {:?}",
+                harness.state().app.new_experiment_dialog.last_error,
+                fs::read_dir(&export_dir)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect::<Vec<_>>()
+            );
             assert!(!fs::read_to_string(&export_file).unwrap().contains("#META"));
 
             harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
             harness.run();
-            assert!(!harness.state().app.new_experiment_dialog.save_series_open);
+            assert!(harness.state().app.new_experiment_dialog.save_series_open);
+            queue_save_path(harness, export_dir.join("kinetics_session.csv"));
+            harness.get_by_label("Save Document").click();
+            harness.run();
+            assert!(export_file.is_file());
+            let session_path = export_dir.join("kinetics_session.csv");
+            assert!(session_path.is_file());
+            let restored = crate::Kinetics::experimental_kinetics::experiment_series_main::TGASeries::from_csv_series(&session_path).unwrap();
+            let restored_columns = restored.list_of_columns(&experiment_id).unwrap();
+            assert!(restored_columns.contains(&"T".to_string()));
+            assert!(restored_columns.contains(&"m".to_string()));
             let text = fs::read_to_string(&export_file).unwrap();
             assert!(!text.contains("#META"));
             assert!(!text.contains("KiThe TGA"));
@@ -1704,6 +2564,8 @@ mod tests {
             harness.get_by_label("Tolerance:");
             harness.get_by_label("Max iter:");
             harness.get_by_label("Initial guess:");
+            harness.get_by_label("Fit data");
+            harness.get_by_label("Evaluate on a new X grid");
             harness.get_by_label("Fit");
             harness.get_by_label("Model equations").click();
             harness.run();
@@ -1733,6 +2595,13 @@ mod tests {
         let mut model = load_model_with_one_curve();
         model.series.set_experiment_id(0, "fit_workflow").unwrap();
         model.plots[0].experiment_id = "fit_workflow".to_string();
+        model
+            .create_experiment_from_columns_for_experiment(
+                "fit_workflow",
+                "another_experiment".to_string(),
+                &["t", "T", "m"],
+            )
+            .unwrap();
         model.select_curve(0);
         let source_height = model
             .series
@@ -1787,19 +2656,60 @@ mod tests {
                     .app
                     .kinetic_methods_state
                     .fit_model_status
-                    .starts_with("Fit stored.")
+                    .starts_with("Fit added '")
             );
 
             let model = &state.app.model;
             let experiment = model.series.get_experiment_by_id("fit_workflow").unwrap();
             assert!(
-                !experiment
+                experiment
                     .dataset
                     .schema
                     .columns
                     .contains_key("fit_temperature")
             );
+            assert!(model.plots.iter().any(|curve| {
+                curve.experiment_id == "fit_workflow"
+                    && curve.x_name == "t"
+                    && curve.y_name == "fit_temperature"
+                    && curve.shown
+                    && !curve.points.is_empty()
+            }));
             assert_eq!(state.app.kinetic_methods_state.fit_sessions.len(), 1);
+
+            {
+                let fit_state = &mut harness.state_mut().app.kinetic_methods_state;
+                fit_state.fit_pending_batch = Some(pending_fit_batch("fit_workflow"));
+                fit_state.fit_model_experiment_id = "another_experiment".to_string();
+                fit_state.fit_model_x_col = "t".to_string();
+            }
+            harness
+                .get_by_label("Evaluate fitted columns")
+                .scroll_to_me();
+            harness.run();
+            harness.get_by_label("Evaluate fitted columns").click();
+            harness.run();
+            assert!(
+                harness
+                    .state()
+                    .app
+                    .kinetic_methods_state
+                    .fit_pending_batch
+                    .is_none()
+            );
+            assert!(
+                harness
+                    .state()
+                    .app
+                    .kinetic_methods_state
+                    .fit_model_status
+                    .contains("no fitted model for experiment 'another_experiment'")
+            );
+            harness
+                .state_mut()
+                .app
+                .kinetic_methods_state
+                .fit_model_experiment_id = "fit_workflow".to_string();
 
             {
                 let fit_state = &mut harness.state_mut().app.kinetic_methods_state;
@@ -1814,6 +2724,10 @@ mod tests {
                 2
             );
 
+            harness
+                .get_by_label("Evaluate fitted columns")
+                .scroll_to_me();
+            harness.run();
             harness.get_by_label("Evaluate fitted columns").click();
             harness.run();
             assert!(
@@ -1824,19 +2738,21 @@ mod tests {
                     .fit_pending_batch
                     .is_some()
             );
+            let experiment = harness
+                .state()
+                .app
+                .model
+                .series
+                .get_experiment_by_id("fit_workflow")
+                .unwrap();
             assert!(
-                !harness
-                    .state()
-                    .app
-                    .model
-                    .series
-                    .get_experiment_by_id("fit_workflow")
-                    .unwrap()
+                experiment
                     .dataset
                     .schema
                     .columns
                     .contains_key("fit_temperature")
             );
+            assert!(experiment.dataset.schema.columns.contains_key("fit_mass"));
 
             harness
                 .state_mut()
@@ -1892,8 +2808,7 @@ mod tests {
                     .dataset
                     .schema
                     .columns
-                    .get("fit_temperature")
-                    .is_none()
+                    .contains_key("fit_temperature")
             );
         });
     }
@@ -1958,10 +2873,19 @@ mod tests {
                     .dataset
                     .schema
                     .columns
-                    .get("mass_rebuilt")
-                    .is_none()
+                    .contains_key("mass_rebuilt")
             );
+            assert!(harness.state().app.model.plots.iter().any(|curve| {
+                curve.experiment_id == "gap_workflow"
+                    && curve.y_name == "mass_rebuilt"
+                    && curve.shown
+                    && !curve.points.is_empty()
+            }));
 
+            harness
+                .get_by_label("Evaluate fitted columns")
+                .scroll_to_me();
+            harness.run();
             harness.get_by_label("Evaluate fitted columns").click();
             harness.run();
             let batch = harness
@@ -2006,8 +2930,7 @@ mod tests {
                     .dataset
                     .schema
                     .columns
-                    .get("temperature_rebuilt")
-                    .is_none()
+                    .contains_key("temperature_rebuilt")
             );
             let reconstructed = state
                 .app
@@ -2236,7 +3159,7 @@ mod tests {
             click_menu_entry(harness, "Math", " Savitzky Golay");
             assert!(
                 harness
-                    .query_by_label_contains("Plot-based estimate:")
+                    .query_by_label_contains("Input-grid width:")
                     .is_some(),
                 "SG window should show the time-equivalent of its sample window"
             );
@@ -2603,12 +3526,13 @@ mod tests {
         let selected = model.get_selected_curve_index().unwrap();
         let after_points = &model.plots[selected].points;
         assert!(!after_points.is_empty());
-        assert!(after_points.len() < points.len());
         assert!(
             after_points
                 .iter()
                 .all(|p| p[0] <= x_min + 1e-9 || p[0] >= x_max - 1e-9)
         );
+        assert!(after_points.first().unwrap()[0] < x_min);
+        assert!(after_points.last().unwrap()[0] > x_max);
     }
 
     #[test]
@@ -3116,9 +4040,9 @@ mod tests {
     #[test]
     fn test_experiment_loading() {
         let mut model = PlotModel::new();
-        let test_file = Path::new("src/assets/TGAexample.txt");
+        let test_file = test_data_path();
 
-        let result = model.push_from_file(test_file);
+        let result = model.push_from_file(&test_file);
         assert!(
             result.is_ok(),
             "Failed to load test data: {:?}",
@@ -3134,8 +4058,8 @@ mod tests {
         use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
 
         let mut model = PlotModel::new();
-        let test_file = Path::new("src/assets/TGAexample.txt");
-        model.push_from_file(test_file).unwrap();
+        let test_file = test_data_path();
+        model.push_from_file(&test_file).unwrap();
 
         let experiments = model.list_of_experiments();
         let exp_id = &experiments[0];
@@ -3155,8 +4079,8 @@ mod tests {
         use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
 
         let mut model = PlotModel::new();
-        let test_file = Path::new("src/assets/TGAexample.txt");
-        model.push_from_file(test_file).unwrap();
+        let test_file = test_data_path();
+        model.push_from_file(&test_file).unwrap();
 
         let experiments = model.list_of_experiments();
         let exp_id = &experiments[0];
@@ -3186,8 +4110,8 @@ mod tests {
         use crate::Kinetics::experimental_kinetics::one_experiment_dataset::Unit;
 
         let mut model = PlotModel::new();
-        let test_file = Path::new("src/assets/TGAexample.txt");
-        model.push_from_file(test_file).unwrap();
+        let test_file = test_data_path();
+        model.push_from_file(&test_file).unwrap();
 
         let experiments = model.list_of_experiments();
         let exp_id = &experiments[0];
@@ -3530,6 +4454,9 @@ mod tests {
         with_plot_app_state_harness(app, |harness| {
             harness.run();
             click_menu_entry(harness, "Test Options", "Load testing data");
+            harness.get_by_label("Replace workspace with test data?");
+            harness.get_by_label("Replace with test data").click();
+            harness.run();
 
             let ids = harness.state().app.model.list_of_experiments();
             assert!(
@@ -3537,6 +4464,152 @@ mod tests {
                 "Load testing data should populate the model"
             );
         });
+    }
+
+    #[test]
+    fn tier3_loading_test_data_requires_confirmation_and_clears_save_target() {
+        let export_dir = unique_temp_dir("test_data_save_target");
+        fs::create_dir_all(&export_dir).unwrap();
+        let target = export_dir.join("working_document.csv");
+        let app = PlotApp::for_testing(load_model_with_one_curve());
+        let mut app = app;
+        app.new_experiment_dialog.current_dir = export_dir.clone();
+
+        with_plot_app_state_harness(app, |harness| {
+            harness.run();
+            click_menu_entry(harness, "File Manager", "Save *");
+            queue_save_path(harness, target.clone());
+            harness.get_by_label("Save Document").click();
+            harness.run();
+            let saved_bytes = fs::read(&target).unwrap();
+
+            click_menu_entry(harness, "Test Options", "Load testing data");
+            harness.get_by_label("Replace workspace with test data?");
+            assert_eq!(fs::read(&target).unwrap(), saved_bytes);
+            harness.get_by_label("Replace with test data").click();
+            harness.run();
+
+            assert_eq!(fs::read(&target).unwrap(), saved_bytes);
+            harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
+            harness.run();
+            harness.get_by_label("Save Document");
+            assert!(harness.state().app.new_experiment_dialog.save_series_open);
+            assert!(harness.state().app.model.message.contains("Save As"));
+        });
+        fs::remove_dir_all(export_dir).unwrap();
+    }
+
+    #[test]
+    fn spline_uses_the_selected_curve_axes_not_the_experiment_plot_binding() {
+        use RustedSciThe::numerical::data_processing::splines::SplineKind;
+
+        let mut model = load_model_with_two_curves();
+        let experiment_id = model.list_of_experiments()[0].clone();
+        let temperature_curve = model
+            .plots
+            .iter()
+            .position(|curve| curve.y_name == "T")
+            .unwrap();
+        model.select_curve(temperature_curve);
+        assert_eq!(model.this_is_y().unwrap(), "T");
+
+        model
+            .splines_for_selected_as("time_spline", 100, SplineKind::Linear, Some("T_spline"))
+            .unwrap();
+
+        let block = model
+            .series
+            .get_experiment_by_id(&experiment_id)
+            .unwrap()
+            .dataset
+            .materialize("time_spline", &["T_spline"])
+            .unwrap();
+        assert!(block.columns["T_spline"][0] > 100.0);
+        assert_eq!(
+            model
+                .active_temperature_source_for_experiment(&experiment_id)
+                .unwrap(),
+            "T_spline"
+        );
+    }
+
+    #[test]
+    fn rolling_mean_does_not_trim_source_rows_because_another_column_has_null_edges() {
+        let mut model = load_model_with_one_curve();
+        let experiment_id = model.list_of_experiments()[0].clone();
+        model.select_curve(0);
+        model
+            .sg_filter_column_for_selected_as("T", 11, 3, 1, 1.0, Some("dT_dt"))
+            .unwrap();
+        let rows_before = model
+            .series
+            .get_experiment_by_id(&experiment_id)
+            .unwrap()
+            .dataset
+            .materialize("t", &["m"])
+            .unwrap()
+            .grid
+            .len();
+
+        model
+            .rolling_mean_for_selected_as("m", 11, Some("rolling_m"))
+            .unwrap();
+        let rows_after = model
+            .series
+            .get_experiment_by_id(&experiment_id)
+            .unwrap()
+            .dataset
+            .materialize("t", &["m"])
+            .unwrap()
+            .grid
+            .len();
+
+        assert_eq!(rows_after, rows_before);
+        assert!(
+            model
+                .list_of_columns(&experiment_id)
+                .unwrap()
+                .contains(&"rolling_m".to_string())
+        );
+    }
+
+    #[test]
+    fn savitzky_golay_derivative_does_not_become_active_mass_and_rejects_in_place_overwrite() {
+        let mut model = load_model_with_one_curve();
+        let experiment_id = model.list_of_experiments()[0].clone();
+        model.select_curve(0);
+        let mass_before = model
+            .series
+            .get_experiment_by_id(&experiment_id)
+            .unwrap()
+            .dataset
+            .materialize("t", &["m"])
+            .unwrap()
+            .columns["m"][10];
+
+        model
+            .sg_filter_column_for_selected_as("m", 11, 3, 1, 1.0, Some("dm_dt"))
+            .unwrap();
+        assert_eq!(
+            model
+                .active_mass_source_for_experiment(&experiment_id)
+                .unwrap(),
+            "m"
+        );
+        assert!(
+            model
+                .sg_filter_column_for_selected_as("m", 11, 3, 1, 1.0, Some("m"))
+                .is_err()
+        );
+        let mass_after = model
+            .series
+            .get_experiment_by_id(&experiment_id)
+            .unwrap()
+            .dataset
+            .materialize("t", &["m"])
+            .unwrap()
+            .columns["m"][10];
+        assert_eq!(mass_after, mass_before);
     }
 
     #[test]
@@ -3548,7 +4621,7 @@ mod tests {
                 .state_mut()
                 .app
                 .model
-                .push_from_file(test_data_path())
+                .push_from_file(&test_data_path())
                 .expect("failed to import raw fixture");
 
             let id = harness.state().app.model.list_of_experiments()[0].clone();
@@ -3576,12 +4649,13 @@ mod tests {
                     .expect("failed to convert time unit");
             }
 
-            click_menu_entry(harness, "File Manager", "Save As CSV");
+            click_menu_entry(harness, "File Manager", "Export CSV");
 
             let export_dir = unique_temp_dir("gui_export");
             fs::create_dir_all(&export_dir).expect("failed to create export dir");
             harness.state_mut().app.new_experiment_dialog.current_dir = export_dir.clone();
             harness.run();
+            queue_save_path(harness, export_dir.join("series_export.csv"));
             harness.get_by_label("Export").click();
             harness.run();
 
@@ -3715,7 +4789,7 @@ mod tests {
         let second_id = "second_experiment";
         model
             .push_from_file_with_meta(
-                test_data_path(),
+                &test_data_path(),
                 ExperimentMeta {
                     id: second_id.to_string(),
                     ..Default::default()

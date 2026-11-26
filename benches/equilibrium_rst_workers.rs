@@ -24,10 +24,10 @@
 //! is the evidence table: facade/workflow/backend denominators are separate,
 //! and RST callback time is kept separate from its remaining solver overhead.
 
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::env;
+use std::hint::black_box;
 use std::time::{Duration, Instant};
-
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tabled::{Table, Tabled};
 
 use KiThe::Thermodynamics::ChemEquilibrium::prelude::*;

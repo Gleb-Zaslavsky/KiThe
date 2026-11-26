@@ -420,6 +420,19 @@ impl TGAExperiment {
         })
     }
 
+    pub fn cut_range_inverse_on_column(
+        self,
+        column: &str,
+        from: f64,
+        to: f64,
+    ) -> Result<Self, TGADomainError> {
+        let dataset = self.dataset.cut_range_inverse_on_column(column, from, to);
+        Ok(Self {
+            dataset,
+            meta: self.meta,
+        })
+    }
+
     pub fn min_distance_to_oneframeplot_point(
         &self,
         point: (f64, f64),

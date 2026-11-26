@@ -35,6 +35,13 @@ fn display_experiment_id(id: &str) -> &str {
     if id.is_empty() { "(unnamed)" } else { id }
 }
 
+fn data_column_width(available_width: f32, column_count: usize) -> f32 {
+    if column_count == 0 {
+        return 120.0;
+    }
+    (available_width / column_count as f32).clamp(88.0, 220.0)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MessageKind {
     Info,
@@ -70,7 +77,16 @@ impl SystemMessage {
 
 #[cfg(test)]
 mod sample_format_tests {
-    use super::{MessageKind, SystemMessage, format_sample_value};
+    use super::{MessageKind, SystemMessage, data_column_width, format_sample_value};
+
+    #[test]
+    fn table_column_width_adapts_to_number_of_columns() {
+        let few_columns = data_column_width(800.0, 2);
+        let many_columns = data_column_width(800.0, 12);
+
+        assert!(few_columns > many_columns);
+        assert_eq!(many_columns, 88.0);
+    }
 
     #[test]
     fn small_nonzero_values_remain_visible() {
@@ -127,6 +143,20 @@ mod sample_format_tests {
         state.set_message_if_changed(MessageKind::Error, "Column sample refresh failed");
         assert_eq!(state.message_revision, revision);
     }
+
+    #[test]
+    fn replacing_document_clears_all_pending_delete_confirmations() {
+        let mut state = super::ColumnManagerState::default();
+        state.confirm_drop_experiment = Some("same_id".to_string());
+        state.confirm_drop_columns = vec![("same_id".to_string(), "mass".to_string())];
+        state.confirm_delete_all = true;
+
+        state.clear_pending_confirmations();
+
+        assert!(state.confirm_drop_experiment.is_none());
+        assert!(state.confirm_drop_columns.is_empty());
+        assert!(!state.confirm_delete_all);
+    }
 }
 /// State for Column Manager window
 /// Stores cached column samples and tracks user selections
@@ -156,6 +186,7 @@ pub struct ColumnManagerState {
     /// Confirmation dialog state for experiment dropping
     confirm_drop_experiment: Option<String>,
     confirm_drop_columns: Vec<(String, String)>,
+    confirm_delete_all: bool,
     details_tab: DetailsTab,
 }
 
@@ -169,6 +200,12 @@ enum DetailsTab {
 }
 
 impl ColumnManagerState {
+    pub(crate) fn clear_pending_confirmations(&mut self) {
+        self.confirm_drop_experiment = None;
+        self.confirm_drop_columns.clear();
+        self.confirm_delete_all = false;
+    }
+
     fn set_message(&mut self, kind: MessageKind, text: impl Into<String>) {
         self.system_message = Some(SystemMessage::new(kind, text));
         self.message_revision = self.message_revision.wrapping_add(1);
@@ -210,6 +247,12 @@ impl ColumnManagerState {
             && !self.confirm_drop_columns.is_empty()
         {
             self.confirm_drop_columns.clear();
+            return true;
+        }
+        if layer.id == egui::Id::unique(Some("Confirm Delete All Workspace"))
+            && self.confirm_delete_all
+        {
+            self.confirm_delete_all = false;
             return true;
         }
         if layer.id == egui::Id::unique(Some("Edit Metadata")) && self.metadata_window_open {
@@ -370,6 +413,18 @@ impl ColumnManagerState {
                     ui.close();
                 }
             });
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if ui
+                        .button("Delete All")
+                        .on_hover_text("Clear every experiment, plot, and selection from the workspace after an explicit confirmation.")
+                        .clicked()
+                    {
+                        self.confirm_delete_all = true;
+                    }
+                },
+            );
         });
 
         if let Some(message) = &self.system_message {
@@ -676,6 +731,7 @@ impl ColumnManagerState {
         }
 
         let show_row_index = !self.compare_mode;
+        let column_width = data_column_width(ui.available_width(), all_columns.len());
         ui.push_id("column_manager_table", |ui| {
             egui::ScrollArea::both()
                 .id_salt("column_manager_table_scroll")
@@ -684,10 +740,13 @@ impl ColumnManagerState {
                 .show(ui, |ui| {
                     let mut table = TableBuilder::new(ui).striped(true);
                     if show_row_index {
-                        table = table.column(Column::auto().resizable(true));
+                        table = table.column(Column::initial(58.0).resizable(true));
                     }
                     table
-                        .columns(Column::auto().resizable(true), all_columns.len())
+                        .columns(
+                            Column::initial(column_width).resizable(false),
+                            all_columns.len(),
+                        )
                         .header(40.0, |mut header| {
                             if show_row_index {
                                 header.col(|ui| {
@@ -1269,8 +1328,9 @@ pub fn show_column_manager_window(
     state: &mut ColumnManagerState,
     methods_state: &mut KineticMethodsWindowState,
     open: &mut bool,
-) {
+) -> bool {
     state.show_metadata_window(ctx, model);
+    let mut clear_workspace = false;
     // state.system_message.clear();
     egui::Window::new("Column Manager")
         .open(open)
@@ -1399,6 +1459,45 @@ pub fn show_column_manager_window(
                         });
                     });
             }
+
+            if state.confirm_delete_all {
+                egui::Window::new("Confirm Delete All Workspace")
+                    .collapsible(false)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.heading(
+                            egui::RichText::new("DELETE ALL WORKSPACE DATA?")
+                                .size(24.0)
+                                .strong()
+                                .color(egui::Color32::LIGHT_RED),
+                        );
+                        ui.label(format!(
+                            "This will permanently remove {} experiment(s) and {} plotted curve(s).",
+                            model.list_of_experiments().len(),
+                            model.plots.len(),
+                        ));
+                        ui.label("This action cannot be undone.");
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_sized(
+                                    [230.0, 48.0],
+                                    egui::Button::new(
+                                        egui::RichText::new("DELETE EVERYTHING")
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::DARK_RED),
+                                )
+                                .clicked()
+                            {
+                                clear_workspace = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                state.confirm_delete_all = false;
+                            }
+                        });
+                    });
+            }
             if confirm_columns {
                 state.commit_drop_columns(model);
             }
@@ -1463,5 +1562,14 @@ pub fn show_column_manager_window(
                 .show(ui, |ui| state.render_table(ui, model));
             state.render_selected_column_details(ui, model);
         });
+    if clear_workspace {
+        model.clear_workspace();
+        model.message = "Workspace cleared. All experiments and plots were removed.".to_string();
+        *state = ColumnManagerState::default();
+        *methods_state = KineticMethodsWindowState::default();
+        *open = false;
+        return true;
+    }
     state.publish_message_to_main_status(model);
+    false
 }

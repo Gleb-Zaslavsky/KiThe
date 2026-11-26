@@ -467,8 +467,40 @@ impl TGAExperiment {
 pub struct TGASeries {
     experiments: Vec<TGAExperiment>,
     exp_map: HashMap<String, usize>,
+    data_revision: u64,
+    calibration_snapshot: Option<CalibrationSnapshot>,
 }
+
+/// Calibration coefficients archived with a series file; loading them never changes GUI settings.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CalibrationSnapshot {
+    pub k: f64,
+    pub b: f64,
+}
+
+impl CalibrationSnapshot {
+    pub fn new(k: f64, b: f64) -> Self {
+        Self { k, b }
+    }
+}
+
 impl TGASeries {
+    pub fn calibration_snapshot(&self) -> Option<CalibrationSnapshot> {
+        self.calibration_snapshot
+    }
+
+    pub fn set_calibration_snapshot(&mut self, snapshot: Option<CalibrationSnapshot>) {
+        self.calibration_snapshot = snapshot;
+    }
+    /// Monotonically changes after every committed mutation of scientific data.
+    pub fn data_revision(&self) -> u64 {
+        self.data_revision
+    }
+
+    pub(crate) fn mark_changed(&mut self) {
+        self.data_revision = self.data_revision.wrapping_add(1);
+    }
+
     /// Applies a narrowly scoped in-place operation whose implementation validates
     /// all fallible inputs before mutating the experiment. Unlike the general
     /// `try_mutate_by_id`, this helper intentionally avoids cloning the dataset
@@ -482,7 +514,9 @@ impl TGASeries {
         F: FnOnce(&mut TGAExperiment) -> Result<R, TGADomainError>,
     {
         let idx = self.index_by_id(id)?;
-        op(&mut self.experiments[idx])
+        let result = op(&mut self.experiments[idx])?;
+        self.mark_changed();
+        Ok(result)
     }
 
     // core/index helpers live in experiment_series_core.rs
@@ -493,7 +527,16 @@ impl TGASeries {
     /// Save the full series to a single CSV file with `#META` helper lines.
     /// The data columns are written as `<experiment_id>_<column_name>` (sanitized and uniquified).
     pub fn to_csv_series(&self, path: &Path) -> Result<(), TGADomainError> {
-        experiment_series_io::to_csv_series_impl(self, path)
+        self.to_csv_series_with_calibration(path, self.calibration_snapshot)
+    }
+
+    /// Save the full series and an archival snapshot of the active voltage-to-mass calibration.
+    pub fn to_csv_series_with_calibration(
+        &self,
+        path: &Path,
+        calibration: Option<CalibrationSnapshot>,
+    ) -> Result<(), TGADomainError> {
+        experiment_series_io::to_csv_series_impl(self, path, calibration)
     }
 
     /// Save a selected set of experiments and columns as a typed KiThe series CSV.
@@ -504,11 +547,28 @@ impl TGASeries {
         experiment_ids: &[String],
         columns_by_experiment: &HashMap<String, Vec<String>>,
     ) -> Result<(), TGADomainError> {
+        self.to_csv_series_selected_with_calibration(
+            path,
+            experiment_ids,
+            columns_by_experiment,
+            self.calibration_snapshot,
+        )
+    }
+
+    /// Save selected experiments and columns with an archival calibration snapshot.
+    pub fn to_csv_series_selected_with_calibration(
+        &self,
+        path: &Path,
+        experiment_ids: &[String],
+        columns_by_experiment: &HashMap<String, Vec<String>>,
+        calibration: Option<CalibrationSnapshot>,
+    ) -> Result<(), TGADomainError> {
         experiment_series_io::to_csv_series_selected_impl(
             self,
             path,
             Some(experiment_ids),
             Some(columns_by_experiment),
+            calibration,
         )
     }
 
@@ -622,6 +682,7 @@ impl TGASeries {
         if let Some(index_map) = next_index {
             self.exp_map = index_map;
         }
+        self.mark_changed();
         Ok(())
     }
 
@@ -1665,6 +1726,15 @@ impl TGASeries {
         to: f64,
     ) -> Result<(), TGADomainError> {
         self.try_transform_by_id(id, |exp| exp.cut_range_inverse_x_or_y(axis, from, to))
+    }
+    pub fn cut_range_inverse_on_column(
+        &mut self,
+        id: &str,
+        column: &str,
+        from: f64,
+        to: f64,
+    ) -> Result<(), TGADomainError> {
+        self.try_transform_by_id(id, |exp| exp.cut_range_inverse_on_column(column, from, to))
     }
     tgaseries_forward_try_apply! {
         pub fn sample_oneframeplot(&self, id: &str, range: Option<ViewRange>, max_points: usize) -> Result<PlotSeries, TGADomainError> => sample_oneframeplot;

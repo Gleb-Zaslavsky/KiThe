@@ -8,21 +8,26 @@ reporting, independent validation, and deterministic tests.
 
 ## Current Regression Follow-Up
 
-- [ ] Reconcile nested P,H range formulation reuse with proactive small-scale
-  normalization. Debug runs of `live_large_element_limited_nested_ph_target_range_story`
-  and `live_nested_ph_inner_pt_cascade_release_matrix` both solve their points
-  but fail the expected `formulation_builds == 1` assertion: observed counts
-  were 9 and 3 respectively. Both fixtures use KiThe-native backends, not RST.
-  The range currently disables `PreparedNestedPhContinuationState` when small-
-  scale preconditioning is active, so each target builds independently. Decide
-  whether a normalized fixed-layout template can be safely reused; otherwise
-  revise the reuse expectation only after documenting why this lifecycle must
-  rebuild. Keep physical acceptance and conservation assertions unchanged.
-- [ ] Add the new local NIST WebBook water Shomate fixture to the frozen
-  reference catalog. `catalog_covers_every_frozen_pair_with_exact_identity_kind_version_and_row_count`
-  currently finds `nist_webbook/water_gas_shomate.metadata.json` on disk with
-  no matching catalog entry. Verify its payload/metadata identity and expected
-  row count, then keep the exact one-entry-per-metadata-file assertion.
+- [x] Reconcile nested P,H range build expectations with proactive small-scale
+  normalization. Both tests now require one normalized formulation build per
+  target (`9` for the 20-species range; `3` for each 5/20/100-species fixture)
+  while retaining continuation, enthalpy, conservation, and transactional
+  assertions. The current range deliberately skips its reusable prepared
+  nested state when proactive preconditioning is active; reported inner reuses
+  are within target solves, not cross-target template reuse. Current debug
+  runs pass; release refresh remains separate.
+- [ ] Consider a reusable normalized fixed-layout template only after proving
+  normalized inventory, targets, bounds, and continuation parameters are safe
+  to rebind. Do not remove the guard to satisfy historical build-count
+  expectations alone.
+- [x] Classify the local NIST WebBook water Shomate metadata separately from
+  frozen dataset-pair metadata. It describes a coefficient payload validated
+  by `nist_shomate_fixture_tests`, not a `.rows.json` dataset. The catalog test
+  now requires every metadata file to be either a registered frozen pair or
+  explicitly listed as auxiliary, while still requiring exact coverage of
+  every frozen rows file. Catalog, local 500 K anchor, and content-manifest
+  tests pass; Story 133 records the corrected contract. The thermochemistry
+  content manifest continues to hash both Shomate fixture files.
 
 ## P8 - Independent Pure-Phase Boundary Cross-Validation
 
@@ -10169,8 +10174,10 @@ then failed on formulation-count assertions:
   3 builds for 3 targets rather than 1; execution stops here, so medium/large
   rows have not yet been characterized on this revision.
 - `catalog_covers_every_frozen_pair_with_exact_identity_kind_version_and_row_count`
-  fails independently because `nist_webbook/water_gas_shomate.metadata.json`
-  exists on disk but is absent from the frozen catalog.
+  also flagged `nist_webbook/water_gas_shomate.metadata.json`. This was an
+  over-broad completeness assertion: the file is thermochemistry fixture
+  metadata, not a frozen dataset-pair record. The test now accounts for it as
+  auxiliary metadata without fabricating a catalog row entry.
 
 The P,H fixtures use initial concentrations of `1e-3 mol` per species. Their
 physical inventories (`0.005`, `0.02`, and `0.1 mol` for 5/20/100 species) are
@@ -10205,6 +10212,17 @@ predate this interaction and are not current evidence.
   nested template only after proving its normalized inventory and parameters
   stay invariant across target enthalpies; retain physical reconstruction,
   verification, and rollback.
+- [x] Compare the targeted proactive-only low-inventory P,H witnesses against
+  `OnNumericalFailure` using identical inputs and current physical gates. Story
+  131 records the elemental H2/O2/H2O results (`1e-6` fails as
+  `enthalpy_non_monotone`; `1e-2` and `1e-1` solve outside the physical gate)
+  and the frozen CHON+graphite results (all four `700/720 K x 1e-4/1e-2`
+  cases pass under failure-only).
+- [ ] Before replacing the proactive default, define and validate a
+  quality-based recovery trigger for solver-successful but physically
+  unacceptable candidates. Current failure-only policy does not retry those
+  elemental cases. Do not infer that solver convergence alone is an adequate
+  trigger, and do not relax the current physical gates.
 - [x] Reconcile Story Tests with current evidence and rerun the paired
   characterization in release. Story 129 records both profiles: all 18 points
   passed in debug and release, build/reuse counts matched, and paired

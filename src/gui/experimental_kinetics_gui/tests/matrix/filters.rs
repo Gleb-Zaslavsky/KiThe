@@ -214,9 +214,27 @@ fn gui_filter_stage_compares_supported_smoothers_across_noise_profiles() {
                         filter.label()
                     );
 
-                    let report = dataset
-                        .filter_quality_report("mass", &out)
-                        .expect("filter quality report");
+                    let paired_samples = dataset
+                        .preview_rows(&["mass", &out], frame.height())
+                        .expect("read aligned nullable filter samples");
+                    let (paired_raw, paired_filtered): (Vec<_>, Vec<_>) =
+                        paired_samples.columns["mass"]
+                            .iter()
+                            .zip(&paired_samples.columns[&out])
+                            .filter_map(|(raw, filtered)| match (raw, filtered) {
+                                (Some(raw), Some(filtered)) => Some((*raw, *filtered)),
+                                _ => None,
+                            })
+                            .unzip();
+                    let paired_raw = ndarray::Array1::from_vec(paired_raw);
+                    let paired_filtered = ndarray::Array1::from_vec(paired_filtered);
+                    let report = crate::Kinetics::experimental_kinetics::math::ndarray_statistics::filter_quality_from_arrays(
+                        &paired_raw,
+                        &paired_filtered,
+                        "mass",
+                        &out,
+                    )
+                    .expect("filter quality report on shared valid rows");
                     let raw_time = read_column(model, EXPERIMENT_ID, "time");
                     let raw_mass = read_column(model, EXPERIMENT_ID, "mass");
                     let filtered_time_col = match filter {
@@ -224,8 +242,18 @@ fn gui_filter_stage_compares_supported_smoothers_across_noise_profiles() {
                         FilterKind::LsqSpline => "t_lsq",
                         _ => "time",
                     };
-                    let filtered_time = read_column(model, EXPERIMENT_ID, filtered_time_col);
-                    let filtered_mass = read_column(model, EXPERIMENT_ID, &out);
+                    let filtered_samples = dataset
+                        .preview_rows(&[filtered_time_col, &out], frame.height())
+                        .expect("read filtered values on their shared valid rows");
+                    let filtered_time_values = &filtered_samples.columns[filtered_time_col];
+                    let (filtered_time, filtered_mass): (Vec<_>, Vec<_>) = filtered_time_values
+                        .iter()
+                        .zip(&filtered_samples.columns[&out])
+                        .filter_map(|(time, mass)| match (time, mass) {
+                            (Some(time), Some(mass)) => Some((*time, *mass)),
+                            _ => None,
+                        })
+                        .unzip();
                     assert_eq!(filtered_time.len(), filtered_mass.len());
                     let raw_truth = truth_at(
                         &raw_time,

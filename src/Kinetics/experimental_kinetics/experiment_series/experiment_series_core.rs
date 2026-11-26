@@ -10,6 +10,8 @@ impl TGASeries {
         Self {
             experiments: Vec::new(),
             exp_map: HashMap::new(),
+            data_revision: 0,
+            calibration_snapshot: None,
         }
     }
 
@@ -67,6 +69,7 @@ impl TGASeries {
         }
         self.experiments.remove(idx);
         self.rebuild_index()?;
+        self.mark_changed();
         Ok(())
     }
 
@@ -78,6 +81,7 @@ impl TGASeries {
             .ok_or_else(|| TGADomainError::ExperimentNotFound(id.to_string()))?;
         self.experiments.remove(idx);
         self.rebuild_index()?;
+        self.mark_changed();
         Ok(())
     }
 
@@ -87,6 +91,7 @@ impl TGASeries {
         let id = exp.meta.id.clone();
         self.experiments.push(exp);
         self.exp_map.insert(id, index);
+        self.mark_changed();
         Ok(())
     }
 
@@ -144,6 +149,7 @@ impl TGASeries {
         exp.meta.id = new_id;
         self.exp_map.remove(&old_id);
         self.exp_map.insert(exp.meta.id.clone(), index);
+        self.mark_changed();
         Ok(())
     }
 
@@ -151,6 +157,7 @@ impl TGASeries {
         let idx = self.index_by_id(id)?;
         let removed = self.experiments.remove(idx);
         self.rebuild_index()?;
+        self.mark_changed();
         Ok(removed)
     }
 

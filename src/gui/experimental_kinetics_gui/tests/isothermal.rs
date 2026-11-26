@@ -325,7 +325,12 @@ fn story_three_noisy_isothermal_runs_recover_arrhenius_parameters_and_export() {
         harness.state_mut().app.model.series = clean_series;
         harness.state_mut().app.new_experiment_dialog.current_dir = export_dir.path().to_path_buf();
         harness.run();
-        super::support::click_menu_entry(harness, "File Manager", "Save As CSV");
+        super::support::click_menu_entry(harness, "File Manager", "Export CSV");
+        harness
+            .state_mut()
+            .app
+            .new_experiment_dialog
+            .test_next_save_file = Some(export_path.clone());
         harness.get_by_label("Export").click();
         harness.run();
         assert!(
@@ -508,9 +513,12 @@ fn gui_import_can_adopt_mean_of_measured_celsius_temperature_as_isothermal_setpo
     app.new_experiment_dialog.current_dir = dir.path().to_path_buf();
 
     with_app(app, |harness| {
+        harness
+            .state_mut()
+            .app
+            .new_experiment_dialog
+            .test_next_open_file = Some(path.clone());
         click_menu_entry(harness, "File Manager", "Import Data");
-        harness.get_by_label("[F] isothermal_sensor.csv").click();
-        harness.run();
         let id_input = harness.get_by_label("Experiment ID:");
         id_input.focus();
         harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);

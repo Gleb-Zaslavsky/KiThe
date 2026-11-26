@@ -402,8 +402,10 @@ fn bdf_facade_solves_analytical_a_to_two_b_without_telemetry_by_default() {
     let options = NetworkIvpOptions::default();
     assert_eq!(options.telemetry, SolverTelemetryMode::Off);
     assert_eq!(options.logging, SolverLogLevel::Off);
-    let solution = solve_network(&problem, &options).unwrap();
+    let mut prepared = PreparedNetworkIvp::new(&problem, &options).unwrap();
+    let solution = prepared.solve().unwrap().clone();
     assert!(solution.telemetry.is_none());
+    assert!(prepared.last_attempt_diagnostics().is_none());
     assert_eq!(solution.species_ids, ["A", "B"]);
     let final_state = solution.concentrations.last().unwrap();
     let expected_a = (-1.0_f64).exp();
@@ -1114,10 +1116,23 @@ fn prepared_session_reuses_all_four_families_and_retains_last_good_result() {
         let mut prepared = PreparedNetworkIvp::new(&problem, &options).unwrap();
         let first_a = prepared.solve().unwrap().concentrations.last().unwrap()[0];
         assert!((first_a - (-1.0_f64).exp()).abs() < 2e-2, "{family:?}");
+        let first_solve_id = prepared
+            .last_attempt_diagnostics()
+            .expect("successful native attempt report")
+            .solve_id;
+        assert_eq!(
+            prepared.last_attempt_diagnostics().unwrap().outcome,
+            NetworkIvpAttemptOutcome::Completed
+        );
         let second = prepared
             .solve_with_initial_concentrations(&[2.0, 0.5])
             .unwrap();
-        let second_final = second.concentrations.last().unwrap();
+        let second_final = second.concentrations.last().unwrap().clone();
+        let second_solve_id = prepared
+            .last_attempt_diagnostics()
+            .expect("second native attempt report")
+            .solve_id;
+        assert_ne!(first_solve_id, second_solve_id, "{family:?}");
         let expected_a = 2.0 * (-1.0_f64).exp();
         let expected_b = 0.5 + 2.0 * (2.0 - expected_a);
         assert!((second_final[0] - expected_a).abs() < 2e-2, "{family:?}");
@@ -1177,6 +1192,10 @@ fn cancellation_does_not_replace_an_accepted_solution() {
             .last()
             .unwrap()
             .clone();
+        let accepted_solve_id = prepared
+            .last_attempt_diagnostics()
+            .expect("initial native attempt report")
+            .solve_id;
         let token = CancellationToken::new();
         token.cancel();
         let error = prepared
@@ -1187,14 +1206,29 @@ fn cancellation_does_not_replace_an_accepted_solution() {
             "{family:?}: {error}"
         );
         assert!(std::error::Error::source(&error).is_some());
-        assert!(
-            prepared.last_attempt_telemetry().is_none(),
-            "{family:?} pre-cancel must not inherit previous telemetry"
+        let attempt = prepared
+            .last_attempt_diagnostics()
+            .expect("pre-start cancellation is still an identified native attempt");
+        assert_ne!(attempt.solve_id, accepted_solve_id, "{family:?}");
+        assert_eq!(attempt.outcome, NetworkIvpAttemptOutcome::Cancelled);
+        assert_eq!(
+            attempt.cancellation_disposition,
+            RustedSciThe::numerical::StiffAPI::StiffCancellationDisposition::ObservedBySolver,
+            "{family:?}"
         );
-        assert!(
-            prepared.last_failed_trajectory().is_none(),
-            "{family:?} pre-cancel must not expose the previous successful trajectory"
-        );
+        let telemetry = attempt
+            .telemetry
+            .as_ref()
+            .expect("RST provides telemetry for pre-start cancellation");
+        assert_eq!(telemetry.solve_id, attempt.solve_id, "{family:?}");
+        let partial = prepared
+            .last_failed_trajectory()
+            .expect("RST exposes a diagnostic initial state for pre-start cancellation");
+        assert_eq!(partial.solve_id, attempt.solve_id, "{family:?}");
+        assert_eq!(partial.solver, family, "{family:?}");
+        assert_eq!(partial.accepted_steps, Some(0), "{family:?}");
+        assert_eq!(partial.time_seconds.len(), 1, "{family:?}");
+        assert_eq!(partial.states, vec![vec![2.0, 0.5]], "{family:?}");
         assert_eq!(
             prepared
                 .last_solution()
@@ -1203,6 +1237,103 @@ fn cancellation_does_not_replace_an_accepted_solution() {
                 .last()
                 .unwrap(),
             &accepted
+        );
+    }
+}
+
+#[test]
+fn failed_native_retry_keeps_attempt_diagnostics_separate_from_last_solution() {
+    for family in [
+        StiffSolverKind::Bdf,
+        StiffSolverKind::Radau,
+        StiffSolverKind::BackwardEuler,
+        StiffSolverKind::Lsode2,
+    ] {
+        let problem = NetworkProblem::new(
+            vec![species("A", 1.0), species("B", 0.0)],
+            vec![reaction(
+                "singular-rate",
+                vec![("A", 1.0)],
+                vec![("B", 1.0)],
+                RateLaw::CustomExpr(Expr::Const(1.0) / Expr::Var("c0".into())),
+            )],
+            TemperatureProgram::Constant(700.0),
+            0.0,
+            0.1,
+        )
+        .unwrap();
+        let options = NetworkIvpOptions {
+            family,
+            telemetry: SolverTelemetryMode::Detailed,
+            max_step: 0.01,
+            ..Default::default()
+        };
+        let mut prepared = PreparedNetworkIvp::new(&problem, &options).unwrap();
+        let accepted = prepared
+            .solve()
+            .unwrap()
+            .concentrations
+            .last()
+            .unwrap()
+            .clone();
+        let accepted_id = prepared.last_attempt_diagnostics().unwrap().solve_id;
+
+        let error = prepared
+            .solve_with_initial_concentrations(&[0.0, 1.0])
+            .expect_err("division by zero in the native RHS must fail");
+        assert!(
+            matches!(error, NetworkIvpError::Integration(_)),
+            "{family:?}: {error}"
+        );
+        assert_eq!(
+            prepared.last_attempt_diagnostics().unwrap().outcome,
+            NetworkIvpAttemptOutcome::Failed,
+            "{family:?}"
+        );
+        let failed = prepared.last_attempt_diagnostics().unwrap();
+        assert_ne!(failed.solve_id, accepted_id, "{family:?}");
+        if let Some(telemetry) = &failed.telemetry {
+            assert_eq!(telemetry.solve_id, failed.solve_id, "{family:?}");
+        }
+        if let Some(partial) = &failed.partial_trajectory {
+            assert_eq!(partial.solve_id, failed.solve_id, "{family:?}");
+            assert_eq!(partial.solver, family, "{family:?}");
+        }
+        match family {
+            StiffSolverKind::Bdf | StiffSolverKind::Lsode2 => {
+                assert!(failed.telemetry.is_none(), "{family:?}");
+                assert!(failed.callback_failure.is_none(), "{family:?}");
+                assert!(failed.partial_trajectory.is_none(), "{family:?}");
+            }
+            StiffSolverKind::Radau | StiffSolverKind::BackwardEuler => {
+                assert!(failed.telemetry.is_some(), "{family:?}");
+                assert!(failed.partial_trajectory.is_some(), "{family:?}");
+                assert!(matches!(
+                    failed.callback_failure,
+                    Some(RustedSciThe::numerical::StiffAPI::StiffCallbackFailureDiagnostic {
+                        evaluation: RustedSciThe::numerical::StiffAPI::StiffCallbackEvaluation::Residual,
+                        reason: RustedSciThe::numerical::StiffAPI::StiffCallbackFailureReason::NonFiniteOutput,
+                        ..
+                    })
+                ), "{family:?}: {:?}", failed.callback_failure);
+            }
+        }
+        println!(
+            "family={family:?} solve_id={} telemetry={} callback={:?} partial={}",
+            failed.solve_id,
+            failed.telemetry.is_some(),
+            failed.callback_failure,
+            failed.partial_trajectory.is_some(),
+        );
+        assert_eq!(
+            prepared
+                .last_solution()
+                .unwrap()
+                .concentrations
+                .last()
+                .unwrap(),
+            &accepted,
+            "{family:?} failed attempt must not publish"
         );
     }
 }

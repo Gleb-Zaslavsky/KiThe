@@ -443,6 +443,18 @@ impl PlotModel {
         Self::default()
     }
 
+    /// Remove all experiment data and plot state while keeping application settings.
+    pub fn clear_workspace(&mut self) {
+        self.series = TGASeries::new();
+        self.plots.clear();
+        self.interaction = InteractionState::default();
+        self.reset_view_requested = false;
+        self.plot_recreation_required = false;
+        self.active_mass_sources.clear();
+        self.active_temperature_sources.clear();
+        self.message.clear();
+    }
+
     /// Выбирает график по индексу
     ///
     /// Снимает выбор со всех графиков и устанавливает выбор
@@ -472,8 +484,12 @@ impl PlotModel {
     }
 
     pub fn get_experiment_by_selected_curve(&self) -> Result<String, TGAGUIError> {
-        if let Some(number) = self.get_selected_curve_index() {
-            return Ok(self.plots[number].experiment_id.clone());
+        if let Some(curve) = self
+            .plots
+            .iter()
+            .find(|curve| curve.selected && curve.is_shown())
+        {
+            return Ok(curve.experiment_id.clone());
         } else if self.is_only_one_shown() {
             let id = self
                 .plots

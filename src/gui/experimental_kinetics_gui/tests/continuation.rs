@@ -31,9 +31,12 @@ fn story_continue_experiment_from_second_file_and_reject_bad_time_order_atomical
         let before = super::support::read_column(&harness.state().app.model, "segment_a", "t");
         assert_eq!(before, vec![0.0, 1.0, 2.0]);
 
+        harness
+            .state_mut()
+            .app
+            .new_experiment_dialog
+            .test_next_open_file = Some(invalid.clone());
         super::support::click_menu_entry(harness, "File Manager", "Append to experiment");
-        harness.get_by_label("[F] segment_invalid.csv").click();
-        harness.run();
         harness.get_by_label("Preview continuation").click();
         harness.run();
         assert!(
@@ -51,7 +54,12 @@ fn story_continue_experiment_from_second_file_and_reject_bad_time_order_atomical
             "failed preview must not modify its source experiment"
         );
 
-        harness.get_by_label("[F] segment_b.csv").click();
+        harness
+            .state_mut()
+            .app
+            .new_experiment_dialog
+            .test_next_open_file = Some(next.clone());
+        harness.get_by_label("Choose another...").click();
         harness.run();
         harness.get_by_label("Preview continuation").click();
         harness.run();
@@ -113,9 +121,12 @@ fn story_append_to_isothermal_experiment_without_temperature_preserves_thermal_m
 
     with_app(empty_app(), |harness| {
         import_csv(harness, &first, "iso_segment_a", Some(523.15), None);
+        harness
+            .state_mut()
+            .app
+            .new_experiment_dialog
+            .test_next_open_file = Some(second.clone());
         super::support::click_menu_entry(harness, "File Manager", "Append to experiment");
-        harness.get_by_label("[F] iso_b.csv").click();
-        harness.run();
         harness.get_by_label("Preview continuation").click();
         harness.run();
         assert!(

@@ -23,6 +23,9 @@ impl PlotController {
     pub fn handle_plot_interactions(plot_ui: &mut PlotUi, model: &mut PlotModel) {
         // Получаем ответ от пользовательского интерфейса графика (структура Response отвечает за обработку взаимодействий)
         let response = plot_ui.response();
+        model.interaction.pointer_coordinate = plot_ui
+            .pointer_coordinate()
+            .map(|point| [point.x as f64, point.y as f64]);
 
         // Получаем позицию указателя мыши в координатах графика
         if let Some(pointer_pos) = plot_ui.pointer_coordinate() {

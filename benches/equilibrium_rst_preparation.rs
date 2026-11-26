@@ -21,9 +21,9 @@
 //! values are inclusive when a stage contains nested work and must not be
 //! summed as if they were mutually exclusive.
 
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::time::{Duration, Instant};
-
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tabled::{Table, Tabled};
 
 use KiThe::Thermodynamics::ChemEquilibrium::prelude::*;

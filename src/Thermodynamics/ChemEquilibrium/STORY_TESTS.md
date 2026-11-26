@@ -1176,7 +1176,7 @@ the raw transcript is retained only as an exact console artifact.
 - twenty locally resolved NASA-gas C/H/O species;
 - nine target enthalpies inside one common coefficient interval;
 - accepted composition and temperature continuation across eight hand-offs;
-- one fixed-P,T template build and repeated inner-template reuse;
+- one normalized inner formulation build per low-inventory target;
 - inverse-temperature accuracy, conservation, enthalpy acceptance, and JSON
   immutability at every point.
 
@@ -1188,11 +1188,17 @@ cargo test --release --lib `
   --no-default-features -- --ignored --nocapture
 ```
 
-### Recorded release summary
+### Historical release summary (pre-proactive range lifecycle)
 
 | Species | Targets | Template builds | Template reuses | Total ms | Worst point ms | Max balance | Status |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | 20 | 9 | 1 | 163 | 41.424 | 8.482 | 1.534e-8 | OK |
+
+This historical result predates the current proactive small-inventory P,H
+path and is no longer the expected formulation lifecycle. Story 132 records
+the current debug rerun: nine targets build nine normalized formulations
+while retaining physical continuation and acceptance. A release rerun of the
+current lifecycle is pending.
 
 ### Raw console transcript
 
@@ -1214,9 +1220,10 @@ live large nested P,H target range: species=20 points=9 builds=1 reuses=163 tota
 test Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_large_element_limited_nested_ph_target_range_story ... ok
 ```
 
-The release run passed. The target temperatures are intentionally interior to
-the common NASA interval; endpoint contracts belong to the dedicated
-interval/Jacobian stories.
+The historical release run passed. The target temperatures are intentionally
+interior to the common NASA interval; endpoint contracts belong to the
+dedicated interval/Jacobian stories. Its one-build count is superseded by the
+current proactive-path lifecycle documented in Story 132.
 
 ## 14. Dense water/ice Auto P,H continuation range
 
@@ -1451,7 +1458,8 @@ Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_nested_ph_inn
 - small, medium, and large real local NASA systems with 5, 20, and 100
   selected species;
 - three target enthalpies solved through the typed nested P,H range facade;
-- one reusable inner P,T formulation per fixture and accepted-state
+- one normalized inner formulation build per target because every fixture
+  inventory is below the proactive threshold, with accepted-state
   continuation between points;
 - outer scalar evaluations reported separately from inner backend attempts and
   measured inner nonlinear-solve time;
@@ -1465,18 +1473,21 @@ Thermodynamics::ChemEquilibrium::equilibrium_live_data_tests::live_nested_ph_inn
 ### Debug characterization
 
 ```text
-live nested P,H inner P,T cascade release matrix
+live nested P,H inner P,T cascade matrix (debug, current proactive policy)
 | Fixture | Status | Species | Points | Outer evals | Inner attempts | Inner solve ms | Builds | Reuses | Total ms | Mean ms | Worst ms | Max balance |
-| small   | OK     | 5       | 3      | 24          | 63             | 3.797          | 1      | 32     | 9.446    | 3.149   | 4.360    | 7.642e-11   |
-| medium  | OK     | 20      | 3      | 49          | 113            | 66.025         | 1      | 57     | 92.079   | 30.693  | 51.832   | 9.834e-11   |
-| large   | OK     | 100     | 3      | 26          | 67             | 1172.744       | 1      | 34     | 1290.992 | 430.331 | 531.140  | 3.643e-10   |
+| small   | OK     | 5       | 3      | 24          | 63             | 0.286          | 3      | 30     | 16.403   | 5.468   | 6.492   | 2.849e-11   |
+| medium  | OK     | 20      | 3      | 49          | 113            | 2.446          | 3      | 55     | 104.798  | 34.933  | 47.653  | 9.907e-11   |
+| large   | OK     | 100     | 3      | 26      | 67             | 134.130        | 3      | 32     | 1386.994 | 462.331 | 561.631 | 3.674e-10   |
 test ...::live_nested_ph_inner_pt_cascade_release_matrix ... ok
 ```
 
-The debug matrix passed. Legacy adapters do not expose comparable nonlinear
-iteration counters, so the table records inner nonlinear solve time rather
-than manufacturing an iteration count. The release command is the target
-machine characterization run.
+The current debug matrix passed with three builds per three-point range;
+continuation remains two hand-offs per range. Reuse counts are inner
+per-target reuse, not reuse of a shared range template. Legacy adapters do not
+expose comparable nonlinear iteration counters, so the table records inner
+nonlinear solve time rather than manufacturing an iteration count. Release
+performance characterization of this current lifecycle remains pending; the
+old one-build table is superseded.
 
 ## 20. GUI accepted-candidate validation mismatch
 
@@ -4023,8 +4034,9 @@ target-specific scalar and lifecycle state independent?
   capabilities and the request owns its resolved-system snapshot;
 - nested P,H ranges hand the accepted temperature and composition to the next
   target;
-- fixed declared phases build one reusable inner P,T template, while every
-  target retains an independent scalar bracket;
+- fixed declared phases reuse the inner P,T template when the physical scale
+  allows the prepared path; sub-mole proactive normalization instead builds a
+  normalized formulation per target, while preserving continuation;
 - rejected scalar trials and bounded active-set lifecycle state are not shared
   as continuation state.
 
@@ -4042,14 +4054,15 @@ cargo test --release --lib `
 
 ### Recorded result
 
-The focused borrowed-callback test passed (`1 passed; 0 failed`). The recorded
-three-target continuation story passes in debug with one template build and
-accepted-state hand-off; its release rerun remains explicitly pending in the
-earlier Story Test 10. The large nested story has a recorded release pass with
-nine targets, one template build, and `163` template reuses. The ownership
-decision is therefore to keep the generic callback lifetime for the
-deprecated/reference route and keep the nested continuation template as a
-narrow mutable cache, without introducing a new shared P,H state object.
+The focused borrowed-callback test passed (`1 passed; 0 failed`). The
+three-target reactive-gas continuation remains above the proactive threshold
+and reuses one template. The large nested low-inventory story now builds once
+per target under proactive normalization; Story 132 records the current
+debug result and supersedes the historical one-build release count. Accepted
+physical composition/temperature hand-off remains intact. Keep the generic
+callback lifetime for the deprecated/reference route and the nested
+continuation template as a narrow mutable cache; do not assume it can also
+serve normalized-first targets without a separate invariant proof.
 
 ## 60. P,H resolved-data copying and lock ownership
 
@@ -9472,3 +9485,120 @@ default unchanged pending broader correctness review and an isolated
 preparation-time measurement. Do not relax tolerances. The paired test is a
 diagnostic story and does not replace the separate production-default
 acceptance gates.
+
+## Story 131: Targeted proactive P,H normalization decision matrix
+
+**Question / hypothesis:** On the specific production cases that proactively
+normalize, does a failure-only policy either (a) recover after a numerical
+failure or (b) publish an equally accurate physical solution without
+preconditioning? The comparison is limited to low-inventory P,H cases, not
+large-inventory recovery or unrelated uses of normalization.
+
+**Commands:**
+
+```powershell
+cargo test --lib --no-default-features elemental_ph_proactive_vs_failure_only_regression_matrix -- --include-ignored --nocapture --test-threads=1
+cargo test --lib --no-default-features i5_tp1906_small_scale_proactive_vs_failure_only_diagnostic -- --include-ignored --nocapture --test-threads=1
+```
+
+**Elemental H2/O2/H2O production cascade, debug:** The P,H target and elemental
+inventory scale together. The reference is the accepted 2500 K unit-scale
+solution. `PHYSICAL_GATE_PASS` uses the existing envelope: `|delta T| < 1e-4
+K`, max component relative error `<1e-5`, residual `<1e-6`, relative elemental
+balance `<1e-6`, and the facade's physical enthalpy gate.
+
+| Inventory factor | Policy | Outcome | `|delta T|` K | Max component relative error | Residual | Relative balance | Trigger |
+|---:|---|---|---:|---:|---:|---:|---|
+| `1e-6` | proactive | physical gate pass | `4.204e-5` | `5.306e-6` | `9.265e-8` | `8.236e-8` | small-scale preconditioning |
+| `1e-6` | failure-only | numerical failure | - | - | - | - | `enthalpy_non_monotone` near `2537.3601 K` |
+| `1e-2` | proactive | physical gate pass | `4.204e-5` | `5.306e-6` | `9.265e-8` | `8.236e-8` | small-scale preconditioning |
+| `1e-2` | failure-only | solved outside gate | `6.691e-3` | `7.113e-4` | `7.450e-7` | `1.095e-5` | none |
+| `1e-1` | proactive | physical gate pass | `4.204e-5` | `5.306e-6` | `9.265e-8` | `8.236e-8` | small-scale preconditioning |
+| `1e-1` | failure-only | solved outside gate | `4.087e-4` | `2.819e-6` | `1.314e-7` | `2.119e-7` | none |
+
+The failure-only `1e-2` and `1e-1` runs return successful facade outcomes, so
+the current numerical-failure trigger cannot recover them. They miss the
+temperature/component/balance envelope despite solver completion.
+
+**Frozen NASA TP-1906 CHON + graphite, debug:** Both source temperatures,
+`700 K` and `720 K`, were tested at inventory factors `1e-4` and `1e-2`. The
+gate requires residual and absolute physical balance `<=1e-6`, temperature
+drift `<=1e-4 K`, component relative error `<=1e-4`, enthalpy acceptance, and
+unchanged graphite topology.
+
+| Source T | Factor | Proactive: max mole error / residual / balance | Failure-only: max mole error / residual / balance | Failure-only outcome |
+|---:|---:|---:|---:|---|
+| 700 K | `1e-4` | `4.325e-7 / 4.417e-10 / 2.751e-13` | `2.465e-5 / 1.543e-11 / 1.543e-11` | gate pass; no normalization |
+| 700 K | `1e-2` | `4.325e-7 / 4.417e-10 / 2.751e-11` | `3.143e-10 / 2.280e-14 / 1.870e-14` | gate pass; no normalization |
+| 720 K | `1e-4` | `2.173e-11 / 8.001e-13 / 4.570e-16` | `1.981e-11 / 3.181e-13 / 5.266e-16` | gate pass; no normalization |
+| 720 K | `1e-2` | `2.173e-11 / 8.007e-13 / 4.570e-14` | `1.983e-11 / 3.176e-13 / 5.261e-14` | gate pass; no normalization |
+
+All rows preserved graphite-active topology and passed physical enthalpy
+acceptance. At `700 K`, factor `1e-4`, failure-only is less covariant in moles
+than proactive but remains within the existing `1e-4` component gate.
+
+**Conclusion:** The cases do not support a global switch to failure-only.
+Elemental P,H demonstrates both a typed failure and successful-but-out-of-gate
+physical solutions; the latter would not activate the current retry policy.
+The tested frozen multiphase cases pass with either policy, with one modestly
+larger but still accepted component deviation under failure-only. A reactive
+policy intended to replace proactive preconditioning therefore needs an
+explicit physical-quality trigger for accepted candidates, not just solver
+failure/nonconvergence. No production policy or tolerance was changed. The
+5/20/100-species live-range comparison remains complementary evidence: on those
+fixtures both policies passed, while proactive made three formulation builds
+per range versus one for failure-only.
+
+## Story 132: Nested P,H range builds under proactive normalization
+
+**Question / hypothesis:** Do the two live range stories preserve physical
+continuation and acceptance when proactive normalization prevents reuse of the
+range-owned prepared nested state? Under the current implementation, expect
+one normalized formulation build per target; count inner solver reuses
+separately from cross-target template reuse.
+
+**Commands:**
+
+```powershell
+cargo test --lib --no-default-features live_large_element_limited_nested_ph_target_range_story -- --include-ignored --nocapture --test-threads=1
+cargo test --lib --no-default-features live_nested_ph_inner_pt_cascade_release_matrix -- --include-ignored --nocapture --test-threads=1
+```
+
+**Debug result (2026-11-23):** Both stories pass. The 20-species/nine-target
+range reports `9` builds, `169` inner reuses, `8` continuation hand-offs, and
+maximum balance `1.352e-13 mol`. The 5/20/100-species three-target matrix
+reports:
+
+| Species | Targets | Builds | Inner reuses | Continuations | Total ms | Max balance |
+|---:|---:|---:|---:|---:|---:|---:|
+| 5 | 3 | 3 | 30 | 2 | 16.403 | 2.849e-11 |
+| 20 | 3 | 3 | 55 | 2 | 104.798 | 9.907e-11 |
+| 100 | 3 | 3 | 32 | 2 | 1386.994 | 3.674e-10 |
+
+**Conclusion:** The old `formulation_builds == 1` assertions were stale for
+inventories below the proactive threshold. They now expect one build per
+target while retaining continuation, enthalpy, conservation, and
+source-immutability checks. This is a lifecycle/correctness update, not a
+performance claim; release measurement of the current lifecycle is pending.
+
+## Story 133: Frozen reference catalog distinguishes auxiliary thermo metadata
+
+**Question / hypothesis:** Does the frozen-pair catalog cover every metadata
+and rows pair without misclassifying the independent NIST Shomate coefficient
+fixture as a tabular frozen reference dataset?
+
+**Commands:**
+
+```powershell
+cargo test --lib --no-default-features catalog_covers_every_frozen_pair_with_exact_identity_kind_version_and_row_count -- --nocapture
+cargo test --lib --no-default-features local_nist_water_shomate_fixture_matches_the_published_500k_anchor_offline -- --nocapture
+cargo test --lib --no-default-features bundled_thermochemistry_content_manifest_matches_checked_in_data -- --nocapture
+```
+
+**Result:** All three debug tests passed. The NIST Shomate metadata is now an
+explicit auxiliary metadata path, validated by its thermochemistry fixture
+test and covered by the content-hash manifest. The catalog continues to check
+exact identity, evidence kind, format version and row count for every frozen
+pair, and exact one-to-one coverage of all `.rows.json` files. New auxiliary
+metadata must be classified explicitly; it is not silently ignored or given
+fabricated rows.

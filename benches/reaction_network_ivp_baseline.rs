@@ -13,7 +13,8 @@ use RustedSciThe::numerical::SolverTelemetryMode;
 use RustedSciThe::numerical::StiffAPI::{
     StiffCallbackPolicy, StiffFrontend, StiffMatrixLayout, StiffSolverKind,
 };
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use tabled::settings::Style;
 use tabled::{Table, Tabled};
 

@@ -800,7 +800,8 @@ mod tests {
         series.to_csv_series(out.path()).unwrap();
 
         let content = std::fs::read_to_string(out.path()).unwrap();
-        assert!(content.contains("# format_version=2"));
+        assert!(content.contains("# format_version=4"));
+        assert!(content.contains("#META\tCALIBRATION\tNONE"));
         assert!(content.contains("Minute"));
         assert!(content.contains("Unknown"));
         assert!(content.contains("Dimensionless"));
@@ -891,6 +892,9 @@ mod tests {
                 if line.starts_with("#META\tPROV\t") {
                     return None;
                 }
+                if line.starts_with("#META\tHISTORY\t") {
+                    return None;
+                }
                 if line.starts_with("#META\tEXP\t") {
                     let parts = line.split('\t').collect::<Vec<_>>();
                     return Some(
@@ -903,8 +907,11 @@ mod tests {
                             .join("\t"),
                     );
                 }
-                if line == "# format_version=2" {
+                if line == "# format_version=4" {
                     return Some("# format_version=1".to_string());
+                }
+                if line.starts_with("#META\tCALIBRATION\t") {
+                    return None;
                 }
                 if line.starts_with("#META\tCOL\t") {
                     Some(line.split('\t').take(7).collect::<Vec<_>>().join("\t"))
@@ -1001,6 +1008,72 @@ mod tests {
             TGASeries::from_csv_series(empty_path.path()),
             Err(TGADomainError::InvalidOperation(message)) if message.contains("Invalid series CSV format version")
         ));
+    }
+
+    #[test]
+    fn typed_series_roundtrip_preserves_audit_history_but_not_runtime_undo() {
+        let csv = make_csv(12, 920);
+        let mut dataset = ds_from_csv(&csv);
+        dataset.log_operation(
+            "document_test_transform",
+            AffectedColumns::Specific(vec!["mass".to_string()]),
+            None,
+            "Applied a documented transformation".to_string(),
+            true,
+        );
+        let mut series = TGASeries::new();
+        series.set_calibration_snapshot(Some(CalibrationSnapshot::new(-1.75, 42.5)));
+        series
+            .push(TGAExperiment::new(dataset).with_id("document"))
+            .unwrap();
+
+        let path = tempfile::NamedTempFile::new().unwrap();
+        series.to_csv_series(path.path()).unwrap();
+        let restored = TGASeries::from_csv_series(path.path()).unwrap();
+        assert_eq!(
+            restored.calibration_snapshot(),
+            Some(CalibrationSnapshot::new(-1.75, 42.5))
+        );
+        let restored_dataset = &restored.get_experiment_by_id("document").unwrap().dataset;
+        let operation = restored_dataset
+            .history_of_operations
+            .vector_of_operations
+            .iter()
+            .find(|operation| operation.operation_name == "document_test_transform")
+            .unwrap();
+        assert_eq!(operation.description, "Applied a documented transformation");
+        assert!(matches!(
+            operation.affected_columns,
+            AffectedColumns::Specific(ref columns) if columns == &["mass"]
+        ));
+        assert!(operation.expr.is_none());
+        assert!(!operation.reversible);
+        assert_eq!(restored_dataset.undo_depth(), 0);
+    }
+
+    #[test]
+    fn series_revision_changes_only_after_successful_commits() {
+        let mut series = TGASeries::new();
+        let initial_revision = series.data_revision();
+        series
+            .push(TGAExperiment::new(TGADataset::default()).with_id("revision"))
+            .unwrap();
+        assert_eq!(series.data_revision(), initial_revision + 1);
+
+        let before_failed_mutation = series.data_revision();
+        let result = series.try_mutate_by_id("revision", |_experiment| {
+            Err::<(), _>(TGADomainError::InvalidOperation("expected".to_string()))
+        });
+        assert!(result.is_err());
+        assert_eq!(series.data_revision(), before_failed_mutation);
+
+        series
+            .try_mutate_by_id("revision", |experiment| {
+                experiment.meta.comment = Some("changed".to_string());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(series.data_revision(), before_failed_mutation + 1);
     }
 
     #[test]

@@ -10,9 +10,9 @@
 //! cargo bench --bench equilibrium_prepared_session --features equilibrium-instrumentation -- --noplot
 //! ```
 
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::time::Instant;
-
-use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tabled::{Table, Tabled};
 
 use KiThe::Thermodynamics::ChemEquilibrium::prelude::*;

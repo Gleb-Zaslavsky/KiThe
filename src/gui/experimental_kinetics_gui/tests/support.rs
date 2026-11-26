@@ -122,10 +122,12 @@ pub fn import_csv(
     harness.state_mut().app.new_experiment_dialog.current_dir =
         path.parent().unwrap().to_path_buf();
     harness.run();
+    harness
+        .state_mut()
+        .app
+        .new_experiment_dialog
+        .test_next_open_file = Some(path.to_path_buf());
     click_menu_entry(harness, "File Manager", "Import Data");
-    let filename = path.file_name().unwrap().to_string_lossy();
-    harness.get_by_label(&format!("[F] {filename}")).click();
-    harness.run();
     harness.get_by_label("Experiment ID:").focus();
     harness.key_press(egui::Key::Home);
     harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);

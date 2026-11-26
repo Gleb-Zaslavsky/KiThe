@@ -17,6 +17,25 @@ impl PlotModel {
         &mut self,
         request: FitColumnRequest,
     ) -> Result<FitColumnResult, TGAGUIError> {
+        self.validate_fit_plot_settings()?;
+        let result = self.series.fit_column(request)?;
+        self.plot_fitted_column(&result)?;
+        Ok(result)
+    }
+
+    /// Fit, publish and plot a curve while retaining its evaluator for later
+    /// gap reconstruction or extrapolation.
+    pub fn fit_session_and_plot(
+        &mut self,
+        request: FitColumnRequest,
+    ) -> Result<FitColumnSession, TGAGUIError> {
+        self.validate_fit_plot_settings()?;
+        let session = self.series.fit_column_and_retain_session(request)?;
+        self.plot_fitted_column(&session.result)?;
+        Ok(session)
+    }
+
+    fn validate_fit_plot_settings(&self) -> Result<(), TGAGUIError> {
         self.settings
             .n_points()
             .filter(|count| *count > 0)
@@ -25,8 +44,10 @@ impl PlotModel {
                     "Plot sample count must be a positive integer.".to_string(),
                 )
             })?;
+        Ok(())
+    }
 
-        let result = self.series.fit_column(request)?;
+    fn plot_fitted_column(&mut self, result: &FitColumnResult) -> Result<(), TGAGUIError> {
         let short_name =
             self.create_plot_short_name(&result.experiment_id, &result.x_col, &result.output_col);
         let previous_curve = self
@@ -86,7 +107,7 @@ impl PlotModel {
                 result.output_col, result.experiment_id
             )));
         }
-        Ok(result)
+        Ok(())
     }
 
     /// Fit without changing the source experiment; evaluation is a separate user action.

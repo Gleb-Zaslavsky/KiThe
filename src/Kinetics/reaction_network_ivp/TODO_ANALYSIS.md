@@ -216,10 +216,11 @@ axes; no optimization claim is made from one machine's measurements.
   only and must never replace `last_solution`; cancellation remains a typed
   failure. The last accepted solution is retained.
 - [x] Characterize native mid-run cancellation/partial telemetry availability
-  with an ignored wall-clock story. On the measured fixture BDF and Backward
-  Euler expose telemetry and partial trajectory, Radau exposes neither on
-  failure, while LSODE2 finishes before the signal. This is measured behavior,
-  not a deterministic cancellation-latency guarantee for LSODE2.
+  with an ignored wall-clock story. On the current RST 0.5.2 fixture BDF and
+  Backward Euler expose telemetry and 32 partial samples, Radau exposes
+  telemetry and its one-point failure snapshot, while LSODE2 finishes before
+  the signal and reports telemetry for the completed attempt. This is measured
+  behavior, not a deterministic cancellation-latency guarantee for LSODE2.
 
 ## RN-05: Rich Typed Errors From The Start
 
@@ -236,12 +237,12 @@ axes; no optimization claim is made from one machine's measurements.
   trial-state values to an opaque RST callback error.
 - [x] Preserve native RST errors through `std::error::Error::source()` and
   typed variants. Avoid public `Result<_, String>` and lossy blanket conversion.
-- [x] Preserve available failed-attempt telemetry and a bounded raw native
-  partial trajectory in distinct diagnostics, never as an accepted solution.
-  Pre-cancel does not inherit the prior snapshot; Radau failure telemetry is
-  suppressed until RST can establish its attempt identity. Native partial
-  samples lack a solve ID and remain best-effort diagnostics, not a verified
-  per-attempt audit record.
+- [x] Preserve attempt-scoped telemetry and partial trajectory from RST reports
+  in distinct diagnostics, never as an accepted solution. Reports and partial
+  samples carry a `solve_id`; pre-start cancellation after a prior success is
+  covered across all four families. Immediate callback failures can still
+  return only the ID and typed error for BDF/LSODE2; this known upstream gap is
+  recorded under Depends On RST Capability/API.
 - [x] Separate malformed input, invalid runtime model domain, numerical
   non-convergence, and physically rejected candidate results.
 - [x] Test local error categories/context and preserve native error sources
@@ -285,7 +286,8 @@ axes; no optimization claim is made from one machine's measurements.
   Revisit only if callers identify an event/context not exposed by either.
 - [x] Test default-Off behavior, independent settings, all four modes, and
   forwarding to each StiffAPI family. Native mode semantics remain an RST
-  contract; failed-run snapshot availability is not uniformly guaranteed.
+  contract. RST reports may omit telemetry when a callback fails before the
+  native family records a failed status; KiThe preserves that absence.
 
 ## RN-07: Acceptance, Results, And Transactionality
 
@@ -345,8 +347,10 @@ axes; no optimization claim is made from one machine's measurements.
   reference fixture, not a universal nonlinear-stiffness guarantee.
 - [x] Early cancellation and retention, unsupported capability, telemetry
   forwarding, malformed symbols, and default logging-disabled lifecycle are
-  covered. A malformed middle reaction rejects whole problem construction;
-  mid-run cancellation and actual native failure retention remain open.
+  covered. A malformed middle reaction rejects whole problem construction.
+  Attempt identity, pre-start cancellation, and native failure retention are
+  covered; the availability matrix for immediate callback failures is pinned
+  in Story 26, including the remaining BDF/LSODE2 RST limitation.
 - [x] Add curated STORY_TESTS.md: name, question/hypothesis, exact commands,
   fixtures/options, numerical criteria/results, conclusions, and limitations.
 
@@ -397,8 +401,8 @@ and backend coverage before expanding the model.
   errors, not reverse conversion or zero-clipped rates.
 - A1/F1 naming is resolved for now: no A1 alias; add an A1 model only after
   its exact expression and model convention are supplied. Scalar F1 parity
-  and mixed SolidState-network stories must verify the capacity/domain
-  contract above.
+  and mixed SolidState-network stories cover the capacity/domain contract
+  above (RN-08).
 - Strict rejection of every negative concentration is the chosen publication
   policy; no clipping or renormalization. Automatically derived nullspace
   relations will not reject generic results. A future public invariant check
@@ -437,21 +441,29 @@ and backend coverage before expanding the model.
   `SolidStateDomain` from intermediate trial states. KiThe validates initial
   and published states and its explicit RHS probe; preserve the native
   callback error until an upstream typed domain-callback hook exists.
-- Upstream request for RST: attach a typed callback failure payload to
-  `StiffSolveError`/`StiffCancellationError` with equation/component index,
-  trial time and state, and failure kind (nonfinite RHS/Jacobian or domain
-  rejection). Include a per-attempt `solve_id` in failed-run telemetry and
-  partial trajectory access so clients can reject snapshots retained from
-  an earlier accepted run. For Radau, expose a failure-side telemetry snapshot
-  separate from `RadauSolution`; for LSODE2, document cancellation checkpoints
-  and whether a completed solve can legitimately outrun a pending signal.
-
-- Verify deterministic mid-run cancellation and whether each native family
-  exposes partial state/telemetry for diagnostics only; never publish it as a
-  successful solution.
-- Preserve native failed-attempt telemetry/partial state where RST exposes it;
-  request an upstream API addition where it does not. Do not synthesize state
-  or classify errors by parsing display strings.
+- [x] RST 0.5.2 attempt reports provide a `solve_id` and cancellation
+  disposition for all four StiffAPI families, with optional telemetry and
+  diagnostic partial trajectory. KiThe consumes these reports whenever
+  telemetry is enabled and retains their identity in
+  `NetworkIvpAttemptDiagnostics`.
+- [x] KiThe keeps the original allocation-light solve route for telemetry
+  `Off`; it does not request an RST report or copy partial state in that mode.
+- [x] Debug stories cover success followed by native callback failure and
+  pre-start cancellation after a successful run. A failed/cancelled attempt
+  cannot replace the accepted solution, and any partial trajectory remains a
+  distinct diagnostic-only type with the current attempt ID.
+- [ ] Native callback diagnostics still omit trial time/state and some native
+  failure paths cannot identify the residual/Jacobian element or domain
+  category. Preserve only RST-provided typed facts; do not infer them from
+  display strings or substitute the last accepted state.
+- [ ] A callback failure before the native solver records a failed status may
+  have a valid attempt ID and typed error but no telemetry or partial state.
+  Keep these fields absent rather than attaching the previous solve's snapshot;
+  request upstream support if early callback failures need counters/state.
+- [x] Repeated the wall-clock mid-run cancellation characterization on RST
+  0.5.2 and recorded it in Story 25. Repeat it after future solver/API changes;
+  LSODE2 may finish before the request, which is a reported disposition and not
+  automatically a defect.
 - Add reaction/expression role and trial-state context for native callback
   errors only when the evaluator boundary can supply that context.
 

@@ -4,8 +4,9 @@ use RustedSciThe::numerical::LSODE2::Lsode2ProblemConfig;
 use RustedSciThe::numerical::Radau::api::{RadauConfig, RadauOutputPolicy, RadauProblem};
 use RustedSciThe::numerical::SolverTelemetryMode;
 use RustedSciThe::numerical::StiffAPI::{
-    PreparedStiffSolver, StiffCallbackPolicy, StiffFrontend, StiffMatrixLayout, StiffPreset,
-    StiffSolverKind, StiffSolverRequest, StiffTelemetrySnapshot,
+    PreparedStiffSolver, StiffAttemptTelemetry, StiffCallbackFailureDiagnostic,
+    StiffCallbackPolicy, StiffCancellationDisposition, StiffFrontend, StiffMatrixLayout,
+    StiffPreset, StiffSolverKind, StiffSolverRequest, StiffTelemetrySnapshot,
 };
 use RustedSciThe::numerical::logging::SolverLogLevel;
 use nalgebra::DVector;
@@ -98,11 +99,32 @@ pub struct NetworkIvpRunMetadata {
     pub rate_coefficients: Vec<RateCoefficientBinding>,
 }
 
-/// Bounded raw native samples observed after a failed integration attempt.
-/// These values are diagnostic only, lack an RST solve ID, and have not passed
-/// physical acceptance.
+/// Attempt-scoped RST diagnostics. Partial trajectory data is never a solution.
+#[derive(Debug, Clone)]
+pub struct NetworkIvpAttemptDiagnostics {
+    pub solve_id: u64,
+    pub outcome: NetworkIvpAttemptOutcome,
+    pub cancellation_disposition: StiffCancellationDisposition,
+    pub telemetry: Option<StiffAttemptTelemetry>,
+    pub callback_failure: Option<StiffCallbackFailureDiagnostic>,
+    pub partial_trajectory: Option<NetworkIvpPartialTrajectory>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkIvpAttemptOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// Bounded trajectory samples from a failed or cancelled attempt. Diagnostic
+/// only: this type is deliberately distinct from `NetworkIvpSolution` and is
+/// not accepted by any publication or continuation API.
 #[derive(Debug, Clone)]
 pub struct NetworkIvpPartialTrajectory {
+    pub solve_id: u64,
+    pub solver: StiffSolverKind,
+    pub accepted_steps: Option<usize>,
     pub time_seconds: Vec<f64>,
     pub states: Vec<Vec<f64>>,
     pub omitted_samples: usize,

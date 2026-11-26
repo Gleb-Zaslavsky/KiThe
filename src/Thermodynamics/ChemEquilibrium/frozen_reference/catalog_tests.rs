@@ -137,6 +137,11 @@ mod tests {
         },
     ];
 
+    // This is source metadata for the independent NIST thermochemistry
+    // fixture, not metadata for a frozen reference dataset with a rows file.
+    // It is content-hashed and validated by `nist_shomate_fixture_tests`.
+    const AUXILIARY_METADATA_FILES: [&str; 1] = ["nist_webbook/water_gas_shomate.metadata.json"];
+
     fn data_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src/Thermodynamics/ChemEquilibrium/frozen_reference/data")
@@ -227,12 +232,20 @@ mod tests {
             assert_eq!(rows.rows.len(), entry.expected_row_count);
         }
 
-        let mut catalog_metadata_paths = metadata_paths.into_iter().collect::<Vec<_>>();
-        catalog_metadata_paths.sort_unstable();
+        for auxiliary_path in AUXILIARY_METADATA_FILES {
+            assert!(
+                !metadata_paths.contains(auxiliary_path),
+                "auxiliary metadata '{}' must not be registered as a frozen row dataset",
+                auxiliary_path
+            );
+        }
+        let mut accounted_metadata_paths = metadata_paths.into_iter().collect::<Vec<_>>();
+        accounted_metadata_paths.extend(AUXILIARY_METADATA_FILES);
+        accounted_metadata_paths.sort_unstable();
         assert_eq!(
-            catalog_metadata_paths,
+            accounted_metadata_paths,
             collect_relative_files(&root, ".metadata.json"),
-            "every metadata file must have exactly one catalog entry"
+            "every metadata file must be cataloged as a frozen pair or explicitly classified as auxiliary"
         );
         let mut catalog_row_paths = row_paths.into_iter().collect::<Vec<_>>();
         catalog_row_paths.sort_unstable();

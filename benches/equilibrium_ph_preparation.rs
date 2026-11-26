@@ -14,12 +14,12 @@
 
 use std::time::{Duration, Instant};
 
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 #[cfg(feature = "equilibrium-benchmark-allocation")]
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::hint::black_box;
 #[cfg(feature = "equilibrium-benchmark-allocation")]
 use std::sync::atomic::{AtomicU64, Ordering};
-
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tabled::{Table, Tabled};
 
 use KiThe::Thermodynamics::ChemEquilibrium::prelude::*;

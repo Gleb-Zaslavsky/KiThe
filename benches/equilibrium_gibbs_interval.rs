@@ -20,9 +20,9 @@
 //!   --features "equilibrium-instrumentation equilibrium-benchmark-no-gibbs-interval-reuse" -- --noplot
 //! ```
 
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::time::Instant;
-
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use tabled::{Table, Tabled};
 
 use KiThe::Thermodynamics::ChemEquilibrium::prelude::*;

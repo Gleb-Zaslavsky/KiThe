@@ -62,12 +62,12 @@ pub struct Mathematics {
     lowess_parallel: bool,
     lowess_selected_cols: Vec<String>,
     lowess_out_cols: HashMap<String, String>,
+    time_grid_cache: HashMap<(String, String, u64), Option<(f64, &'static str, f64)>>,
 }
 
 impl Mathematics {
-    /// Estimate the selected curve's time spacing from its currently displayed points.
-    /// Plot downsampling can make this differ from the underlying measurement grid.
-    fn time_grid_summary(model: &PlotModel) -> Option<(f64, &'static str, f64)> {
+    /// Summarize the selected curve's real input grid once per dataset revision.
+    fn time_grid_summary(&mut self, model: &PlotModel) -> Option<(f64, &'static str, f64)> {
         let curve = model
             .get_selected_curve_index()
             .and_then(|index| model.plots.get(index))
@@ -82,42 +82,61 @@ impl Mathematics {
             .series
             .get_experiment_by_id(&curve.experiment_id)
             .ok()?;
-        let unit = experiment.dataset.schema.columns.get(&curve.x_name)?.unit;
+        let experiment_id = curve.experiment_id.clone();
+        let x_name = curve.x_name.clone();
+        let y_name = curve.y_name.clone();
+        let unit = experiment.dataset.schema.columns.get(&x_name)?.unit;
         let unit_name = match unit {
             Unit::Second => "s",
             Unit::Minute => "min",
             Unit::Hour => "h",
             _ => return None,
         };
-
-        let mut steps: Vec<f64> = curve
-            .points
-            .windows(2)
-            .map(|pair| (pair[1][0] - pair[0][0]).abs())
-            .filter(|step| step.is_finite() && *step > 0.0)
-            .collect();
-        if steps.is_empty() {
-            return None;
+        let revision = model.series.data_revision();
+        let key = (experiment_id.clone(), x_name.clone(), revision);
+        if let Some(cached) = self.time_grid_cache.get(&key) {
+            return *cached;
         }
-        steps.sort_by(f64::total_cmp);
-        let median_step = steps[steps.len() / 2];
-        let total_span = curve
-            .points
-            .iter()
-            .map(|point| point[0])
-            .filter(|x| x.is_finite())
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), x| {
-                (min.min(x), max.max(x))
-            });
-        let span = total_span.1 - total_span.0;
-        (span.is_finite() && span > 0.0).then_some((median_step, unit_name, span))
+
+        let result = (|| {
+            let block = experiment.dataset.materialize(&x_name, &[&y_name]).ok()?;
+            let grid = block.grid.as_ref();
+            let mut steps: Vec<f64> = grid
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]).abs())
+                .filter(|step| step.is_finite() && *step > 0.0)
+                .collect();
+            if steps.is_empty() {
+                return None;
+            }
+            let middle = steps.len() / 2;
+            steps.select_nth_unstable_by(middle, f64::total_cmp);
+            let median_step = if steps.len() % 2 == 0 {
+                let lower = steps[..middle].iter().copied().max_by(f64::total_cmp)?;
+                (lower + steps[middle]) * 0.5
+            } else {
+                steps[middle]
+            };
+            let (min, max) = grid
+                .iter()
+                .copied()
+                .filter(|x| x.is_finite())
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), x| {
+                    (min.min(x), max.max(x))
+                });
+            let span = max - min;
+            (span.is_finite() && span > 0.0).then_some((median_step, unit_name, span))
+        })();
+        self.time_grid_cache.clear();
+        self.time_grid_cache.insert(key, result);
+        result
     }
 
-    fn show_window_duration(ui: &mut egui::Ui, model: &PlotModel, points: usize) {
-        if let Some((median_step, unit, _)) = Self::time_grid_summary(model) {
+    fn show_window_duration(&mut self, ui: &mut egui::Ui, model: &PlotModel, points: usize) {
+        if let Some((median_step, unit, _)) = self.time_grid_summary(model) {
             let covered = median_step * points.saturating_sub(1) as f64;
             ui.small(format!(
-                "Plot-based estimate: {covered:.6} {unit} ({points} points; median plotted step {median_step:.6} {unit}). Downsampling may make this differ from the measurement grid."
+                "Input-grid width: {covered:.6} {unit} ({points} points; median input step {median_step:.6} {unit})."
             ));
         } else {
             ui.small("Time span unavailable: select a curve with a bound time unit and at least two distinct time points.");
@@ -187,6 +206,7 @@ impl Mathematics {
             lowess_parallel: true,
             lowess_selected_cols: Vec::new(),
             lowess_out_cols: HashMap::new(),
+            time_grid_cache: HashMap::new(),
         }
     }
 
@@ -298,14 +318,10 @@ impl Mathematics {
 
     fn finalize_success(model: &mut PlotModel, message: &str) {
         if let Err(err) = model.create_points_for_selected_curve() {
-            if let Ok(id) = model.get_experiment_by_selected_curve() {
-                model.plots.retain(|curve| curve.experiment_id != id);
-                model.reset_view();
-            }
             Self::set_action_error(
                 model,
                 TGAGUIError::post_commit_warning(format!(
-                    "the filter was applied, but its graph could not be refreshed; stale curves were removed ({err})"
+                    "the filter was applied, but the selected graph could not be refreshed; existing curves were preserved ({err})"
                 )),
             );
             return;
@@ -320,6 +336,7 @@ impl Mathematics {
         }
 
         let mut open = self.show_hampel_window;
+        let mut close_clicked = false;
         egui::Window::new("Hampel filter")
             .open(&mut open)
             .resizable(false)
@@ -348,7 +365,7 @@ impl Mathematics {
                     let value = ui.add(egui::DragValue::new(&mut self.hampel_window).speed(1.0));
                     value.labelled_by(label.id);
                 });
-                Self::show_window_duration(ui, model, self.hampel_window);
+                self.show_window_duration(ui, model, self.hampel_window);
                 ui.horizontal(|ui| {
                     let label = ui.label("Sigma threshold");
                     let value = ui.add(egui::DragValue::new(&mut self.hampel_sigma).speed(0.1));
@@ -425,11 +442,11 @@ impl Mathematics {
                         }
                     }
                     if ui.button("Close").clicked() {
-                        self.show_hampel_window = false;
+                        close_clicked = true;
                     }
                 });
             });
-        self.show_hampel_window = open;
+        self.show_hampel_window = open && !close_clicked;
     }
 
     fn show_sg_window(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
@@ -438,6 +455,7 @@ impl Mathematics {
         }
 
         let mut open = self.show_sg_window;
+        let mut close_clicked = false;
         egui::Window::new("Savitzky Golay")
             .open(&mut open)
             .resizable(false)
@@ -466,7 +484,7 @@ impl Mathematics {
                     let value = ui.add(egui::DragValue::new(&mut self.sg_window).speed(1.0));
                     value.labelled_by(label.id);
                 });
-                Self::show_window_duration(ui, model, self.sg_window);
+                self.show_window_duration(ui, model, self.sg_window);
                 ui.horizontal(|ui| {
                     let label = ui.label("Polynomial order");
                     let value = ui.add(egui::DragValue::new(&mut self.sg_poly_order).speed(1.0));
@@ -515,11 +533,11 @@ impl Mathematics {
                         }
                     }
                     if ui.button("Close").clicked() {
-                        self.show_sg_window = false;
+                        close_clicked = true;
                     }
                 });
             });
-        self.show_sg_window = open;
+        self.show_sg_window = open && !close_clicked;
     }
 
     fn show_rolling_window(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
@@ -528,6 +546,7 @@ impl Mathematics {
         }
 
         let mut open = self.show_rolling_window;
+        let mut close_clicked = false;
         egui::Window::new("rolling mean")
             .open(&mut open)
             .resizable(false)
@@ -556,7 +575,7 @@ impl Mathematics {
                     let value = ui.add(egui::DragValue::new(&mut self.rolling_window).speed(1.0));
                     value.labelled_by(label.id);
                 });
-                Self::show_window_duration(ui, model, self.rolling_window);
+                self.show_window_duration(ui, model, self.rolling_window);
 
                 ui.horizontal(|ui| {
                     let label = ui.label("Output column (optional)");
@@ -587,11 +606,11 @@ impl Mathematics {
                         }
                     }
                     if ui.button("Close").clicked() {
-                        self.show_rolling_window = false;
+                        close_clicked = true;
                     }
                 });
             });
-        self.show_rolling_window = open;
+        self.show_rolling_window = open && !close_clicked;
     }
 
     fn show_lowess_window(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
@@ -600,6 +619,7 @@ impl Mathematics {
         }
 
         let mut open = self.show_lowess_window;
+        let mut close_clicked = false;
         egui::Window::new("LOWESS")
             .open(&mut open)
             .resizable(false)
@@ -739,11 +759,11 @@ impl Mathematics {
                         }
                     }
                     if ui.button("Close").clicked() {
-                        self.show_lowess_window = false;
+                        close_clicked = true;
                     }
                 });
             });
-        self.show_lowess_window = open;
+        self.show_lowess_window = open && !close_clicked;
     }
 
     fn show_splines_window(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
@@ -752,6 +772,7 @@ impl Mathematics {
         }
 
         let mut open = self.show_splines_window;
+        let mut close_clicked = false;
         egui::Window::new("Splines")
             .open(&mut open)
             .resizable(false)
@@ -846,11 +867,11 @@ impl Mathematics {
                         }
                     }
                     if ui.button("Close").clicked() {
-                        self.show_splines_window = false;
+                        close_clicked = true;
                     }
                 });
             });
-        self.show_splines_window = open;
+        self.show_splines_window = open && !close_clicked;
     }
 
     fn show_lsq_splines_window(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
@@ -859,6 +880,7 @@ impl Mathematics {
         }
 
         let mut open = self.show_sql_splines_window;
+        let mut close_clicked = false;
         egui::Window::new("LSQ Splines")
             .open(&mut open)
             .resizable(false)
@@ -884,7 +906,7 @@ impl Mathematics {
                     );
                     let _ = input.labelled_by(label.id);
                 });
-                if let Some((_, unit, span)) = Self::time_grid_summary(model) {
+                if let Some((_, unit, span)) = self.time_grid_summary(model) {
                     if self.sq_splines_n_internal_knots == 0 {
                         ui.small("No internal knots; knot spacing is not applicable.");
                     } else {
@@ -942,10 +964,99 @@ impl Mathematics {
                         }
                     }
                     if ui.button("Close").clicked() {
-                        self.show_sql_splines_window = false;
+                        close_clicked = true;
                     }
                 });
             });
-        self.show_sql_splines_window = open;
+        self.show_sql_splines_window = open && !close_clicked;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Mathematics;
+    use crate::gui::experimental_kinetics_gui::{
+        gui_test::load_model_with_two_curves, model::PlotModel,
+    };
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    #[test]
+    fn failed_filter_graph_refresh_preserves_existing_curves() {
+        let mut model = load_model_with_two_curves();
+        let original_len = model.plots.len();
+        let unaffected_y = model.plots[1].y_name.clone();
+        model.select_curve(0);
+        model.settings.set_n_points(Some(0));
+        let mut probe = model.clone();
+        assert!(probe.create_points_for_selected_curve().is_err());
+
+        Mathematics::finalize_success(&mut model, "operation succeeded");
+
+        assert_eq!(model.plots.len(), original_len);
+        assert_eq!(model.plots[1].y_name, unaffected_y);
+        assert!(model.message.contains("existing curves were preserved"));
+    }
+
+    #[test]
+    fn hampel_close_button_clears_window_open_state() {
+        struct State {
+            model: PlotModel,
+            math: Mathematics,
+        }
+
+        let mut math = Mathematics::new();
+        math.show_hampel_window = true;
+        let mut harness = Harness::new_ui_state(
+            |ui, state: &mut State| state.math.show_windows(ui.ctx(), &mut state.model),
+            State {
+                model: PlotModel::new(),
+                math,
+            },
+        );
+        harness.run();
+        harness.get_by_label("Close").click();
+        harness.run();
+        assert!(!harness.state().math.show_hampel_window);
+    }
+}
+
+#[cfg(test)]
+mod time_grid_summary_tests {
+    use super::*;
+    use crate::Kinetics::experimental_kinetics::experiment_series_main::{
+        ExperimentMeta, ExperimentThermalMode,
+    };
+    use crate::Kinetics::experimental_kinetics::testing_mod::VirtualTGA;
+
+    #[test]
+    fn filter_width_uses_input_grid_not_downsampled_plot_points() {
+        let count = 10_000;
+        let time: Vec<_> = (0..count).map(|index| index as f64 * 0.1).collect();
+        let data = VirtualTGA {
+            temperature: vec![500.0; count],
+            mass: time.iter().map(|t| 100.0 - t * 0.01).collect(),
+            time,
+        };
+        let mut model = PlotModel::default();
+        model
+            .series
+            .create_from_synthetic_data(
+                &data,
+                ExperimentMeta {
+                    id: "input_grid_summary".into(),
+                    isothermal_temperature: Some(500.0),
+                    thermal_mode: ExperimentThermalMode::Isothermal,
+                    ..ExperimentMeta::default()
+                },
+            )
+            .unwrap();
+        model.set_x("input_grid_summary", "time").unwrap();
+        model.set_y("input_grid_summary", "mass").unwrap();
+        model.create_points_for_curve("input_grid_summary").unwrap();
+        assert!(model.plots[0].points.len() < count);
+
+        let summary = Mathematics::new().time_grid_summary(&model).unwrap();
+        assert!((summary.0 - 0.1).abs() < 1e-9);
+        assert!((summary.2 - 999.9).abs() < 1e-8);
     }
 }

@@ -188,6 +188,12 @@ impl PlotView {
             ui.label("График не выбран");
         }
 
+        if let Some([x, y]) = model.interaction.pointer_coordinate {
+            ui.label(format!("Cursor: x={x:.6}, y={y:.6}"));
+        } else {
+            ui.label("Cursor: outside plot");
+        }
+
         if let Some(rect) = &model.interaction.selection_rect {
             let (x_min, x_max, y_min, y_max) = rect.bounds();
             ui.label(format!(

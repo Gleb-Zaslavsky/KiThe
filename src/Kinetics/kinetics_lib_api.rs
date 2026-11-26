@@ -56,6 +56,17 @@ use sha2::{Digest, Sha256};
 type LibraryReactbase = HashMap<String, HashMap<String, Value>>;
 type LibraryReactionDb = HashMap<String, HashMap<String, HashMap<String, HashSet<String>>>>;
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String is infallible");
+    }
+    encoded
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileRevision {
     path: PathBuf,
@@ -166,7 +177,7 @@ fn read_json_library_with_hash<T: DeserializeOwned>(
     file.read_to_string(&mut contents).map_err(|error| {
         KineticsError::Io(error).with_context(format!("reading {library} at `{path}`"))
     })?;
-    let digest = format!("{:x}", Sha256::digest(contents.as_bytes()));
+    let digest = sha256_hex(contents.as_bytes());
     let parsed = serde_json::from_str(&contents).map_err(|error| {
         KineticsError::Json(error).with_context(format!("parsing {library} at `{path}`"))
     })?;
@@ -200,7 +211,7 @@ fn read_json_library_with_diagnostics<T: DeserializeOwned>(
     }
     diagnostics.file_read = Some(started.elapsed());
     diagnostics.bytes = Some(contents.len() as u64);
-    let digest = format!("{:x}", Sha256::digest(contents.as_bytes()));
+    let digest = sha256_hex(contents.as_bytes());
     diagnostics.content_sha256 = Some(digest.clone());
 
     let started = Instant::now();
@@ -783,6 +794,14 @@ pub enum SearchVariants {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn sha256_digest_uses_standard_lowercase_hex_encoding() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     #[test]
     fn poisoned_cache_lock_maps_to_a_typed_error() {

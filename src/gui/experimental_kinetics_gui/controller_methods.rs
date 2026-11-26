@@ -417,6 +417,8 @@ impl KineticMethods {
 
                     // Run the Kissinger calculation without creating new series data or curves.
                     if ui.button("Calculate").on_hover_text("Requires multiple non-isothermal experiments with different heating rates. Updates Ea/R2 labels only; no column or experiment is created.").clicked() {
+                        state.kissinger_ea_kj = None;
+                        state.kissinger_r2 = None;
                         let status = (|| -> Result<String, TGAGUIError> {
                             // Kissinger needs the same columns as non-isothermal isoconversional methods.
                             let view = model.create_kinetic_data_view_for_method(
@@ -527,7 +529,7 @@ impl KineticMethods {
                             if lower.is_some() != upper.is_some() {
                                 return Err(TGAGUIError::BindingError("Enter both conversion X bounds, or leave both empty.".into()));
                             }
-                            let selected_range = if lower.is_none() {
+                                    let selected_range = if lower.is_none() {
                                 if let Some(rect) = model.interaction.selection_rect {
                                     let (x_min, x_max, _, _) = rect.bounds();
                                     let intersecting = model.plots.iter().filter(|plot| plot.highlighted).count();
@@ -538,8 +540,6 @@ impl KineticMethods {
                                     if experiment.dataset.schema.eta.as_deref() != Some(x_name.as_str()) {
                                         return Err(TGAGUIError::BindingError("For a plot selection, the curve X column must be the experiment's bound conversion column. Otherwise enter conversion X bounds above.".into()));
                                     }
-                                    state.sublimation_x_min = x_min.to_string();
-                                    state.sublimation_x_max = x_max.to_string();
                                     Some((x_min, x_max))
                                 } else {
                                     None
@@ -693,6 +693,10 @@ impl KineticMethods {
 
                     // Run the analysis and update result labels.
                     if ui.button("Calculate").on_hover_text("Requires non-isothermal temperature, conversion and conversion-rate data. Uses the numeric search settings; updates result labels only, with no new column.").clicked() {
+                        state.combined_result_n = None;
+                        state.combined_result_m = None;
+                        state.combined_result_ea_kj = None;
+                        state.combined_result_r2 = None;
                         let status = (|| -> Result<String, TGAGUIError> {
                             let analysis = CombinedKineticAnalysis {
                                 n_min: state.combined_n_min,
@@ -743,9 +747,11 @@ impl KineticMethods {
         egui::Window::new("Fit Model")
             .open(&mut state.fit_model_open)
             .default_size([620.0, 430.0])
+            .max_height(520.0)
+            .vscroll(true)
             .show(ui.ctx(), |ui| {
                 ui.vertical(|ui| {
-                    ui.label("General curve fitting, not a kinetic method (isothermal classification: not applicable). Choose one experiment, X/Y columns, model and optional fit settings. Fit adds a fitted-Y column; an existing output name is replaced.");
+                    ui.label("General curve fitting, not a kinetic method. Fit adds a new fitted-Y column to this experiment and plots it; measured data remain unchanged. Evaluate separately reconstructs a gap or extrapolates onto a new X grid.");
                     ui.add_space(4.0);
                     let exp_ids = model.list_of_experiments();
                     if state.fit_model_experiment_id.is_empty()
@@ -978,13 +984,38 @@ impl KineticMethods {
                                 let _ = input.labelled_by(label.id);
                             });
 
+                            ui.separator();
+                            ui.strong("Fit data");
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut state.fit_training_range_enabled, "Limit fit range");
+                                if state.fit_training_range_enabled {
+                                    let label = ui.label("X start:");
+                                    let response = ui.add(egui::DragValue::new(&mut state.fit_training_start).speed(0.1));
+                                    let _ = response.labelled_by(label.id);
+                                    let label = ui.label("end:");
+                                    let response = ui.add(egui::DragValue::new(&mut state.fit_training_end).speed(0.1));
+                                    let _ = response.labelled_by(label.id);
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut state.fit_gap_enabled, "Exclude missing interval from fit");
+                                if state.fit_gap_enabled {
+                                    let label = ui.label("Gap start:");
+                                    let response = ui.add(egui::DragValue::new(&mut state.fit_gap_start).speed(0.1));
+                                    let _ = response.labelled_by(label.id);
+                                    let label = ui.label("end:");
+                                    let response = ui.add(egui::DragValue::new(&mut state.fit_gap_end).speed(0.1));
+                                    let _ = response.labelled_by(label.id);
+                                }
+                            });
+
                             ui.horizontal(|ui| {
                                 ui.label("Status:");
                                 ui.label(&state.fit_model_status);
                             });
 
                             ui.add_space(8.0);
-                            if ui.button("Fit").on_hover_text("Requires an experiment and X/Y columns. Polynomial degree is required for polynomial models; initial guess is optional. Fits and stores a reusable model; it does not change any experiment or add a column.").clicked() {
+                            if ui.button("Fit").on_hover_text("Requires an experiment and X/Y columns. Polynomial degree is required for polynomial models; initial guess is optional. Adds a new fitted column to the same experiment, plots it, and keeps the model available for Evaluate. Existing columns are not overwritten.").clicked() {
                                 let status = (|| -> Result<String, TGAGUIError> {
                                     if state.fit_model_experiment_id.is_empty()
                                         || state.fit_model_x_col.is_empty()
@@ -1029,16 +1060,17 @@ impl KineticMethods {
                                         request = request.with_initial_guess(initial_guess);
                                     }
 
-                                    let session = model.fit_column_for_evaluation(request)?;
+                                    let session = model.fit_session_and_plot(request)?;
                                     let result = session.result.clone();
                                     state.fit_model_result = Some(result.clone());
                                     state.fit_sessions.retain(|existing| {
-                                        existing.result.y_col != result.y_col
+                                        existing.result.experiment_id != result.experiment_id
+                                            || existing.result.y_col != result.y_col
                                             || existing.result.x_col != result.x_col
                                     });
                                     state.fit_sessions.push(session);
                                     state.fit_pending_batch = None;
-                                    Ok(format!("Fit stored. R2={:.6}; no source data changed.", result.r2))
+                                    Ok(format!("Fit added '{}' and plotted. R2={:.6}; measured data unchanged.", result.output_col, result.r2))
                                 })();
 
                                 state.fit_model_status = match status {
@@ -1055,6 +1087,7 @@ impl KineticMethods {
                                     .striped(true)
                                     .show(ui, |ui| {
                                         ui.strong("Y");
+                                        ui.strong("Experiment");
                                         ui.strong("Model");
                                         ui.strong("R2");
                                         ui.strong("Coefficients");
@@ -1070,6 +1103,7 @@ impl KineticMethods {
                                                 _ => "-".to_string(),
                                             };
                                             ui.label(&result.y_col);
+                                            ui.label(&result.experiment_id);
                                             ui.label(result.kinetic_model.display_name());
                                             ui.label(format!("{:.6}", result.r2));
                                             ui.monospace(coefficients);
@@ -1080,27 +1114,11 @@ impl KineticMethods {
                             }
 
                             ui.separator();
-                            ui.strong("Evaluation");
+                            ui.strong("Evaluate on a new X grid");
+                            ui.label("This is optional reconstruction, not required to inspect the fitted curve.");
                             ui.horizontal(|ui| {
-                                ui.checkbox(&mut state.fit_training_range_enabled, "Limit fit range");
-                                if state.fit_training_range_enabled {
-                                    let label = ui.label("Fit X start:");
-                                    let response = ui.add(egui::DragValue::new(&mut state.fit_training_start).speed(0.1));
-                                    let _ = response.labelled_by(label.id);
-                                    let label = ui.label("end:");
-                                    let response = ui.add(egui::DragValue::new(&mut state.fit_training_end).speed(0.1));
-                                    let _ = response.labelled_by(label.id);
-                                }
-                            });
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut state.fit_gap_enabled, "Reconstruct an internal gap");
                                 if state.fit_gap_enabled {
-                                    let label = ui.label("Gap start:");
-                                    let response = ui.add(egui::DragValue::new(&mut state.fit_gap_start).speed(0.1));
-                                    let _ = response.labelled_by(label.id);
-                                    let label = ui.label("end:");
-                                    let response = ui.add(egui::DragValue::new(&mut state.fit_gap_end).speed(0.1));
-                                    let _ = response.labelled_by(label.id);
+                                    ui.label(format!("Fill excluded interval [{:.4}, {:.4}]", state.fit_gap_start, state.fit_gap_end));
                                 } else {
                                     let label = ui.label("Extrapolation X start:");
                                     let response = ui.add(egui::DragValue::new(&mut state.fit_evaluation_start).speed(0.1));
@@ -1115,9 +1133,22 @@ impl KineticMethods {
                             });
                             ui.horizontal(|ui| {
                                 if ui.button("Evaluate fitted columns")
-                                    .on_hover_text("Evaluates every stored fit on one shared X grid. The result remains a preview until explicitly added from Column Manager.")
+                                    .on_hover_text("Evaluates the retained fit models on a shared new X grid for extrapolation or gap reconstruction. This does not replace the fitted column; review the preview and explicitly create a reconstructed experiment.")
                                     .clicked()
                                 {
+                                    // A failed evaluation must not leave an older preview available
+                                    // for accidental commit from Column Manager.
+                                    state.fit_pending_batch = None;
+                                    let matching_sessions: Vec<_> = state
+                                        .fit_sessions
+                                        .iter()
+                                        .filter(|session| {
+                                            session.result.experiment_id
+                                                == state.fit_model_experiment_id
+                                                && session.result.x_col == state.fit_model_x_col
+                                        })
+                                        .cloned()
+                                        .collect();
                                     let mode = if state.fit_gap_enabled {
                                         FitEvaluationMode::FillGap {
                                             start: state.fit_gap_start,
@@ -1131,15 +1162,27 @@ impl KineticMethods {
                                             points: state.fit_evaluation_points,
                                         }
                                     };
-                                    match evaluate_fit_batch(&state.fit_sessions, mode) {
-                                        Ok(batch) => {
-                                            state.fit_reconstructed_experiment_id = format!(
-                                                "{}_reconstructed", batch.source_experiment_id
-                                            );
-                                            state.fit_pending_batch = Some(batch);
-                                            state.fit_model_status = "Evaluation ready. Review and commit it in Column Manager.".to_string();
+                                    if matching_sessions.is_empty() {
+                                        state.fit_model_status = format!(
+                                            "Evaluation failed: no fitted model for experiment '{}' and X column '{}'.",
+                                            state.fit_model_experiment_id,
+                                            state.fit_model_x_col
+                                        );
+                                    } else {
+                                        match evaluate_fit_batch(&matching_sessions, mode) {
+                                            Ok(batch) => {
+                                                state.fit_reconstructed_experiment_id = format!(
+                                                    "{}_reconstructed",
+                                                    batch.source_experiment_id
+                                                );
+                                                state.fit_pending_batch = Some(batch);
+                                                state.fit_model_status = "Evaluation ready. Review and commit it in Column Manager.".to_string();
+                                            }
+                                            Err(error) => {
+                                                state.fit_model_status =
+                                                    format!("Evaluation failed: {error}")
+                                            }
                                         }
-                                        Err(error) => state.fit_model_status = format!("Evaluation failed: {error}"),
                                     }
                                 }
                                 if ui.button("Clear fit sessions").clicked() {

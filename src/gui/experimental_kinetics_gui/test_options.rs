@@ -2,7 +2,7 @@
 use crate::Kinetics::experimental_kinetics::testing_mod::{
     AdvancedTGAConfig, ExperimentMode, KineticModel, NoiseConfig, NoiseKind, SpikeModel,
 };
-use crate::gui::experimental_kinetics_gui::gui_test::load_model_with_one_curve;
+use crate::gui::experimental_kinetics_gui::gui_test::try_load_model_with_one_curve;
 use crate::gui::experimental_kinetics_gui::help_view::{HelpDoc, HelpLanguage};
 use crate::gui::experimental_kinetics_gui::model::PlotModel;
 use crate::gui::experimental_kinetics_gui::settings::{CalibrationLine, Settings};
@@ -28,6 +28,7 @@ pub struct TestOptions {
     pub(crate) help_editor_buffer: String,
     pub(crate) help_expanded_sections: std::collections::HashSet<usize>,
     pub(crate) show_logs_window: bool,
+    pub(crate) confirm_load_testing_data: bool,
     // Synthetic data window
     pub(crate) show_synthetic_data: bool,
 
@@ -101,6 +102,7 @@ impl Default for TestOptions {
             help_editor_buffer: String::new(),
             help_expanded_sections: HashSet::new(),
             show_logs_window: false,
+            confirm_load_testing_data: false,
             show_synthetic_data: false,
 
             syn_n_points: "70000".to_string(),
@@ -165,8 +167,7 @@ impl TestOptions {
     /// Main UI display function
     pub fn show(ui: &mut egui::Ui, model: &mut PlotModel, test_options: &mut TestOptions) {
         if ui.button("Load testing data").clicked() {
-            info!("Loading packaged test data");
-            model.push_testing_data();
+            test_options.confirm_load_testing_data = true;
         }
         if ui.button("Create synthetic data").clicked() {
             test_options.show_synthetic_data = true;
@@ -190,9 +191,55 @@ impl TestOptions {
         }
     }
 
+    pub fn show_load_testing_data_confirmation(
+        &mut self,
+        ctx: &egui::Context,
+        model: &mut PlotModel,
+        document: &mut crate::gui::experimental_kinetics_gui::controller_buttons_and_panels::NewExperimentDialogState,
+    ) {
+        if !self.confirm_load_testing_data {
+            return;
+        }
+        let mut confirm_open = true;
+        let mut confirmed = false;
+        let mut canceled = false;
+        egui::Window::new("Replace workspace with test data?")
+            .open(&mut confirm_open)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label("This replaces all current experiments. The current Save target will be cleared.");
+                ui.horizontal(|ui| {
+                    if ui.button("Replace with test data").clicked() {
+                        confirmed = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        canceled = true;
+                    }
+                });
+            });
+        self.confirm_load_testing_data = confirm_open && !canceled;
+        if confirmed {
+            match try_load_model_with_one_curve() {
+                Ok(test_model) => {
+                    *model = test_model;
+                    document.reset_save_target_after_external_replacement(model);
+                    let _ = model
+                        .push_message("Loaded test data; use Save As to choose a destination.");
+                    info!("Loaded packaged test data into a clean document session");
+                }
+                Err(error) => {
+                    warn!("Could not load packaged test data: {error}");
+                    let _ = model.push_message(&format!("Could not load test data: {error}"));
+                }
+            }
+            self.confirm_load_testing_data = false;
+        }
+    }
+
     /// Displays the settings editor window
     pub fn show_settings_window(&mut self, ctx: &egui::Context, model: &mut PlotModel) {
         let mut is_open = self.show_settings_window;
+        let mut close_clicked = false;
         egui::Window::new("TGA Settings")
             .open(&mut is_open)
             .resizable(true)
@@ -299,7 +346,7 @@ impl TestOptions {
                     }
 
                     if ui.button("Close").clicked() {
-                        self.show_settings_window = false;
+                        close_clicked = true;
                     }
                 });
 
@@ -309,7 +356,7 @@ impl TestOptions {
                     ui.colored_label(egui::Color32::GREEN, &model.message);
                 }
             });
-        self.show_settings_window = is_open;
+        self.show_settings_window = is_open && !close_clicked;
     }
 
     /// Synthetic data window
@@ -318,6 +365,7 @@ impl TestOptions {
             return;
         }
         let mut open = self.show_synthetic_data;
+        let mut close_clicked = false;
         egui::Window::new("Create Synthetic TGA Data")
             .open(&mut open)
             .resizable(true)
@@ -525,11 +573,11 @@ impl TestOptions {
                         }
                     }
                     if ui.button("Close").clicked() {
-                        self.show_synthetic_data = false;
+                        close_clicked = true;
                     }
                 });
             });
-        self.show_synthetic_data = open;
+        self.show_synthetic_data = open && !close_clicked;
     }
 
     /// Show the history feed for the currently selected experiment.
@@ -822,20 +870,22 @@ impl TestOptions {
             .parse::<usize>()
             .map_err(|_| format!("Invalid n_points value: '{}'", self.temp_n_points))?;
 
-        // Update model settings
-        model
-            .settings
-            .set_calibration_line(Some(CalibrationLine::new(k, b)));
-        model.settings.set_n_points(Some(n_points));
-        model
-            .settings
-            .set_log_level(Some(self.temp_log_level.clone()));
+        if !k.is_finite() || !b.is_finite() {
+            return Err("Calibration coefficients must be finite".into());
+        }
+        if n_points == 0 {
+            return Err("Number of plot points must be greater than zero".into());
+        }
 
-        // Save to file
-        model
-            .settings
+        // Persist a candidate first; failed I/O must leave live settings untouched.
+        let mut candidate = model.settings.clone();
+        candidate.set_calibration_line(Some(CalibrationLine::new(k, b)));
+        candidate.set_n_points(Some(n_points));
+        candidate.set_log_level(Some(self.temp_log_level.clone()));
+        candidate
             .create_or_recreate_config()
             .map_err(|e| format!("Failed to save settings: {:?}", e))?;
+        model.settings = candidate;
 
         Ok(())
     }
@@ -849,8 +899,85 @@ impl TestOptions {
 //============================================================================================
 //
 //============================================================================================
-impl PlotModel {
-    fn push_testing_data(&mut self) {
-        *self = load_model_with_one_curve();
+#[cfg(test)]
+mod settings_apply_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_calibration_does_not_change_live_settings() {
+        let mut model = PlotModel::default();
+        let before = model.settings.calibration_line().unwrap();
+        let mut options = TestOptions::default();
+        options.temp_k = "NaN".into();
+        options.temp_b = "12".into();
+        options.temp_n_points = "100".into();
+        options.temp_log_level = "info".into();
+
+        assert!(options.apply_settings(&mut model).is_err());
+        let after = model.settings.calibration_line().unwrap();
+        assert_eq!(before.k(), after.k());
+        assert_eq!(before.b(), after.b());
+    }
+}
+
+#[cfg(test)]
+mod window_close_tests {
+    use super::TestOptions;
+    use crate::gui::experimental_kinetics_gui::model::PlotModel;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    struct State {
+        options: TestOptions,
+        model: PlotModel,
+    }
+
+    #[test]
+    fn settings_close_button_clears_open_state() {
+        let mut options = TestOptions::new();
+        options.show_settings_window = true;
+        let mut harness = Harness::builder()
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, state: &mut State| {
+                    state
+                        .options
+                        .show_settings_window(ui.ctx(), &mut state.model)
+                },
+                State {
+                    options,
+                    model: PlotModel::new(),
+                },
+            );
+        harness.run();
+        harness.get_by_label("Close").scroll_to_me();
+        harness.run();
+        harness.get_by_label("Close").click();
+        harness.run();
+        assert!(!harness.state().options.show_settings_window);
+    }
+
+    #[test]
+    fn synthetic_data_close_button_clears_open_state() {
+        let mut options = TestOptions::new();
+        options.show_synthetic_data = true;
+        let mut harness = Harness::builder()
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, state: &mut State| {
+                    state
+                        .options
+                        .show_synthetic_data_window(ui.ctx(), &mut state.model)
+                },
+                State {
+                    options,
+                    model: PlotModel::new(),
+                },
+            );
+        harness.run();
+        harness.get_by_label("Close").scroll_to_me();
+        harness.run();
+        harness.get_by_label("Close").click();
+        harness.run();
+        assert!(!harness.state().options.show_synthetic_data);
     }
 }

@@ -1118,6 +1118,135 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "compare proactive and failure-triggered policies on frozen low-inventory P,H cases"]
+    fn i5_tp1906_small_scale_proactive_vs_failure_only_diagnostic() {
+        let fixture = fixture();
+        let cases = fixture.cases().unwrap();
+        let contract = AcceptedSolutionContract::new(1.0e-6, 1.0e-6);
+        let policies = [
+            (
+                "proactive",
+                ExtensiveNormalizationPolicy::OnNumericalFailureAndSmallScalePhPreconditioning,
+            ),
+            (
+                "failure-only",
+                ExtensiveNormalizationPolicy::OnNumericalFailure,
+            ),
+        ];
+
+        println!("frozen CHON + graphite P,H proactive-policy comparison");
+        println!(
+            "source_T | factor | policy | outcome | dT_K | max_relative_moles | residual | abs_balance | graphite | normalization"
+        );
+        for temperature_k in [700.0, 720.0] {
+            let case = cases
+                .iter()
+                .find(|case| (case.enthalpy.temperature_k - temperature_k).abs() <= f64::EPSILON)
+                .expect("frozen comparison must retain both source temperatures");
+            let solve = |factor: f64, policy: ExtensiveNormalizationPolicy| {
+                let request = fixture
+                    .ph_request(case, 900.0)
+                    .expect("frozen comparison request must validate")
+                    .with_initial_composition(scaled_initial_composition(&fixture, factor))
+                    .expect("scaled frozen composition must validate")
+                    .with_target_enthalpy_and_seed(
+                        TotalEnthalpyJoules::new(factor * case.target_enthalpy_j)
+                            .expect("scaled frozen enthalpy must be finite"),
+                        900.0,
+                    )
+                    .expect("scaled frozen target and seed must validate")
+                    .with_ph_solve_mode(PhSolveMode::NestedTemperature)
+                    .with_solve_options(
+                        extensivity_solve_options()
+                            .with_trace_seed_policy(TraceSpeciesSeedPolicy::Absolute {
+                                floor: 1.0e-30,
+                            })
+                            .with_extensive_normalization_policy(policy),
+                    )
+                    .with_temperature_options(extensivity_temperature_options())
+                    .expect("frozen comparison controls must validate");
+                solve_resolved_ph(request)
+            };
+            let baseline = solve(
+                1.0,
+                ExtensiveNormalizationPolicy::OnNumericalFailureAndSmallScalePhPreconditioning,
+            )
+            .expect("unit-scale frozen baseline must solve");
+
+            for factor in [1.0e-4, 1.0e-2] {
+                for (policy_name, policy) in policies {
+                    match solve(factor, policy) {
+                        Ok(candidate) => {
+                            let equilibrium = candidate.equilibrium();
+                            let validation = equilibrium.accepted_solution().validation();
+                            let temperature_error =
+                                (candidate.temperature() - baseline.temperature()).abs();
+                            let max_relative_moles = baseline
+                                .equilibrium()
+                                .component_moles()
+                                .iter()
+                                .zip(equilibrium.component_moles())
+                                .map(|(&expected, &actual)| {
+                                    (expected - actual / factor).abs()
+                                        / expected.abs().max(actual.abs() / factor).max(1.0e-30)
+                                })
+                                .fold(0.0_f64, f64::max);
+                            let same_topology = fixture.graphite_is_active(equilibrium)
+                                == fixture.graphite_is_active(baseline.equilibrium());
+                            let enthalpy_ok = candidate.enthalpy_error().abs()
+                                <= candidate.enthalpy_error_limit_joules();
+                            let gate_pass = temperature_error <= 1.0e-4
+                                && max_relative_moles <= 1.0e-4
+                                && validation.residual_l2_norm <= contract.max_residual_l2_norm
+                                && validation.max_abs_element_balance_error
+                                    <= contract.max_abs_element_balance_error
+                                && same_topology
+                                && enthalpy_ok;
+                            let normalization = equilibrium
+                                .extensive_normalization_recovery()
+                                .map(|evidence| format!("{:?}", evidence.trigger))
+                                .unwrap_or_else(|| "none".to_string());
+                            println!(
+                                "{temperature_k:.0} | {factor:.0e} | {policy_name} | {} | {temperature_error:.3e} | {max_relative_moles:.3e} | {:.3e} | {:.3e} | {same_topology} | {normalization}",
+                                if gate_pass {
+                                    "PHYSICAL_GATE_PASS"
+                                } else {
+                                    "SOLVED_OUTSIDE_GATE"
+                                },
+                                validation.residual_l2_norm,
+                                validation.max_abs_element_balance_error,
+                            );
+
+                            if policy_name == "proactive" {
+                                assert_bounded_solution_accepted(equilibrium, contract);
+                                assert!(
+                                    gate_pass,
+                                    "proactive gate failed at T={temperature_k}, factor={factor:e}"
+                                );
+                                let evidence =
+                                    equilibrium.extensive_normalization_recovery().expect(
+                                        "proactive frozen solve must retain normalization evidence",
+                                    );
+                                assert!(matches!(
+                                    evidence.trigger,
+                                    ExtensiveNormalizationTrigger::SmallScalePreconditioning { .. }
+                                ));
+                                assert!(evidence.reconstructed_physical_boundary);
+                            }
+                        }
+                        Err(error) if policy_name == "failure-only" => println!(
+                            "{temperature_k:.0} | {factor:.0e} | {policy_name} | NUMERICAL_FAILURE | - | - | - | - | - | {error}"
+                        ),
+                        Err(error) => panic!(
+                            "proactive frozen gate failed at T={temperature_k}, factor={factor:e}: {error}"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "release diagnostic for exact test-only P,H extensive normalization"]
     fn i5_tp1906_extensive_ph_normalization_recovery_matrix() {
         let fixture = fixture();

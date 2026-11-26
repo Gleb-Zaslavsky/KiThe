@@ -603,7 +603,7 @@ impl EquilibriumCalculatorBuilder {
             + Send
             + Sync
             + 'static,
-    {
+{
         let diagnostics = self
             .solve_options
             .diagnostics_options()
@@ -2918,6 +2918,134 @@ mod tests {
                 }
                 Ok(other) => panic!("scale {scale:e} returned unexpected outcome {other:?}"),
                 Err(error) => panic!("elemental P,H scale={scale:e} failed: {error:?}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "compare proactive and failure-triggered policies on historical low-scale regressions"]
+    fn elemental_ph_proactive_vs_failure_only_regression_matrix() {
+        let reference = match gas_point_builder()
+            .at_temperature(2_500.0)
+            .solve()
+            .expect("reference P,T point must solve")
+        {
+            EquilibriumCalculatorOutcome::PtPoint(point) => point,
+            other => panic!("expected reference P,T point, got {other:?}"),
+        };
+        let thermochemistry =
+            ResolvedThermochemistry::from_resolved_system(reference.resolved()).unwrap();
+        let target_enthalpy = thermochemistry
+            .enthalpy_model()
+            .evaluate_total(reference.solution().component_moles(), 2_500.0)
+            .unwrap();
+        let baseline_moles = reference.solution().component_moles();
+        let mut temperature_options = PhTemperatureSolveOptions::default();
+        temperature_options.scaled_enthalpy_tolerance = 1.0e-7;
+        let policies = [
+            (
+                "proactive",
+                crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::
+                    ExtensiveNormalizationPolicy::OnNumericalFailureAndSmallScalePhPreconditioning,
+            ),
+            (
+                "failure-only",
+                crate::Thermodynamics::ChemEquilibrium::phase_equilibrium_workflow::
+                    ExtensiveNormalizationPolicy::OnNumericalFailure,
+            ),
+        ];
+
+        println!("historical elemental P,H proactive-policy comparison");
+        println!(
+            "scale | policy | outcome | dT_K | max_relative_moles | residual | relative_balance | normalization"
+        );
+        for scale in [1.0e-6, 1.0e-2, 1.0e-1] {
+            for (policy_name, normalization_policy) in policies {
+                let options = EquilibriumSolveOptions::default()
+                    .with_extensive_normalization_policy(normalization_policy);
+                let result = EquilibriumCalculator::builder()
+                    .single_ideal_gas(["H2", "O2", "H2O"])
+                    .unwrap()
+                    .element_inventory(
+                        ElementInventory::from_amounts([("H", 4.0 * scale), ("O", 2.0 * scale)])
+                            .unwrap(),
+                    )
+                    .prefer_libraries(["NASA_gas"])
+                    .offline_only()
+                    .pressure_pa(PRESSURE_PA)
+                    .reference_pressure_pa(REFERENCE_PRESSURE_PA)
+                    .at_total_enthalpy(
+                        TotalEnthalpyJoules::new(target_enthalpy * scale).unwrap(),
+                        2_300.0,
+                        TemperatureBounds::new(2_100.0, 2_900.0).unwrap(),
+                    )
+                    .ph_solve_mode(PhSolveMode::NestedTemperature)
+                    .ph_temperature_options(temperature_options.clone())
+                    .production_cascade()
+                    .solve_options(options)
+                    .solve();
+
+                match result {
+                    Ok(EquilibriumCalculatorOutcome::PhPoint(point)) => {
+                        let equilibrium = point.solution().equilibrium();
+                        let validation = equilibrium.accepted_solution().validation();
+                        let d_temperature = (point.solution().temperature() - 2_500.0).abs();
+                        let max_relative_moles = baseline_moles
+                            .iter()
+                            .zip(equilibrium.component_moles())
+                            .map(|(&base, &actual)| {
+                                (base - actual / scale).abs() / base.abs().max(1.0e-30)
+                            })
+                            .fold(0.0_f64, f64::max);
+                        let relative_balance =
+                            validation.max_abs_element_balance_error / (6.0 * scale).max(1.0e-30);
+                        let gate_pass = d_temperature < 1.0e-4
+                            && max_relative_moles < 1.0e-5
+                            && validation.residual_l2_norm < 1.0e-6
+                            && relative_balance < 1.0e-6
+                            && point.solution().enthalpy_error().abs()
+                                <= point.solution().enthalpy_error_limit_joules();
+                        let normalization = equilibrium
+                            .extensive_normalization_recovery()
+                            .map(|evidence| format!("{:?}", evidence.trigger))
+                            .unwrap_or_else(|| "none".to_string());
+                        println!(
+                            "{scale:.0e} | {policy_name} | {} | {d_temperature:.3e} | {max_relative_moles:.3e} | {:.3e} | {relative_balance:.3e} | {normalization}",
+                            if gate_pass {
+                                "PHYSICAL_GATE_PASS"
+                            } else {
+                                "SOLVED_OUTSIDE_GATE"
+                            },
+                            validation.residual_l2_norm,
+                        );
+
+                        if policy_name == "proactive" {
+                            assert!(
+                                gate_pass,
+                                "proactive elemental regression failed at {scale:e}"
+                            );
+                            let evidence = equilibrium.extensive_normalization_recovery().expect(
+                                "proactive low-scale solve must retain normalization evidence",
+                            );
+                            assert!(matches!(
+                                evidence.trigger,
+                                ExtensiveNormalizationTrigger::SmallScalePreconditioning { .. }
+                            ));
+                            assert!(evidence.reconstructed_physical_boundary);
+                        }
+                    }
+                    Ok(other) => {
+                        panic!("{policy_name} scale={scale:e}: unexpected outcome {other:?}")
+                    }
+                    Err(error) if policy_name == "failure-only" => {
+                        println!(
+                            "{scale:.0e} | {policy_name} | NUMERICAL_FAILURE | - | - | - | - | {error}"
+                        );
+                    }
+                    Err(error) => {
+                        panic!("proactive elemental regression failed at {scale:e}: {error}")
+                    }
+                }
             }
         }
     }

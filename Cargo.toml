@@ -56,25 +56,25 @@ equilibrium-benchmark-no-gibbs-interval-reuse = []
 equilibrium-benchmark-rst-frontends = []
 
 [dependencies]
-regex = "1.12.4"
+regex = "1.13.2"
 serde = { version = "1.0.229", features = ["derive"] }
 tabled = "0.22.0"
 strum = "0.28.0"
 strum_macros = "0.28.0"
-serde_json = "1.0.151"
-sha2 = "0.10.8"
+serde_json = "1.0.154"
+sha2 = "0.11.1"
 loc = "0.5.0"
 RustedSciThe = "0.5.2"   
 rayon = "1.11.0"
 nalgebra = { version = "0.35.0", features = ["serde"] }
 prettytable-rs = "0.10.0"
 simplelog = "0.12.2"
-log = "0.4.34"
+log = "0.4.35"
 approx = "0.5.1"
 reqwest = { version = "0.13.5", features = ["blocking"] }
-scraper = "0.27.0"
-url = "2.5.8"
-thiserror = "2.0.20"
+scraper = "0.29.0"
+url = "2.5.9"
+thiserror = "2.0.21"
 enum_dispatch = "0.3.13"
 tempfile = "3.26.0"
 reborrow = "0.5.5"
@@ -84,7 +84,8 @@ egui = { version = "0.37.0", features = ["default_fonts", "monochrome_emoji_font
 egui_plot = "0.38.0"
 egui_kittest = "0.37.0"
 egui_extras = { version = "0.37.0", features = ["image"] }
-rfd = "0.17.2"
+rfd = "0.18.0"
+rust_xlsxwriter = "0.104.0"
 plotters = "0.3"
 chrono = "0.4.41"
 dialoguer = "0.12.0"
@@ -92,21 +93,22 @@ polars ={ version = "0.55.2", features = ["lazy", "csv", "parquet", "rolling_win
 ndarray = "0.17.2"
 
 ndarray-stats = "0.7.0"
-rand = "0.10.3"
+rand = "0.10.4"
 rand_distr = "0.6.0"
 splines = "5.0.0"
 bspline = "1.1.0"
 
 
 lstsq = "0.8.0"
-KiThePlot = "0.8.0"
+KiThePlot = "0.9.0"
 
 [build-dependencies]
 winres = "0.1"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8.2"
 proptest = "1.9"
+calamine = "0.38.0"
 
 [[bench]]
 name = "equilibrium_baseline"

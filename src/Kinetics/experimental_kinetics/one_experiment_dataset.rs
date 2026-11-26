@@ -1138,7 +1138,7 @@ impl History {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ColumnTypes {
     Time,
     Temperature,
@@ -1153,7 +1153,7 @@ pub enum ColumnTypes {
     All,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum AffectedColumns {
     Specific(Vec<String>),
     All,
@@ -1170,11 +1170,12 @@ impl std::fmt::Display for AffectedColumns {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct OperationRecord {
     pub timestamp: usize,
     pub operation_name: String,
     pub affected_columns: AffectedColumns,
+    #[serde(skip)]
     pub expr: Option<Expr>,
     pub description: String,
     pub reversible: bool,

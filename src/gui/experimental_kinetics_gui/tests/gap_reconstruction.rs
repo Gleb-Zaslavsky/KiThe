@@ -192,6 +192,10 @@ fn story_fit_both_sides_of_missing_interval_and_commit_aligned_reconstruction() 
             2
         );
 
+        harness
+            .get_by_label("Evaluate fitted columns")
+            .scroll_to_me();
+        harness.run();
         harness.get_by_label("Evaluate fitted columns").click();
         harness.run();
         let batch = harness
@@ -421,7 +425,7 @@ fn story_unsuitable_fit_reports_low_quality_without_touching_source() {
             fit.r2
         );
         println!(
-            "[STORY][gap-reconstruction-negative] seed=7401 model=Linear applied_to=exponential_mass R2={:.7} accepted=false source_rows={} unchanged=true",
+            "[STORY][gap-reconstruction-negative] seed=7401 model=Linear applied_to=exponential_mass R2={:.7} low_quality=true decision_left_to_user=true source_rows={} measured_values_unchanged=true",
             fit.r2,
             before.len()
         );
@@ -442,8 +446,7 @@ fn story_unsuitable_fit_reports_low_quality_without_touching_source() {
                 .dataset
                 .schema
                 .columns
-                .get("bad_fit")
-                .is_none()
+                .contains_key("bad_fit")
         );
         assert_eq!(
             super::support::read_column(&state.app.model, "poor_fit", "m"),

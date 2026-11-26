@@ -4,7 +4,10 @@
 The "File Manager" menu provides tools for loading, saving, and managing experiment data.
 
 # Import Data
-Loads data from CSV, TXT, or Excel files. Various column formats are supported. After import, data appears in the table and on the plot.
+Imports raw TXT/CSV files after column binding and typed single-experiment KiThe CSV files. A typed series can be opened as the current document or added to it. Import never sets the destination used by Save. The file browser searches names, sorts directories/files, and filters to CSV/TXT by default; choose All files for other extensions.
+
+# Open Document
+Opens a typed KiThe series CSV as the current document, replacing the current series. If the current document has unsaved changes, choose Save, Discard, or Cancel first. Raw measurement files are imported, not opened as the document.
 
 # New experiment
 Opens a dialog for creating a new experiment. The window consists of two panels: left – file browser, right – metadata.
@@ -22,11 +25,14 @@ Below are column binding blocks:
 
 After filling, click the "Select" button – data will be loaded, metadata saved, bindings applied.
 
-# Append data to experiment
-Adds new data to an existing experiment, merging them into a single dataset.
+# Append to experiment
+Adds a second file to an existing experiment after binding its columns. The resulting experiment is added to the current series, or replaces the source experiment when that option is selected.
 
-# Export Data
-Saves current experiment data to a file of chosen format (CSV, TXT, Excel).
+# Save / Save As
+Save writes the complete current series to a typed KiThe CSV, including all experiments, columns, metadata, bindings, provenance, and operation history. The first Save asks for a path; later Saves reuse that document path. Save As chooses a new path for the complete document. Ctrl/Cmd+S runs Save.
+
+# Export CSV / Export TXT
+Exports the whole series, selected experiments, or one experiment with selected columns. Column choices show their classification, unit, and active binding. Export settings and paths are independent of the current document; exporting never changes what Save writes. CSV preserves KiThe metadata, while TXT is plain tab-delimited data for one experiment.
 
 # Manage Data
 Opens the data manager where you can view, edit, and delete loaded experiments.
@@ -34,8 +40,8 @@ Opens the data manager where you can view, edit, and delete loaded experiments.
 # Manage Plot
 Opens the plot configuration dialog: choose displayed curves, adjust colors, labels, and other visual parameters.
 
-# Save As CSV/TXT/Excel/Image
-Exports data in a specific format. "Save as image" saves the current plot to an image file (PNG, JPEG, etc.) via the KiThe Plot editor window.
+# Plot Editor
+Opens the print-ready plot editor for journal/report figures. It does not change live plots or experiment data.
 
 ## Math
 The "Math" menu contains tools for mathematical data processing: filtering, smoothing, interpolation.

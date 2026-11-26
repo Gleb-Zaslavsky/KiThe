@@ -2,7 +2,8 @@
 
 These records describe executable correctness tests. They are not performance
 measurements. The named tests live in `tests.rs` and use the public network
-facade with RST 0.5.0 from the current lockfile.
+facade. Each result records the RST version used for that run; the current
+dependency is RST 0.5.2.
 
 ## Story 1: Four Native Families Solve An Analytical Network
 
@@ -66,8 +67,9 @@ RST 0.5.0. The session uses `try_solve_with_initial_state()` on a previously
 prepared native solver; equations, temperature law, and interval are unchanged.
 
 **Conclusion / limitation:** Same-formulation initial-state reuse is working.
-Numeric parameter rebinding, changed intervals, and retention after an actual
-native integration failure remain separate tests/work items.
+Numeric parameter rebinding and changed intervals are separate concerns;
+retention after a native failure and per-attempt diagnostic identity are
+covered in Story 26.
 
 ## Story 3: Cancellation Never Publishes A Partial Result
 
@@ -92,12 +94,13 @@ Request a second run from `A(0)=2`, `B(0)=0.5` with an already-cancelled
 the previous published endpoint must remain byte-for-byte unchanged.
 
 **Result:** Passed in Debug for BDF, Radau, Backward Euler, and LSODE2 with
-RST 0.5.0.
+RST 0.5.2.
 
 **Conclusion / limitation:** Cooperative cancellation is wired through the
 common facade and publication is transactional for this early-cancel case.
-The test does not characterize mid-integration cancellation latency or the
-availability of a partial trajectory/telemetry snapshot after such a stop.
+The report has a fresh attempt ID, and its telemetry and one-point diagnostic
+state are checked against that ID. Mid-integration behavior is characterized
+separately in Story 25; this test is not a cancellation-latency guarantee.
 
 ## Story 4: Numeric Temperature Rebind Without Symbolic Repreparation
 
@@ -819,18 +822,58 @@ non-ignored test pre-cancels all four families after a prior accepted solve
 and asserts that no old telemetry or trajectory is misattributed to the new
 attempt.
 
-| Family | Observed outcome in two Debug runs | Failure telemetry | Partial points retained | Accepted solution |
+| Family | Observed outcome in this Debug run | Attempt telemetry | Partial points retained | Accepted solution |
 | --- | --- | --- | ---: | --- |
 | BDF | typed failure | yes | 32 | no |
-| Radau | typed failure | no | 0 | no |
+| Radau | typed failure | yes | 1 | no |
 | Backward Euler | typed failure | yes | 32 | no |
-| LSODE2 | completed before cancellation | not a failed attempt | 0 | yes |
+| LSODE2 | completed before cancellation | yes | 0 | yes |
 
-**Result:** Ignored characterization passed on the second run; the first run
-revealed that asserting cancellation for every wall-clock schedule was
-incorrect. The pre-cancel correctness gate passes for all four families.
+**Result:** The ignored characterization passed. The pre-cancel correctness
+gate also passes for all four families and now checks that the report,
+telemetry, and one-point partial state share a new `solve_id` after an earlier
+accepted solution.
 
-**Conclusion / limitation:** KiThe retains bounded raw diagnostics where RST
-exposes them, with no acceptance or physical-validity claim. Radau needs an
-upstream failure snapshot with attempt identity. This test does not establish
-LSODE2 mid-run cancellation latency, and its timing is not a performance gate.
+**Conclusion / limitation:** KiThe exposes RST attempt reports as diagnostic
+metadata and never publishes partial state as a solution. RST 0.5.2 supplies
+attempt identity and failure snapshots for all four families. LSODE2 may
+complete before a wall-clock cancellation request; this characterization does
+not establish cancellation latency and is not a performance gate.
+
+## Story 26: Attempt Identity Survives A Native Failure
+
+**Name:** Failed retry diagnostics belong to the failed run, not the last good result.
+
+**Question / hypothesis:** After a successful solve, does a new native RHS
+failure receive its own `solve_id` and typed diagnostics while the previously
+accepted physical solution remains available and unchanged?
+
+**Command:**
+
+```powershell
+$env:CARGO_BUILD_JOBS='1'
+cargo test --lib --no-default-features failed_native_retry_keeps_attempt_diagnostics_separate_from_last_solution -- --nocapture
+```
+
+**Fixture and acceptance:** For each of BDF, Radau, Backward Euler, and
+LSODE2, solve `A -> B` successfully with rate `1/c0`, then retry from the
+valid nonnegative state `[A=0, B=1]`, which makes the RHS singular. The retry
+must fail through the typed native integration error, report outcome
+`Failed` with a different `solve_id`, and leave the previous solution
+unchanged. Any telemetry or diagnostic partial trajectory must carry the
+failed attempt's ID; partial samples are diagnostic only.
+
+**Result:** Passed in Debug for all four StiffAPI families. No solver
+equations, tolerances, or acceptance rules were changed.
+
+| Family | Attempt telemetry | Typed callback diagnostic | Partial diagnostic state |
+| --- | --- | --- | --- |
+| BDF | unavailable for this immediate callback failure | unavailable | unavailable |
+| Radau | available, same solve ID | residual / non-finite output | available, same solve ID |
+| Backward Euler | available, same solve ID | residual / non-finite output | available, same solve ID |
+| LSODE2 | unavailable for this immediate callback failure | unavailable | unavailable |
+
+This is an observed capability difference, not fabricated data: BDF and
+LSODE2 reject the initial callback before exposing a failed-state snapshot.
+The returned typed error and attempt ID are still current; absent optional
+diagnostics are not filled from the preceding successful run.

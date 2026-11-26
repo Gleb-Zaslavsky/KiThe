@@ -1748,13 +1748,14 @@ mod tests {
 
     #[test]
     fn test_phase_spec_derives_legacy_component_states_from_one_canonical_state() {
-        let phase = PhaseSpec::pure_condensed(
+        let phase = PhaseSpec::ideal_solution(
             PhaseId::new(Some("solid".to_string())),
             vec!["C(s)".to_string(), "Si(s)".to_string()],
             PhasePhysicalState::Solid,
         )
         .unwrap();
 
+        assert_eq!(phase.model(), PhaseModel::IdealSolution);
         let legacy_states = phase.legacy_component_phase_map();
         assert_eq!(legacy_states.len(), 2);
         assert!(matches!(

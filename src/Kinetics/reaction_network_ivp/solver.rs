@@ -1,5 +1,6 @@
 use RustedSciThe::numerical::StiffAPI::{
-    PreparedStiffSolver, StiffSolveOutcome, StiffTelemetrySnapshot,
+    PreparedStiffSolver, StiffAttemptError, StiffSolveAttemptReport, StiffSolveOutcome,
+    StiffTelemetrySnapshot,
 };
 use RustedSciThe::numerical::{CancellationToken, SolverTelemetryMode};
 use nalgebra::{DMatrix, DVector};
@@ -12,7 +13,8 @@ use super::problem::NetworkProblem;
 use super::rate_law::{RateCoefficient, RateCoefficientBinding, RateLaw};
 use super::solid_state::validate_conversion;
 use super::solver_backend::{
-    NetworkIvpOptions, NetworkIvpPartialTrajectory, NetworkIvpSolution, prepare_native,
+    NetworkIvpAttemptDiagnostics, NetworkIvpAttemptOutcome, NetworkIvpOptions,
+    NetworkIvpPartialTrajectory, NetworkIvpSolution, prepare_native,
 };
 use super::temperature::{TemperatureBinding, check_temperature};
 
@@ -34,8 +36,7 @@ pub struct PreparedNetworkIvp<'a> {
     accepted_rate_bindings: Vec<RateCoefficientBinding>,
     native_bindings_match_accepted: bool,
     last_solution: Option<NetworkIvpSolution>,
-    last_attempt_telemetry: Option<StiffTelemetrySnapshot>,
-    last_failed_trajectory: Option<NetworkIvpPartialTrajectory>,
+    last_attempt_diagnostics: Option<NetworkIvpAttemptDiagnostics>,
     stage_diagnostics: Option<NetworkIvpStageDiagnostics>,
 }
 
@@ -94,8 +95,7 @@ impl<'a> PreparedNetworkIvp<'a> {
             native_bindings_match_accepted: true,
             rate_binding_indices,
             last_solution: None,
-            last_attempt_telemetry: None,
-            last_failed_trajectory: None,
+            last_attempt_diagnostics: None,
             stage_diagnostics,
         })
     }
@@ -153,8 +153,7 @@ impl<'a> PreparedNetworkIvp<'a> {
         temperature: Option<TemperatureBinding>,
         bindings: Option<&[RateCoefficientBinding]>,
     ) -> Result<&NetworkIvpSolution, NetworkIvpError> {
-        self.last_attempt_telemetry = None;
-        self.last_failed_trajectory = None;
+        self.last_attempt_diagnostics = None;
         self.validate_initial(initial)?;
         self.validate_binding(temperature)?;
         let (rate_bindings_to_commit, parameter_values) =
@@ -165,21 +164,38 @@ impl<'a> PreparedNetworkIvp<'a> {
                 .as_ref()
                 .is_none_or(|rates| *rates == self.accepted_rate_bindings);
         let original_initial = !self.attempted && self.initial_matches_problem(initial);
-        let result = if self.parameter_count > 0 {
-            let initial = DVector::from_vec(self.problem.initial_state(initial));
-            let parameters = DVector::from_vec(parameter_values);
-            self.run_integration(|native| {
-                native.try_solve_with_parameter_values(initial, parameters)
-            })
-        } else if original_initial {
-            self.run_integration(PreparedStiffSolver::try_solve)
+        let result = if self.options.telemetry == SolverTelemetryMode::Off {
+            let result = if self.parameter_count > 0 {
+                let initial = DVector::from_vec(self.problem.initial_state(initial));
+                let parameters = DVector::from_vec(parameter_values);
+                self.run_integration(|native| {
+                    native.try_solve_with_parameter_values(initial, parameters)
+                })
+            } else if original_initial {
+                self.run_integration(PreparedStiffSolver::try_solve)
+            } else {
+                let initial = DVector::from_vec(self.problem.initial_state(initial));
+                self.run_integration(|native| native.try_solve_with_initial_state(initial))
+            };
+            result.map_err(NetworkIvpError::Integration)
         } else {
-            let initial = DVector::from_vec(self.problem.initial_state(initial));
-            self.run_integration(|native| native.try_solve_with_initial_state(initial))
+            let report = if self.parameter_count > 0 {
+                let initial = DVector::from_vec(self.problem.initial_state(initial));
+                let parameters = DVector::from_vec(parameter_values);
+                self.run_integration(|native| {
+                    native.try_solve_with_parameter_values_report(initial, parameters)
+                })
+            } else if original_initial {
+                self.run_integration(|native| native.try_solve_with_report(None))
+            } else {
+                let initial = DVector::from_vec(self.problem.initial_state(initial));
+                self.run_integration(|native| native.try_solve_with_initial_state_report(initial))
+            };
+            self.record_native_attempt(report)
+                .map_err(map_attempt_error)
         };
         self.attempted = true;
-        self.capture_attempt_diagnostics(result.is_err(), true);
-        let outcome = result.map_err(NetworkIvpError::Integration)?;
+        let outcome = result?;
         self.publish_outcome(outcome, initial, temperature, rate_bindings_to_commit)
     }
 
@@ -188,10 +204,8 @@ impl<'a> PreparedNetworkIvp<'a> {
         initial: &[f64],
         cancellation: CancellationToken,
     ) -> Result<&NetworkIvpSolution, NetworkIvpError> {
-        self.last_attempt_telemetry = None;
-        self.last_failed_trajectory = None;
+        self.last_attempt_diagnostics = None;
         self.validate_initial(initial)?;
-        let cancelled_before_run = cancellation.is_cancelled();
         if self.accepted_temperature != self.native_temperature
             || !self.native_bindings_match_accepted
         {
@@ -211,10 +225,16 @@ impl<'a> PreparedNetworkIvp<'a> {
                 .map_err(NetworkIvpError::Restart)?;
         }
         self.attempted = true;
-        let result =
-            self.run_integration(|native| native.try_solve_with_cancellation_token(cancellation));
-        self.capture_attempt_diagnostics(result.is_err(), !cancelled_before_run);
-        let outcome = result.map_err(NetworkIvpError::CancellationAwareIntegration)?;
+        let result = if self.options.telemetry == SolverTelemetryMode::Off {
+            self.run_integration(|native| native.try_solve_with_cancellation_token(cancellation))
+                .map_err(NetworkIvpError::CancellationAwareIntegration)
+        } else {
+            let report =
+                self.run_integration(|native| native.try_solve_with_report(Some(cancellation)));
+            self.record_native_attempt(report)
+                .map_err(map_attempt_error)
+        };
+        let outcome = result?;
         self.publish_outcome(outcome, initial, self.accepted_temperature, None)
     }
 
@@ -242,7 +262,6 @@ impl<'a> PreparedNetworkIvp<'a> {
                 .to_vec(),
         };
         candidate.stage_diagnostics = self.stage_diagnostics.clone();
-        self.last_attempt_telemetry = candidate.telemetry.clone();
         self.last_solution = Some(candidate);
         self.accepted_temperature = binding;
         if let Some(rate_bindings) = rate_bindings {
@@ -392,6 +411,30 @@ impl<'a> PreparedNetworkIvp<'a> {
         result
     }
 
+    fn record_native_attempt(
+        &mut self,
+        report: StiffSolveAttemptReport,
+    ) -> Result<StiffSolveOutcome, StiffAttemptError> {
+        let outcome = match &report.result {
+            Ok(_) => NetworkIvpAttemptOutcome::Completed,
+            Err(StiffAttemptError::Solve(_)) => NetworkIvpAttemptOutcome::Failed,
+            Err(StiffAttemptError::Cancelled(_)) => NetworkIvpAttemptOutcome::Cancelled,
+        };
+        let partial_trajectory = report
+            .partial_trajectory
+            .as_ref()
+            .map(network_partial_trajectory);
+        self.last_attempt_diagnostics = Some(NetworkIvpAttemptDiagnostics {
+            solve_id: report.solve_id,
+            outcome,
+            cancellation_disposition: report.cancellation_at_return,
+            telemetry: report.telemetry.clone(),
+            callback_failure: report.callback_failure_diagnostic(),
+            partial_trajectory,
+        });
+        report.result
+    }
+
     fn timer_start(&self) -> Option<Instant> {
         self.stage_diagnostics
             .as_ref()
@@ -424,14 +467,25 @@ impl<'a> PreparedNetworkIvp<'a> {
     /// Available native diagnostics from the most recent run request. None
     /// may mean Off, pre-validation rejection, or no attributable failure data.
     pub fn last_attempt_telemetry(&self) -> Option<&StiffTelemetrySnapshot> {
-        self.last_attempt_telemetry.as_ref()
+        self.last_attempt_diagnostics
+            .as_ref()?
+            .telemetry
+            .as_ref()
+            .map(|telemetry| &telemetry.snapshot)
     }
 
-    /// Bounded raw native samples observed after the last failed integration,
-    /// if the trajectory advanced. RST does not yet expose a solve ID to
-    /// prove provenance across repeated failures. Never a published solution.
+    /// Attempt identity and native diagnostics from the latest call that
+    /// reached RST. Validation and restart failures have no attempt report.
+    pub fn last_attempt_diagnostics(&self) -> Option<&NetworkIvpAttemptDiagnostics> {
+        self.last_attempt_diagnostics.as_ref()
+    }
+
+    /// Diagnostic-only partial trajectory from the latest failed attempt.
     pub fn last_failed_trajectory(&self) -> Option<&NetworkIvpPartialTrajectory> {
-        self.last_failed_trajectory.as_ref()
+        self.last_attempt_diagnostics
+            .as_ref()?
+            .partial_trajectory
+            .as_ref()
     }
 
     /// KiThe-owned cumulative stage data for this prepared session. It is
@@ -439,61 +493,29 @@ impl<'a> PreparedNetworkIvp<'a> {
     pub fn stage_diagnostics(&self) -> Option<&NetworkIvpStageDiagnostics> {
         self.stage_diagnostics.as_ref()
     }
+}
 
-    fn native_snapshot(&self) -> Option<StiffTelemetrySnapshot> {
-        if self.options.telemetry == SolverTelemetryMode::Off {
-            return None;
-        }
-        match &self.native {
-            PreparedStiffSolver::Radau(prepared) => prepared
-                .solver()
-                .last_solve_telemetry()
-                .cloned()
-                .map(StiffTelemetrySnapshot::Radau),
-            _ => self.native.telemetry_snapshot().ok(),
-        }
+fn map_attempt_error(error: StiffAttemptError) -> NetworkIvpError {
+    match error {
+        StiffAttemptError::Solve(error) => NetworkIvpError::Integration(error),
+        StiffAttemptError::Cancelled(error) => NetworkIvpError::CancellationAwareIntegration(error),
     }
+}
 
-    fn capture_attempt_diagnostics(&mut self, failed: bool, permit_partial: bool) {
-        if failed {
-            self.last_failed_trajectory = if permit_partial {
-                self.failed_trajectory_snapshot()
-            } else {
-                None
-            };
-            self.last_attempt_telemetry = self
-                .last_failed_trajectory
-                .as_ref()
-                .and_then(|_| self.native_snapshot());
-        } else {
-            self.last_attempt_telemetry = self.native_snapshot();
-        }
-    }
-
-    fn failed_trajectory_snapshot(&self) -> Option<NetworkIvpPartialTrajectory> {
-        if self.options.telemetry == SolverTelemetryMode::Off {
-            return None;
-        }
-        let view = self.native.trajectory_view().ok()?;
-        let (start, end) = self.problem.time_interval();
-        if view.axis.len() < 2
-            || view.values.nrows() != view.axis.len()
-            || view.values.ncols()
-                != self.problem.species().len() + self.problem.solid_state_count()
-            || (view.axis[0] - start).abs() > 1e-9 * (end - start).abs().max(1.0)
-            || view.axis[view.axis.len() - 1] >= end
-            || view.axis[view.axis.len() - 1] <= view.axis[0]
-        {
-            return None;
-        }
-        let first = view.axis.len().saturating_sub(32);
-        Some(NetworkIvpPartialTrajectory {
-            time_seconds: view.axis.iter().skip(first).copied().collect(),
-            states: (first..view.axis.len())
-                .map(|row| view.values.row(row).iter().copied().collect())
-                .collect(),
-            omitted_samples: first,
-        })
+fn network_partial_trajectory(
+    trajectory: &RustedSciThe::numerical::StiffAPI::StiffDiagnosticTrajectory,
+) -> NetworkIvpPartialTrajectory {
+    let omitted_samples = trajectory.axis.len().saturating_sub(32);
+    let first = omitted_samples;
+    NetworkIvpPartialTrajectory {
+        solve_id: trajectory.solve_id,
+        solver: trajectory.solver,
+        accepted_steps: trajectory.accepted_steps,
+        time_seconds: trajectory.axis.iter().skip(first).copied().collect(),
+        states: (first..trajectory.values.nrows())
+            .map(|row| trajectory.values.row(row).iter().copied().collect())
+            .collect(),
+        omitted_samples,
     }
 }
 
